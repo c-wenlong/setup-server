@@ -10,6 +10,7 @@ running its `setup.sh`.
 | Service | What it gives you | Deploy |
 |---|---|---|
 | [code-server](code-server/) | VS Code (with terminal) in the browser, tailnet-only over HTTPS | `cd code-server && ./setup.sh` |
+| [seafile](seafile/) | Self-hosted Drive: file sync + web UI + mobile photo backup (Docker) | `cd seafile && ./setup.sh` |
 
 ## Layout — every service directory contains
 
