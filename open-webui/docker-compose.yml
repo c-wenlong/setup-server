@@ -1,0 +1,19 @@
+# Open WebUI — ChatGPT-style UI over the host's ollama, tailnet-only.
+#
+# host network mode: ollama runs on the host, and Docker bridge networking
+# can't reach a host service cleanly without exposing more surface. With
+# host networking + HOST=127.0.0.1 the UI binds loopback only, and Tailscale
+# Serve terminates TLS in front of it.
+
+services:
+  open-webui:
+    image: ${WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}
+    container_name: open-webui
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - HOST=127.0.0.1
+      - PORT=${LOCAL_PORT:-3001}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+    volumes:
+      - "${WEBUI_VOLUME:?}:/app/backend/data"

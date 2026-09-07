@@ -11,6 +11,9 @@ running its `setup.sh`.
 |---|---|---|
 | [code-server](code-server/) | VS Code (with terminal) in the browser, tailnet-only over HTTPS | `cd code-server && ./setup.sh` |
 | [seafile](seafile/) | Self-hosted Drive: file sync + web UI + mobile photo backup (Docker) | `cd seafile && ./setup.sh` |
+| [open-webui](open-webui/) | ChatGPT-style UI over the host's ollama models (Docker) | `cd open-webui && ./setup.sh` |
+
+Future service ideas live in [EXPLORATION.md](EXPLORATION.md).
 
 ## Layout — every service directory contains
 
