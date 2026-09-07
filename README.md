@@ -15,6 +15,9 @@ running its `setup.sh`.
 | [monitoring](monitoring/) | Uptime Kuma dashboard + ntfy phone alerts for every service (Docker) | `cd monitoring && ./setup.sh` |
 
 Future service ideas live in [EXPLORATION.md](EXPLORATION.md).
+The live deployment (every running service, port map, credentials pointers)
+is documented in [DIRECTORY.md](DIRECTORY.md) — keep it updated when adding
+services.
 
 ## Layout — every service directory contains
 
