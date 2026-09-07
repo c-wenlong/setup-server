@@ -90,10 +90,14 @@ Overrides: `CONTROL_TOPIC` (default `control`), `REPLY_TOPIC` (`alerts`),
      - Tap a service → it runs; the reply carries buttons for the state
        the service is *now* in, plus `[menu]` back to a fresh menu card.
      Everything goes through the same allowlist as typed commands.
-     Bootstrap the menu once by opening
-     `https://<host>:3003/control/publish?message=panel` in Safari (or
-     from the box: `curl -d panel http://127.0.0.1:3003/control`); after
-     that the `[menu]` buttons keep the loop going.
+     `setup.sh` publishes the menu automatically at the end of every run
+     (and warns with a full onboarding walkthrough if no phone is found
+     on the tailnet — ntfy has no subscriber API and iOS delivery rides
+     the ntfy.sh push relay, so the tailnet peer list is the best
+     available "can a phone even connect?" signal). Re-pop the menu any
+     time: the `[menu]` buttons, re-running setup.sh, opening
+     `https://<host>:3003/control/publish?message=panel` in Safari, or
+     `curl -d panel http://127.0.0.1:3003/control` from the box.
    - **ntfy web app (no-install fallback).** The server hosts ntfy's full
      web UI at `https://<host>:3003` — it *does* have a compose box.
      Subscribe to `control` there and type commands; "Add to Home Screen"
