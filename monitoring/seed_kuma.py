@@ -15,6 +15,8 @@ MONITORS = [
     ("open-webui", f"http://127.0.0.1:{os.environ.get('OPEN_WEBUI_PORT', '3001')}/health"),
     ("ollama", f"http://127.0.0.1:{os.environ.get('OLLAMA_PORT', '11434')}/api/version"),
     ("n8n", f"http://127.0.0.1:{os.environ.get('N8N_PORT', '5678')}/healthz"),
+    ("manimkc", f"http://127.0.0.1:{os.environ.get('MANIMKC_PORT', '8090')}/health"),
+    ("kaichenpedia", f"http://127.0.0.1:{os.environ.get('KAICHENPEDIA_PORT', '8091')}/"),
 ]
 
 api = UptimeKumaApi(f"http://127.0.0.1:{os.environ['KUMA_PORT']}", timeout=30)

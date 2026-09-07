@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# npm stub: `npm ci` creates node_modules in the cwd.
+echo "npm $*" >> "$CALLS_LOG"
+[ "${1:-}" = "ci" ] && mkdir -p node_modules
+exit 0

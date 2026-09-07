@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# python3 stub: the wiki -> site/content sync is a no-op in the sandbox.
+echo "python3 $*" >> "$CALLS_LOG"
+exit 0

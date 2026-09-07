@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# npx stub: `npx quartz build` writes a fake static site into ./public.
+echo "npx $*" >> "$CALLS_LOG"
+if [ "${1:-}" = "quartz" ] && [ "${2:-}" = "build" ]; then
+  mkdir -p public
+  echo "<html>kaichenpedia</html>" > public/index.html
+  echo "<html>404</html>" > public/404.html
+fi
+exit 0
