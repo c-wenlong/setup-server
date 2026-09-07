@@ -39,9 +39,10 @@ running its `setup.sh`.
 
 ## Prerequisites (all services)
 
-- Linux server with systemd
-- Tailscale installed and logged in (`sudo tailscale up`)
-- `curl`
+- Linux server with systemd, or macOS (services run as launchd LaunchAgents;
+  macOS support is portable by construction, so far verified only on Linux)
+- Tailscale installed and logged in (`sudo tailscale up` / the macOS app)
+- `curl` (plus Docker Desktop or OrbStack on macOS for Docker-based services)
 
 ## Adding a new service
 

@@ -18,6 +18,7 @@ STUBS="$TESTS_DIR/stubs"
 
 PASS=0; FAIL=0
 ORIG_HOME="$HOME"
+OS="$(uname -s)"   # the mocked suite exercises the current platform's branch
 red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
@@ -86,10 +87,15 @@ test_fresh_deploy() {
   check "installed fake code-server"        [ -x "$HOME/.local/bin/code-server" ]
   check "wrote config with default port"    grep -q "bind-addr: 127.0.0.1:8080" "$HOME/.config/code-server/config.yaml"
   check "config binds localhost only"       grep -q "bind-addr: 127.0.0.1" "$HOME/.config/code-server/config.yaml"
-  check "wrote systemd unit"                [ -f "$HOME/.config/systemd/user/code-server.service" ]
-  check "enabled + restarted service"       calls_have "systemctl --user restart code-server"
-  check "enabled lingering via sudo"        calls_have "sudo loginctl enable-linger"
-  check "granted operator via sudo"         calls_have "sudo tailscale set --operator="
+  if [ "$OS" = "Linux" ]; then
+    check "wrote systemd unit"              [ -f "$HOME/.config/systemd/user/code-server.service" ]
+    check "enabled + restarted service"     calls_have "systemctl --user restart code-server"
+    check "enabled lingering via sudo"      calls_have "sudo loginctl enable-linger"
+    check "granted operator via sudo"       calls_have "sudo tailscale set --operator="
+  else
+    check "wrote LaunchAgent plist"         [ -f "$HOME/Library/LaunchAgents/com.coder.code-server.plist" ]
+    check "bootstrapped LaunchAgent"        calls_have "launchctl bootstrap"
+  fi
   check "published via tailscale serve"     calls_have "tailscale serve --bg http://127.0.0.1:8080"
   check "prints final tailnet URL"          out_has "https://test-host.tailfake.ts.net"
   check "end-to-end check passed"           out_has "End-to-end check passed"
@@ -108,7 +114,11 @@ test_idempotent_rerun() {
   check "config left untouched"         grep -q "my-custom-marker" "$HOME/.config/code-server/config.yaml"
   check "says config untouched"         out_has "leaving untouched"
   check "never invoked sudo"            no_call "^sudo "
-  check "service still restarted"       calls_have "systemctl --user restart code-server"
+  if [ "$OS" = "Linux" ]; then
+    check "service still restarted"     calls_have "systemctl --user restart code-server"
+  else
+    check "LaunchAgent re-bootstrapped" calls_have "launchctl bootstrap"
+  fi
   check "serve reapplied"               calls_have "tailscale serve --bg"
   teardown
 }
@@ -133,7 +143,7 @@ test_serve_approval_retry() {
   check "exits zero after retry"     [ "$CODE" -eq 0 ]
   check "showed the approval prompt" out_has "one-time enablement"
   check "eventually published"       out_has "Tailscale Serve: HTTPS :443"
-  check "granted operator on 1st failure" calls_have "sudo tailscale set --operator="
+  [ "$OS" = "Linux" ] && check "granted operator on 1st failure" calls_have "sudo tailscale set --operator="
   teardown
 }
 
@@ -147,17 +157,33 @@ live_check() { # live_check <description> <command...>
   fi
 }
 
+# Portable helpers: BSD (macOS) tools lack grep -P and ss.
+no_external_listener() { # fails if the port listens on a non-loopback address
+  local port="$1"
+  if command -v ss >/dev/null; then
+    ! (ss -ltn | grep ":$port" | grep -v 127.0.0.1 | grep -q LISTEN)
+  else
+    ! (lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}' | grep -v '^127\.0\.0\.1' | grep -q .)
+  fi
+}
+
 test_live() {
   echo "• live: verify the real deployment on this machine"
-  local port url
-  port="$(grep -oP 'bind-addr: 127\.0\.0\.1:\K[0-9]+' "$HOME/.config/code-server/config.yaml")"
-  url="https://$(tailscale status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
-  live_check "systemd service is active"        systemctl --user is-active code-server
-  live_check "service is enabled at boot"       systemctl --user is-enabled code-server
-  live_check "lingering is on (boot persist)"   sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
+  local ts port url
+  ts="tailscale"
+  command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+  port="$(sed -n 's/^bind-addr: 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$HOME/.config/code-server/config.yaml")"
+  url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+  if [ "$OS" = "Linux" ]; then
+    live_check "systemd service is active"      systemctl --user is-active code-server
+    live_check "service is enabled at boot"     systemctl --user is-enabled code-server
+    live_check "lingering is on (boot persist)" sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
+  else
+    live_check "LaunchAgent is loaded"          launchctl print "gui/$(id -u)/com.coder.code-server"
+  fi
   live_check "local healthz responds"           curl -fsS "http://127.0.0.1:$port/healthz"
-  live_check "not listening on non-local ifaces" sh -c "! (ss -ltn | grep :$port | grep -v 127.0.0.1 | grep -q LISTEN)"
-  live_check "tailscale serve config present"   sh -c "tailscale serve status | grep -q 'proxy http://127.0.0.1:$port'"
+  live_check "not listening on non-local ifaces" no_external_listener "$port"
+  live_check "tailscale serve config present"   sh -c "'$ts' serve status | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS healthz responds"   curl -fsS --max-time 30 "$url/healthz"
 }
 

@@ -14,8 +14,9 @@
 #   ./setup.sh                              # defaults: local 8081, HTTPS 8443
 #   LOCAL_PORT=9081 HTTPS_PORT=10000 ./setup.sh
 #
-# Requirements: Linux, curl, Docker Engine + Compose v2, Tailscale logged in,
-# user in the `docker` group (sudo usermod -aG docker $USER, then re-login).
+# Requirements: Linux or macOS, curl, Docker Engine + Compose v2 (Docker
+# Desktop/OrbStack on macOS), Tailscale logged in. On Linux the user must be
+# in the `docker` group (sudo usermod -aG docker $USER, then re-login).
 #
 # Idempotent: safe to re-run; an existing .env (holds all secrets) is never
 # overwritten. Tailscale HTTPS serve ports must be 443, 8443, or 10000.
@@ -33,23 +34,38 @@ ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- preflight
-info "Preflight checks"
-[ "$(uname -s)" = "Linux" ] || die "This script targets Linux."
+OS="$(uname -s)"
+info "Preflight checks ($OS)"
+case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
 [ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
 command -v curl >/dev/null || die "curl is required."
-command -v docker >/dev/null || die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
-command -v tailscale >/dev/null || die "Tailscale is not installed: https://tailscale.com/download"
+if ! command -v docker >/dev/null; then
+  [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
+  die "Docker is not installed. On macOS install Docker Desktop or OrbStack."
+fi
 
-docker ps >/dev/null 2>&1 || die "Cannot talk to the Docker daemon. Fix: sudo usermod -aG docker $USER, then log out/in (or run this script via: sg docker -c ./setup.sh)"
+# Tailscale CLI: on PATH, or inside the macOS app bundle.
+if command -v tailscale >/dev/null; then
+  TAILSCALE="tailscale"
+elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+else
+  die "Tailscale is not installed: https://tailscale.com/download"
+fi
+
+if ! docker ps >/dev/null 2>&1; then
+  [ "$OS" = "Linux" ] && die "Cannot talk to the Docker daemon. Fix: sudo usermod -aG docker $USER, then log out/in (or run this script via: sg docker -c ./setup.sh)"
+  die "Cannot talk to the Docker daemon. Is Docker Desktop/OrbStack running?"
+fi
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)."
 
-state="$(tailscale status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up"
+state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
 
 case "$HTTPS_PORT" in 443|8443|10000) ;; *) die "Tailscale Serve only supports HTTPS on 443, 8443, or 10000 (got: $HTTPS_PORT)";; esac
-ok "Linux + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
+ok "$OS + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
 
-host="$(tailscale status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+host="$("$TAILSCALE" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 
 # ---------------------------------------------------------------- .env
@@ -70,7 +86,7 @@ SEAFILE_MYSQL_VOLUME=$HOME/seafile/mysql
 LOCAL_PORT=$LOCAL_PORT
 SEAFILE_SERVER_HOSTNAME=$host:$HTTPS_PORT
 SEAFILE_SERVER_PROTOCOL=https
-TIME_ZONE=$(cat /etc/timezone 2>/dev/null || echo Etc/UTC)
+TIME_ZONE=$(cat /etc/timezone 2>/dev/null || readlink /etc/localtime 2>/dev/null | sed 's|.*zoneinfo/||' || echo Etc/UTC)
 
 JWT_PRIVATE_KEY=$(openssl rand -hex 32)
 SEAFILE_MYSQL_DB_PASSWORD=$(openssl rand -hex 16)
@@ -102,10 +118,12 @@ done
 
 # ------------------------------------------------------- tailscale serve
 info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT, tailnet only)"
-if ! tailscale serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
-  info "Direct serve failed — trying operator grant (needs sudo, one time)"
-  sudo tailscale set --operator="$USER"
-  until tailscale serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
+if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
+  if [ "$OS" = "Linux" ]; then
+    info "Direct serve failed — trying operator grant (needs sudo, one time)"
+    sudo tailscale set --operator="$USER"
+  fi
+  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
     echo
     info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
     read -r

@@ -7,6 +7,17 @@ home servers. One directory per service; each is self-contained.
 
 - **Entrypoint is always `<service>/setup.sh`**, runnable as a regular user.
   Root refusal is a preflight check, not an afterthought.
+- **Linux + macOS portability.** Branch on `uname -s` (`Linux`/`Darwin`, die on
+  anything else). Services: systemd user units + lingering on Linux, launchd
+  LaunchAgents on macOS (Docker services need neither — dockerd/Docker Desktop
+  handles restarts). Resolve the Tailscale CLI from PATH or the macOS app
+  bundle (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`). No
+  GNU-only tool flags: no `grep -P` (use `sed -n 's/../p'`), no `stat -c`
+  without a `stat -f` fallback, no `ss` without an `lsof` fallback, no
+  `/etc/timezone` without a `readlink /etc/localtime` fallback. Linux-only
+  concepts (docker group, tailscale operator, lingering) must be gated, and
+  their test assertions gated on `$OS` too. macOS paths are portable by
+  construction — mark them verified only after a real run on a Mac.
 - **Idempotent**: re-running must upgrade or repair, never break a working
   deployment, and never overwrite a config file the user may have edited
   (write configs only if absent).

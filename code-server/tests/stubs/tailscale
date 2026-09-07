@@ -28,7 +28,8 @@ EOF
         exit 1
       fi
     fi
-    if [ ! -f "$STATE_DIR/operator" ]; then
+    # Operator gating is a Linux tailscaled concept; macOS has no operator.
+    if [ "$(uname -s)" != "Darwin" ] && [ ! -f "$STATE_DIR/operator" ]; then
       echo "sending serve config: Access denied: serve config denied" >&2
       exit 1
     fi

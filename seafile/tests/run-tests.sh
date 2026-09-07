@@ -17,6 +17,7 @@ STUBS="$TESTS_DIR/stubs"
 
 PASS=0; FAIL=0
 ORIG_HOME="$HOME"
+OS="$(uname -s)"   # the mocked suite exercises the current platform's branch
 red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
@@ -64,7 +65,11 @@ test_preflight_docker_perms() {
   touch "$STATE_DIR/docker_no_perm"
   run_deploy
   check "exits non-zero"           [ "$CODE" -ne 0 ]
-  check "suggests usermod fix"     out_has "usermod -aG docker"
+  if [ "$OS" = "Linux" ]; then
+    check "suggests usermod fix"   out_has "usermod -aG docker"
+  else
+    check "suggests Docker Desktop" out_has "Docker Desktop"
+  fi
   check "wrote no .env"            [ ! -f "$SVC/.env" ]
   teardown
 }
@@ -96,7 +101,7 @@ test_fresh_deploy() {
   run_deploy
   check "exits zero"                     [ "$CODE" -eq 0 ]
   check ".env generated"                 [ -f "$SVC/.env" ]
-  check ".env is mode 600"               [ "$(stat -c %a "$SVC/.env")" = "600" ]
+  check ".env is mode 600"               sh -c "[ \"\$(stat -c %a '$SVC/.env' 2>/dev/null || stat -f %Lp '$SVC/.env')\" = 600 ]"
   check ".env has hostname with port"    env_has "SEAFILE_SERVER_HOSTNAME=test-host.tailfake.ts.net:8443"
   check ".env has generated JWT key"     sh -c "grep -E '^JWT_PRIVATE_KEY=[0-9a-f]{64}$' '$SVC/.env' >/dev/null"
   check ".env has admin password"        sh -c "grep -E '^INIT_SEAFILE_ADMIN_PASSWORD=.+' '$SVC/.env' >/dev/null"
@@ -144,7 +149,7 @@ test_operator_escalation() {
   setup
   run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
-  check "granted operator"        calls_have "sudo tailscale set --operator="
+  [ "$OS" = "Linux" ] && check "granted operator" calls_have "sudo tailscale set --operator="
   check "eventually published"    calls_have "tailscale serve --bg --https=8443"
   teardown
 }
@@ -159,17 +164,29 @@ live_check() {
   fi
 }
 
+# Portable: BSD (macOS) tools lack grep -P and ss.
+no_external_listener() {
+  local port="$1"
+  if command -v ss >/dev/null; then
+    ! (ss -ltn | grep ":$port" | grep -v 127.0.0.1 | grep -q LISTEN)
+  else
+    ! (lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}' | grep -v '^127\.0\.0\.1' | grep -q .)
+  fi
+}
+
 test_live() {
   echo "• live: verify the real deployment on this machine"
-  local port hport url
-  port="$(grep -oP '^LOCAL_PORT=\K[0-9]+' "$SERVICE_DIR/.env")"
-  hport="$(grep -oP '^SEAFILE_SERVER_HOSTNAME=.*:\K[0-9]+' "$SERVICE_DIR/.env")"
-  url="https://$(grep -oP '^SEAFILE_SERVER_HOSTNAME=\K.*' "$SERVICE_DIR/.env")"
+  local ts port hport url
+  ts="tailscale"
+  command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+  port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
+  hport="$(sed -n 's/^SEAFILE_SERVER_HOSTNAME=.*:\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
+  url="https://$(sed -n 's/^SEAFILE_SERVER_HOSTNAME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   live_check "3 containers running"           sh -c "[ \"\$(docker compose --project-directory '$SERVICE_DIR' ps --status running -q | wc -l)\" -ge 3 ]"
   live_check "seafile container healthy"      sh -c "docker inspect -f '{{.State.Health.Status}}' seafile | grep -qx healthy"
   live_check "local web UI responds"          sh -c "curl -fsS -o /dev/null http://127.0.0.1:$port/"
-  live_check "not listening on non-local ifaces" sh -c "! (ss -ltn | grep :$port | grep -v 127.0.0.1 | grep -q LISTEN)"
-  live_check "tailscale serve maps :$hport"   sh -c "tailscale serve status | grep -A2 ':$hport' | grep -q 'proxy http://127.0.0.1:$port'"
+  live_check "not listening on non-local ifaces" no_external_listener "$port"
+  live_check "tailscale serve maps :$hport"   sh -c "'$ts' serve status | grep -A2 ':$hport' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS responds"         curl -fsS -o /dev/null --max-time 30 "$url/"
 }
 
