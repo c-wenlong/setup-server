@@ -1,0 +1,39 @@
+# Uptime Kuma (status dashboard + checks) and ntfy (push notifications).
+#
+# Both host-networked: Kuma must probe services bound to the host's loopback
+# (code-server :8080, seafile :8081, open-webui :3001, ollama :11434), which
+# bridge networking can't reach. Both bind 127.0.0.1 only; Tailscale Serve
+# terminates TLS in front of each.
+#
+# Kuma is pinned to 1.x — the seeding script uses the uptime-kuma-api
+# library, which supports 1.x only. Don't bump to 2.x without replacing seed_kuma.py.
+
+services:
+  uptime-kuma:
+    image: ${KUMA_IMAGE:-louislam/uptime-kuma:1.23.16}
+    container_name: uptime-kuma
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - UPTIME_KUMA_HOST=127.0.0.1
+      - UPTIME_KUMA_PORT=${KUMA_PORT:-3002}
+    volumes:
+      - "${KUMA_VOLUME:?}:/app/data"
+
+  ntfy:
+    image: ${NTFY_IMAGE:-binwiederhier/ntfy:latest}
+    container_name: ntfy
+    restart: unless-stopped
+    network_mode: host
+    command: serve
+    environment:
+      - NTFY_LISTEN_HTTP=127.0.0.1:${NTFY_PORT:-3003}
+      - NTFY_BASE_URL=${NTFY_BASE_URL:?}
+      - NTFY_BEHIND_PROXY=true
+      - NTFY_CACHE_FILE=/var/cache/ntfy/cache.db
+      - NTFY_ATTACHMENT_CACHE_DIR=/var/cache/ntfy/attachments
+      # Forwards poll requests through ntfy.sh so self-hosted topics still get
+      # instant iOS push (message content stays on this server).
+      - NTFY_UPSTREAM_BASE_URL=https://ntfy.sh
+    volumes:
+      - "${NTFY_VOLUME:?}:/var/cache/ntfy"

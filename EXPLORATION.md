@@ -16,9 +16,10 @@ Already running: code-server, Seafile (Drive), ollama (local LLM).
 ## Ops for what's already built
 
 - **Uptime Kuma** — status dashboard + HTTP/docker/cert-expiry checks for
-  code-server, Seafile, etc.
+  code-server, Seafile, etc. ✅ done (monitoring/)
 - **ntfy** — self-hosted push notifications to iPhone; pairs with Kuma
   ("server tells phone when something breaks") and could carry auth links.
+  ✅ done (monitoring/)
 
 ## Memories & media
 

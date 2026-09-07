@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# uv stub: logs and succeeds (seeding is not exercised in the mocked suite).
+echo "uv $*" >> "$CALLS_LOG"
+exit 0

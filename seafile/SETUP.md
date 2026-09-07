@@ -26,7 +26,7 @@ Tailscale Serve (:8443) ──▶ seafile container (127.0.0.1:8081)
 - All containers on an internal Docker network; only the Seafile web port is
   published, and only on `127.0.0.1`.
 - Tailscale Serve terminates TLS (auto-managed Let's Encrypt cert). code-server
-  owns :443, so Seafile uses :8443 (Serve supports 443/8443/10000).
+  owns :443, so Seafile uses :8443 (modern Tailscale allows any HTTPS port).
 - `restart: unless-stopped` + the system dockerd makes it boot-persistent —
   no systemd unit needed.
 - Differences from the official compose: no Caddy proxy (Tailscale replaces

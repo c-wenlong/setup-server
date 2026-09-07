@@ -85,12 +85,12 @@ test_preflight_tailscale_down() {
 }
 
 test_preflight_bad_https_port() {
-  echo "• preflight rejects an unsupported HTTPS port"
+  echo "• preflight rejects a non-numeric HTTPS port"
   setup
-  export HTTPS_PORT=9999
+  export HTTPS_PORT=abc
   run_deploy
-  check "exits non-zero"            [ "$CODE" -ne 0 ]
-  check "explains allowed ports"    out_has "443, 8443, or 10000"
+  check "exits non-zero"        [ "$CODE" -ne 0 ]
+  check "explains the problem"  out_has "must be numeric"
   teardown
 }
 

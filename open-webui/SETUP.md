@@ -19,8 +19,8 @@ Tailscale Serve (:10000) ──▶ open-webui container ──▶ host ollama (:
 - **Host network mode**: ollama runs on the host, so the container shares the
   host network namespace to reach it at `127.0.0.1:11434`. `HOST=127.0.0.1`
   keeps the UI itself loopback-only — nothing new is exposed to LAN.
-- Ports on this box: :443 code-server, :8443 Seafile, :10000 this (Tailscale
-  Serve supports exactly those three HTTPS ports).
+- Ports on this box: :443 code-server, :8443 Seafile, :10000 this,
+  :3002/:3003 monitoring (modern Tailscale allows any HTTPS serve port).
 - Boot-persistent via Docker's `restart: unless-stopped` — no systemd unit.
 - Chat history, accounts, and uploaded docs live in `~/open-webui/data`.
 

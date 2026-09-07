@@ -59,7 +59,7 @@ docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (do
 state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
 [ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
 
-case "$HTTPS_PORT" in 443|8443|10000) ;; *) die "Tailscale Serve only supports HTTPS on 443, 8443, or 10000 (got: $HTTPS_PORT)";; esac
+case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
 
 # macOS note: with Docker Desktop, "host" networking + loopback ollama needs
 # Docker Desktop >= 4.34 host networking support; verify after deploy.
