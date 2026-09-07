@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# uv stub: kuma pause/resume calls succeed.
+echo "uv $*" >> "$CALLS_LOG"
+exit 0
