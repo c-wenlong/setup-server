@@ -41,6 +41,24 @@ Supporting services (no Tailscale Serve entry):
 - Open WebUI: first-registered account is admin (registered by Kai)
 - ntfy: open on the tailnet (anyone on the tailnet can pub/sub)
 
+## Loose ends / TODO (as of 2026-09-07)
+
+- **ollama on `*:11434`** — LAN-exposed via systemd override; tighten to
+  127.0.0.1 (Open WebUI + n8n only need loopback). Needs sudo.
+- **Tailscale exit node** — not yet advertised (`tailscale set
+  --advertise-exit-node` + one-time admin-console approval).
+- **Phone apps pending (Kai)** — ntfy app (subscribe `alerts`), Seafile app
+  (camera upload). Both server-side ready.
+- **AdGuard Home** — agreed next service (see EXPLORATION.md).
+- **macOS script paths** — portable by construction, still unverified on a
+  real Mac (`tests/run-tests.sh` mocked suite would confirm).
+- **Password sync rule** — service `.env` files are read once at seeding;
+  UI password changes must be manually mirrored into `.env` or re-seeding
+  breaks (bit us once with Kuma). n8n's password differs from Kuma's by a
+  capital K (n8n policy).
+- **WhatsApp via Composio** — broken upstream (Graph API error 100);
+  Telegram is the working personal channel.
+
 ## Quick health check
 
 Dashboard: https://kai-home-server.taild6a23f.ts.net:3002 — or from the box:
