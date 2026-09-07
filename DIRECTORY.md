@@ -14,6 +14,7 @@ Tailscale Serve, apps bound to `127.0.0.1`.
 | :10000 | [open-webui](open-webui/) | ChatGPT-style UI over local ollama | 3001 | Docker (host net) |
 | :3002 | [monitoring](monitoring/) — Uptime Kuma | Status dashboard; probes everything below every 60s | 3002 | Docker (host net) |
 | :3003 | [monitoring](monitoring/) — ntfy | Push notifications (topic `alerts`) to phone/web | 3003 | Docker (host net) |
+| :5678 | [n8n](n8n/) | Workflow automation; workflows can call all local services | 5678 | Docker (host net) |
 
 Supporting services (no Tailscale Serve entry):
 
@@ -36,7 +37,7 @@ Supporting services (no Tailscale Serve entry):
 ## Credentials & auth
 
 - code-server: no password — tailnet is the auth layer
-- Seafile / Kuma: admin credentials in each service's gitignored `.env`
+- Seafile / Kuma / n8n: admin credentials in each service's gitignored `.env`
 - Open WebUI: first-registered account is admin (registered by Kai)
 - ntfy: open on the tailnet (anyone on the tailnet can pub/sub)
 

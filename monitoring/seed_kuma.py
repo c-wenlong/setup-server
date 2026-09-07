@@ -14,6 +14,7 @@ MONITORS = [
     ("seafile", f"http://127.0.0.1:{os.environ.get('SEAFILE_PORT', '8081')}/api2/ping"),
     ("open-webui", f"http://127.0.0.1:{os.environ.get('OPEN_WEBUI_PORT', '3001')}/health"),
     ("ollama", f"http://127.0.0.1:{os.environ.get('OLLAMA_PORT', '11434')}/api/version"),
+    ("n8n", f"http://127.0.0.1:{os.environ.get('N8N_PORT', '5678')}/healthz"),
 ]
 
 api = UptimeKumaApi(f"http://127.0.0.1:{os.environ['KUMA_PORT']}", timeout=30)

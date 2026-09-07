@@ -1,0 +1,32 @@
+# n8n — workflow automation, tailnet-only.
+#
+# Host network mode so workflows can call the other localhost-bound services
+# on this box (ollama :11434, ntfy :3003, seafile :8081, ...) without extra
+# plumbing. N8N_LISTEN_ADDRESS keeps the UI itself loopback-only; Tailscale
+# Serve terminates TLS in front of it.
+#
+# Runs as uid 1000 (node) inside the container — matches the host user, so
+# the ~/n8n/data volume needs no chown.
+
+services:
+  n8n:
+    image: ${N8N_IMAGE:-n8nio/n8n:latest}
+    container_name: n8n
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - N8N_LISTEN_ADDRESS=127.0.0.1
+      - N8N_PORT=${LOCAL_PORT:-5678}
+      - N8N_HOST=${PUBLIC_HOST:?}
+      - N8N_PROTOCOL=https
+      - N8N_EDITOR_BASE_URL=${PUBLIC_URL:?}
+      - WEBHOOK_URL=${PUBLIC_URL:?}
+      - N8N_PROXY_HOPS=1
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?}
+      - GENERIC_TIMEZONE=${TIME_ZONE:-Etc/UTC}
+      - TZ=${TIME_ZONE:-Etc/UTC}
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_DIAGNOSTICS_ENABLED=false
+    volumes:
+      - "${N8N_VOLUME:?}:/home/node/.n8n"
