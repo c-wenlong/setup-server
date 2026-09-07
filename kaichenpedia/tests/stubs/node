@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# node stub. $STATE_DIR/node_version overrides the reported version.
+echo "node $*" >> "$CALLS_LOG"
+if [ "${1:-}" = "--version" ]; then
+  cat "$STATE_DIR/node_version" 2>/dev/null || echo "v22.20.0"
+fi
+exit 0
