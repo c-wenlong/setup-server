@@ -106,7 +106,7 @@ test_fresh_deploy() {
   check ".env has generated JWT key"     sh -c "grep -E '^JWT_PRIVATE_KEY=[0-9a-f]{64}$' '$SVC/.env' >/dev/null"
   check ".env has admin password"        sh -c "grep -E '^INIT_SEAFILE_ADMIN_PASSWORD=.+' '$SVC/.env' >/dev/null"
   check "compose up invoked"             [ -f "$STATE_DIR/compose_up" ]
-  check "data dirs created under HOME"   [ -d "$HOME/seafile/data" ]
+  check "data dirs created under HOME"   [ -d "$HOME/services/seafile/data" ]
   check "served on tailscale :8443"      calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8081"
   check "prints final URL"               out_has "https://test-host.tailfake.ts.net:8443"
   check "prints admin credentials"       out_has "ADMIN_EMAIL"

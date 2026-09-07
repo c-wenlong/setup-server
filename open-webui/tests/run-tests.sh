@@ -102,7 +102,7 @@ test_fresh_deploy() {
   check ".env generated"                [ -f "$SVC/.env" ]
   check ".env points at local ollama"   env_has "OLLAMA_BASE_URL=http://127.0.0.1:11434"
   check "compose up invoked"            [ -f "$STATE_DIR/compose_up" ]
-  check "data dir created under HOME"   [ -d "$HOME/open-webui/data" ]
+  check "data dir created under HOME"   [ -d "$HOME/services/open-webui/data" ]
   check "served on tailscale :10000"    calls_have "tailscale serve --bg --https=10000 http://127.0.0.1:3001"
   check "prints final URL"              out_has "https://test-host.tailfake.ts.net:10000"
   check "warns about first signup"      out_has "first account registered becomes the admin"
