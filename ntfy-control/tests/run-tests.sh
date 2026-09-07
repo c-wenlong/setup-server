@@ -58,6 +58,7 @@ check() {
 }
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
+out_lacks()  { ! grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
@@ -105,6 +106,20 @@ test_fresh_install() {
     check "launch agent written"    [ -f "$HOME/Library/LaunchAgents/com.ntfy-control.listener.plist" ]
   fi
   check "prints usage"              out_has "stop seafile"
+  check "publishes panel to phone"  calls_have '\-d panel http://127.0.0.1:3003/control'
+  check "no phone -> onboarding"    out_has "No phone detected"
+  check "onboarding has server URL" out_has "https://test-host.tailfake.ts.net:3003"
+  teardown
+}
+
+test_fresh_install_with_phone() {
+  echo "• fresh install with a phone on the tailnet: no onboarding lecture"
+  setup
+  touch "$STATE_DIR/phone_peer"
+  run_deploy
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "phone detected"            out_has "Phone found on the tailnet"
+  check "no onboarding walkthrough" out_lacks "No phone detected"
   teardown
 }
 
@@ -247,6 +262,7 @@ echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_ntfy_down
 test_preflight_docker_perms
 test_fresh_install
+test_fresh_install_with_phone
 test_idempotent_rerun
 test_handle_stop
 test_handle_start

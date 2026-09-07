@@ -184,17 +184,41 @@ if [ "$OS" = "Linux" ]; then
   ok "Listener is running"
 fi
 
+# ------------------------------------------------------- phone bootstrap
+# Publish the button menu so a subscribed phone lands on the control panel
+# immediately (the iOS app can't compose messages, so this is its entry).
+if curl -fsS -o /dev/null -d "panel" "http://127.0.0.1:$NTFY_PORT/$CONTROL_TOPIC" 2>/dev/null; then
+  ok "Control panel published to topic '$REPLY_TOPIC' — check your phone"
+else
+  warn "Could not publish the control panel — send it later: curl -d panel http://127.0.0.1:$NTFY_PORT/$CONTROL_TOPIC"
+fi
+
+# ntfy has no subscriber-listing API, and iOS delivery rides the ntfy.sh
+# push relay (no persistent connection) — so the best available "is a phone
+# even able to connect?" signal is whether one exists on the tailnet.
+phone_peer=""
+if [ -n "${TAILSCALE:-}" ]; then
+  phone_peer="$("$TAILSCALE" status --json 2>/dev/null | grep -oE '"OS": *"(iOS|android)"' | head -1 || true)"
+fi
+
 echo
 printf '\033[1;32mDone.\033[0m Control the server from the ntfy app.\n'
 echo
-echo "Phone app setup (ntfy app, phone on the tailnet):"
-echo "  Service URL: https://\$(tailnet host):$NTFY_PORT — no username/password"
-echo "  Subscribe to: $REPLY_TOPIC (alerts + replies) and $CONTROL_TOPIC (send commands)"
+if [ -z "$phone_peer" ]; then
+  warn "No phone detected on your tailnet — to receive alerts and the control panel:"
+  echo "     1. Install Tailscale on the phone and log in to this tailnet"
+  echo "     2. Install the ntfy app"
+  echo "     3. Add subscription: topic '$REPLY_TOPIC', tap 'Use another server',"
+  echo "        server URL https://${TS_HOST:-<tailnet-host>}:$NTFY_PORT (leave username/password EMPTY)"
+  echo "     4. Re-run ./setup.sh (or open https://${TS_HOST:-<tailnet-host>}:$NTFY_PORT/$CONTROL_TOPIC/publish?message=panel)"
+  echo "        to repost the control panel"
+else
+  ok "Phone found on the tailnet ($phone_peer) — if no notification arrived, subscribe to"
+  echo "     topic '$REPLY_TOPIC' in the ntfy app with server https://${TS_HOST:-<tailnet-host>}:$NTFY_PORT (no username/password)"
+fi
 echo
-echo "Then publish to '$CONTROL_TOPIC':"
-echo "  status            # state of every service"
-echo "  stop seafile      # also pauses its Kuma monitor"
-echo "  start seafile     # resumes the monitor"
+echo "From the panel: tap [start]/[stop]/[restart] to pick a service; typed"
+echo "commands (Android/web app) work too: status | panel | stop seafile | ..."
 echo "  (services: seafile, open-webui, n8n, kaichenpedia, uptime-kuma, code-server)"
 echo
 if [ "$OS" = "Linux" ]; then

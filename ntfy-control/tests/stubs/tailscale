@@ -9,9 +9,12 @@ case "$1" in
   status)
     state="Running"
     [ -f "$STATE_DIR/backend_state" ] && state="$(cat "$STATE_DIR/backend_state")"
+    peer=""
+    [ -f "$STATE_DIR/phone_peer" ] && peer='"Peer": {"nk1": {"HostName": "kais-iphone", "OS": "iOS"}},'
     cat <<EOF
 {
   "BackendState": "$state",
+  $peer
   "Self": {
     "DNSName": "test-host.tailfake.ts.net."
   }
