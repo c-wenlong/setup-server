@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# curl stub. State in $STATE_DIR:
+#   ntfy_down  — exists => the ntfy health check fails
+echo "curl $*" >> "$CALLS_LOG"
+
+if [ -f "$STATE_DIR/ntfy_down" ]; then
+  for a in "$@"; do
+    case "$a" in */v1/health) exit 7;; esac
+  done
+fi
+exit 0
