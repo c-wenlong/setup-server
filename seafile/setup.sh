@@ -80,8 +80,8 @@ SEAFILE_IMAGE=seafileltd/seafile-mc:13.0-latest
 SEAFILE_DB_IMAGE=mariadb:10.11
 SEAFILE_REDIS_IMAGE=redis:7-alpine
 
-SEAFILE_VOLUME=$HOME/seafile/data
-SEAFILE_MYSQL_VOLUME=$HOME/seafile/mysql
+SEAFILE_VOLUME=$HOME/services/seafile/data
+SEAFILE_MYSQL_VOLUME=$HOME/services/seafile/mysql
 
 LOCAL_PORT=$LOCAL_PORT
 SEAFILE_SERVER_HOSTNAME=$host:$HTTPS_PORT
@@ -100,7 +100,7 @@ EOF
   ok "Wrote $ENV_FILE (mode 600)"
 fi
 
-mkdir -p "$HOME/seafile/data" "$HOME/seafile/mysql"
+mkdir -p "$HOME/services/seafile/data" "$HOME/services/seafile/mysql"
 
 # ---------------------------------------------------------------- deploy
 info "Starting containers (docker compose up -d) — first run pulls ~1 GB of images"
