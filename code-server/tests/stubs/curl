@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# curl stub: serves a fake code-server installer, succeeds on health checks.
+echo "curl $*" >> "$CALLS_LOG"
+
+url=""
+for a in "$@"; do
+  case "$a" in http*) url="$a" ;; esac
+done
+
+case "$url" in
+  *code-server.dev/install.sh*)
+    cat <<'EOS'
+#!/bin/sh
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\necho "9.9.9-fake test-build"\n' > "$HOME/.local/bin/code-server"
+chmod +x "$HOME/.local/bin/code-server"
+echo "fake standalone install complete"
+EOS
+    ;;
+  *healthz*)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
