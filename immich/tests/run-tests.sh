@@ -352,6 +352,16 @@ EOF
 
 test_live() {
   echo "• live: verify the real deployment on this machine"
+  # Without the docker group every `docker inspect` fails and the container
+  # checks report "not running" for a perfectly healthy stack. Say so, rather
+  # than letting three red lines imply an outage. A shell started before the
+  # user was added to the group hits this, which is easy to forget.
+  if ! docker ps >/dev/null 2>&1; then
+    red "    ! cannot reach the docker daemon — container checks would report"
+    red "      false failures. Re-run as: sg docker -c './tests/run-tests.sh --live'"
+    FAIL=$((FAIL + 1))
+    return
+  fi
   local ts port https_port url
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"

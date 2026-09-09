@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# curl stub — fakes the launcher health endpoint. State in $STATE_DIR:
+#   health_down       — exists => every /healthz probe fails (exit 22, as curl
+#                       -f does on an HTTP error)
+#   https_down        — exists => only the tailnet HTTPS probes fail, so the
+#                       "cert still minting" warning path can be exercised
+#
+# setup.sh only ever calls curl as `curl -fsS -o /dev/null [--max-time N] URL`,
+# so the flag parsing here stays deliberately small.
+echo "curl $*" >> "$CALLS_LOG"
+
+url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--max-time|-X|-H) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+case "$url" in
+  https://*)
+    [ -f "$STATE_DIR/https_down" ] && exit 22
+    ;;
+esac
+
+case "$url" in
+  */healthz)
+    [ -f "$STATE_DIR/health_down" ] && exit 22
+    echo "ok"
+    exit 0
+    ;;
+esac
+
+exit 0

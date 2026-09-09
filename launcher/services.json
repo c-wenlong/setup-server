@@ -1,0 +1,177 @@
+{
+  "_comment": [
+    "Service registry for the launcher. Edited by hand; read at every request.",
+    "HOST in a url is substituted at runtime with this node's MagicDNS name,",
+    "so the file stays tailnet-agnostic and survives a re-tailnet.",
+    "marker  - a path that exists only after that service is deployed. Drives",
+    "          'installed' without touching the docker CLI (a systemd user unit",
+    "          does not reliably inherit the docker group; status must not",
+    "          depend on that).",
+    "setup   - path to setup.sh relative to the repo root, or an absolute /",
+    "          ~-prefixed path for service code that lives outside this repo.",
+    "          null means 'not built yet' -> planned.",
+    "Order here is the order the grid renders in: daily drivers first."
+  ],
+  "services": [
+    {
+      "key": "immich",
+      "name": "Immich",
+      "tagline": "Photos",
+      "icon": "camera",
+      "url": "https://HOST:2283/",
+      "health": "http://127.0.0.1:2283/api/server/ping",
+      "marker": "~/services/immich",
+      "setup": "immich/setup.sh"
+    },
+    {
+      "key": "seafile",
+      "name": "Seafile",
+      "tagline": "Files",
+      "icon": "folder",
+      "url": "https://HOST:8443/",
+      "health": "http://127.0.0.1:8081/api2/ping/",
+      "marker": "~/services/seafile",
+      "setup": "seafile/setup.sh"
+    },
+    {
+      "key": "code-server",
+      "name": "code-server",
+      "tagline": "Code",
+      "icon": "code",
+      "url": "https://HOST/",
+      "health": "http://127.0.0.1:8080/healthz",
+      "marker": "~/.config/code-server",
+      "setup": "code-server/setup.sh"
+    },
+    {
+      "key": "open-webui",
+      "name": "Open WebUI",
+      "tagline": "Chat",
+      "icon": "chat",
+      "url": "https://HOST:10000/",
+      "health": "http://127.0.0.1:3001/health",
+      "marker": "~/services/open-webui",
+      "setup": "open-webui/setup.sh"
+    },
+    {
+      "key": "kaichenpedia",
+      "name": "kaichenpedia",
+      "tagline": "Wiki",
+      "icon": "book",
+      "url": "https://HOST:8091/",
+      "health": "http://127.0.0.1:8091/",
+      "marker": "~/services/kaichenpedia",
+      "setup": "kaichenpedia/setup.sh"
+    },
+    {
+      "key": "n8n",
+      "name": "n8n",
+      "tagline": "Automation",
+      "icon": "workflow",
+      "url": "https://HOST:5678/",
+      "health": "http://127.0.0.1:5678/healthz",
+      "marker": "~/services/n8n",
+      "setup": "n8n/setup.sh"
+    },
+    {
+      "key": "beszel",
+      "name": "Beszel",
+      "tagline": "Metrics",
+      "icon": "activity",
+      "url": "https://HOST:8092/",
+      "health": "http://127.0.0.1:8092/api/health",
+      "marker": "~/services/beszel",
+      "setup": "beszel/setup.sh"
+    },
+    {
+      "key": "uptime-kuma",
+      "name": "Uptime Kuma",
+      "tagline": "Status",
+      "icon": "heartbeat",
+      "url": "https://HOST:3002/",
+      "health": "http://127.0.0.1:3002/",
+      "marker": "~/services/monitoring",
+      "setup": "monitoring/setup.sh"
+    },
+    {
+      "key": "ntfy",
+      "name": "ntfy",
+      "tagline": "Alerts",
+      "icon": "bell",
+      "url": "https://HOST:3003/",
+      "health": "http://127.0.0.1:3003/v1/health",
+      "marker": "~/services/monitoring",
+      "setup": "monitoring/setup.sh"
+    },
+    {
+      "key": "manimkc",
+      "name": "manimkc",
+      "tagline": "Video",
+      "icon": "video",
+      "url": "https://HOST:8090/",
+      "health": "http://127.0.0.1:8090/health",
+      "marker": "~/services/manimkc",
+      "setup": "~/dev/manimkc/server/setup.sh"
+    },
+    {
+      "key": "ollama",
+      "name": "ollama",
+      "tagline": "Models",
+      "icon": "cpu",
+      "url": null,
+      "health": "http://127.0.0.1:11434/api/version",
+      "marker": "/usr/local/bin/ollama",
+      "setup": null
+    },
+    {
+      "key": "adguard",
+      "name": "AdGuard Home",
+      "tagline": "DNS",
+      "icon": "shield",
+      "url": null,
+      "health": null,
+      "marker": null,
+      "setup": null
+    },
+    {
+      "key": "jellyfin",
+      "name": "Jellyfin",
+      "tagline": "Media",
+      "icon": "film",
+      "url": null,
+      "health": null,
+      "marker": null,
+      "setup": null
+    },
+    {
+      "key": "paperless-ngx",
+      "name": "Paperless-ngx",
+      "tagline": "Documents",
+      "icon": "document",
+      "url": null,
+      "health": null,
+      "marker": null,
+      "setup": null
+    },
+    {
+      "key": "karakeep",
+      "name": "Karakeep",
+      "tagline": "Bookmarks",
+      "icon": "bookmark",
+      "url": null,
+      "health": null,
+      "marker": null,
+      "setup": null
+    },
+    {
+      "key": "forgejo",
+      "name": "Forgejo",
+      "tagline": "Git",
+      "icon": "git",
+      "url": null,
+      "health": null,
+      "marker": null,
+      "setup": null
+    }
+  ]
+}
