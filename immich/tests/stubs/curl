@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# curl stub — fakes the Immich REST API. State in $STATE_DIR:
+#   admin_exists     — exists => /auth/admin-sign-up returns 400 (already set up)
+#   login_fails      — exists => /auth/login returns 401
+#   config_put.json  — written with the body of a PUT /admin/config
+#
+# Understands the flag shapes setup.sh actually uses: -X, -o, -w %{http_code},
+# --data-binary @file, and the bare -fsS health checks.
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; body=""; url=""; want_code=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    --data-binary) body="${2#@}"; shift 2 ;;
+    -d) body="${2#@}"; shift 2 ;;
+    -H|--max-time) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <json>
+  [ -n "$out" ] && printf '%s' "$2" > "$out"
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  return 0
+}
+
+case "$url" in
+  */api/server/ping)
+    emit 200 '{"res":"pong"}'
+    ;;
+  */api/auth/admin-sign-up)
+    if [ -f "$STATE_DIR/admin_exists" ]; then
+      emit 400 '{"message":"The server already has an admin"}'
+    else
+      touch "$STATE_DIR/admin_exists"
+      emit 201 '{"id":"user-1","email":"admin@example.com"}'
+    fi
+    ;;
+  */api/auth/login)
+    if [ -f "$STATE_DIR/login_fails" ]; then
+      emit 401 '{"message":"Incorrect email or password"}'
+    else
+      emit 200 '{"accessToken":"stub-token","isAdmin":true,"userId":"user-1"}'
+    fi
+    ;;
+  */api/admin/config|*/api/system-config)
+    # v3.1.0 (what actually ships today) serves /system-config and 404s on
+    # /admin/config; the rename lands in a later release. Default to the
+    # shipped behaviour, and set new_config_api to model the post-rename one.
+    case "$url" in
+      */api/admin/config)
+        [ -f "$STATE_DIR/new_config_api" ] || { emit 404 '{"message":"Not Found"}'; exit 0; }
+        ;;
+      */api/system-config)
+        [ -f "$STATE_DIR/new_config_api" ] && { emit 404 '{"message":"Not Found"}'; exit 0; }
+        ;;
+    esac
+    if [ "$method" = "PUT" ]; then
+      cp "$body" "$STATE_DIR/config_put.json"
+      emit 200 "$(cat "$STATE_DIR/config_put.json")"
+    else
+      emit 200 '{
+        "ffmpeg": {"threads": 0, "crf": 23, "preset": "ultrafast"},
+        "job": {
+          "smartSearch": {"concurrency": 2},
+          "faceDetection": {"concurrency": 2},
+          "thumbnailGeneration": {"concurrency": 3},
+          "videoConversion": {"concurrency": 1},
+          "ocr": {"concurrency": 2},
+          "metadataExtraction": {"concurrency": 5}
+        },
+        "machineLearning": {
+          "enabled": true,
+          "urls": ["http://immich-machine-learning:3003"],
+          "availabilityChecks": {"enabled": true, "interval": 30, "timeout": 5},
+          "clip": {"enabled": true, "modelName": "ViT-B-32__openai"},
+          "duplicateDetection": {"enabled": true, "maxDistance": 0.01},
+          "facialRecognition": {"enabled": true, "modelName": "buffalo_l", "minScore": 0.7, "maxDistance": 0.5, "minFaces": 3},
+          "ocr": {"enabled": true, "modelName": "PP-OCRv5_mobile"}
+        },
+        "newVersionCheck": {"enabled": true}
+      }'
+    fi
+    ;;
+  */api/system-metadata/admin-onboarding)
+    emit 200 '{}'
+    ;;
+  *)
+    emit 200 '{}'
+    ;;
+esac
+exit 0

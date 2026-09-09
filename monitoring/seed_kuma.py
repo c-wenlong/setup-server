@@ -9,15 +9,41 @@ import os
 
 from uptime_kuma_api import MonitorType, NotificationType, UptimeKumaApi
 
-MONITORS = [
-    ("code-server", f"http://127.0.0.1:{os.environ.get('CODE_SERVER_PORT', '8080')}/healthz"),
-    ("seafile", f"http://127.0.0.1:{os.environ.get('SEAFILE_PORT', '8081')}/api2/ping"),
-    ("open-webui", f"http://127.0.0.1:{os.environ.get('OPEN_WEBUI_PORT', '3001')}/health"),
-    ("ollama", f"http://127.0.0.1:{os.environ.get('OLLAMA_PORT', '11434')}/api/version"),
-    ("n8n", f"http://127.0.0.1:{os.environ.get('N8N_PORT', '5678')}/healthz"),
-    ("manimkc", f"http://127.0.0.1:{os.environ.get('MANIMKC_PORT', '8090')}/health"),
-    ("kaichenpedia", f"http://127.0.0.1:{os.environ.get('KAICHENPEDIA_PORT', '8091')}/"),
+HOST = os.environ.get("TAILNET_HOST", "kai-home-server.taild6a23f.ts.net")
+
+# Monitors probe the tailnet HTTPS URL, not loopback, so that the dashboard
+# shows the address you actually open and each check exercises the whole
+# path: Tailscale Serve, the TLS cert, and the app behind it. A lost serve
+# config or an expired cert is real downtime from a phone's point of view,
+# and loopback checks are blind to both.
+#
+# The trade-off, accepted deliberately: if tailscaled itself breaks, every
+# monitor goes red at once without singling out the app. Check
+# `tailscale serve status` first when everything fails together.
+#
+# (name, tailnet HTTPS port or None for :443, health path)
+PUBLISHED = [
+    ("code-server", None, "/healthz"),
+    ("seafile", 8443, "/api2/ping/"),  # trailing slash: /api2/ping 301s
+    ("open-webui", 10000, "/health"),
+    ("n8n", 5678, "/healthz"),
+    ("manimkc", 8090, "/health"),
+    ("kaichenpedia", 8091, "/"),
+    ("beszel", 8092, "/api/health"),
+    ("immich", 2283, "/api/server/ping"),
+    ("launcher", 8093, "/healthz"),
 ]
+
+MONITORS = [
+    (name, f"https://{HOST}" + (f":{port}" if port else "") + path)
+    for name, port, path in PUBLISHED
+]
+
+# ollama is deliberately NOT published via Tailscale Serve, so it has no
+# tailnet URL and stays on loopback.
+MONITORS.append(
+    ("ollama", f"http://127.0.0.1:{os.environ.get('OLLAMA_PORT', '11434')}/api/version")
+)
 
 api = UptimeKumaApi(f"http://127.0.0.1:{os.environ['KUMA_PORT']}", timeout=30)
 user = os.environ["KUMA_ADMIN_USER"]
@@ -46,20 +72,25 @@ else:
     notification_id = result["id"]
     print("created ntfy notification")
 
-have = {m["name"] for m in api.get_monitors()}
+have = {m["name"]: m for m in api.get_monitors()}
 for name, url in MONITORS:
-    if name in have:
-        continue
-    api.add_monitor(
-        type=MonitorType.HTTP,
-        name=name,
-        url=url,
-        interval=60,
-        maxretries=2,
-        retryInterval=30,
-        notificationIDList=[notification_id],
-    )
-    print(f"added monitor: {name} -> {url}")
+    existing = have.get(name)
+    if existing is None:
+        api.add_monitor(
+            type=MonitorType.HTTP,
+            name=name,
+            url=url,
+            interval=60,
+            maxretries=2,
+            retryInterval=30,
+            notificationIDList=[notification_id],
+        )
+        print(f"added monitor: {name} -> {url}")
+    elif existing["url"] != url:
+        # Repoint an existing monitor. Only the URL is touched, so a paused
+        # monitor stays paused and any hand-tuned interval survives.
+        api.edit_monitor(existing["id"], url=url)
+        print(f"updated monitor: {name} -> {url}")
 
 api.disconnect()
 print("seed complete")
