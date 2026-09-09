@@ -1,0 +1,14 @@
+# Beszel hub — resource monitoring dashboard (CPU/RAM/GPU/disk/net/temps).
+# Host networking bound to loopback (like the box's other services) so the
+# hub can reach the native agent on 127.0.0.1:45876; published via
+# tailscale serve :8092. The agent runs as a systemd user unit (setup.sh)
+# for nvidia-smi + hwmon + docker-socket access.
+services:
+  beszel:
+    image: henrygd/beszel:latest
+    container_name: beszel
+    restart: unless-stopped
+    network_mode: host
+    command: serve --http "127.0.0.1:${BESZEL_PORT:-8092}"
+    volumes:
+      - ${BESZEL_VOLUME:?}:/beszel_data
