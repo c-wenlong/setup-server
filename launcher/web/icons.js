@@ -43,6 +43,7 @@
        artwork in the kaichenpedia repo, so it needs no plate on either theme.
        Raster because no vector original exists. */
     'kaichenpedia':  { file: 'kaichenpedia', ext: 'png' },
+    'manimkc':       { file: 'manimkc',      ext: 'png' },
     'seafile':       { file: 'seafile' },
     'code-server':   { file: 'code-server' },
     'open-webui':    { file: 'open-webui',    dark: true },  /* black disc  */
