@@ -34,10 +34,15 @@
   /* ---------------------------------------------------------------- brands */
 
   /* service key -> vendored file basename. `dark: true` means a companion
-     "<base>-dark.svg" exists and is used under prefers-color-scheme: dark.
+     "<base>-dark.<ext>" exists and is used under prefers-color-scheme: dark.
+     `ext` defaults to 'svg'.
      Provenance and licence: web/icons/NOTICE.md */
   var BRANDS = {
     'immich':        { file: 'immich' },
+    /* Bespoke mark, not from the icon set: circular-cropped from the original
+       artwork in the kaichenpedia repo, so it needs no plate on either theme.
+       Raster because no vector original exists. */
+    'kaichenpedia':  { file: 'kaichenpedia', ext: 'png' },
     'seafile':       { file: 'seafile' },
     'code-server':   { file: 'code-server' },
     'open-webui':    { file: 'open-webui',    dark: true },  /* black disc  */
@@ -290,7 +295,10 @@
   var themed = [];
 
   function fileFor(entry) {
-    return DIR + entry.file + (entry.dark && prefersDark() ? '-dark' : '') + '.svg';
+    /* `ext` defaults to svg — every vendored brand mark is vector except the
+       bespoke kaichenpedia logo, which only exists as a raster original. */
+    var ext = entry.ext || 'svg';
+    return DIR + entry.file + (entry.dark && prefersDark() ? '-dark' : '') + '.' + ext;
   }
 
   function repaint() {
