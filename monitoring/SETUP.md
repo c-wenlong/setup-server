@@ -9,13 +9,28 @@ your phone when something goes down (and when it recovers).
 ## Architecture
 
 ```
-Uptime Kuma ──probe──▶ code-server :8080 /healthz
- (127.0.0.1:3002)      seafile     :8081 /api2/ping
-      │                open-webui  :3001 /health
-      │ on failure     ollama      :11434 /api/version
+Uptime Kuma ──probe──▶ https://<tailnet host>/healthz          (code-server)
+ (127.0.0.1:3002)      https://<tailnet host>:8443/api2/ping/  (seafile)
+      │                https://<tailnet host>:10000/health     (open-webui)
+      │                https://<tailnet host>:2283/api/...     (immich)
+      │ on failure     http://127.0.0.1:11434/api/version      (ollama*)
       ▼
     ntfy (127.0.0.1:3003) ──push──▶ phone (ntfy app) + web subscribers
 ```
+
+Monitors probe the **tailnet HTTPS URL**, not loopback. Two reasons: the
+dashboard then shows the address you actually open (Kuma renders the probe
+URL as the monitor's link — there is no separate "display URL" field), and
+each check exercises the whole path, so a lost `tailscale serve` mapping or
+an expired cert registers as downtime. From a phone's point of view that
+*is* downtime, and a loopback check is blind to it.
+
+The accepted trade-off: if tailscaled itself breaks, every monitor goes red
+at once without singling out the app. When everything fails together, check
+`tailscale serve status` before suspecting the services.
+
+\* ollama is deliberately not published via Tailscale Serve, so it has no
+tailnet URL and is the one monitor still probing loopback.
 
 Both containers are host-networked (Kuma must reach services bound to the
 host's loopback) and bind `127.0.0.1` only. Tailscale Serve fronts each with
@@ -61,8 +76,13 @@ curl -d "backup finished" https://<host>.<tailnet>.ts.net:3003/alerts
 
 ## Adding monitors for future services
 
-Either click them into the Kuma UI, or add a line to `MONITORS` in
-`seed_kuma.py` and re-run `./setup.sh` (seeding only adds what's missing).
+Either click them into the Kuma UI, or add a line to `PUBLISHED` in
+`seed_kuma.py` — `(name, tailnet HTTPS port or None for :443, health path)`
+— and re-run `./setup.sh`. Seeding adds what's missing and repoints any
+monitor whose URL has changed; it only writes the URL, so a paused monitor
+stays paused and a hand-tuned interval survives. A service that is *not*
+published via Tailscale Serve should be appended to `MONITORS` directly with
+a loopback URL, as ollama is.
 
 ## Operations
 

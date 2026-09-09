@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   ml_container    — exists => `docker ps -a` lists immich_machine_learning
+#   compose_up      — touched by `compose ... up`
+#   compose_up_ml   — touched by `compose --profile ml ... up`
+#   compose_rm_ml   — touched by `compose ... rm -sf immich-machine-learning`
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    # `docker ps -a --format '{{.Names}}'` — used to detect a stale ML container
+    for a in "$@"; do
+      if [ "$a" = "-a" ] && [ -f "$STATE_DIR/ml_container" ]; then
+        echo "immich_server"
+        echo "immich_machine_learning"
+      fi
+    done
+    ;;
+  rm)
+    # `docker rm -f immich_machine_learning` (fallback path)
+    rm -f "$STATE_DIR/ml_container"
+    ;;
+  compose)
+    # Real compose activates a profile from EITHER --profile or the
+    # COMPOSE_PROFILES environment variable (env wins over the .env file),
+    # so the stub honours both — a stale export must show up as a failure.
+    profile=0
+    case ",${COMPOSE_PROFILES:-}," in *,ml,*) profile=1 ;; esac
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "--profile" ] && [ "$a" = "ml" ] && profile=1
+      prev="$a"
+    done
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        for a in "$@"; do
+          case "$a" in
+            up)
+              touch "$STATE_DIR/compose_up"
+              if [ "$profile" = "1" ]; then
+                touch "$STATE_DIR/compose_up_ml" "$STATE_DIR/ml_container"
+              fi
+              ;;
+            rm)
+              touch "$STATE_DIR/compose_rm_ml"
+              rm -f "$STATE_DIR/ml_container"
+              ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0

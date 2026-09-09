@@ -31,11 +31,36 @@ Walk the chain backwards:
 
 ## Kuma monitor shows down but the service is fine
 
-- Kuma probes `127.0.0.1:<port>` from the host network — confirm the port in
-  the monitor matches the service's actual LOCAL_PORT (they can drift if you
-  redeployed a service on a new port).
-- `seafile` probe uses `/api2/ping` (returns 200); plain `/` returns a 302
-  which Kuma counts as down by default.
+- Kuma probes the **tailnet HTTPS URL**, so a red monitor can mean the app is
+  down *or* that publishing is. Check which: `curl` the app's loopback port
+  directly — if that answers, the app is fine and the fault is in Tailscale
+  Serve (`tailscale serve status`) or the cert.
+- **Everything red at once** is the signature of a tailscaled/Serve problem,
+  not nine simultaneous app failures. Start with `tailscale serve status`.
+
+  ⚠️ **Do not "fix" it with `tailscale serve reset`.** That wipes the serve
+  config for the *whole node* — every service on the box goes dark at once,
+  and each one's `setup.sh` has to be re-run to republish it. This trap is
+  easy to fall into because `reset` is one of only two removal commands the
+  `tailscale serve --help` text advertises (the other, `clear`, is for
+  Tailscale Services, not this).
+
+  To remove **one** mapping, use the legacy-but-working form:
+
+  ```sh
+  tailscale serve --https=<port> off      # e.g. --https=3002 off
+  ```
+
+  `off` is absent from `--help` on 1.102.3, but it is what Tailscale itself
+  prints after a successful `serve` ("To disable the proxy, run: …"), and it
+  is verified working on this box. It is the only removal that touches a
+  single port instead of all of them.
+- Confirm the monitor's HTTPS port matches the service's published port
+  (they can drift if you redeployed a service on a new port); re-running
+  `monitoring/setup.sh` repoints monitors to whatever `seed_kuma.py` says.
+- `seafile` probes `/api2/ping/` **with the trailing slash** — `/api2/ping`
+  returns a 301 to it, and plain `/` returns a 302 which Kuma counts as down.
+- ollama is the one monitor still on loopback (never published via Serve).
 
 ## Seeding failed
 

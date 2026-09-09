@@ -109,7 +109,9 @@ done
 # ---------------------------------------------------------------- seed
 if command -v uv >/dev/null; then
   info "Seeding Kuma (admin account, monitors, ntfy alert channel)"
-  if (set -a; . "$ENV_FILE"; set +a; \
+  # TAILNET_HOST: monitors probe the tailnet HTTPS URLs, so the seeder needs
+  # this node's MagicDNS name.
+  if (set -a; . "$ENV_FILE"; TAILNET_HOST="$host"; set +a; \
       uv run --with uptime-kuma-api python3 "$SERVICE_DIR/seed_kuma.py"); then
     ok "Kuma seeded"
   else
