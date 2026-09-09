@@ -108,7 +108,7 @@
       "name": "manimkc",
       "tagline": "Video",
       "icon": "video",
-      "url": "https://HOST:8090/",
+      "url": "https://HOST:8090/docs",
       "health": "http://127.0.0.1:8090/health",
       "marker": "~/services/manimkc",
       "setup": "~/dev/manimkc/server/setup.sh"
