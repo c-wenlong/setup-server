@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# loginctl stub. $STATE_DIR/linger existing => lingering already enabled.
+echo "loginctl $*" >> "$CALLS_LOG"
+
+case "$1" in
+  show-user)
+    if [ -f "$STATE_DIR/linger" ]; then echo "yes"; else echo "no"; fi
+    ;;
+  enable-linger)
+    touch "$STATE_DIR/linger"
+    ;;
+esac
+exit 0

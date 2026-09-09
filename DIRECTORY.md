@@ -33,6 +33,9 @@ no Docker).
 | :5678 | [n8n](n8n/) | Workflow automation; workflows can call all local services | 5678 | Docker (host net) |
 | :8091 | [kaichenpedia](kaichenpedia/) | Personal wiki (Quartz static build of the private kaichenpedia repo); polls GitHub daily and redeploys on new commits (`bin/deploy.sh --force` deploys now) | 8091 | Docker (nginx) + systemd user timer |
 | :8090 | manimkc (`~/dev/manimkc/server/`) | Video-gen job server: JSON brief → narrated ManimGL video → Seafile `manimkc` library | 8090 | systemd user unit |
+| :8092 | [beszel](beszel/) | Resource monitoring: CPU/RAM/GPU/disk/net/temps, history + ntfy-able alerts (complements Kuma's uptime checks) | 8092 | Docker (host net, loopback-bound) + native agent on 127.0.0.1:45876 (systemd user unit) |
+| :443**/home/** + :8093 | [launcher](launcher/) | One-tap app launcher: tile grid of every service with live status; dimmed tiles for services not installed yet, with a Deploy button that runs their `setup.sh`. **The short URL to bookmark on the phone.** Shares :443 with code-server via a `--set-path=/home` handler, which leaves `/` untouched | 8093 | systemd user unit (Python 3 stdlib, no deps) |
+| :2283 | [immich](immich/) | Self-hosted Google Photos: timeline, albums, phone background backup; ML (faces/semantic search) behind a flag, **off by default** on this box's 7.7 GB | 2283 | Docker (bridge; server loopback-published, postgres+redis unpublished) |
 
 Supporting services (no Tailscale Serve entry):
 
@@ -47,6 +50,12 @@ Supporting services (no Tailscale Serve entry):
 
 - Modern Tailscale (>= ~1.90) serves HTTPS on **any** port — the old
   443/8443/10000 limit is gone.
+- A port can host **several** mounts: `tailscale serve --set-path=/foo` adds a
+  handler next to whatever already owns `/`, so :443 serves code-server at `/`
+  and the launcher at `/home/`. Tailscale **strips** the prefix before
+  proxying (the backend sees `/`), so anything published this way must use
+  relative URLs. Never issue a bare `--https=443` — it replaces the `/`
+  handler and takes code-server down.
 - Convention: monitoring-class services use HTTPS port == local port
   (3002/3003); earlier services predate that and differ.
 - Before claiming a port for a new service: check this table, then
@@ -59,6 +68,10 @@ Supporting services (no Tailscale Serve entry):
 - Seafile / Kuma / n8n: admin credentials in each service's gitignored `.env`
 - Open WebUI: first-registered account is admin (registered by Kai)
 - ntfy: open on the tailnet (anyone on the tailnet can pub/sub)
+- Immich: admin `chenwenlongofficial@gmail.com`, password generated into
+  `immich/.env` (`IMMICH_ADMIN_PASSWORD`); DB password there too. Same
+  password-sync rule — a UI change must be mirrored back into `.env`, or
+  setup.sh warns and skips the settings step on the next run.
 - manimkc: uploads as service account `manimkc@kaichen.local` (API token in
   `~/dev/manimkc/.env`, no password stored); library `manimkc` shared rw to
   Kai's account. ⚠️ service account is a Seafile admin (self-demotion via API
@@ -72,12 +85,27 @@ Supporting services (no Tailscale Serve entry):
   127.0.0.1 (Open WebUI + n8n only need loopback). Needs sudo.
 - **Tailscale exit node** — not yet advertised (`tailscale set
   --advertise-exit-node` + one-time admin-console approval).
+- **Immich RAM ceiling** — deployed 2026-09-10 with machine learning OFF
+  (`IMMICH_ML=off`, the default): 7.7 GB total, and ollama claims ~5 GB with a
+  model loaded, against Immich's documented 6 GB minimum / 8 GB recommended.
+  Semantic search, face grouping and OCR stay dark until then. This box is
+  AM4/DDR4, so 32 GB is a ~$50–90 upgrade; after it lands run
+  `IMMICH_ML=on ./setup.sh` and the existing library backfills. The ~150 GB
+  free disk is the other gate — a Takeout import wants a dedicated drive.
+- **Seafile vs Immich camera upload** — pick one, not both, or every photo is
+  stored twice. Seafile camera upload was never enabled, so Immich takes the
+  role and Seafile stays Drive-only.
 - **Phone apps** — ntfy app connected (2026-09-08, subscribed `alerts`;
   service control via [ntfy-control](ntfy-control/) buttons — send `panel`
   to re-pop the menu). Seafile app (camera upload) still pending.
 - **n8n intentionally stopped** (2026-09-08, via ntfy-control; Kuma monitor
   paused). Start it from the panel or `docker start n8n` when needed —
   scheduled workflows don't run while it's down.
+- **kaichenpedia intentionally stopped** (2026-09-08, via ntfy-control; Kuma
+  monitor paused, container `Exited (0)`). Not needed up right now. Start it
+  from the ntfy panel or `docker start kaichenpedia`; the daily GitHub poller
+  only redeploys while the container is running. Both this and n8n show as
+  amber "Paused" tiles in the launcher, which is accurate, not a fault.
 - **kaichenpedia baseUrl** — `site/quartz.config.ts` in the wiki repo still
   points at the old Cloudflare domain (cosmetic: og/sitemap links only).
 - **AdGuard Home** — agreed next service (see EXPLORATION.md).

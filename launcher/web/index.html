@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f6f6f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e0e11" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Launcher">
+<meta name="robots" content="noindex">
+<title>Launcher</title>
+<!-- Inline data: icon so no /favicon.ico request is made at either mount point. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='3.5' width='7' height='7' rx='2'/%3E%3Crect x='13.5' y='3.5' width='7' height='7' rx='2'/%3E%3Crect x='3.5' y='13.5' width='7' height='7' rx='2'/%3E%3Crect x='13.5' y='13.5' width='7' height='7' rx='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<a class="skip" href="#grid">Skip to services</a>
+
+<div class="wrap">
+
+  <header class="head">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+          <rect x="3.5" y="3.5" width="7" height="7" rx="2"/>
+          <rect x="13.5" y="3.5" width="7" height="7" rx="2"/>
+          <rect x="3.5" y="13.5" width="7" height="7" rx="2"/>
+          <rect x="13.5" y="13.5" width="7" height="7" rx="2"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <h1>Launcher</h1>
+        <span class="host" id="host">&nbsp;</span>
+      </span>
+    </div>
+
+    <div class="search">
+      <span class="search-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+          <circle cx="11" cy="11" r="6.4"/><path d="m15.7 15.7 4.3 4.3"/>
+        </svg>
+      </span>
+      <label class="sr-only" for="filter">Filter services</label>
+      <input id="filter" type="search" placeholder="Filter" enterkeyhint="search" inputmode="search"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </div>
+  </header>
+
+  <main>
+    <div class="notice" id="notice" hidden>
+      <div class="notice-body">
+        <p class="notice-title" id="notice-title">Can't reach the launcher API</p>
+        <p class="notice-text" id="notice-text"></p>
+      </div>
+      <button class="btn" id="notice-retry" type="button">Retry</button>
+    </div>
+
+    <div class="tabs" id="tabs" role="tablist" aria-label="Filter by state">
+      <button class="tab" type="button" role="tab" id="tab-all" data-tab="all"
+              aria-controls="panel" aria-selected="true" tabindex="0">
+        <span class="tab-label">All</span><span class="tab-n" id="tab-n-all"></span>
+      </button>
+      <button class="tab" type="button" role="tab" id="tab-active" data-tab="active"
+              aria-controls="panel" aria-selected="false" tabindex="-1">
+        <span class="tab-label">Active</span><span class="tab-n" id="tab-n-active"></span>
+      </button>
+      <button class="tab" type="button" role="tab" id="tab-paused" data-tab="paused"
+              aria-controls="panel" aria-selected="false" tabindex="-1">
+        <span class="tab-label">Paused</span><span class="tab-n" id="tab-n-paused"></span>
+      </button>
+      <button class="tab" type="button" role="tab" id="tab-uninstalled" data-tab="uninstalled"
+              aria-controls="panel" aria-selected="false" tabindex="-1">
+        <span class="tab-label">Uninstalled</span><span class="tab-n" id="tab-n-uninstalled"></span>
+      </button>
+    </div>
+
+    <div class="panel" id="panel" role="tabpanel" aria-labelledby="tab-all">
+      <div class="grid" id="grid" role="list" aria-busy="true"></div>
+
+      <p class="empty" id="empty" hidden>No service matches that.</p>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <span id="foot-count"></span>
+    <span class="foot-legend">
+      <span class="legend"><i class="dot dot-ok"></i>running</span>
+      <span class="legend"><i class="dot dot-warn"></i>down</span>
+      <span class="legend"><i class="dot dot-off"></i>not deployed</span>
+    </span>
+  </footer>
+
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
+  <div class="sheet-card" id="sheet-card">
+    <div class="sheet-head">
+      <span class="sheet-icon" id="sheet-icon" aria-hidden="true"></span>
+      <span class="sheet-headtext">
+        <h2 id="sheet-title">Deploy</h2>
+        <span class="sheet-sub" id="sheet-sub"></span>
+      </span>
+    </div>
+
+    <p class="sheet-body" id="sheet-body"></p>
+
+    <div class="sheet-alert" id="sheet-alert" role="alert" hidden></div>
+
+    <div class="sheet-run" id="sheet-run" hidden>
+      <div class="run-head">
+        <span class="pill" id="run-pill">Running</span>
+        <span class="run-exit" id="run-exit"></span>
+      </div>
+      <pre class="log" id="run-log" tabindex="0" aria-label="Deploy log"></pre>
+    </div>
+
+    <div class="sheet-actions" id="sheet-actions">
+      <button class="btn" id="btn-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="btn-confirm" type="button">Deploy</button>
+    </div>
+  </div>
+</div>
+
+<p class="sr-only" id="live" role="status" aria-live="polite"></p>
+
+<script src="icons.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

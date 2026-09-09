@@ -26,6 +26,12 @@ Already running: code-server, Seafile (Drive), ollama (local LLM).
 - **Immich** — self-hosted Google Photos (timeline, faces, semantic search,
   iOS auto-backup). Overlaps Seafile camera upload — pick one photo system.
   Heaviest option here (~2–3 GB with ML); the trigger for a storage drive.
+  ✅ done (immich/) — deployed 2026-09-10 with ML off until this box has
+  more RAM.
+  Surveyed against PhotoPrism (no native mobile app → no background backup,
+  paywalled multi-user) and Ente (server idles at 130–500 MB because all ML
+  is on-device, true E2EE — the better pick *if* E2EE outranks polish, at the
+  cost of MinIO/CORS setup and a smaller community).
 - **Jellyfin** — Netflix for your own media library; CPU transcoding handles
   1080p fine on this box.
 

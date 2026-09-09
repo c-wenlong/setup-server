@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# systemctl stub: logs and succeeds. `is-active` reports active unless
+# $STATE_DIR/unit_dead exists.
+echo "systemctl $*" >> "$CALLS_LOG"
+for a in "$@"; do
+  if [ "$a" = "is-active" ]; then
+    if [ -f "$STATE_DIR/unit_dead" ]; then echo "inactive"; exit 3; fi
+    echo "active"; exit 0
+  fi
+done
+exit 0
