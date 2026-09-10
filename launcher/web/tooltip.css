@@ -1,0 +1,84 @@
+/* tooltip.css — hover-intent description bubble.
+ *
+ * Every rule is scoped to `.tt`; this module restyles nothing it does not own.
+ * Colours come from app.css's tokens, so light and dark follow the app for
+ * free. No absolute URLs (the page is served at `/` and `/home/` both), no
+ * images, no webfont.
+ */
+
+.tt {
+  position: fixed;
+  top: 0;
+  left: 0;
+  /* Above the cards (which live at z-index 0–2) and below the scrim (40) and
+     the deploy sheet (41): a modal must always win. */
+  z-index: 30;
+
+  /* Small and square-ish: it grows to fit short text and stops well before it
+     becomes a banner. On a narrow window it gives way to the viewport. */
+  width: -webkit-max-content;
+  width: max-content;
+  min-width: 108px;
+  max-width: 210px;
+  max-width: min(210px, calc(100vw - 32px));
+
+  padding: 9px 11px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e2e2e6);
+  border-radius: 11px;
+  box-shadow: var(--shadow-up, 0 6px 22px rgba(18, 18, 24, .1));
+
+  /* Decoration: it must never eat a hover, a tap, or a mouseout. */
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.tt[hidden] { display: none; }
+
+.tt-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+  line-clamp: 8;
+  overflow: hidden;
+
+  font-family: var(--font, system-ui, -apple-system, sans-serif);
+  font-size: 12.5px;
+  line-height: 1.42;
+  letter-spacing: 0;      /* never the display tracking, this is small text */
+  color: var(--muted, #6a6a74);
+  overflow-wrap: break-word;
+}
+
+/* The caret. A rotated square wearing the bubble's own background and two of
+   its borders, so it reads as one shape. `left` is set from JS to follow the
+   tile's centre, and it is hidden outright when clamping breaks that line. */
+.tt-arrow {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  margin-left: -5px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e2e2e6);
+  transform: rotate(45deg);
+}
+
+.tt-arrow[hidden] { display: none; }
+
+.tt-below .tt-arrow { top: -5px; border-right: 0; border-bottom: 0; }
+.tt-above .tt-arrow { bottom: -5px; border-left: 0; border-top: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .tt.tt-in { animation: tt-in 110ms cubic-bezier(.2, .7, .3, 1) both; }
+  .tt-above.tt-in { animation-name: tt-in-up; }
+
+  @keyframes tt-in {
+    from { opacity: 0; transform: translateY(-3px); }
+    to   { opacity: 1; transform: none; }
+  }
+  @keyframes tt-in-up {
+    from { opacity: 0; transform: translateY(3px); }
+    to   { opacity: 1; transform: none; }
+  }
+}

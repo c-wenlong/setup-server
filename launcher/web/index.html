@@ -109,6 +109,11 @@
      <!-- No launch link and no URL here on purpose: opening a service is the
           grid's job. This page is description, config and env vars. -->
 
+     <!-- Two columns from `--bp-2col` up, stacked below it. The breadcrumb and
+          the head row above span the full width; only the body splits. -->
+     <div class="d-cols">
+      <div class="d-main">
+
      <section class="d-sec">
        <h3 class="d-sec-h">Name and description</h3>
 
@@ -142,10 +147,15 @@
        <dl class="meta" id="d-meta"></dl>
      </section>
 
-     <!-- Mount point for the notes module (notes.js). Self-contained: it
-          reads the service key from the hash and renders itself here, so
-          notes can evolve without touching app.js. -->
-     <div id="notes-mount"></div>
+      </div><!-- /.d-main -->
+
+      <!-- Second column. Mount point for the notes module (notes.js), which
+           is self-contained: it reads the service key from the hash and
+           renders itself here, so notes evolve without touching app.js. -->
+      <aside class="d-side" aria-label="Notes">
+        <div id="notes-mount"></div>
+      </aside>
+     </div><!-- /.d-cols -->
 
    </section>
   </main>

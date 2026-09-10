@@ -381,7 +381,9 @@ class DeployTest(SandboxTest):
 class ServiceJobFieldTest(SandboxTest):
     """`job` on each service: what lets a reopened tile reattach to a deploy."""
 
-    EIGHT = ["key", "name", "tagline", "icon", "url", "state",
+    # The identity fields, in payload order. `description` joined them so the
+    # grid's hover tooltip does not have to fetch each service individually.
+    EIGHT = ["key", "name", "tagline", "description", "icon", "url", "state",
              "installed", "active"]
 
     def setUp(self):
@@ -627,19 +629,30 @@ class HttpTest(SandboxTest):
         doc = json.loads(body)
         self.assertEqual(doc["host"], "box.ts.net")
         svc = doc["services"][0]
-        self.assertEqual(sorted(svc), ["active", "control", "icon",
-                                       "installed", "job", "key", "name",
-                                       "state", "tagline", "url"])
+        self.assertEqual(sorted(svc), ["active", "control", "description",
+                                       "icon", "installed", "job", "key",
+                                       "name", "state", "tagline", "url"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
         self.assertIsNone(svc["job"])
 
     def test_services_field_order_is_stable(self):
-        # The frontend reads these positionally in places; `job` is appended
-        # last and the original eight keep their order.
+        # The frontend reads these positionally in places. `description` sits
+        # next to the other identity fields (the grid tooltip needs it here,
+        # not only on the detail page); `job` and `control` stay appended last.
         doc = json.loads(self.get("/api/services")[1])
         self.assertEqual(list(doc["services"][0]),
-                         ["key", "name", "tagline", "icon", "url", "state",
-                          "installed", "active", "job", "control"])
+                         ["key", "name", "tagline", "description", "icon",
+                          "url", "state", "installed", "active", "job",
+                          "control"])
+
+    def test_services_list_carries_the_effective_description(self):
+        # Without this the hover tooltip has to fetch every service one by
+        # one just to show a bubble. An override must win here too, exactly
+        # as it does for `name`.
+        doc = json.loads(self.get("/api/services")[1])
+        tile = {s["key"]: s for s in doc["services"]}["alpha"]
+        self.assertEqual(tile["description"],
+                         server.service_detail("alpha")["description"])
 
     def test_running_job_appears_on_its_tile_over_http(self):
         subprocess.Popen = lambda argv, **kw: FakeProc(argv, **kw)

@@ -529,11 +529,15 @@ def services_payload():
         health = svc.get("health")
         active = bool(health) and probes.get(health, False)
         installed = active or marker_exists(svc.get("marker"))
-        name, _ = effective(svc, overrides)
+        name, description = effective(svc, overrides)
         services.append({
             "key": svc.get("key"),
             "name": name,
             "tagline": svc.get("tagline"),
+            # Carried on the list too, not just the detail page: the grid's
+            # hover tooltip needs it, and without it here that module had to
+            # fetch every service individually just to show one bubble.
+            "description": description,
             "icon": svc.get("icon"),
             "url": substitute_host(svc.get("url"), host),
             "state": derive_state(svc.get("setup"), installed, active),

@@ -1,0 +1,437 @@
+/* notes.css — per-service developer notes
+ *
+ * Every selector in this file is prefixed `.nt-`, so this module can only ever
+ * style nodes it created itself. It shares the cascade with app.css and
+ * tooltip.css and must not reach into either.
+ *
+ * It does reuse app.css's design tokens (--accent, --surface, --border, …) and
+ * two of its shells — `.d-sec` for the section rule and `.btn` for the two form
+ * buttons — because the point is for this to look like it was always part of
+ * the page rather than a second design living underneath it.
+ *
+ * No absolute URLs, no webfonts, nothing fetched: the page is served at both
+ * `/` and `/home/`.
+ */
+
+/* ---------- section ---------- */
+
+.nt-sec { padding-bottom: 4px; }
+
+.nt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+/* `.d-sec-h` carries the 3px bottom margin that separates a heading from its
+   sub-line; in a flex row that just knocks the row off centre. */
+.nt-h { margin: 0; }
+
+.nt-count {
+  font-size: 11px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  color: var(--faint);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 0 7px;
+}
+
+.nt-new {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+  margin: -10px -10px -10px auto;   /* 44px target, 24px of visible weight */
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 550;
+  letter-spacing: -.005em;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background-color var(--dur) ease, opacity var(--dur) ease;
+}
+.nt-new svg { width: 15px; height: 15px; display: block; }
+.nt-new:active { opacity: .7; }
+.nt-new[disabled] { color: var(--faint); cursor: default; }
+@media (hover: hover) and (pointer: fine) {
+  .nt-new:hover { background: var(--surface-2); }
+  .nt-new[disabled]:hover { background: none; }
+}
+
+.nt-sub {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.nt-flash {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.nt-flash.is-warn { color: var(--warn); }
+
+.nt-fail {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 10px;
+}
+.nt-fail > span { flex: 1 1 200px; min-width: 0; }
+
+.nt-sr {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ---------- the stack ----------
+ *
+ * Notes are hairline-separated rows, not cards. A card each would make eight
+ * notes look like eight more services; the whole point of the collapsed form
+ * is that a long history stays scannable in one screen.
+ */
+
+.nt-list {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+.nt-item {
+  border-bottom: 1px solid var(--border);
+  transition: background-color var(--dur) ease;
+}
+
+/* Wraps rather than crushes. The title and the timestamp share one line while
+   they both fit; when they stop fitting — a phone, or the narrow side column
+   on a laptop — the timestamp drops to its own line under the title instead of
+   squeezing it. Flex decides that from the space the row actually has, so it
+   needs no breakpoint and no container query. */
+.nt-row {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 9px;
+  width: 100%;
+  min-height: 48px;
+  padding: 9px 4px 9px 2px;
+  font-family: inherit;
+  font-size: 14px;
+  text-align: left;
+  color: var(--text);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  transition: color var(--dur) ease;
+}
+.nt-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 8px; }
+
+.nt-chev {
+  flex: none;
+  display: block;
+  width: 15px; height: 15px;
+  color: var(--faint);
+  transition: transform var(--dur) ease, color var(--dur) ease;
+}
+.nt-chev svg { width: 15px; height: 15px; display: block; }
+.nt-item.is-open .nt-chev { transform: rotate(90deg); color: var(--accent); }
+
+.nt-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 500;
+  line-height: 1.4;
+  /* Collapsed means one line. A note whose first line is a paragraph must not
+     be allowed to set the height of the row. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nt-item.is-open .nt-line { white-space: normal; overflow: visible; }
+
+/* The 24px left margin is the chevron plus its gap, so a wrapped timestamp
+   lines up with the title above it and with the body below. */
+.nt-row > .nt-when { margin-left: 24px; }
+
+.nt-when {
+  flex: none;
+  font-size: 12px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .nt-item:hover { background: var(--surface); }
+  .nt-row:hover .nt-chev { color: var(--muted); }
+  .nt-item.is-open:hover .nt-chev { color: var(--accent); }
+}
+
+
+/* ---------- open note ---------- */
+
+.nt-panel { padding: 0 2px 14px 26px; }
+
+.nt-text {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text);
+  /* Notes are plain text and stay plain text — line breaks are the only
+     formatting there is, and they are preserved rather than rendered. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.nt-text.is-empty { color: var(--faint); font-style: normal; }
+
+.nt-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 10px;
+}
+
+.nt-stamp {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--faint);
+}
+.nt-stamp .nt-when { font-size: 12px; }
+.nt-dot { padding: 0 5px; color: var(--border-strong); }
+
+.nt-ask {
+  flex: 1 1 180px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.nt-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: -9px;   /* pull the last button's padding back to the edge */
+}
+
+.nt-tool {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 9px;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 540;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color var(--dur) ease, background-color var(--dur) ease;
+}
+.nt-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.nt-tool[disabled] { opacity: .5; cursor: default; }
+
+/* Delete is quiet at rest and red only once it is armed. The red belongs to
+   the step that actually destroys something, not to the one that asks. */
+.nt-danger { color: var(--muted); }
+.nt-danger.is-armed {
+  color: var(--accent-ink);
+  background: var(--bad);
+  padding: 0 13px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .nt-tool:hover { color: var(--text); background: var(--surface-2); }
+  .nt-danger:hover { color: var(--bad); background: var(--warn-soft); }
+  .nt-danger.is-armed:hover { color: var(--accent-ink); background: var(--bad); filter: brightness(1.08); }
+}
+.nt-danger:focus-visible { color: var(--bad); }
+
+.nt-foot.is-confirm { margin-top: 12px; }
+
+/* ---------- form ---------- */
+
+.nt-slot:empty { display: none; }
+
+.nt-form {
+  margin: 14px 0 4px;
+  padding: 14px 14px 13px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+/* Inside an open note the form is already inset; drop the second box so it
+   does not read as a card within a card. */
+.nt-panel .nt-form {
+  margin: 2px 0 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+
+.nt-field { display: flex; flex-direction: column; gap: 5px; margin: 0 0 10px; }
+
+.nt-label {
+  font-size: 12.5px;
+  font-weight: 540;
+  color: var(--muted);
+}
+
+.nt-input {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 16px;   /* 16px so iOS Safari does not zoom the page on focus */
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  transition: border-color var(--dur) ease, box-shadow var(--dur) ease;
+}
+.nt-input::placeholder { color: var(--faint); }
+.nt-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.nt-input[disabled] { opacity: .6; }
+
+.nt-area {
+  min-height: 108px;
+  resize: vertical;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.nt-panel .nt-input { background: var(--surface); }
+
+.nt-formfoot {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 2px;
+}
+
+/* Wraps rather than truncates: this line is the only place the derived-title
+   rule is explained, so it has to be readable at 360px. */
+.nt-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--faint);
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+/* The live preview of the title you are about to get. */
+.nt-hint.is-derived { color: var(--muted); }
+
+.nt-counter {
+  flex: none;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+.nt-counter.is-over { color: var(--bad); }
+
+.nt-err {
+  margin: 9px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--bad);
+}
+
+.nt-actions { display: flex; gap: 8px; margin-top: 12px; }
+/* Save first, cancel second — thumbs reach the left of a phone screen more
+   easily, and this form is the one thing on the page you came here to do. */
+.nt-act { flex: 0 1 auto; font-size: 14px; padding: 8px 16px; }
+
+@media (max-width: 430px) {
+  .nt-act { flex: 1 1 0; }
+}
+
+/* ---------- empty state ---------- */
+
+.nt-empty {
+  margin-top: 12px;
+  padding: 18px 16px 16px;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.nt-empty-h {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 560;
+  letter-spacing: -.005em;
+  color: var(--text);
+}
+
+.nt-empty-p {
+  margin: 5px 0 0;
+  max-width: 52ch;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.nt-cta {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin: 8px 0 -6px -10px;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 550;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background-color var(--dur) ease;
+}
+.nt-cta:active { opacity: .7; }
+@media (hover: hover) and (pointer: fine) {
+  .nt-cta:hover { background: var(--surface-2); }
+}

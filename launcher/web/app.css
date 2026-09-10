@@ -5,6 +5,24 @@
  * so there is not a single absolute URL in this file.
  */
 
+/* ---------- font ----------
+ *
+ * Inter, vendored in web/fonts/ and loaded from a RELATIVE url so it resolves
+ * at both mount points. Nothing is fetched from the internet: the launcher has
+ * to render when the box has no route out. Licence: web/fonts/NOTICE.md.
+ *
+ * Cursor's own face (CursorGothic) is proprietary; what is copied here is the
+ * technique rather than the typeface — a neutral screen grotesque plus tight
+ * negative tracking at display sizes only.
+ */
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/inter-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ---------- tokens ---------- */
 
 :root {
@@ -32,10 +50,13 @@
   --shadow-up: 0 6px 22px rgba(18, 18, 24, .10), 0 1px 3px rgba(18, 18, 24, .06);
   --dur: 120ms;
 
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
-          Arial, "Noto Sans", sans-serif;
+  /* Tail chain is Cursor's own declared fallback. */
+  --font: Inter, system-ui, -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  /* Mono survives in exactly two places: the deploy log, and revealed env
+     values — where telling l from 1 and O from 0 is the whole point. */
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
           "Liberation Mono", monospace;
+  --tight: -.03em;   /* display tracking, à la Cursor. Never on small text. */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -107,8 +128,10 @@ h1, h2, p { margin: 0; }
 .wrap {
   max-width: 1260px;
   margin: 0 auto;
+  /* The footer used to give the grid its bottom breathing room; with it gone
+     the padding carries that, and still clears the iOS home indicator. */
   padding: max(18px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
-           max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+           max(34px, calc(env(safe-area-inset-bottom) + 18px)) max(16px, env(safe-area-inset-left));
 }
 
 /* ---------- header ---------- */
@@ -124,25 +147,25 @@ h1, h2, p { margin: 0; }
 
 .brand-mark {
   display: inline-flex;
-  width: 30px; height: 30px;
+  width: 32px; height: 32px;
   flex: none;
   align-items: center; justify-content: center;
-  color: var(--accent);
 }
-.brand-mark svg { width: 20px; height: 20px; display: block; }
+/* Already rounded in the file — no radius here, and none on the touch icon
+   either, or iOS double-rounds it. */
+.brand-mark img { width: 32px; height: 32px; display: block; }
 
 .brand-text { display: flex; flex-direction: column; min-width: 0; }
 
 .head h1 {
   font-size: 17px;
   font-weight: 600;
-  letter-spacing: -.01em;
+  letter-spacing: var(--tight);
   line-height: 1.2;
 }
 
 .host {
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--faint);
   letter-spacing: .01em;
   white-space: nowrap;
@@ -287,42 +310,111 @@ h1, h2, p { margin: 0; }
 
 /* ---------- tile ---------- */
 
+/* One surface, two sibling targets — an <a> may not live inside a <button>,
+   so they are never nested:
+     .tile-more : covers the WHOLE card as the base layer, opens the detail page
+     .tile-open : the icon + name link, raised above it, shrink-wrapped to its
+                  own content so it is the small, precise target
+   There is deliberately no divider, no second background, no seam: the card
+   must read as one tile, and everything the icon+name column does not cover
+   belongs to details. */
 .tile {
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 0;
   min-height: 122px;
   padding: 14px 14px 13px;
   margin: 0;
-  font: inherit;
-  text-align: left;
-  text-decoration: none;
-  color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  -webkit-appearance: none;
-  appearance: none;
   transition: transform var(--dur) ease,
               border-color var(--dur) ease,
               box-shadow var(--dur) ease,
               background-color var(--dur) ease;
 }
 
-a.tile, button.tile { cursor: pointer; }
+.tile-open, .tile-solo {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  color: var(--text);
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* Raised above the details layer and only as wide as the icon and the name,
+   so a tap on either of those always opens the service. */
+.tile-open {
+  position: relative;
+  z-index: 1;
+  width: -webkit-fit-content;
+  width: fit-content;
+}
+
+/* Nothing to launch (no URL, or planned): the whole tile is the detail link. */
+.tile-solo { position: relative; z-index: 1; align-self: stretch; width: 100%; }
+
+/* The base layer: the entire card. No background, no border, no edge. */
+.tile-more {
+  position: absolute;
+  z-index: 0;
+  top: 0; right: 0; bottom: 0; left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 13px;
+  color: var(--faint);
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* The one affordance: a chevron that fades in on hover and on focus, and is
+   invisible at rest. */
+.tile-more svg {
+  width: 16px; height: 16px;
+  display: block;
+  opacity: 0;
+  transition: opacity var(--dur) ease;
+}
+.tile-more:hover svg,
+.tile-more:focus-visible svg { opacity: .75; }
+
+.tile-open:focus-visible, .tile-solo:focus-visible, .tile-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+.tile-open:focus-visible { outline-offset: 3px; }
 
 @media (hover: hover) and (pointer: fine) {
-  a.tile:hover, button.tile:hover {
+  /* The lift belongs to the whole card, wherever the pointer is. */
+  .tile:not(.tile-skel):hover {
     border-color: var(--border-strong);
     box-shadow: var(--shadow-up);
     transform: translateY(-1px);
   }
 }
 
-a.tile:active, button.tile:active { transform: scale(.975); }
+/* :active propagates to ancestors, so pressing either region presses the
+   whole card — the tap feedback stays exactly as it was. */
+.tile:not(.tile-skel):active { transform: scale(.975); }
 
 .tile-icon {
   display: block;
@@ -355,17 +447,24 @@ a.tile:active, button.tile:active { transform: scale(.975); }
   color: var(--muted);
 }
 
+.tile-tail { white-space: nowrap; }
+.tile-sep  { color: var(--faint); }
+
 .tile-note { color: var(--warn); }
 .tile-note-muted { color: var(--faint); }
 .tile-note-run { color: var(--accent); }
 
-/* corner slot: status dot, deploy glyph, or planned badge */
+/* Corner slot: status dot, deploy glyph, or planned badge. Sits above both
+   targets and is inert — the state it shows is already spoken by the link's
+   accessible name, so it is decorative here and must not eat taps. */
 .tile-corner {
   position: absolute;
+  z-index: 2;
   top: 13px;
   right: 13px;
   display: flex;
   align-items: center;
+  pointer-events: none;
 }
 
 .dot {
@@ -412,16 +511,17 @@ a.tile:active, button.tile:active { transform: scale(.975); }
   background: transparent;
   border-style: dashed;
   box-shadow: none;
-  cursor: default;
 }
 .tile-planned .tile-icon { opacity: .35; }
 .tile-planned .tile-tag  { color: var(--faint); }
 
+@media (hover: hover) and (pointer: fine) {
+  /* keep the dashed "not here yet" look on hover: lift, don't fill */
+  .tile-planned:not(.tile-skel):hover { box-shadow: none; }
+}
+
 /* --- state: stopped --- */
 .tile-stopped { border-color: var(--border); }
-
-/* --- no web UI (ollama) --- */
-.tile-static { cursor: default; }
 
 /* skeletons while the first fetch is in flight */
 .tile-skel {
@@ -467,21 +567,6 @@ a.tile:active, button.tile:active { transform: scale(.975); }
   font-size: 14px;
 }
 
-/* ---------- footer ---------- */
-
-.foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px 18px;
-  padding: 26px 2px 6px;
-  font-size: 12px;
-  color: var(--faint);
-}
-.foot-legend { display: flex; flex-wrap: wrap; gap: 14px; }
-.legend { display: inline-flex; align-items: center; gap: 6px; }
-
 /* ---------- buttons ---------- */
 
 .btn {
@@ -515,6 +600,17 @@ a.tile:active, button.tile:active { transform: scale(.975); }
 }
 @media (hover: hover) and (pointer: fine) {
   .btn-primary:hover { background: var(--accent); filter: brightness(1.08); }
+}
+
+/* The confirm that takes a service down. Same shape as the primary button,
+   deliberately not the accent — accent is for the thing you meant to do. */
+.btn-primary.is-danger {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: var(--accent-ink);   /* white on the light red, near-black on the dark */
+}
+@media (hover: hover) and (pointer: fine) {
+  .btn-primary.is-danger:hover { background: var(--bad); filter: brightness(1.08); }
 }
 
 .btn[disabled] { opacity: .5; cursor: default; transform: none; }
@@ -593,10 +689,9 @@ a.tile:active, button.tile:active { transform: scale(.975); }
 .sheet-icon .icon-blank { background: none; }
 
 .sheet-headtext { display: flex; flex-direction: column; min-width: 0; padding-top: 2px; }
-.sheet-card h2 { font-size: 17px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; }
+.sheet-card h2 { font-size: 17px; font-weight: 600; letter-spacing: var(--tight); line-height: 1.25; }
 .sheet-sub {
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--faint);
   margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -605,8 +700,8 @@ a.tile:active, button.tile:active { transform: scale(.975); }
 .sheet-body { font-size: 13.5px; color: var(--muted); line-height: 1.5; }
 .sheet-body strong { color: var(--text); font-weight: 560; }
 .sheet-body code {
-  font-family: var(--mono);
   font-size: 12.5px;
+  font-weight: 540;
   background: var(--surface-2);
   border-radius: 5px;
   padding: 1px 5px;
@@ -642,7 +737,7 @@ a.tile:active, button.tile:active { transform: scale(.975); }
 .pill-done { color: var(--ok);  border-color: var(--ok); }
 .pill-fail { color: var(--bad); border-color: var(--bad); }
 
-.run-exit { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.run-exit { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
 
 .log {
   margin: 0;
@@ -664,3 +759,433 @@ a.tile:active, button.tile:active { transform: scale(.975); }
 
 .sheet-actions { display: flex; gap: 10px; }
 .sheet-actions .btn { flex: 1 1 0; }
+
+/* ---------- service detail (#/service/<key>) ---------- */
+
+/* A document, not a dashboard — but a wide screen has room for two columns of
+   it: the service itself on the left, its notes alongside. Same surfaces and
+   hairlines as the grid.
+
+   `--bp-2col` is the whole tunable: it is the page width at which the body
+   splits in two, and everything else is derived from it. There is no media
+   query behind it on purpose — the columns are flex items that wrap when they
+   no longer fit, so the split follows the space the page actually has rather
+   than the size of the window. Change the one number and the breakpoint moves
+   with it. */
+.detail {
+  --bp-2col:  960px;   /* below this, notes stack under the main column */
+  --col-side: 300px;   /* the notes column at its narrowest */
+  --col-gap:   32px;
+  --col-main: calc(var(--bp-2col) - var(--col-side) - var(--col-gap));
+
+  max-width: 1120px;
+  padding-bottom: 8px;
+}
+
+/* The breadcrumb and the head row above stay full width; only the body
+   splits, so the title, the status and the lifecycle buttons keep the whole
+   line to themselves. */
+.d-cols {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0 var(--col-gap);
+}
+
+/* Grows into spare width but never past the measure it reads well at — a
+   700px column of `IMMICH_VERSION → v3` rows is already generous. */
+.d-main {
+  flex: 1 1 var(--col-main);
+  min-width: 0;
+  max-width: 700px;
+}
+
+/* Takes whatever is left over, and keeps its column even when the service has
+   no notes yet — the notes module draws its own empty state in here. Its top
+   rule matches a section's, so it reads as the next section when it wraps
+   underneath and as a column head when it sits alongside. */
+.d-side {
+  flex: 1 1 var(--col-side);
+  min-width: 0;
+  margin-top: 26px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.d-back {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 44px;
+  margin: -8px 0 14px -10px;
+  padding: 0 12px 0 8px;
+  font-family: inherit;
+  font-size: 17px;
+  font-weight: 560;
+  letter-spacing: var(--tight);
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: color var(--dur) ease, background-color var(--dur) ease;
+}
+.d-back svg { width: 21px; height: 21px; display: block; }
+@media (hover: hover) and (pointer: fine) {
+  .d-back:hover { color: var(--text); background: var(--surface-2); }
+}
+
+.d-note {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+}
+
+/* Icon, title, and — hard right on the same line — the lifecycle controls,
+   which app.js appends. Wrapping is what saves this row on a phone: the
+   control group is allowed to take a whole line of its own rather than
+   squeezing the name into two characters. */
+.d-head {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 13px;
+}
+
+.d-icon {
+  display: inline-flex;
+  flex: none;
+  width: 46px; height: 46px;
+  align-items: center; justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+}
+.d-icon > * { width: 24px; height: 24px; display: block; }
+.d-icon .icon-blank { background: var(--surface-2); border-radius: 7px; }
+
+.d-headtext { display: flex; flex-direction: column; min-width: 0; padding-top: 3px; }
+
+.detail h2 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: var(--tight);
+  line-height: 1.2;
+}
+
+.d-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.d-sub .dot { flex: none; }
+.d-key { font-size: 12px; color: var(--faint); }
+.d-sep { color: var(--border-strong); }
+
+/* --- start / stop / restart --- */
+
+/* Flush right against the title row. `margin-left: auto` rather than
+   `justify-content` so the name column keeps whatever width it needs first. */
+.d-ctl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+
+.d-ctl-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;          /* iOS tap target, same floor as .btn */
+  padding: 0 15px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 540;
+  letter-spacing: -.005em;
+  white-space: nowrap;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 11px;
+  cursor: pointer;
+  transition: transform var(--dur) ease, background-color var(--dur) ease,
+              border-color var(--dur) ease, color var(--dur) ease,
+              opacity var(--dur) ease;
+}
+.d-ctl-btn:active { transform: scale(.97); }
+
+/* Start is the one thing you want from a service that is down, so it carries
+   the accent — the same weight Deploy has in the sheet. */
+.d-ctl-btn.is-primary {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Stop is not accented, and not a red slab either: quiet until you go near it,
+   then unmistakably the destructive one. */
+.d-ctl-btn.is-danger { color: var(--bad); }
+
+@media (hover: hover) and (pointer: fine) {
+  .d-ctl-btn:hover { background: var(--surface-2); }
+  .d-ctl-btn.is-primary:hover { background: var(--accent); filter: brightness(1.08); }
+  .d-ctl-btn.is-danger:hover { border-color: var(--bad); }
+}
+
+.d-ctl-btn[disabled] { opacity: .45; cursor: default; transform: none; }
+
+/* A service the server will not control gets no button at all — a lock where
+   the buttons would have been, and the reason underneath. */
+.d-ctl-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 4px;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+.d-ctl-lock svg { width: 15px; height: 15px; display: block; flex: none; }
+
+.d-ctl-why {
+  flex: 1 0 100%;            /* its own line inside the head row */
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+/* Narrow: the controls drop to a line of their own rather than eating the
+   name. Still right-aligned, so they stay where they were on the desktop. */
+@media (max-width: 560px) {
+  .d-ctl {
+    flex: 1 0 100%;
+    margin-left: 0;
+    margin-top: 2px;
+    justify-content: flex-end;
+  }
+  .d-ctl-lock { padding-top: 0; }
+}
+
+@media (max-width: 360px) {
+  .d-ctl-btn { padding: 0 12px; font-size: 13.5px; }
+}
+
+.d-sec {
+  margin-top: 26px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.d-sec-h {
+  margin: 0 0 3px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.d-sec-sub {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  color: var(--faint);
+  word-break: break-all;
+}
+
+.d-empty {
+  margin: 10px 0 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* --- editable fields --- */
+
+.field { display: flex; flex-direction: column; gap: 5px; margin-top: 14px; }
+
+.field-label {
+  font-size: 12.5px;
+  font-weight: 540;
+  color: var(--muted);
+}
+
+.field-input {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 16px; /* 16px so iOS Safari does not zoom on focus */
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  box-shadow: var(--shadow);
+  transition: border-color var(--dur) ease, box-shadow var(--dur) ease;
+}
+.field-area { resize: vertical; min-height: 104px; }
+.field-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.field-input[disabled] { opacity: .6; }
+
+.field-hint {
+  margin-top: 9px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+.field-hint code {
+  font-size: 12px;
+  font-weight: 540;
+  background: var(--surface-2);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--muted);
+}
+
+.field-status {
+  min-height: 18px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--faint);
+  transition: color var(--dur) ease;
+}
+.field-status.is-saved { color: var(--ok); }
+.field-status.is-error { color: var(--bad); }
+
+/* --- environment variables --- */
+
+/* name -> value, two columns that hold at 360px because the name column is
+   allowed to shrink and the value wraps. */
+.env {
+  display: grid;
+  grid-template-columns: minmax(0, 34%) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px 12px;
+  margin: 12px 0 0;
+}
+
+.env dt {
+  min-width: 0;
+  padding-top: 13px;
+  font-size: 12.5px;
+  font-weight: 540;
+  line-height: 1.35;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.env dd { min-width: 0; margin: 0; }
+
+.env-field {
+  display: flex;
+  align-items: stretch;
+  min-height: 44px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.env-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  padding: 9px 4px 9px 11px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 132px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.env-value.is-masked { color: var(--faint); letter-spacing: .12em; }
+.env-value.is-empty  { color: var(--faint); font-family: var(--font); font-size: 12.5px; letter-spacing: 0; }
+
+.env-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: none;
+  width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--faint);
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--border);
+  cursor: pointer;
+  transition: color var(--dur) ease, background-color var(--dur) ease;
+}
+.env-btn svg { width: 17px; height: 17px; display: block; }
+.env-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.env-btn[disabled] { opacity: .5; cursor: default; }
+.env-btn.is-on { color: var(--accent); }
+.env-btn.is-done { color: var(--ok); }
+@media (hover: hover) and (pointer: fine) {
+  .env-btn:hover { color: var(--text); background: var(--surface-2); }
+}
+
+.env-err {
+  margin: 5px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--bad);
+}
+
+@media (max-width: 400px) {
+  .env { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .env dt { padding-top: 12px; }
+  .env dd { margin-bottom: 6px; }
+}
+
+/* --- registry meta --- */
+
+.meta {
+  display: grid;
+  grid-template-columns: minmax(0, 34%) minmax(0, 1fr);
+  gap: 9px 12px;
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+.meta dt { min-width: 0; color: var(--muted); }
+.meta dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-all;
+}
+.meta dd.is-none { font-family: var(--font); font-size: 13px; color: var(--faint); }
+
+@media (max-width: 400px) {
+  .meta { grid-template-columns: minmax(0, 42%) minmax(0, 1fr); }
+}

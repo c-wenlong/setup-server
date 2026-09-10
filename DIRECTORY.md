@@ -85,6 +85,19 @@ Supporting services (no Tailscale Serve entry):
   127.0.0.1 (Open WebUI + n8n only need loopback). Needs sudo.
 - **Tailscale exit node** — not yet advertised (`tailscale set
   --advertise-exit-node` + one-time admin-console approval).
+- **Launcher state is not in git and not backed up** —
+  `~/services/launcher/overrides.json` (per-service name/description edits)
+  and `~/services/launcher/notes.json` (developer notes) are user-authored
+  content living only on this disk. `services.json` in the repo is the
+  shipped default; overrides layer on top, and deleting either file falls
+  back cleanly. If notes accumulate real operational knowledge, they need to
+  be in the backup job alongside the Immich library and database.
+- **Launcher can start/stop/restart services**, sharing one allowlist with
+  ntfy-control: the `control` block per service in `launcher/services.json`,
+  read by both. `ntfy`, `ollama` and `launcher` are locked out server-side
+  (checked before the registry, so editing services.json cannot re-enable
+  them) — stopping ntfy or the launcher removes the only way to start them
+  again, and ollama is a system unit that would need sudo.
 - **Immich RAM ceiling** — deployed 2026-09-10 with machine learning OFF
   (`IMMICH_ML=off`, the default): 7.7 GB total, and ollama claims ~5 GB with a
   model loaded, against Immich's documented 6 GB minimum / 8 GB recommended.
