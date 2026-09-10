@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# curl stub — fakes the Jellyfin HTTP surface. State in $STATE_DIR:
+#
+#   conn_refused_left  — countdown of connection refusals (container not
+#                        listening yet); curl exits 7 with no output, which is
+#                        what makes setup.sh's `|| echo 000` produce JF_CODE=000
+#   startup_503_left   — countdown of 503s from *every* /Startup/* endpoint.
+#                        THIS IS THE READINESS RACE: the real server answers
+#                        /System/Info/Public with 200 while it is still loading
+#                        and 503s /Startup/* for the same window. A script that
+#                        gates on the wrong endpoint POSTs the wizard into
+#                        those 503s and ends up with a completed wizard and no
+#                        admin account.
+#   wizard_done        — set by POST /Startup/Complete; makes
+#                        /System/Info/Public report StartupWizardCompleted:true
+#   wizard_never_completes — Complete returns 204 but the flag never flips
+#                        (models a server that accepted the steps and did not
+#                        actually finish)
+#   fail_step          — "<Step> <code>", e.g. "User 500" or "RemoteAccess 503":
+#                        that one wizard POST fails once with that code
+#   login_rejected     — /Users/AuthenticateByName 401s, i.e. the password in
+#                        .env no longer matches the server
+#   not_admin          — authentication succeeds but IsAdministrator is false
+#
+# Recorded for assertions:
+#   wizard_steps       — the wizard steps that were POSTed, in order
+#   body_<Step>        — the JSON body of each wizard POST
+#   auth_body          — the JSON body of the AuthenticateByName call
+#
+# Understands the flag shapes setup.sh actually uses: bundled -sS / -fsS, -o,
+# -w %{http_code}, -X, -H, --data-binary @file, --max-time.
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; want_code=0; failonerr=0; body=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -u) shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -d|--data|--data-binary)
+      body="$2"
+      case "$body" in @*) body="$(cat "${body#@}" 2>/dev/null)" ;; esac
+      shift 2 ;;
+    -H|--max-time|--connect-timeout) shift 2 ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <body>
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+# countdown FILE -> 0 (and decrements) while there are ticks left.
+countdown() {
+  local f="$STATE_DIR/$1" left
+  [ -f "$f" ] || return 1
+  left="$(cat "$f" 2>/dev/null)"
+  case "$left" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$left" -gt 0 ] || return 1
+  echo $((left - 1)) > "$f"
+  return 0
+}
+
+LOADING='{"Message":"Jellyfin Server is loading. Please try again shortly."}'
+
+# Nothing is listening yet — the container is still starting.
+if countdown conn_refused_left; then
+  echo "curl: (7) Failed to connect: Connection refused" >&2
+  exit 7
+fi
+
+case "$url" in
+  */System/Info/Public)
+    wc=false
+    [ -f "$STATE_DIR/wizard_done" ] && wc=true
+    # LocalAddress echoes PublishedServerUrl on the real server, which in a
+    # correct deploy is the address the request came in on — so mirror it.
+    base="${url%/System/Info/Public}"
+    [ -f "$STATE_DIR/wrong_published_url" ] && base="http://localhost:8096"
+    emit 200 "{\"LocalAddress\":\"$base\",\"ServerName\":\"kai-home-server\",\"Version\":\"12.0.0\",\"ProductName\":\"Jellyfin Server\",\"Id\":\"stub\",\"StartupWizardCompleted\":$wc}"
+    ;;
+
+  */Users/Public)
+    # The real server returns [] here even on a fully successful setup: it
+    # lists only users configured to show on the login screen. Anything that
+    # treats this as "no users exist" reports a working deploy as broken.
+    emit 200 '[]'
+    ;;
+
+  */Startup/FirstUser)
+    countdown startup_503_left && emit 503 "$LOADING"
+    # Once the wizard is done the real server 401s this endpoint rather than
+    # 200ing it. Both mean "finished loading", which is the only thing the
+    # readiness loop is allowed to conclude from it.
+    [ -f "$STATE_DIR/wizard_done" ] && emit 401 '{"Message":"Unauthorized"}'
+    emit 200 '{"Name":"","Password":""}'
+    ;;
+
+  */Startup/Configuration|*/Startup/User|*/Startup/RemoteAccess|*/Startup/Complete)
+    countdown startup_503_left && emit 503 "$LOADING"
+    step="${url##*/}"
+    printf '%s\n' "$step" >> "$STATE_DIR/wizard_steps"
+    printf '%s\n' "$body" > "$STATE_DIR/body_$step"
+
+    if [ -f "$STATE_DIR/fail_step" ]; then
+      fs="$(cat "$STATE_DIR/fail_step")"
+      if [ "$step" = "${fs%% *}" ]; then
+        rm -f "$STATE_DIR/fail_step"
+        emit "${fs##* }" '{"Message":"stubbed wizard failure"}'
+      fi
+    fi
+
+    if [ "$step" = "Complete" ] && [ ! -f "$STATE_DIR/wizard_never_completes" ]; then
+      touch "$STATE_DIR/wizard_done"
+    fi
+    emit 204 ''
+    ;;
+
+  */Users/AuthenticateByName)
+    printf '%s\n' "$body" > "$STATE_DIR/auth_body"
+    [ -f "$STATE_DIR/login_rejected" ] && emit 401 '{"Message":"Invalid username or password"}'
+    admin=true
+    [ -f "$STATE_DIR/not_admin" ] && admin=false
+    user="$(printf '%s' "$body" | sed -n 's/.*"Username":"\([^"]*\)".*/\1/p')"
+    emit 200 "{\"User\":{\"Name\":\"$user\",\"Id\":\"u1\",\"HasPassword\":true,\"Policy\":{\"IsAdministrator\":$admin}},\"AccessToken\":\"stub-token\",\"ServerId\":\"stub\"}"
+    ;;
+
+  *)
+    emit 200 '{}'
+    ;;
+esac

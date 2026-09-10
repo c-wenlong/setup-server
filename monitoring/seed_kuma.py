@@ -35,6 +35,7 @@ PUBLISHED = [
     # /api/healthz, not / — it reports on the cache and database rather than
     # just proving a page renders, so a half-broken forge shows as down.
     ("forgejo", 3000, "/api/healthz"),
+    ("jellyfin", 8096, "/health"),
 ]
 
 MONITORS = [

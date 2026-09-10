@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# sleep stub: logs the call and returns immediately.
+#
+# Not cosmetic. setup.sh's readiness loop is `90 attempts x sleep 2`, so the
+# "never finishes loading" test would spend three real minutes asleep, and the
+# readiness-race test would spend as long as the forced 503 countdown. The log
+# line is also load-bearing: it is how the suite asserts the script *polls*
+# (request, wait, request) rather than spinning on curl.
+echo "sleep $*" >> "$CALLS_LOG"
+exit 0

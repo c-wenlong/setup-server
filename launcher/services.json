@@ -301,12 +301,21 @@
       "name": "Jellyfin",
       "tagline": "Media",
       "icon": "film",
-      "url": null,
-      "health": null,
-      "marker": null,
-      "setup": null,
-      "env": null,
-      "description": "Not built yet. Would serve a personal movie and TV library to the tailnet with real apps on phone and TV. This CPU transcodes 1080p comfortably; the gate is disk, not compute."
+      "url": "https://HOST:8096/",
+      "health": "http://127.0.0.1:8096/health",
+      "marker": "~/services/jellyfin",
+      "setup": "jellyfin/setup.sh",
+      "env": "jellyfin/.env",
+      "description": "Media server for films, shows and music, streamed to a browser, phone, tablet or TV on the tailnet. One container at about 200 MB, SQLite library database, no sidecar. Pinned to 12.0 — the .NET rewrite — because this library started empty, so there were no plugins to break and no database to migrate; the usual 'wait for 12.0.1' advice is for people upgrading an existing server. Transcoding is software only: the GTX 1070 cannot be used until nvidia-container-toolkit is installed. Media is mounted READ-ONLY from MEDIA_DIR in jellyfin/.env, which starts empty — nothing shows up until you put files there or repoint it.",
+      "control": {
+        "parts": [
+          {
+            "container": "jellyfin"
+          }
+        ],
+        "kuma": "jellyfin",
+        "_comment": "Single container with an embedded SQLite library database; nothing to order."
+      }
     },
     {
       "key": "paperless-ngx",

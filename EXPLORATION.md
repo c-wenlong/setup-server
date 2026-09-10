@@ -32,8 +32,14 @@ Already running: code-server, Seafile (Drive), ollama (local LLM).
   paywalled multi-user) and Ente (server idles at 130–500 MB because all ML
   is on-device, true E2EE — the better pick *if* E2EE outranks polish, at the
   cost of MinIO/CORS setup and a smaller community).
-- **Jellyfin** — Netflix for your own media library; CPU transcoding handles
-  1080p fine on this box.
+- **Jellyfin** — Netflix for your own media library. ✅ done (jellyfin/),
+  deployed 2026-09-11 on :8096. CPU transcoding does handle 1080p, and it is
+  the only option: the box has a GTX 1070 but no `nvidia-container-toolkit`,
+  so Docker has no GPU runtime — installing it is the upgrade path. Took two
+  attempts, not one: Jellyfin answers /Startup/* several seconds before it
+  accepts connections, so the first run completed the wizard with no admin
+  account. The library is still empty — MEDIA_DIR in jellyfin/.env points at
+  ~/services/jellyfin/media and nothing shows up until media lands there.
 
 ## Knowledge & documents
 
