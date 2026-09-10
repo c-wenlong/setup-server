@@ -47,8 +47,16 @@ Already running: code-server, Seafile (Drive), ollama (local LLM).
 
 - **Self-hosted GitHub Actions runner** — free unlimited CI minutes for
   existing GitHub repos; more practical than self-hosting git.
-- **Forgejo** — full self-hosted GitHub (repos + CI). Sovereignty hobby more
-  than need while GitHub works fine.
+- **Forgejo** — full self-hosted GitHub (repos + CI). ✅ done (forgejo/),
+  deployed 2026-09-11 on :3000. Chosen over Gitea on governance: Codeberg
+  e.V., a nonprofit, versus the for-profit that took Gitea's trademark in
+  2022 — and migration runs Gitea → Forgejo but not back, so it is the
+  direction that keeps a door open. GitLab was disqualified by RAM (4 GB
+  minimum against this box's 7.7 GB total). The original note here — that
+  this is sovereignty more than need while GitHub works — still stands:
+  GitHub remains canonical, and this is a mirror until the box has backups.
+  The cheaper half of the idea, a self-hosted Actions runner, is still
+  unbuilt and still the better value.
 
 ## Notes
 

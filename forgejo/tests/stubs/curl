@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# curl stub — fakes the Forgejo HTTP surface. State in $STATE_DIR:
+#   health_fails_left  — countdown of 503s from /api/healthz (models a slow boot)
+#   install_unlocked   — exists => /install answers 200 instead of 404, i.e. the
+#                        install wizard is NOT locked (a deploy that looks
+#                        successful but is actually wide open)
+#   login_rejected     — exists => /api/v1/user 401s, i.e. the password in .env
+#                        no longer matches the server
+#   wrong_root_url     — exists => generated html_url points at localhost, i.e.
+#                        ROOT_URL is wrong (clone URLs would be unusable)
+#
+# Understands the flag shapes setup.sh actually uses: bundled -fsS, -o, -u,
+# -w %{http_code}, -X, -H, --max-time.
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; auth=""; want_code=0; failonerr=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -u) auth="$2"; shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -H|--max-time|--connect-timeout|-d|--data-binary) shift 2 ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <body>
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */api/healthz)
+    if [ -f "$STATE_DIR/health_fails_left" ]; then
+      left="$(cat "$STATE_DIR/health_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/health_fails_left"
+        emit 503 '{"status":"fail"}'
+      fi
+    fi
+    emit 200 '{"status":"pass","description":"forgejo"}'
+    ;;
+  */install|*/install/)
+    if [ -f "$STATE_DIR/install_unlocked" ]; then
+      emit 200 '<html>Initial Configuration</html>'
+    fi
+    emit 404 '<html>Not Found</html>'
+    ;;
+  */api/v1/version)
+    emit 200 '{"version":"15.0.8"}'
+    ;;
+  */api/v1/user)
+    [ -n "$auth" ] || emit 401 '{"message":"token is required"}'
+    [ -f "$STATE_DIR/login_rejected" ] && emit 401 '{"message":"Unauthorized"}'
+    login="${auth%%:*}"
+    # html_url is built from ROOT_URL by the real server, so mirror the URL the
+    # request came in on — that is exactly what setup.sh inspects.
+    base="${url%/api/v1/user}"
+    [ -f "$STATE_DIR/wrong_root_url" ] && base="http://localhost:3000"
+    emit 200 "{\"login\":\"$login\",\"is_admin\":true,\"html_url\":\"$base/$login\"}"
+    ;;
+  *)
+    emit 200 '{}'
+    ;;
+esac

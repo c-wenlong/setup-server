@@ -63,10 +63,19 @@
       "env": "immich/.env",
       "control": {
         "parts": [
-          { "container": "immich_server" },
-          { "container": "immich_machine_learning", "optional": true },
-          { "container": "immich_redis" },
-          { "container": "immich_postgres" }
+          {
+            "container": "immich_server"
+          },
+          {
+            "container": "immich_machine_learning",
+            "optional": true
+          },
+          {
+            "container": "immich_redis"
+          },
+          {
+            "container": "immich_postgres"
+          }
         ],
         "kuma": "immich",
         "_comment": "Stop order matters: the API server first, then the ML container (which only exists when the `ml` compose profile is active, hence optional), then the datastores it was talking to. Start is the reverse."
@@ -85,9 +94,15 @@
       "env": "seafile/.env",
       "control": {
         "parts": [
-          { "container": "seafile" },
-          { "container": "seafile-mysql" },
-          { "container": "seafile-redis" }
+          {
+            "container": "seafile"
+          },
+          {
+            "container": "seafile-mysql"
+          },
+          {
+            "container": "seafile-redis"
+          }
         ],
         "kuma": "seafile"
       },
@@ -104,7 +119,11 @@
       "setup": "code-server/setup.sh",
       "env": null,
       "control": {
-        "parts": [{ "unit": "code-server.service" }],
+        "parts": [
+          {
+            "unit": "code-server.service"
+          }
+        ],
         "kuma": "code-server"
       },
       "description": "Full VS Code, integrated terminal included, in any browser on the tailnet — the way to work on this box from a phone or a borrowed laptop. A systemd user unit with auth disabled, because the tailnet is the access-control layer. It owns / on :443, which is why the launcher hangs off /home/ instead; its state lives in ~/.config/code-server rather than ~/services."
@@ -120,7 +139,11 @@
       "setup": "open-webui/setup.sh",
       "env": "open-webui/.env",
       "control": {
-        "parts": [{ "container": "open-webui" }],
+        "parts": [
+          {
+            "container": "open-webui"
+          }
+        ],
         "kuma": "open-webui"
       },
       "description": "ChatGPT-style chat over the ollama models already running on this box, with conversation history, model switching and document upload. Host-network container bound to 127.0.0.1:3001. The first account registered (Kai's) is the admin; nothing leaves the tailnet."
@@ -136,7 +159,11 @@
       "setup": "kaichenpedia/setup.sh",
       "env": "kaichenpedia/.env",
       "control": {
-        "parts": [{ "container": "kaichenpedia" }],
+        "parts": [
+          {
+            "container": "kaichenpedia"
+          }
+        ],
         "kuma": "kaichenpedia"
       },
       "description": "Personal wiki: a Quartz static build of the private kaichenpedia GitHub repo, served by nginx. A systemd user timer polls GitHub daily and redeploys on new commits, so pushing from any device is the publish step; ~/services/kaichenpedia/bin/deploy.sh --force does it now. The poller only runs while the container is up, so an amber tile means the wiki is frozen at its last build."
@@ -152,7 +179,11 @@
       "setup": "n8n/setup.sh",
       "env": "n8n/.env",
       "control": {
-        "parts": [{ "container": "n8n" }],
+        "parts": [
+          {
+            "container": "n8n"
+          }
+        ],
         "kuma": "n8n"
       },
       "description": "Self-hosted Zapier: visual workflows wiring schedules, webhooks and APIs to everything else here — ollama, ntfy, Seafile, any loopback service. Host-network container on 127.0.0.1:5678 with SQLite storage. Often stopped on purpose; scheduled workflows do not run while it is down. Its .env holds the encryption key that every saved credential is encrypted with, so back that up with the data."
@@ -169,8 +200,12 @@
       "env": "beszel/.env",
       "control": {
         "parts": [
-          { "unit": "beszel-agent.service" },
-          { "container": "beszel" }
+          {
+            "unit": "beszel-agent.service"
+          },
+          {
+            "container": "beszel"
+          }
         ],
         "primary": "beszel",
         "kuma": "beszel",
@@ -189,7 +224,11 @@
       "setup": "monitoring/setup.sh",
       "env": "monitoring/.env",
       "control": {
-        "parts": [{ "container": "uptime-kuma" }],
+        "parts": [
+          {
+            "container": "uptime-kuma"
+          }
+        ],
         "kuma": null,
         "_comment": "Kuma has no monitor of itself to pause, so `kuma` is null. Stopping it cannot break any other service's stop: the pause step is best-effort everywhere and its failure never fails the action."
       },
@@ -221,7 +260,11 @@
       "setup": "~/dev/manimkc/server/setup.sh",
       "env": "~/dev/manimkc/.env",
       "control": {
-        "parts": [{ "unit": "manimkc.service" }],
+        "parts": [
+          {
+            "unit": "manimkc.service"
+          }
+        ],
         "kuma": "manimkc"
       },
       "description": "Video-gen job server: POST a JSON brief and it renders a narrated ManimGL video, then uploads it to the Seafile `manimkc` library. A systemd user unit on 127.0.0.1:8090; the tile opens its /docs API page, since that is the whole UI. Code lives in its own repo at ~/dev/manimkc, not in this one, and narration runs through ElevenLabs, Sarvam or local Kokoro TTS."
@@ -294,12 +337,21 @@
       "name": "Forgejo",
       "tagline": "Git",
       "icon": "git",
-      "url": null,
-      "health": null,
-      "marker": null,
-      "setup": null,
-      "env": null,
-      "description": "Not built yet. Would be a self-hosted GitHub — repos plus CI — on this box. Filed as a sovereignty nice-to-have rather than a need while GitHub works fine; a self-hosted Actions runner is the cheaper half of the idea."
+      "url": "https://HOST:3000/",
+      "health": "http://127.0.0.1:3000/api/healthz",
+      "marker": "~/services/forgejo",
+      "setup": "forgejo/setup.sh",
+      "env": "forgejo/.env",
+      "description": "Self-hosted git forge — repos, pull requests, issues and review, on this box. Pinned to the v15 LTS line (supported to July 2027) rather than v16, which stops getting fixes in October 2026. SQLite rather than Postgres, so it is one container at about 120 MB. Built-in SSH is off because port 22 belongs to the box's own sshd — clone over HTTPS on the tailnet. GitHub is still the canonical copy: until this box has a backup job, treat this as a mirror, not the only home for your code.",
+      "control": {
+        "parts": [
+          {
+            "container": "forgejo"
+          }
+        ],
+        "kuma": "forgejo",
+        "_comment": "Single container with an embedded SQLite database, so there is no ordering to respect — unlike immich, nothing else has to come down first."
+      }
     }
   ]
 }

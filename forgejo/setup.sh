@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+#
+# setup.sh — one-shot deploy of Forgejo (self-hosted Git forge) behind
+# Tailscale. Linux + macOS.
+#
+# End state:
+#   - a single `forgejo` container (SQLite inside it — no database sidecar)
+#   - published on 127.0.0.1:LOCAL_PORT only
+#   - reachable tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
+#   - the web install wizard locked out (INSTALL_LOCK) and the admin account
+#     created from the CLI — no first-run setup screen, ever
+#   - open registration off; the tailnet is the auth boundary
+#   - boot-persistent via Docker's restart policy (no systemd/launchd needed)
+#
+# Usage:
+#   ./setup.sh                            # local 3000, HTTPS 3000
+#   LOCAL_PORT=3010 HTTPS_PORT=3010 ./setup.sh
+#   FORGEJO_ADMIN_USERNAME=kai ./setup.sh # first run only; .env wins after
+#
+# Version: pinned to the `15` tag — Forgejo 15 is the LTS, supported to
+# 2027-07-15. Do NOT bump this to 16: 16 is a non-LTS release whose support
+# ends 2026-10-29.
+#
+# Built-in SSH is OFF. Host port 22 is the box's own sshd and Tailscale Serve
+# fronts HTTPS only, so clone over HTTPS — it works fine on a tailnet.
+# docker-compose.yml documents the four steps to turn SSH on later.
+#
+# Requirements: Linux or macOS, curl, Docker + Compose v2, Tailscale logged in.
+#
+# Idempotent: safe to re-run; it upgrades the image and repairs the publish.
+# An existing .env is never overwritten, and the admin account is created at
+# most once.
+
+set -euo pipefail
+
+LOCAL_PORT="${LOCAL_PORT:-3000}"
+HTTPS_PORT="${HTTPS_PORT:-3000}"
+ADMIN_USERNAME="${FORGEJO_ADMIN_USERNAME:-kai}"
+ADMIN_EMAIL="${FORGEJO_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+CONTAINER="forgejo"
+
+SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SERVICE_DIR/.env"
+STATE="$HOME/services/forgejo"
+ADMIN_MARKER="$STATE/.admin-created"
+
+info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
+die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# 32 hex chars: [A-Za-z0-9]-safe, so it survives .env, shell quoting and
+# HTTP basic auth without escaping. python3 when present, /dev/urandom
+# otherwise — no hard dependency on python for what is just random bytes.
+randhex() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import secrets; print(secrets.token_hex(16))'
+  else
+    od -An -tx1 -N16 /dev/urandom | tr -d ' \n'
+    echo
+  fi
+}
+
+# ---------------------------------------------------------------- preflight
+OS="$(uname -s)"
+info "Preflight checks ($OS)"
+case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
+[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+command -v curl >/dev/null || die "curl is required."
+if ! command -v docker >/dev/null; then
+  [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
+  die "Docker is not installed. On macOS install Docker Desktop or OrbStack."
+fi
+
+if command -v tailscale >/dev/null; then
+  TAILSCALE="tailscale"
+elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+else
+  die "Tailscale is not installed: https://tailscale.com/download"
+fi
+
+if ! docker ps >/dev/null 2>&1; then
+  [ "$OS" = "Linux" ] && die "Cannot talk to the Docker daemon. Fix: sudo usermod -aG docker $USER, then log out/in (or run via: sg docker -c ./setup.sh)"
+  die "Cannot talk to the Docker daemon. Is Docker Desktop/OrbStack running?"
+fi
+docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)."
+
+state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+
+case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
+case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
+
+ok "$OS + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
+
+# The tailnet name is needed *before* the container starts, not after: it goes
+# into ROOT_URL, and Forgejo builds every clone URL, redirect and webhook
+# payload from ROOT_URL. A wrong value produces working-but-useless localhost
+# links rather than an error, so resolve it up front and verify it at the end.
+TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+[ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
+ok "Tailnet name: $TS_HOST"
+
+# ---------------------------------------------------------------- .env
+if [ -f "$ENV_FILE" ]; then
+  ok "Config already exists, leaving untouched: $ENV_FILE"
+else
+  info "Writing .env (generated admin password + SECRET_KEY)"
+  admin_pw="$(randhex)"
+  secret_key="$(randhex)"
+  tz="Etc/UTC"
+  if [ -L /etc/localtime ]; then
+    tz="$(readlink /etc/localtime | sed 's#.*/zoneinfo/##')"
+  fi
+  cat > "$ENV_FILE" <<EOF
+# Generated by setup.sh. Gitignored; mode 600.
+# Docker Compose reads this file from the project directory for interpolation.
+# It is NOT passed to the container as env_file — the admin password below
+# must not end up in the container's environment.
+
+# Forgejo 15 is the LTS (supported to 2027-07-15). 16 is non-LTS and goes
+# out of support 2026-10-29 — do not bump without reading the release notes.
+FORGEJO_VERSION=15
+
+LOCAL_PORT=$LOCAL_PORT
+TZ=$tz
+
+# Repositories, SQLite DB, LFS, avatars — the whole state directory, and the
+# only thing here worth backing up. Moving it means moving the directory too.
+FORGEJO_DATA=$STATE/data
+FORGEJO_UID=$(id -u)
+FORGEJO_GID=$(id -g)
+
+# Public identity. Forgejo derives clone URLs and redirects from ROOT_URL, so
+# it must be the tailnet HTTPS URL, with the trailing slash. If the machine is
+# ever renamed or the HTTPS port moves, edit both lines and re-run setup.sh —
+# it warns when these drift from the live tailnet name.
+FORGEJO_DOMAIN=$TS_HOST
+FORGEJO_ROOT_URL=https://$TS_HOST:$HTTPS_PORT/
+
+# Built-in SSH server, off. Turning it on takes a host port that is not 22
+# plus a \`tailscale serve --tcp\` mount; see the ports block in
+# docker-compose.yml for the full four-step recipe.
+FORGEJO_DISABLE_SSH=true
+FORGEJO_START_SSH_SERVER=false
+FORGEJO_SSH_HOST_PORT=2222
+
+# Admin account, created once via the Forgejo CLI on first deploy.
+FORGEJO_ADMIN_USERNAME=$ADMIN_USERNAME
+FORGEJO_ADMIN_EMAIL=$ADMIN_EMAIL
+FORGEJO_ADMIN_PASSWORD=$admin_pw
+
+# Encrypts 2FA secrets and stored mirror/OAuth credentials. Never change it
+# on a live instance — anything already encrypted becomes unreadable.
+FORGEJO_SECRET_KEY=$secret_key
+EOF
+  chmod 600 "$ENV_FILE"
+  ok "Wrote $ENV_FILE"
+fi
+
+# Read back: an existing .env is the source of truth for ports, paths and
+# credentials, so a re-run can never silently move a live deployment.
+REQUESTED_PORT="$LOCAL_PORT"
+set -a; . "$ENV_FILE"; set +a
+ADMIN_USERNAME="${FORGEJO_ADMIN_USERNAME:?FORGEJO_ADMIN_USERNAME missing from $ENV_FILE}"
+ADMIN_EMAIL="${FORGEJO_ADMIN_EMAIL:?FORGEJO_ADMIN_EMAIL missing from $ENV_FILE}"
+ADMIN_PASSWORD="${FORGEJO_ADMIN_PASSWORD:?FORGEJO_ADMIN_PASSWORD missing from $ENV_FILE}"
+DATA_DIR="${FORGEJO_DATA:?FORGEJO_DATA missing from $ENV_FILE}"
+ROOT_URL="${FORGEJO_ROOT_URL:?FORGEJO_ROOT_URL missing from $ENV_FILE}"
+if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
+  warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
+fi
+
+# Drift check, not a rewrite: .env is the user's file. But a ROOT_URL that no
+# longer matches this machine breaks clone URLs silently, so say so loudly.
+WANT_ROOT_URL="https://$TS_HOST:$HTTPS_PORT/"
+if [ "$ROOT_URL" != "$WANT_ROOT_URL" ]; then
+  warn "FORGEJO_ROOT_URL in .env is $ROOT_URL but this box now answers to $WANT_ROOT_URL."
+  warn "  Clone URLs and redirects will point at the old address. Fix: set FORGEJO_DOMAIN=$TS_HOST and FORGEJO_ROOT_URL=$WANT_ROOT_URL in $ENV_FILE, then re-run."
+fi
+
+mkdir -p "$DATA_DIR"
+
+avail_kb="$(df -Pk "$DATA_DIR" | awk 'NR==2{print $4}')"
+if [ "${avail_kb:-0}" -lt 10485760 ]; then
+  warn "$(( avail_kb / 1048576 )) GB free at $DATA_DIR — git repositories only grow (history, LFS objects, CI artifacts, and repacks that need room to work). Move FORGEJO_DATA to a bigger disk before pushing anything large."
+else
+  ok "$(( avail_kb / 1048576 )) GB free at $DATA_DIR"
+fi
+
+# ---------------------------------------------------------------- deploy
+COMPOSE=(docker compose --project-directory "$SERVICE_DIR")
+
+info "Starting Forgejo (docker compose up -d) — first run pulls ~130 MB"
+"${COMPOSE[@]}" up -d
+
+info "Waiting for Forgejo on 127.0.0.1:$LOCAL_PORT (first boot creates the SQLite schema)"
+for i in $(seq 1 60); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:$LOCAL_PORT/api/healthz" 2>/dev/null; then
+    ok "Forgejo is answering locally"
+    break
+  fi
+  [ "$i" -eq 60 ] && die "Forgejo did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs forgejo"
+  sleep 3
+done
+
+# ---------------------------------------------------- admin account (once)
+# Two layers of idempotency, because either one alone is wrong:
+#   - the marker means a normal re-run does not even shell into the container
+#   - "user already exists" is still treated as success, so a run that died
+#     after creating the user but before writing the marker recovers cleanly
+#
+# --must-change-password=false is load-bearing. Without it the CLI flags the
+# account for a forced password change, the generated password in .env stops
+# working at the login form, and the deploy "succeeds" while locking you out.
+if [ -f "$ADMIN_MARKER" ]; then
+  ok "Admin account already provisioned ($ADMIN_USERNAME) — skipping"
+else
+  info "Creating admin account: $ADMIN_USERNAME"
+  if out="$(docker exec -u git "$CONTAINER" forgejo admin user create \
+      --admin \
+      --username "$ADMIN_USERNAME" \
+      --password "$ADMIN_PASSWORD" \
+      --email "$ADMIN_EMAIL" \
+      --must-change-password=false 2>&1)"; then
+    ok "Admin account created: $ADMIN_USERNAME"
+    mkdir -p "$STATE"
+    printf '%s\n' "$ADMIN_USERNAME" > "$ADMIN_MARKER"
+  else
+    case "$out" in
+      *"already exists"*)
+        ok "Admin account $ADMIN_USERNAME already exists — leaving it alone"
+        mkdir -p "$STATE"
+        printf '%s\n' "$ADMIN_USERNAME" > "$ADMIN_MARKER"
+        ;;
+      *)
+        die "Could not create the admin account: $out"
+        ;;
+    esac
+  fi
+fi
+
+# ------------------------------------------------------- tailscale serve
+info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT, tailnet only)"
+if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
+  if [ "$OS" = "Linux" ]; then
+    info "Direct serve failed — trying operator grant (needs sudo, one time)"
+    sudo tailscale set --operator="$USER"
+  fi
+  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
+    echo
+    info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
+    read -r
+  done
+fi
+ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
+
+# ------------------------------------------------------------ final check
+url="https://$TS_HOST:$HTTPS_PORT"
+info "Verifying $url (first request can take ~60s while the TLS cert is minted)"
+if curl -fsS -o /dev/null --max-time 90 "$url/api/healthz"; then
+  ok "End-to-end HTTPS check passed"
+else
+  warn "No answer on $url/api/healthz yet — the cert may still be minting. Retry in a minute: curl $url/api/healthz"
+fi
+
+# One authenticated request proves three things at once: the generated
+# password actually logs in (the --must-change-password trap), the account is
+# an admin, and ROOT_URL is right — html_url in the response is built from it,
+# so if it says localhost, clone URLs would too.
+code="$(curl -sS -o "$WORK/me.json" -w '%{http_code}' --max-time 60 \
+  -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" "$url/api/v1/user" 2>/dev/null || echo 000)"
+me="$(cat "$WORK/me.json" 2>/dev/null || true)"
+case "$code" in
+  401|403)
+    die "Login as $ADMIN_USERNAME was rejected (HTTP $code). The password in $ENV_FILE does not match the server — changed in the web UI? Mirror it back into .env, or reset it: docker exec -u git $CONTAINER forgejo admin user change-password --username $ADMIN_USERNAME --password '<new>' --must-change-password=false"
+    ;;
+  200)
+    case "$me" in
+      *'"is_admin":true'*) ok "Signed in as $ADMIN_USERNAME over HTTPS; account is an admin" ;;
+      *)                   warn "Signed in as $ADMIN_USERNAME, but the account is not an admin. Fix: docker exec -u git $CONTAINER forgejo admin user change-password --username $ADMIN_USERNAME ... (or grant admin in Site Administration)" ;;
+    esac
+    case "$me" in
+      *"\"html_url\":\"$url/"*) ok "ROOT_URL is the tailnet address (generated URLs use $TS_HOST)" ;;
+      *) warn "Forgejo is generating URLs that are not $url/ — check FORGEJO_ROOT_URL in $ENV_FILE (see: docker exec $CONTAINER grep ROOT_URL /data/gitea/conf/app.ini). Clone URLs and redirects will be wrong until it matches." ;;
+    esac
+    ;;
+  *)
+    warn "Could not verify the admin login over HTTPS (HTTP $code). Check by hand: curl -u $ADMIN_USERNAME:<password from .env> $url/api/v1/user"
+    ;;
+esac
+
+echo
+printf '\033[1;32mDone.\033[0m Forgejo is at \033[1m%s\033[0m (tailnet only).\n' "$url"
+echo
+echo "  Login:    $ADMIN_USERNAME  ($ADMIN_EMAIL)"
+echo "  Password: see FORGEJO_ADMIN_PASSWORD in $ENV_FILE"
+echo "  No install wizard: INSTALL_LOCK is set, so /install returns 404 and"
+echo "    every setting comes from docker-compose.yml + .env, not the web UI."
+echo "  Sign-ups are disabled. New account:"
+echo "    docker exec -u git $CONTAINER forgejo admin user create --username <name> \\"
+echo "      --email <mail> --password '<pw>' --must-change-password=false"
+echo
+echo "Create a repo in the web UI, then push to it over HTTPS:"
+echo "  git remote add origin $url/$ADMIN_USERNAME/<repo>.git"
+echo "  git push -u origin main          # username $ADMIN_USERNAME, password = an access token"
+echo "  (Generate the token under Settings -> Applications. SSH clones are off;"
+echo "   docker-compose.yml explains how to turn them on.)"
+echo
+echo "Backups: nothing backs this box up. Everything Forgejo owns lives in"
+echo "  $DATA_DIR (repos + SQLite DB). Keep GitHub as the canonical remote and"
+echo "  treat this as a mirror until that directory is in a real backup job."
+echo "  Cold copy:  docker compose --project-directory $SERVICE_DIR stop &&"
+echo "              tar czf forgejo-\$(date +%F).tgz -C $DATA_DIR . &&"
+echo "              docker compose --project-directory $SERVICE_DIR start"
+echo
+echo "Manage:  docker compose --project-directory $SERVICE_DIR ps|logs|restart|down"
+echo "Upgrade: docker compose --project-directory $SERVICE_DIR pull && ./setup.sh"
+exit 0

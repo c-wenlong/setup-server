@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
+#   compose_up         — touched by `compose ... up`
+#   user_exists        — exists => `forgejo admin user create` fails the way the
+#                        real CLI does when the account is already there
+#   admin_create_args  — the full argv of every `admin user create` attempt
+#   admin_create_count — how many times it was attempted
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    for a in "$@"; do
+      [ "$a" = "-a" ] && echo "forgejo"
+    done
+    ;;
+
+  inspect)
+    # Only the live suite inspects containers; keep the mocked answer sane.
+    echo running
+    ;;
+
+  exec)
+    # The only exec setup.sh makes is the admin bootstrap:
+    #   docker exec -u git forgejo forgejo admin user create --admin \
+    #     --username U --password P --email E --must-change-password=false
+    case "$*" in
+      *"admin user create"*)
+        printf '%s\n' "$*" >> "$STATE_DIR/admin_create_args"
+        n=0
+        [ -f "$STATE_DIR/admin_create_count" ] && n="$(cat "$STATE_DIR/admin_create_count")"
+        echo $((n + 1)) > "$STATE_DIR/admin_create_count"
+
+        if [ -f "$STATE_DIR/user_exists" ]; then
+          # Verbatim shape of the real failure (Forgejo 15 exits 1 here).
+          echo "Command error: user already exists [name: kai]" >&2
+          exit 1
+        fi
+        touch "$STATE_DIR/user_exists"
+        echo "New user 'kai' has been successfully created!"
+        ;;
+      *)
+        : ;;
+    esac
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        for a in "$@"; do
+          case "$a" in
+            up)   touch "$STATE_DIR/compose_up" ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0

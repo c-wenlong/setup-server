@@ -35,6 +35,7 @@ no Docker).
 | :8090 | manimkc (`~/dev/manimkc/server/`) | Video-gen job server: JSON brief → narrated ManimGL video → Seafile `manimkc` library | 8090 | systemd user unit |
 | :8092 | [beszel](beszel/) | Resource monitoring: CPU/RAM/GPU/disk/net/temps, history + ntfy-able alerts (complements Kuma's uptime checks) | 8092 | Docker (host net, loopback-bound) + native agent on 127.0.0.1:45876 (systemd user unit) |
 | :443**/home/** + :8093 | [launcher](launcher/) | One-tap app launcher: tile grid of every service with live status; dimmed tiles for services not installed yet, with a Deploy button that runs their `setup.sh`. **The short URL to bookmark on the phone.** Shares :443 with code-server via a `--set-path=/home` handler, which leaves `/` untouched | 8093 | systemd user unit (Python 3 stdlib, no deps) |
+| :3000 | [forgejo](forgejo/) | Self-hosted git forge: repos, pull requests, issues. v15 **LTS** (to 2027-07-15) not v16 (EOL 2026-10-29); SQLite not Postgres, so one container at ~100 MB. Built-in SSH off — port 22 is the box's own sshd — so clone over HTTPS. Sign-ups disabled | 3000 | Docker (single container, loopback-published) |
 | :2283 | [immich](immich/) | Self-hosted Google Photos: timeline, albums, phone background backup; ML (faces/semantic search) behind a flag, **off by default** on this box's 7.7 GB | 2283 | Docker (bridge; server loopback-published, postgres+redis unpublished) |
 
 Supporting services (no Tailscale Serve entry):
