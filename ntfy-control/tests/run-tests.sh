@@ -2,6 +2,13 @@
 #
 # Tests for ntfy-control/setup.sh + control_listener.py.
 #
+# The listener's allowlist is NOT in the listener: it is the per-service
+# `control` block in launcher/services.json, which the launcher's web UI reads
+# for the same purpose. The handler tests below therefore run against the REAL
+# shipped registry (found via the repo-relative candidate in
+# _registry_candidates), which is what makes "the phone and the web control
+# the same services" a thing this suite can actually check.
+#
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
 
@@ -62,6 +69,36 @@ out_lacks()  { ! grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
+
+# Order matters for multi-container services (Immich's server has to go
+# before the database it is still talking to), and one `docker stop a b c`
+# would not give it: the docker CLI stops containers in parallel. So the
+# listener issues one command per part, and these assert the sequence.
+call_line()      { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1; }
+calls_in_order() {
+  local prev=0 n pat
+  for pat in "$@"; do
+    n="$(call_line "$pat")"
+    [ -n "$n" ] || return 1
+    [ "$n" -gt "$prev" ] || return 1
+    prev="$n"
+  done
+  return 0
+}
+
+# The shipped registry both front ends read.
+REGISTRY="$(cd "$SERVICE_DIR/.." && pwd)/launcher/services.json"
+registry_keys() {
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+locked = ("ntfy", "launcher", "ollama")
+print(" ".join(sorted(
+    s["key"] for s in doc["services"]
+    if isinstance(s.get("control"), dict)
+    and not s["control"].get("locked")
+    and s["key"] not in locked)))' "$REGISTRY"
+}
 
 # ----------------------------------------------------------------- tests
 test_preflight_ntfy_down() {
@@ -142,12 +179,111 @@ test_handle_stop() {
   echo "KUMA_PORT=3002" > "$SANDBOX/kuma.env"
   run_handle "stop seafile"
   check "exits zero"                 [ "$CODE" -eq 0 ]
-  check "stops app before deps"      calls_have "docker stop seafile seafile-mysql seafile-redis"
+  check "one command per container"  calls_have "docker stop seafile$"
+  check "stops app before deps"      calls_in_order "docker stop seafile$" \
+                                       "docker stop seafile-mysql" \
+                                       "docker stop seafile-redis"
+  check "pauses BEFORE stopping"     calls_in_order "kuma_toggle.py pause seafile" \
+                                       "docker stop seafile$"
   check "pauses kuma monitor"        calls_have "uv run --with uptime-kuma-api python3 .*kuma_toggle.py pause seafile"
   check "replies ok to alerts"       calls_have "seafile: stop ok.*http://127.0.0.1:3003/alerts"
   check "reply offers start (now stopped)"  calls_have 'seafile: stop ok.*X-Actions.*start seafile'
   check "reply does not offer stop"         no_call 'seafile: stop ok.*"body": "stop seafile"'
   check "buttons use tailnet URL"           calls_have 'X-Actions.*test-host.tailfake.ts.net:3003/control'
+  teardown
+}
+
+test_handle_immich() {
+  echo "• handler: immich stops server->ml->datastores, starts in reverse"
+  setup
+  echo "KUMA_PORT=3002" > "$SANDBOX/kuma.env"
+  run_handle "stop immich"
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  check "server before datastores"   calls_in_order "docker stop immich_server" \
+                                       "docker stop immich_machine_learning" \
+                                       "docker stop immich_redis" \
+                                       "docker stop immich_postgres"
+  check "pauses the immich monitor"  calls_have "kuma_toggle.py pause immich"
+  : > "$CALLS_LOG"
+  run_handle "start immich"
+  check "datastores before server"   calls_in_order "docker start immich_postgres" \
+                                       "docker start immich_redis" \
+                                       "docker start immich_machine_learning" \
+                                       "docker start immich_server"
+  check "resumes the monitor"        calls_have "kuma_toggle.py resume immich"
+  teardown
+}
+
+test_handle_immich_without_ml() {
+  echo "• handler: immich with the ml profile off — optional part is skipped"
+  setup
+  touch "$STATE_DIR/missing_immich_machine_learning"
+  run_handle "stop immich"
+  check "still reports ok"           calls_have "immich: stop ok"
+  check "tried the ml container"     calls_have "docker stop immich_machine_learning"
+  check "datastores still stopped"   calls_in_order "docker stop immich_server" \
+                                       "docker stop immich_redis" \
+                                       "docker stop immich_postgres"
+  teardown
+}
+
+test_handle_immich_required_failure_stops_there() {
+  echo "• handler: a REQUIRED container failing aborts the rest of the stop"
+  setup
+  touch "$STATE_DIR/missing_immich_server"
+  run_handle "stop immich"
+  check "reports failure"            calls_have "immich: stop FAILED"
+  check "never touched the database" no_call "docker stop immich_postgres"
+  teardown
+}
+
+test_handle_beszel() {
+  echo "• handler: beszel moves hub and agent together"
+  setup
+  run_handle "stop beszel"
+  check "agent stopped before hub"   calls_in_order "systemctl --user stop beszel-agent.service" \
+                                       "docker stop beszel"
+  : > "$CALLS_LOG"
+  run_handle "start beszel"
+  check "hub started before agent"   calls_in_order "docker start beszel" \
+                                       "systemctl --user start beszel-agent.service"
+  teardown
+}
+
+test_handle_manimkc() {
+  echo "• handler: manimkc is a systemd user unit"
+  setup
+  run_handle "restart manimkc"
+  check "stops then starts the unit" calls_in_order "systemctl --user stop manimkc.service" \
+                                       "systemctl --user start manimkc.service"
+  check "no docker involved"         no_call "docker stop manimkc\|docker start manimkc"
+  teardown
+}
+
+test_shared_allowlist() {
+  echo "• allowlist: the listener controls exactly what launcher/services.json says"
+  setup
+  run_handle "status"
+  local key
+  for key in $(registry_keys); do
+    check "lists $key"               calls_have "$key: "
+  done
+  check "immich is covered"          calls_have "immich: "
+  check "beszel is covered"          calls_have "beszel: "
+  check "manimkc is covered"         calls_have "manimkc: "
+  teardown
+}
+
+test_missing_registry_controls_nothing() {
+  echo "• allowlist: no registry file => nothing is controllable, and it says so"
+  setup
+  OUT="$(NTFY_BASE_URL=http://127.0.0.1:3003 CONTROL_TOPIC=control REPLY_TOPIC=alerts \
+    CONTROL_REGISTRY="$SANDBOX/does-not-exist.json" \
+    KUMA_ENV_FILE="$SANDBOX/kuma.env" \
+    PATH="$STUBS:$PATH" python3 "$SERVICE_DIR/control_listener.py" --handle "stop seafile" 2>&1)"
+  check "refuses the service"     calls_have "unknown service 'seafile'"
+  check "says the list is empty"  calls_have "control registry not found"
+  check "nothing executed"        no_call "docker stop"
   teardown
 }
 
@@ -186,8 +322,13 @@ test_handle_pick() {
 test_handle_pick_empty() {
   echo "• handler: empty picker explains itself instead of showing nothing"
   setup
-  for c in seafile seafile-mysql seafile-redis n8n open-webui kaichenpedia uptime-kuma; do
+  # every controllable service's *primary* part, down.
+  for c in seafile seafile-mysql seafile-redis n8n open-webui kaichenpedia \
+           uptime-kuma immich_server beszel; do
     touch "$STATE_DIR/stopped_$c"
+  done
+  for u in code-server.service manimkc.service beszel-agent.service; do
+    touch "$STATE_DIR/stopped_$u"
   done
   run_handle "pick stop"
   check "explains nothing to stop"    calls_have "nothing to stop"
@@ -200,7 +341,11 @@ test_handle_start() {
   setup
   echo "KUMA_PORT=3002" > "$SANDBOX/kuma.env"
   run_handle "start seafile"
-  check "starts deps before app"     calls_have "docker start seafile-redis seafile-mysql seafile"
+  check "starts deps before app"     calls_in_order "docker start seafile-redis" \
+                                       "docker start seafile-mysql" \
+                                       "docker start seafile$"
+  check "resumes AFTER starting"     calls_in_order "docker start seafile$" \
+                                       "kuma_toggle.py resume seafile"
   check "resumes kuma monitor"       calls_have "kuma_toggle.py resume seafile"
   check "replies ok"                 calls_have "seafile: start ok"
   check "reply offers stop (now up)" calls_have 'seafile: start ok.*"body": "stop seafile"'
@@ -223,6 +368,18 @@ test_handle_rejects_unknown() {
   run_handle "stop ntfy"
   check "ntfy not stoppable"      calls_have "unknown service 'ntfy'"
   check "no docker stop"          no_call "docker stop"
+  # The other two deliberate lock-outs, refused by the same allowlist:
+  # ollama is a *system* unit (sudo), and the launcher serves the web UI you
+  # would have to use to start it again.
+  : > "$CALLS_LOG"
+  run_handle "stop ollama"
+  check "ollama not stoppable"    calls_have "unknown service 'ollama'"
+  check "no systemctl stop"       no_call "systemctl --user stop"
+  : > "$CALLS_LOG"
+  run_handle "restart launcher"
+  check "launcher not stoppable"  calls_have "unknown service 'launcher'"
+  check "nothing executed"        no_call "systemctl --user stop\|systemctl --user restart"
+  : > "$CALLS_LOG"
   : > "$CALLS_LOG"
   run_handle "rm -rf /"
   check "junk gets usage reply"   calls_have "commands: panel"
@@ -266,6 +423,13 @@ test_fresh_install_with_phone
 test_idempotent_rerun
 test_handle_stop
 test_handle_start
+test_handle_immich
+test_handle_immich_without_ml
+test_handle_immich_required_failure_stops_there
+test_handle_beszel
+test_handle_manimkc
+test_shared_allowlist
+test_missing_registry_controls_nothing
 test_handle_panel
 test_handle_pick
 test_handle_pick_empty

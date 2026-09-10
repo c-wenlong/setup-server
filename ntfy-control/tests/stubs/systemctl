@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
-# systemctl stub: logs and succeeds.
+# systemctl stub. State in $STATE_DIR (mirrors the docker stub):
+#   stopped_<unit>  — exists => `is-active` reports inactive; created by
+#                     `--user stop`, removed by start/restart
 echo "systemctl $*" >> "$CALLS_LOG"
+
+if [ "${1:-}" = "--user" ]; then
+  verb="${2:-}"
+  unit="${3:-}"
+  case "$verb" in
+    stop)      [ -n "$unit" ] && touch "$STATE_DIR/stopped_$unit" ;;
+    start|restart) [ -n "$unit" ] && rm -f "$STATE_DIR/stopped_$unit" ;;
+    is-active)
+      if [ -n "$unit" ] && [ -f "$STATE_DIR/stopped_$unit" ]; then
+        echo inactive
+      else
+        echo active
+      fi
+      ;;
+  esac
+fi
 exit 0

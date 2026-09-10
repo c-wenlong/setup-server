@@ -3,6 +3,10 @@
 #   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
 #   stopped_<name>     — exists => container reports `exited`; created by
 #                        `docker stop`, removed by start/restart
+#   missing_<name>     — exists => the container does not exist at all, so
+#                        stop/start/inspect fail the way docker really does
+#                        (this is Immich's `ml`-profile container when the
+#                        profile is off)
 echo "docker $*" >> "$CALLS_LOG"
 
 cmd="$1"
@@ -13,17 +17,29 @@ case "$cmd" in
       exit 1
     fi
     ;;
-  stop)
+  stop|start|restart)
     shift
-    for c in "$@"; do touch "$STATE_DIR/stopped_$c"; done
-    ;;
-  start|restart)
-    shift
-    for c in "$@"; do rm -f "$STATE_DIR/stopped_$c"; done
+    rc=0
+    for c in "$@"; do
+      if [ -f "$STATE_DIR/missing_$c" ]; then
+        echo "Error response from daemon: No such container: $c" >&2
+        rc=1
+        continue
+      fi
+      case "$cmd" in
+        stop) touch "$STATE_DIR/stopped_$c" ;;
+        *)    rm -f "$STATE_DIR/stopped_$c" ;;
+      esac
+    done
+    exit "$rc"
     ;;
   inspect)
     name=""
     for a in "$@"; do name="$a"; done
+    if [ -f "$STATE_DIR/missing_$name" ]; then
+      echo "Error: No such object: $name" >&2
+      exit 1
+    fi
     if [ -f "$STATE_DIR/stopped_$name" ]; then echo "exited"; else echo "running"; fi
     ;;
 esac

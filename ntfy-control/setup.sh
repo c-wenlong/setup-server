@@ -219,7 +219,23 @@ fi
 echo
 echo "From the panel: tap [start]/[stop]/[restart] to pick a service; typed"
 echo "commands (Android/web app) work too: status | panel | stop seafile | ..."
-echo "  (services: seafile, open-webui, n8n, kaichenpedia, uptime-kuma, code-server)"
+# Derived from the shared registry rather than hard-coded: launcher/services.json
+# is the single source of truth for what is controllable, read by both this
+# listener and the launcher's web UI. A hard-coded list here went stale the
+# moment services were added.
+echo "  (services: $(python3 - <<'PY' 2>/dev/null || echo 'see launcher/services.json'
+import json, os, sys
+p = os.path.join(os.path.dirname(os.path.abspath("$0")), "..", "launcher", "services.json")
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit(1)
+svcs = d["services"] if isinstance(d, dict) and "services" in d else d
+names = [s["key"] for s in svcs
+         if isinstance(s.get("control"), dict) and not s["control"].get("locked")]
+print(", ".join(sorted(names)) if names else "none found")
+PY
+))"
 echo
 if [ "$OS" = "Linux" ]; then
   echo "Manage: systemctl --user status|restart ntfy-control"

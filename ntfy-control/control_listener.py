@@ -14,20 +14,37 @@ ntfy), and on top of that message text is only ever *matched* against the
 allowlist below — it is never executed. Worst case for a bogus message is a
 "usage" reply.
 
+THE ALLOWLIST IS NOT IN THIS FILE. It is the per-service `control` block in
+`launcher/services.json`, which the launcher's web UI reads for exactly the
+same purpose. Two hand-maintained service->command maps would drift — a
+service controllable from the phone but not the web, or a Kuma monitor
+paused on only one of the two paths — so there is one map and both front
+ends read it. This listener is deployed as a copy under
+~/services/ntfy-control/bin (see setup.sh), so it locates the repo copy of
+that file at runtime; see _registry_candidates(). If it cannot find one,
+nothing is controllable and it says so, rather than falling back to a stale
+second copy of the list.
+
 ntfy itself is deliberately not controllable (stopping it would cut off the
-ability to start it again). Stopping a service also pauses its Uptime Kuma
-monitor (via kuma_toggle.py) so intentional downtime doesn't page.
+ability to start it again), and so are the launcher (it serves the web UI
+that would start it) and ollama (a *system* unit, so it would need sudo).
+Those are marked `locked` in the shared file and hard-locked here as well.
+Stopping a service also pauses its Uptime Kuma monitor (via kuma_toggle.py)
+so intentional downtime doesn't page; that step is best-effort and never
+fails the action itself.
 
 Modes:
     control_listener.py                  subscribe loop (systemd/launchd)
     control_listener.py --handle "..."   handle one message and exit (tests)
 
 Config via env (systemd EnvironmentFile= / launchd EnvironmentVariables):
-    NTFY_BASE_URL, CONTROL_TOPIC, REPLY_TOPIC, KUMA_ENV_FILE
+    NTFY_BASE_URL, CONTROL_TOPIC, REPLY_TOPIC, KUMA_ENV_FILE,
+    CONTROL_REGISTRY (optional explicit path to launcher/services.json)
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -41,30 +58,16 @@ REPLY_TOPIC = os.environ.get("REPLY_TOPIC", "alerts")
 KUMA_ENV_FILE = os.environ.get("KUMA_ENV_FILE", "")
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Container names in stop order; start uses the reverse (deps first).
-DOCKER_SERVICES = {
-    "seafile": ["seafile", "seafile-mysql", "seafile-redis"],
-    "open-webui": ["open-webui"],
-    "n8n": ["n8n"],
-    "kaichenpedia": ["kaichenpedia"],
-    "uptime-kuma": ["uptime-kuma"],
-}
-SYSTEMD_SERVICES = {"code-server": "code-server"}
+VERBS = ("start", "stop", "restart")
 
-# service -> Uptime Kuma monitor to pause/resume alongside it
-KUMA_MONITORS = {
-    "seafile": "seafile",
-    "open-webui": "open-webui",
-    "n8n": "n8n",
-    "kaichenpedia": "kaichenpedia",
-    "code-server": "code-server",
-}
+# Same shape gate as the launcher's: container and unit names out of the
+# registry are matched against this before they can become an argv word.
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 
-USAGE = (
-    "commands: panel (menu card) | pick start|stop|restart (service picker) | "
-    "stop <svc> | start <svc> | restart <svc>\nservices: "
-    + ", ".join(sorted(list(DOCKER_SERVICES) + list(SYSTEMD_SERVICES)))
-)
+# The second lock, mirroring launcher/server.py: the shared file already
+# marks these `locked`, and this is here so an edit to that file cannot
+# hand the phone a button that stops the thing you would start things with.
+HARD_LOCKED = ("ntfy", "launcher", "ollama")
 
 
 def run(argv, env=None, timeout=300):
@@ -74,6 +77,111 @@ def run(argv, env=None, timeout=300):
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
 
+
+# ------------------------------------------------------- shared allowlist
+
+_registry = {"path": None, "mtime": None, "services": {}}
+
+
+def _registry_candidates():
+    """Where launcher/services.json might be, best first.
+
+    setup.sh copies this script (and kuma_toggle.py, and nothing else) into
+    ~/services/ntfy-control/bin, so a plain sibling lookup does not work in
+    the deployed case. What the deployed case does have is KUMA_ENV_FILE,
+    an absolute path to <repo>/monitoring/.env written by setup.sh — so the
+    repo root is derivable from the config that already exists. The other
+    candidates cover running straight from a checkout (the tests do) and the
+    conventional location.
+    """
+    explicit = os.environ.get("CONTROL_REGISTRY", "").strip()
+    if explicit:
+        return [explicit]
+    paths = []
+    if KUMA_ENV_FILE:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(KUMA_ENV_FILE)))
+        paths.append(os.path.join(repo, "launcher", "services.json"))
+    paths.append(os.path.join(os.path.dirname(BIN_DIR), "launcher",
+                              "services.json"))
+    paths.append(os.path.expanduser("~/dev/setup-server/launcher/services.json"))
+    return paths
+
+
+def _parts(block):
+    """`parts` of a control block, in STOP order. Malformed entries dropped."""
+    out = []
+    for entry in block.get("parts") or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = "container" if "container" in entry else "unit"
+        name = entry.get(kind)
+        if not isinstance(name, str) or not NAME_RE.match(name):
+            continue
+        out.append({"kind": kind, "name": name,
+                    "optional": bool(entry.get("optional"))})
+    return out
+
+
+def load_registry():
+    """key -> {parts, primary, kuma} for every controllable service.
+
+    Re-read only when the file changes, so editing services.json takes
+    effect without restarting the listener — the same live-reload the
+    launcher gets from the same file.
+    """
+    for path in _registry_candidates():
+        if not os.path.isfile(path):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if _registry["path"] == path and _registry["mtime"] == mtime:
+            return _registry["services"]
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as e:
+            print(f"control registry unreadable ({path}): {e}", flush=True)
+            continue
+        services = {}
+        for svc in doc.get("services") or []:
+            key = svc.get("key")
+            block = svc.get("control")
+            if not isinstance(key, str) or key in HARD_LOCKED:
+                continue
+            if not isinstance(block, dict) or block.get("locked"):
+                continue
+            parts = _parts(block)
+            if not parts:
+                continue
+            monitor = block.get("kuma")
+            if not (isinstance(monitor, str) and NAME_RE.match(monitor)):
+                monitor = None
+            services[key] = {"parts": parts, "kuma": monitor,
+                             "primary": block.get("primary")}
+        _registry.update(path=path, mtime=mtime, services=services)
+        print(f"control registry: {len(services)} services from {path}",
+              flush=True)
+        return services
+    print("no control registry found — nothing is controllable", flush=True)
+    return {}
+
+
+def all_services():
+    return sorted(load_registry())
+
+
+def usage():
+    names = all_services()
+    listed = ", ".join(names) if names else "(none — control registry not found)"
+    return (
+        "commands: panel (menu card) | pick start|stop|restart (service picker) | "
+        "stop <svc> | start <svc> | restart <svc>\nservices: " + listed
+    )
+
+
+# ------------------------------------------------------------------ ntfy
 
 def notify(text, actions=None):
     cmd = ["curl", "-fsS", "-o", "/dev/null", "-H", "Title: server-control", "-d", text]
@@ -90,15 +198,39 @@ def action(label, message):
             "url": f"{PUBLIC_NTFY}/{CONTROL_TOPIC}", "body": message}
 
 
-def service_state(svc):
-    if svc in DOCKER_SERVICES:
+# ----------------------------------------------------------------- state
+
+def primary_part(control):
+    """The part whose state stands for the service's state.
+
+    Defaults to the first part, which is the front-most thing in stop order
+    and so usually the user-facing one. beszel is the exception — its agent
+    is stopped first but the hub is what has a URL — so the shared file names
+    it explicitly.
+    """
+    for part in control["parts"]:
+        if part["name"] == control.get("primary"):
+            return part
+    return control["parts"][0]
+
+
+def part_state(part):
+    if part["kind"] == "container":
         code, out = run(["docker", "inspect", "-f", "{{.State.Status}}",
-                         DOCKER_SERVICES[svc][0]], timeout=30)
+                         part["name"]], timeout=30)
         if code == 0:
             return out
         return "not found" if "No such" in out else "unknown (docker error)"
-    code, out = run(["systemctl", "--user", "is-active", SYSTEMD_SERVICES[svc]], timeout=30)
+    code, out = run(["systemctl", "--user", "is-active", part["name"]],
+                    timeout=30)
     return out if out else "unknown"
+
+
+def service_state(svc):
+    control = load_registry().get(svc)
+    if not control:
+        return "unknown"
+    return part_state(primary_part(control))
 
 
 def is_up(state):
@@ -117,9 +249,6 @@ def context_buttons(svc):
     return state, acts
 
 
-ALL_SERVICES = sorted(list(DOCKER_SERVICES) + list(SYSTEMD_SERVICES))
-
-
 def master_card():
     """The menu: body is the live service list, buttons are the verbs.
     (ntfy caps actions at 3 per notification, so 'list' is the body itself.)"""
@@ -133,7 +262,7 @@ def pick(verb):
     stop/restart list running services, start lists stopped ones. One
     button per service, chunked 3 per notification (ntfy's action limit)."""
     want_up = verb in ("stop", "restart")
-    svcs = [s for s in ALL_SERVICES if is_up(service_state(s)) == want_up]
+    svcs = [s for s in all_services() if is_up(service_state(s)) == want_up]
     header = "active" if want_up else "stopped"
     if not svcs:
         notify(f"nothing to {verb} — no {header} services",
@@ -147,10 +276,23 @@ def pick(verb):
         notify(f"{verb} which? {header}: " + ", ".join(chunk), actions=acts)
 
 
-def kuma(action, service):
+def states():
+    registry = load_registry()
+    if not registry:
+        return "control registry not found — nothing is controllable"
+    return "\n".join(f"{svc}: {service_state(svc)}" for svc in sorted(registry))
+
+
+# ------------------------------------------------------------------ kuma
+
+def kuma(action, control):
     """Pause/resume the service's Kuma monitor. Best-effort: returns a note
-    for the reply on failure, '' on success or when not applicable."""
-    monitor = KUMA_MONITORS.get(service)
+    for the reply on failure, '' on success or when not applicable.
+
+    Deliberately never contributes to the command's own exit status —
+    stopping a service must not depend on the monitoring stack being up.
+    """
+    monitor = control.get("kuma")
     if not monitor or not KUMA_ENV_FILE or not os.path.isfile(KUMA_ENV_FILE):
         return ""
     env = dict(os.environ)
@@ -168,11 +310,46 @@ def kuma(action, service):
     return "" if code == 0 else f" (kuma {action} failed)"
 
 
-def states():
-    return "\n".join(
-        f"{svc}: {service_state(svc)}"
-        for svc in sorted(list(DOCKER_SERVICES) + list(SYSTEMD_SERVICES))
-    )
+# --------------------------------------------------------------- lifecycle
+
+def part_argv(part, verb):
+    if part["kind"] == "container":
+        return ["docker", verb, part["name"]]
+    return ["systemctl", "--user", verb, part["name"]]
+
+
+def plan(control, verb):
+    """The ordered (argv, optional) steps for one verb.
+
+    One command per part rather than one `docker stop a b c`: the docker CLI
+    stops multiple containers in parallel, and for Immich the order is the
+    whole point — the server has to go before the database it is still
+    talking to. Start is the exact reverse, so dependencies come up first.
+    Restart is a stop pass followed by a start pass, for the same reason.
+    """
+    parts = control["parts"]
+    steps = []
+    if verb in ("stop", "restart"):
+        steps += [(part_argv(p, "stop"), p["optional"]) for p in parts]
+    if verb in ("start", "restart"):
+        steps += [(part_argv(p, "start"), p["optional"]) for p in reversed(parts)]
+    return steps
+
+
+def run_plan(steps):
+    """Run steps in order. First required failure stops the run.
+
+    A part marked optional (Immich's machine-learning container, which only
+    exists when the `ml` compose profile is on) is allowed to fail.
+    """
+    output = []
+    for argv, optional in steps:
+        code, out = run(argv)
+        if out:
+            output.append(out)
+        if code != 0 and not optional:
+            return code, "\n".join(output)
+    return 0, "\n".join(output)
 
 
 def handle(text):
@@ -186,24 +363,30 @@ def handle(text):
     if cmd in ("panel", "menu", "status", "list"):
         master_card()
         return
-    if cmd == "pick" and target in ("start", "stop", "restart"):
+    if cmd == "pick" and target in VERBS:
         pick(target)
         return
-    if cmd not in ("start", "stop", "restart"):
-        notify(USAGE)
+    if cmd not in VERBS:
+        notify(usage())
         return
 
-    if target in DOCKER_SERVICES:
-        containers = DOCKER_SERVICES[target]
-        order = containers if cmd == "stop" else list(reversed(containers))
-        code, out = run(["docker", cmd] + order)
-    elif target in SYSTEMD_SERVICES:
-        code, out = run(["systemctl", "--user", cmd, SYSTEMD_SERVICES[target]])
-    else:
-        notify(f"unknown service '{target}'\n{USAGE}")
+    control = load_registry().get(target)
+    if control is None:
+        notify(f"unknown service '{target}'\n{usage()}")
         return
 
-    note = kuma("pause" if cmd == "stop" else "resume", target)
+    # Pause before stopping, resume after starting: a paused monitor cannot
+    # page about downtime you asked for. Both are best-effort — `note` is the
+    # only trace a failure leaves, and it never changes the outcome below.
+    note = ""
+    if cmd in ("stop", "restart"):
+        note += kuma("pause", control)
+    code, out = run_plan(plan(control, cmd))
+    if cmd in ("start", "restart"):
+        # Resumed even when the command failed: a service that would not come
+        # back up is real downtime and should be allowed to page.
+        note += kuma("resume", control)
+
     _, acts = context_buttons(target)  # buttons for the state we're now in
     if code == 0:
         notify(f"{target}: {cmd} ok{note}", actions=acts)
@@ -214,6 +397,7 @@ def handle(text):
 def subscribe_forever():
     url = f"{NTFY}/{CONTROL_TOPIC}/json"
     print(f"listening on {url} (replies -> {REPLY_TOPIC})", flush=True)
+    load_registry()   # log which allowlist file is in force, at startup
     while True:
         try:
             proc = subprocess.Popen(["curl", "-sN", url], stdout=subprocess.PIPE, text=True)

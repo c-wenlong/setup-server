@@ -10,9 +10,14 @@
 <meta name="apple-mobile-web-app-title" content="Launcher">
 <meta name="robots" content="noindex">
 <title>Launcher</title>
-<!-- Inline data: icon so no /favicon.ico request is made at either mount point. -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='3.5' width='7' height='7' rx='2'/%3E%3Crect x='13.5' y='3.5' width='7' height='7' rx='2'/%3E%3Crect x='3.5' y='13.5' width='7' height='7' rx='2'/%3E%3Crect x='13.5' y='13.5' width='7' height='7' rx='2'/%3E%3C/svg%3E">
+<!-- Relative on purpose: the page is served at both `/` and `/home/`. -->
+<link rel="icon" href="icons/favicon.png">
+<!-- Full-bleed square, deliberately not pre-rounded: iOS applies its own
+     squircle mask and a pre-rounded icon comes out double-rounded. -->
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="notes.css">
+<link rel="stylesheet" href="tooltip.css">
 </head>
 <body>
 
@@ -20,15 +25,10 @@
 
 <div class="wrap">
 
-  <header class="head">
+  <header class="head" id="head">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
-          <rect x="3.5" y="3.5" width="7" height="7" rx="2"/>
-          <rect x="13.5" y="3.5" width="7" height="7" rx="2"/>
-          <rect x="3.5" y="13.5" width="7" height="7" rx="2"/>
-          <rect x="13.5" y="13.5" width="7" height="7" rx="2"/>
-        </svg>
+        <img src="icons/launcher.png" alt="" width="32" height="32" decoding="async">
       </span>
       <span class="brand-text">
         <h1>Launcher</h1>
@@ -36,7 +36,7 @@
       </span>
     </div>
 
-    <div class="search">
+    <div class="search" id="search">
       <span class="search-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
           <circle cx="11" cy="11" r="6.4"/><path d="m15.7 15.7 4.3 4.3"/>
@@ -49,6 +49,7 @@
   </header>
 
   <main>
+   <div id="view-grid">
     <div class="notice" id="notice" hidden>
       <div class="notice-body">
         <p class="notice-title" id="notice-title">Can't reach the launcher API</p>
@@ -81,16 +82,73 @@
 
       <p class="empty" id="empty" hidden>No service matches that.</p>
     </div>
-  </main>
+   </div>
 
-  <footer class="foot">
-    <span id="foot-count"></span>
-    <span class="foot-legend">
-      <span class="legend"><i class="dot dot-ok"></i>running</span>
-      <span class="legend"><i class="dot dot-warn"></i>down</span>
-      <span class="legend"><i class="dot dot-off"></i>not deployed</span>
-    </span>
-  </footer>
+   <!-- Detail view. Same page, hash-routed (#/service/<key>), so Back works
+        and the grid keeps its tab, filter and scroll position underneath. -->
+   <section class="detail" id="view-detail" aria-labelledby="d-title" hidden>
+
+     <button class="d-back" id="d-back" type="button">
+       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+         <path d="M14.5 5.5 8 12l6.5 6.5"/>
+       </svg>
+       <span>Services</span>
+     </button>
+
+     <div class="d-note" id="d-note" role="status" hidden></div>
+
+     <div class="d-head">
+       <span class="d-icon" id="d-icon" aria-hidden="true"></span>
+       <span class="d-headtext">
+         <h2 id="d-title">&nbsp;</h2>
+         <span class="d-sub" id="d-sub"></span>
+       </span>
+     </div>
+
+     <!-- No launch link and no URL here on purpose: opening a service is the
+          grid's job. This page is description, config and env vars. -->
+
+     <section class="d-sec">
+       <h3 class="d-sec-h">Name and description</h3>
+
+       <p class="field">
+         <label class="field-label" for="d-name">Name</label>
+         <input class="field-input" id="d-name" type="text" autocomplete="off"
+                autocorrect="off" autocapitalize="off" spellcheck="false" maxlength="120">
+       </p>
+
+       <p class="field">
+         <label class="field-label" for="d-desc">Description</label>
+         <textarea class="field-input field-area" id="d-desc" rows="4" spellcheck="false"></textarea>
+       </p>
+
+       <p class="field-hint">
+         Saved on the box, not in the repo. Clear a field and it goes back to the
+         name shipped in <code>services.json</code>.
+       </p>
+       <p class="field-status" id="d-save" role="status" aria-live="polite"></p>
+     </section>
+
+     <section class="d-sec" id="d-env-sec" hidden>
+       <h3 class="d-sec-h">Environment</h3>
+       <p class="d-sec-sub" id="d-env-path"></p>
+       <dl class="env" id="d-env"></dl>
+       <p class="d-empty" id="d-env-empty" hidden></p>
+     </section>
+
+     <section class="d-sec" id="d-meta-sec" hidden>
+       <h3 class="d-sec-h">Registry</h3>
+       <dl class="meta" id="d-meta"></dl>
+     </section>
+
+     <!-- Mount point for the notes module (notes.js). Self-contained: it
+          reads the service key from the hash and renders itself here, so
+          notes can evolve without touching app.js. -->
+     <div id="notes-mount"></div>
+
+   </section>
+  </main>
 
 </div>
 
@@ -129,5 +187,7 @@
 
 <script src="icons.js"></script>
 <script src="app.js"></script>
+<script src="notes.js"></script>
+<script src="tooltip.js"></script>
 </body>
 </html>

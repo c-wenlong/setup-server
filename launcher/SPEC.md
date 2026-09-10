@@ -166,3 +166,75 @@ install → unit → publish → verify), `SETUP.md`, `TROUBLESHOOT.md`,
 Auth (tailnet is the boundary), editing the registry from the UI,
 uninstall/stop actions, log history beyond the current job, PWA manifest,
 reordering tiles.
+
+---
+
+# v2 — service detail pages
+
+## Why
+
+The tile grid answers "what exists and is it up". It cannot answer "what is
+this, what is it configured with, and what was that password". That lives
+scattered across DIRECTORY.md and nine `.env` files.
+
+## Card interaction split
+
+A tile becomes two targets side by side, not one:
+
+- **Left — icon + name (+ tagline, status dot):** the link. Opens the
+  service in a new tab. This is the shrunk hit area; it is deliberately no
+  longer the whole card.
+- **Right — blank space:** opens that service's detail page.
+
+Both must be real, keyboard-reachable controls, and an `<a>` may not be
+nested inside a `<button>` — use two siblings in a positioned container.
+The right region needs an accessible name ("Details for Immich"); blank to
+the eye is not blank to a screen reader.
+
+`planned` tiles have no URL, so the whole tile opens details.
+
+## Detail page
+
+A hash route (`#/service/<key>`), so Back works and a page can be linked.
+Not a modal-only affair.
+
+Contents:
+- Icon, name, status, and the URL as a real link.
+- **Editable name and description**, saved back to the server.
+- **Environment variables**, secrets masked, each with an eye toggle.
+- Whatever `meta` is useful (setup script path, health URL, ports).
+
+## Editing, and where edits live
+
+Edits do NOT go into `services.json` — that file is tracked in git and is
+the shipped default. They go to `~/services/launcher/overrides.json`, which
+survives redeploys and keeps the repo clean. A service's effective name and
+description are the registry values with the override layered on top.
+Deleting the override file restores the shipped defaults.
+
+## Secrets — read this before implementing
+
+The reveal endpoint puts every secret on the box behind an HTTP endpoint:
+database passwords, admin passwords, a JWT private key, and third-party API
+keys (ElevenLabs, Sarvam). Anything on the tailnet can read them. That is a
+real widening of exposure and is accepted deliberately, but it constrains
+the design:
+
+- Masked values are **never** sent in the list or detail payload. The
+  detail response carries only names and a `secret` flag.
+- Revealing is a separate, explicit **POST** per variable — not a GET, so
+  it cannot be prefetched, link-previewed, or sit in browser history.
+- Secret detection is by name: `PASS`, `SECRET`, `TOKEN`, `KEY`, `CRED`,
+  `PRIVATE` (case-insensitive). When in doubt, treat it as a secret —
+  over-masking is a nuisance, under-masking is a leak.
+- The env file path comes from the registry only, is `realpath`'d, and must
+  resolve inside the allowed roots — the same rule the deploy endpoint uses.
+- Never write a revealed value to a log line.
+
+## API
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `api/services/{key}` | detail: identity, meta, env var names + `secret` flags (no values) |
+| PATCH | `api/services/{key}` | `{name?, description?}` → persists to overrides.json |
+| POST | `api/services/{key}/env/{var}/reveal` | `{value}` for one variable |
