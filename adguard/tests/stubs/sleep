@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# sleep stub: logs the call and returns immediately, so readiness loops that
+# would really take a minute finish instantly. The suite counts these to prove
+# the loop actually waited between polls rather than spinning.
+echo "sleep $*" >> "$CALLS_LOG"
+exit 0

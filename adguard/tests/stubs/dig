@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# dig stub — the single most important stub in this suite.
+#
+# The trap this models: a fresh AdGuard container runs NO DNS server at all,
+# only the install wizard, yet Docker's port mapping still makes `ss` report
+# <tailnet-ip>:53 as LISTEN. Measured in that state:
+#
+#   dig @<ip> example.com  ->  ;; communications error ...: connection refused
+#
+# So a verify step built on a socket check goes green against a resolver that
+# answers nothing. This stub refuses every query until $STATE_DIR/configured
+# exists — created by the curl stub when the install API succeeds — so a
+# setup.sh that skipped or botched the install cannot pass.
+#
+# It also refuses any query aimed at the WRONG SERVER. Only the tailnet
+# address answers; a script that verified against 127.0.0.1, or against a
+# hardcoded literal, gets nothing back.
+#
+# State in $STATE_DIR:
+#   configured       — (from the curl stub) the DNS server is running
+#   ts_ip            — the address that answers (default 100.77.77.77)
+#   dns_dead         — exists => configured, but queries still refused. The
+#                      "everything green except the actual resolver" case.
+#   filters_pending  — countdown of queries for a blocked name that come back
+#                      UNBLOCKED, modelling the filter lists still downloading
+#                      after a first configure. Must be a warning, not a
+#                      failure.
+echo "dig $*" >> "$CALLS_LOG"
+
+server=""; name=""
+for a in "$@"; do
+  case "$a" in
+    @*) server="${a#@}" ;;
+    +*|-*) ;;
+    A|AAAA|IN|CNAME|TXT) ;;
+    *) [ -z "$name" ] && name="$a" ;;
+  esac
+done
+
+ts_ip="$(cat "$STATE_DIR/ts_ip" 2>/dev/null || echo 100.77.77.77)"
+
+refused() {
+  echo ";; communications error to ${server:-?}#53: connection refused" >&2
+  exit 9
+}
+
+[ -f "$STATE_DIR/configured" ] || refused
+[ -f "$STATE_DIR/dns_dead" ] && refused
+[ "$server" = "$ts_ip" ] || refused
+
+case "$name" in
+  doubleclick.net|*.doubleclick.net|ads.*)
+    if [ -f "$STATE_DIR/filters_pending" ]; then
+      left="$(cat "$STATE_DIR/filters_pending")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/filters_pending"
+        echo "142.250.66.14"          # not blocked yet: lists still downloading
+        exit 0
+      fi
+    fi
+    echo "0.0.0.0"                     # AdGuard's answer for a blocked name
+    ;;
+  "")
+    exit 1
+    ;;
+  *)
+    # A CNAME line ahead of the address, the way +short really answers, so a
+    # verify step that takes the first line blindly is not quietly rewarded.
+    echo "cdn.example.net."
+    echo "93.184.216.34"
+    ;;
+esac
+exit 0

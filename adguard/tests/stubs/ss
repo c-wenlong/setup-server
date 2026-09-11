@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# ss stub — feeds setup.sh's listener audit. Real `ss` would report this
+# host's own sockets, which in a sandbox means the audit passes for reasons
+# that have nothing to do with the script under test, and the failure branch
+# could never be reached at all.
+#
+# Output shape matches `ss -ltnH` / `ss -lunH`: no header, and the local
+# address is field 4.
+#
+# The default picture is a correct deploy:
+#   :53   -> the tailnet address, plus systemd-resolved's 127.0.0.53%lo and
+#            127.0.0.54 stubs, which are loopback and legitimately there —
+#            this deploy leaves resolved completely alone.
+#   :3080 -> 127.0.0.1 only.
+#
+# State in $STATE_DIR:
+#   listen_dns_wildcard — :53 also on 0.0.0.0. The hard failure for this
+#                         service: an open recursive resolver on the LAN.
+#   listen_dns_lan      — :53 on a LAN address instead of the tailnet one.
+#   listen_web_lan      — the web port on a LAN address.
+echo "ss $*" >> "$CALLS_LOG"
+
+port=""
+for a in "$@"; do
+  case "$a" in
+    sport*) port="$(printf '%s' "$a" | sed -n 's/.*:\([0-9][0-9]*\).*/\1/p')" ;;
+  esac
+done
+[ -n "$port" ] || exit 0
+
+ts_ip="$(cat "$STATE_DIR/ts_ip" 2>/dev/null || echo 100.77.77.77)"
+web_port="$(cat "$STATE_DIR/web_port" 2>/dev/null || echo 3080)"
+
+row() { printf 'LISTEN 0 4096 %s:%s 0.0.0.0:*\n' "$1" "$port"; }
+
+if [ "$port" = "53" ]; then
+  row "127.0.0.53%lo"
+  row "127.0.0.54"
+  if [ -f "$STATE_DIR/listen_dns_wildcard" ]; then
+    row "0.0.0.0"
+  elif [ -f "$STATE_DIR/listen_dns_lan" ]; then
+    row "192.168.1.42"
+  else
+    row "$ts_ip"
+  fi
+elif [ "$port" = "$web_port" ]; then
+  if [ -f "$STATE_DIR/listen_web_lan" ]; then
+    row "192.168.1.42"
+  else
+    row "127.0.0.1"
+  fi
+fi
+exit 0

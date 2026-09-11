@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# curl stub — fakes the AdGuard Home HTTP surface (v0.107.79).
+#
+# The endpoint that carries this whole deploy is GET /control/status, whose
+# STATUS CODE is the state machine. Measured against the real image:
+#
+#   000  not accepting connections yet
+#   302  up, NOT configured — redirects to /control/install.html
+#   401  up, configured, no credentials offered
+#   200  up, configured, and these credentials work
+#
+# so the stub models exactly that, keyed off $STATE_DIR/configured.
+#
+# The other load-bearing behaviour is that this stub VALIDATES the install
+# body rather than rubber-stamping it. POST /control/install/configure must
+# carry {"web":{"ip":"0.0.0.0","port":3000}} — the address AdGuard is already
+# serving on inside the container. Anything else gets the measured
+#   400 checking address <ip>:<port>: listen tcp ...: address already in use
+# because AdGuard validates the requested web address by trying to BIND it,
+# and so collides with itself. 127.0.0.1:3000 is the natural thing to put
+# there (it is the correct value everywhere else in this repo) and it fails.
+# A setup.sh mutated to send it therefore turns this suite red, which is the
+# entire point of validating instead of accepting.
+#
+# State in $STATE_DIR:
+#   configured         — exists => AdGuard is configured (also created BY a
+#                        successful install, so the second run of a two-run
+#                        test sees the real thing)
+#   creds              — "user:pass" the install recorded; the authenticated
+#                        status check must present these
+#   install_body       — the raw JSON the script POSTed, for assertions
+#   dns_config_body    — the raw JSON POSTed to /control/dns_config
+#   conn_refused_left  — countdown of REAL connection failures on the loopback
+#                        API (exit 7, http_code 000). This is what a cold
+#                        start actually looks like — not a tidy 503 — and a
+#                        deploy that treats the first 000 as fatal fails most
+#                        of them. Jellyfin's deploy in this repo died on it.
+#   install_400        — exists => force the 400 branch even for a correct body
+#   install_code       — a code to force out of the install endpoint (e.g. 500)
+#   dns_not_running    — exists => an authenticated /control/status answers 200
+#                        but with "running":false, i.e. signed in fine and the
+#                        DNS server is not up. Green everywhere else.
+#   bad_password       — exists => credentials never match (password drifted
+#                        after someone changed it in the web UI)
+#   https_dead         — exists => the tailnet HTTPS front door never answers
+#   ratelimit_fails    — exists => POST /control/dns_config returns 500
+echo "curl $*" >> "$CALLS_LOG"
+
+out=""; url=""; want_code=0; failonerr=0; method="GET"; user=""; datafile=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -u) user="$2"; shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    --data-binary|-d) case "$2" in @*) datafile="${2#@}" ;; esac; shift 2 ;;
+    -H|--max-time|--connect-timeout|--retry) shift 2 ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <body>
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+# A refused connection: curl writes 000 under -w and nothing else, and exits 7
+# whether or not -f was given.
+refuse() {
+  [ -n "$out" ] && : > "$out"
+  [ "$want_code" = "1" ] && printf '000'
+  echo "curl: (7) Failed to connect: Connection refused" >&2
+  exit 7
+}
+
+configured() { [ -f "$STATE_DIR/configured" ]; }
+
+# Pull a "key":value or "key":"value" out of flat-ish JSON without a parser.
+jget() {  # jget <file> <key>
+  sed -n "s/.*\"$2\": *\"\{0,1\}\([^,\"}]*\)\"\{0,1\}.*/\1/p" "$1" 2>/dev/null | head -1
+}
+# The web block specifically: {"web":{"ip":"...","port":N},...}
+web_field() {  # web_field <file> ip|port
+  sed -n 's/.*"web":{\([^}]*\)}.*/\1/p' "$1" 2>/dev/null \
+    | sed -n "s/.*\"$2\": *\"\{0,1\}\([^,\"}]*\)\"\{0,1\}.*/\1/p" | head -1
+}
+
+case "$url" in
+  # ---- the tailnet HTTPS front door -------------------------------------
+  https://*)
+    [ -f "$STATE_DIR/https_dead" ] && refuse
+    configured && emit 401 '<html>Unauthorized</html>'
+    emit 302 ''
+    ;;
+esac
+
+# Everything below is the loopback API. A cold start refuses the connection
+# outright; it does not answer politely with a 503.
+if [ -f "$STATE_DIR/conn_refused_left" ]; then
+  left="$(cat "$STATE_DIR/conn_refused_left")"
+  if [ "$left" -gt 0 ]; then
+    echo $((left - 1)) > "$STATE_DIR/conn_refused_left"
+    refuse
+  fi
+fi
+
+case "$url" in
+  */control/install/configure)
+    [ "$method" = "POST" ] || emit 405 ''
+    [ -n "$datafile" ] && cp "$datafile" "$STATE_DIR/install_body" 2>/dev/null
+
+    # A second configure against an already-configured instance. The desired
+    # end state, so setup.sh must treat it as success, not as a failed deploy.
+    configured && emit 403 '{"message":"AdGuard Home is already configured"}'
+
+    if [ -f "$STATE_DIR/install_code" ]; then
+      emit "$(cat "$STATE_DIR/install_code")" '{"message":"stub-forced failure"}'
+    fi
+
+    wip="$(web_field "$STATE_DIR/install_body" ip)"
+    wport="$(web_field "$STATE_DIR/install_body" port)"
+    if [ -f "$STATE_DIR/install_400" ] \
+       || [ "$wip" != "0.0.0.0" ] || [ "$wport" != "3000" ]; then
+      # The exact shape AdGuard returns when the web block names an address
+      # other than the one it is already serving on: it tries to bind the
+      # address to validate it, and loses the race with itself.
+      emit 400 "{\"message\":\"checking address ${wip:-?}:${wport:-?}: listen tcp ${wip:-?}:${wport:-?}: bind: address already in use\"}"
+    fi
+
+    printf '%s:%s' "$(jget "$STATE_DIR/install_body" username)" \
+                   "$(jget "$STATE_DIR/install_body" password)" \
+      > "$STATE_DIR/creds"
+    touch "$STATE_DIR/configured"
+    emit 200 'OK'
+    ;;
+
+  */control/dns_config)
+    [ -n "$datafile" ] && cp "$datafile" "$STATE_DIR/dns_config_body" 2>/dev/null
+    [ -f "$STATE_DIR/ratelimit_fails" ] && emit 500 '{"message":"nope"}'
+    emit 200 'OK'
+    ;;
+
+  */control/status)
+    configured || emit 302 '<a href="/control/install.html">Found</a>'
+    [ -n "$user" ] || emit 401 '{"message":"Forbidden"}'
+    [ -f "$STATE_DIR/bad_password" ] && emit 401 '{"message":"Forbidden"}'
+    want="$(cat "$STATE_DIR/creds" 2>/dev/null || true)"
+    [ -n "$want" ] && [ "$user" != "$want" ] && emit 401 '{"message":"Forbidden"}'
+    if [ -f "$STATE_DIR/dns_not_running" ]; then
+      emit 200 '{"version":"v0.107.79","running":false,"protection_enabled":true}'
+    fi
+    emit 200 '{"version":"v0.107.79","running":true,"protection_enabled":true,"dns_addresses":["100.77.77.77"]}'
+    ;;
+
+  *)
+    emit 200 '{}'
+    ;;
+esac
