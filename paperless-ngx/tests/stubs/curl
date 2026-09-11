@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# curl stub — fakes the Paperless-ngx (Django 5.2) HTTP surface.
+#
+# This stub does not rubber-stamp requests. It answers the way Django answers
+# GIVEN THE EFFECTIVE ENVIRONMENT the docker stub computed from
+# docker-compose.yml + .env at `compose up` ($STATE_DIR/paperless_env). Every
+# rule below was read out of the shipped image rather than remembered:
+#
+#   src/paperless/settings/__init__.py  (identical logic in 2.18.4 and 3.1.3)
+#     ALLOWED_HOSTS = get_list_from_env("PAPERLESS_ALLOWED_HOSTS", default=["*"])
+#     if ALLOWED_HOSTS != ["*"]: ALLOWED_HOSTS.append("localhost")   # NOT 127.0.0.1
+#     PAPERLESS_URL, if set, appends to CSRF_TRUSTED_ORIGINS, CORS_ALLOWED_ORIGINS
+#       and (hostname only, port stripped) ALLOWED_HOSTS
+#     PAPERLESS_SECRET_KEY unset or "change-me" -> ImproperlyConfigured at boot
+#
+#   django/middleware/csrf.py  (Django 5.2.16, in the image)
+#     _origin_verified: good_origin = "%s://%s" % (scheme, request.get_host())
+#     and an exact-string membership test against CSRF_TRUSTED_ORIGINS.
+#
+# THREE CONSEQUENCES, and they are what this suite exists to hold down.
+#
+# 1. THE 400 IS NOT THE DEFAULT FAILURE — IT IS THE FAILURE YOU CREATE BY
+#    "TIGHTENING" ALLOWED_HOSTS. Out of the box ALLOWED_HOSTS is ["*"] and
+#    nothing 400s. Set PAPERLESS_ALLOWED_HOSTS to the tailnet name — the
+#    obviously-correct-looking hardening step — and Django appends "localhost"
+#    but NOT "127.0.0.1", so the browser keeps working while
+#    http://127.0.0.1:8095/ starts returning
+#      400 Invalid HTTP_HOST header: '127.0.0.1:8095'.
+#    That is the local health check, the Uptime Kuma monitor, and this repo's
+#    own live suite — all red, with the app perfectly fine.
+#
+# 2. THE CSRF FAILURE IS INVISIBLE TO curl. Tailscale Serve terminates TLS and
+#    proxies plain HTTP, so Django computes good_origin as
+#    "http://test-host.tailfake.ts.net:8095" while a browser sends
+#    "Origin: https://test-host.tailfake.ts.net:8095". Those differ, so the POST
+#    is only allowed if that exact string is in CSRF_TRUSTED_ORIGINS — i.e. if
+#    PAPERLESS_URL carries the scheme AND the port. Without it, every GET is a
+#    cheerful 200 and only the login POST fails, 403. A deploy check that fetches
+#    a page and sees 200 declares victory over an instance nobody can log in to.
+#    So this stub enforces the origin rule on POSTs, and the suite asserts it.
+#
+# 3. manage_superuser NEVER RESETS A PASSWORD (see the docker stub). The
+#    credentials this stub accepts are the ones recorded when the account was
+#    FIRST created, not whatever .env says now.
+#
+# State in $STATE_DIR:
+#   paperless_env      — the effective environment (written by the docker stub)
+#   superuser          — "user:password" as actually created
+#   conn_refused_left  — countdown of REAL refused connections: exit 7, and 000
+#                        under -w. This is what a cold Paperless looks like while
+#                        it runs migrations — gunicorn is not listening at all —
+#                        and NOT a tidy 503. A readiness loop that treats the
+#                        first 000 as fatal fails nearly every first boot.
+#   https_dead         — the tailnet HTTPS front door never answers (cert still
+#                        minting on a brand-new port)
+#   force_code         — force this status code out of every app request
+#   login_broken       — the login page itself 500s (a template/static failure)
+echo "curl $*" >> "$CALLS_LOG"
+
+# --------------------------------------------------------------- arguments
+out=""; url=""; want_code=0; failonerr=0; method=""; user=""
+data=""; origin=""; follow=0; cookie_jar=""; cookie_in=""; head_only=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X|--request) method="$2"; shift 2 ;;
+    -o|--output) out="$2"; shift 2 ;;
+    -u|--user) user="$2"; shift 2 ;;
+    -w|--write-out) case "$2" in *'%{http_code}'*) want_code=1 ;; esac; shift 2 ;;
+    -c|--cookie-jar) cookie_jar="$2"; shift 2 ;;
+    -b|--cookie) cookie_in="$2"; shift 2 ;;
+    -d|--data|--data-raw|--data-binary|--data-urlencode)
+      case "$2" in
+        @*) data="$data&$(cat "${2#@}" 2>/dev/null)" ;;
+        *)  data="$data&$2" ;;
+      esac
+      shift 2 ;;
+    -H|--header)
+      case "$2" in
+        [Oo]rigin:*) origin="$(printf '%s' "${2#*:}" | sed 's/^ *//; s/ *$//')" ;;
+      esac
+      shift 2 ;;
+    --max-time|--connect-timeout|--retry|--retry-delay|-A|--user-agent|-e|--referer)
+      shift 2 ;;
+    -L|--location) follow=1; shift ;;
+    -I|--head) head_only=1; shift ;;
+    -f|--fail) failonerr=1; shift ;;
+    -[a-zA-Z][a-zA-Z]*)
+      # bundled short flags, e.g. -fsS / -sSL
+      case "$1" in *f*) failonerr=1 ;; esac
+      case "$1" in *L*) follow=1 ;; esac
+      shift ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+[ -n "$method" ] || { [ -n "$data" ] && method=POST || method=GET; }
+
+# ------------------------------------------------------------------ output
+emit() {  # emit <http_code> <body>
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+# A refused connection. curl exits 7, writes 000 under -w, and produces no body
+# — whether or not -f was passed. Modelling a cold start as anything tidier
+# (a 503, an empty 200) would be a lie, and it is exactly the lie that let
+# Jellyfin's deploy in this repo pass its readiness probe and then fail.
+refuse() {
+  [ -n "$out" ] && : > "$out"
+  [ "$want_code" = "1" ] && printf '000'
+  echo "curl: (7) Failed to connect to ${host_hdr:-host}: Connection refused" >&2
+  exit 7
+}
+
+env_get() { sed -n "s/^$1=//p" "$STATE_DIR/paperless_env" 2>/dev/null | head -1; }
+
+# ------------------------------------------------------- Django host checks
+# ALLOWED_HOSTS as settings.py assembles it. Note the two asymmetries that make
+# this worth modelling instead of assuming: the default is a bare "*", and the
+# convenience entry Django adds when you narrow it is "localhost" — never
+# "127.0.0.1".
+host_allowed() {  # host_allowed <host-without-port>
+  local h="$1" ah pu hn item
+  ah="$(env_get PAPERLESS_ALLOWED_HOSTS)"
+  pu="$(env_get PAPERLESS_URL)"
+  hn="$(printf '%s' "$pu" | sed -n 's#^[a-z]*://\([^:/]*\).*#\1#p')"
+  if [ -z "$ah" ]; then
+    return 0                     # default ["*"]  (+ hostname) — everything passes
+  fi
+  # narrowed: the list, plus "localhost", plus PAPERLESS_URL's hostname
+  for item in $(printf '%s' "$ah" | tr ',' ' ') localhost $hn; do
+    [ "$item" = "*" ] && return 0
+    [ "$item" = "$h" ] && return 0
+  done
+  return 1
+}
+
+# CSRF_TRUSTED_ORIGINS membership: an exact string match, port and scheme
+# included. This is the whole trap in one function.
+origin_trusted() {  # origin_trusted <origin>
+  local o="$1" cto pu item
+  cto="$(env_get PAPERLESS_CSRF_TRUSTED_ORIGINS)"
+  pu="$(env_get PAPERLESS_URL)"
+  for item in $(printf '%s' "$cto" | tr ',' ' ') $pu; do
+    [ "$item" = "$o" ] && return 0
+  done
+  return 1
+}
+
+# --------------------------------------------------------------- responses
+LOGIN_PAGE='<!doctype html><html><head><title>Paperless-ngx Sign in</title></head>
+<body><form method="post" action="/accounts/login/">
+<input type="hidden" name="csrfmiddlewaretoken" value="STUBCSRFTOKEN0000000000000000000">
+<input name="login"><input name="password" type="password">
+<button>Sign in</button></form></body></html>'
+
+bad_host() {  # bad_host <host-with-port> <host-without-port>
+  emit 400 "<h1>Bad Request (400)</h1><p>Invalid HTTP_HOST header: '$1'. You may need to add '$2' to ALLOWED_HOSTS.</p>"
+}
+
+csrf_bad_origin() {
+  # DEBUG is off in any sane deploy, so Django renders the generic page and the
+  # reason string is NOT in the body. That is why TROUBLESHOOT.md tells you to
+  # read the container log for "Forbidden (Origin checking failed ...)" rather
+  # than the page. The marker below stands in for the log line.
+  echo "Forbidden (Origin checking failed - $origin does not match any trusted origins.): /accounts/login/" \
+    >> "$STATE_DIR/app_log"
+  emit 403 '<!doctype html><html><head><title>403 Forbidden</title></head><body><h1>Forbidden <span>(403)</span></h1><p>CSRF verification failed. Request aborted.</p></body></html>'
+}
+
+csrf_no_cookie() {
+  echo "Forbidden (CSRF cookie not set.): /accounts/login/" >> "$STATE_DIR/app_log"
+  emit 403 '<!doctype html><html><head><title>403 Forbidden</title></head><body><h1>Forbidden <span>(403)</span></h1><p>CSRF verification failed. Request aborted.</p><p>You are seeing this message because this site requires a CSRF cookie when submitting forms.</p></body></html>'
+}
+
+# ------------------------------------------------------------------ routing
+# Split the URL into scheme, host:port and path.
+scheme="$(printf '%s' "$url" | sed -n 's#^\([a-z][a-z]*\)://.*#\1#p')"
+host_hdr="$(printf '%s' "$url" | sed -n 's#^[a-z]*://\([^/]*\).*#\1#p')"
+path="$(printf '%s' "$url" | sed -n 's#^[a-z]*://[^/]*\(/[^?]*\).*#\1#p')"
+[ -n "$path" ] || path="/"
+host_only="${host_hdr%%:*}"
+
+# The tailnet front door. Serve terminates TLS and proxies plain HTTP to
+# 127.0.0.1, PRESERVING the Host header — which is why ALLOWED_HOSTS has to
+# know the tailnet name, and why Django still thinks the request is http.
+if [ "$scheme" = "https" ]; then
+  [ -f "$STATE_DIR/https_dead" ] && refuse
+else
+  # The loopback side. A cold start refuses outright; it does not answer
+  # politely while migrations run.
+  if [ -f "$STATE_DIR/conn_refused_left" ]; then
+    left="$(cat "$STATE_DIR/conn_refused_left")"
+    if [ "$left" -gt 0 ]; then
+      echo $((left - 1)) > "$STATE_DIR/conn_refused_left"
+      refuse
+    fi
+  fi
+fi
+
+# Nothing answers at all until the container has been started.
+[ -f "$STATE_DIR/compose_up" ] || refuse
+
+if [ -f "$STATE_DIR/force_code" ]; then
+  emit "$(cat "$STATE_DIR/force_code")" 'stub-forced'
+fi
+
+# ALLOWED_HOSTS is checked before anything else Django does.
+host_allowed "$host_only" || bad_host "$host_hdr" "$host_only"
+
+case "$path" in
+  /)
+    # Measured: an unauthenticated GET / is a 302 to the login page, never a
+    # 200. Uptime Kuma scores a 302 as DOWN, so this is not the health path.
+    if [ "$follow" = "1" ]; then
+      path="/accounts/login/"
+    else
+      emit 302 ''
+    fi
+    ;;
+esac
+
+case "$path" in
+  /accounts/login/*|/accounts/login)
+    [ -f "$STATE_DIR/login_broken" ] && emit 500 '<h1>Server Error (500)</h1>'
+    if [ "$method" = "POST" ]; then
+      # 1. Origin first — this is the order Django checks in, and it is why a
+      #    misconfigured PAPERLESS_URL surfaces as a bad-origin 403 rather than
+      #    as a credentials error.
+      if [ -n "$origin" ]; then
+        if [ "$origin" != "http://$host_hdr" ] && ! origin_trusted "$origin"; then
+          csrf_bad_origin
+        fi
+      fi
+      # 2. Then the cookie/token pair.
+      if [ -z "$cookie_in" ] || ! printf '%s' "$data" | grep -q 'csrfmiddlewaretoken'; then
+        csrf_no_cookie
+      fi
+      # 3. Only then the credentials — and against the password the account was
+      #    CREATED with, which is not necessarily the one in .env now.
+      want="$(cat "$STATE_DIR/superuser" 2>/dev/null || true)"
+      if [ -z "$want" ]; then
+        emit 200 '<h1>Sign in</h1><p>The username and/or password you specified are not correct.</p>'
+      fi
+      u="$(printf '%s' "$data" | sed -n 's/.*[&?]login=\([^&]*\).*/\1/p' | head -1)"
+      p="$(printf '%s' "$data" | sed -n 's/.*[&?]password=\([^&]*\).*/\1/p' | head -1)"
+      if [ "$u:$p" = "$want" ]; then
+        emit 302 ''
+      fi
+      emit 200 '<h1>Sign in</h1><p>The username and/or password you specified are not correct.</p>'
+    fi
+    [ -n "$cookie_jar" ] && {
+      printf '# Netscape HTTP Cookie File\n%s\tFALSE\t/\tFALSE\t0\tcsrftoken\tSTUBCSRFTOKEN0000000000000000000\n' \
+        "$host_only" > "$cookie_jar"
+    }
+    emit 200 "$LOGIN_PAGE"
+    ;;
+
+  /api/remote_version/*|/api/remote_version)
+    # The one /api/ route that answers UNauthenticated with a 200 — measured
+    # on the running 3.1.3 container, alongside /accounts/login/ (200), / (302),
+    # /healthz (302) and /api/ (302). It was missing from this stub, so the
+    # three checks that assert it fell through to the /api/* branch below and
+    # got a 302.
+    #
+    # It is NOT the health path of choice even so: it reaches out to GitHub to
+    # ask whether a newer Paperless exists, which makes it depend on the
+    # internet being up. /accounts/login/ exercises Django and nothing else.
+    emit 200 '{"version":"3.1.3","update_available":false,"feature_is_set":true}'
+    ;;
+
+  /api/*|/api)
+    # Measured against the running image: an UNauthenticated /api/ is a 302 to
+    # the login page, not a 401 or a 403. So it is no better a health path than
+    # `/` is — Kuma scores the redirect as down — and a check that accepted
+    # "any 2xx/3xx" here would pass against a Paperless with no account in it.
+    if [ -n "$user" ]; then
+      want="$(cat "$STATE_DIR/superuser" 2>/dev/null || true)"
+      [ "$user" = "$want" ] && emit 200 '{"documents":"ok"}'
+      emit 403 '{"detail":"Invalid username/password."}'
+    fi
+    emit 302 ''
+    ;;
+
+  *)
+    emit 200 '<html>ok</html>'
+    ;;
+esac
