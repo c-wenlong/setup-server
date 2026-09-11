@@ -9,26 +9,26 @@ running its `setup.sh`.
 
 | Service | What it gives you | Deploy |
 |---|---|---|
-| [code-server](code-server/) | VS Code (with terminal) in the browser, tailnet-only over HTTPS | `cd code-server && ./setup.sh` |
-| [seafile](seafile/) | Self-hosted Drive: file sync + web UI + mobile photo backup (Docker) | `cd seafile && ./setup.sh` |
-| [open-webui](open-webui/) | ChatGPT-style UI over the host's ollama models (Docker) | `cd open-webui && ./setup.sh` |
-| [monitoring](monitoring/) | Uptime Kuma dashboard + ntfy phone alerts for every service (Docker) | `cd monitoring && ./setup.sh` |
-| [n8n](n8n/) | Workflow automation (self-hosted Zapier) wired to local services (Docker) | `cd n8n && ./setup.sh` |
-| [kaichenpedia](kaichenpedia/) | Personal wiki (Quartz static site), auto-deploys from GitHub via a daily poller (Docker nginx) | `cd kaichenpedia && ./setup.sh` |
+| <a href="https://coder.com/docs/code-server"><img src="launcher/web/icons/code-server.svg" width="20" alt="code-server"></a> [code-server](code-server/) | VS Code (with terminal) in the browser, tailnet-only over HTTPS | `cd code-server && ./setup.sh` |
+| <a href="https://manual.seafile.com/latest/"><img src="launcher/web/icons/seafile.svg" width="20" alt="Seafile"></a> [seafile](seafile/) | Self-hosted Drive: file sync + web UI + mobile photo backup (Docker) | `cd seafile && ./setup.sh` |
+| <a href="https://docs.openwebui.com/"><picture><source media="(prefers-color-scheme: dark)" srcset="launcher/web/icons/open-webui-dark.svg"><img src="launcher/web/icons/open-webui.svg" width="20" alt="Open WebUI"></picture></a> [open-webui](open-webui/) | ChatGPT-style UI over the host's ollama models (Docker) | `cd open-webui && ./setup.sh` |
+| <a href="https://uptime.kuma.pet/"><img src="launcher/web/icons/uptime-kuma.svg" width="20" alt="Uptime Kuma"></a> <a href="https://docs.ntfy.sh/"><img src="launcher/web/icons/ntfy.svg" width="20" alt="ntfy"></a> [monitoring](monitoring/) | Uptime Kuma dashboard + ntfy phone alerts for every service (Docker) | `cd monitoring && ./setup.sh` |
+| <a href="https://docs.n8n.io/"><img src="launcher/web/icons/n8n.svg" width="20" alt="n8n"></a> [n8n](n8n/) | Workflow automation (self-hosted Zapier) wired to local services (Docker) | `cd n8n && ./setup.sh` |
+| <a href="https://github.com/c-wenlong/kaichenpedia"><img src="launcher/web/icons/kaichenpedia.png" width="20" alt="kaichenpedia"></a> [kaichenpedia](kaichenpedia/) | Personal wiki (Quartz static site), auto-deploys from GitHub via a daily poller (Docker nginx) | `cd kaichenpedia && ./setup.sh` |
 | [ntfy-control](ntfy-control/) | Start/stop services from the ntfy phone app (allowlisted commands; auto-pauses Kuma monitors) | `cd ntfy-control && ./setup.sh` |
-| manimkc | Narrated ManimGL explainer videos from a JSON brief (HTTP job server; lives in the [manimkc repo](https://github.com/c-wenlong/manimkc) at `server/`) | `~/dev/manimkc/server/setup.sh` |
-| [beszel](beszel/) | Resource monitoring — CPU/RAM/GPU/disk/network/temperature graphs + alerts (Docker hub + native agent) | `cd beszel && ./setup.sh` |
-| [immich](immich/) | Self-hosted Google Photos: timeline, albums, phone background backup, optional face/semantic search (Docker) | `cd immich && ./setup.sh` |
-| [forgejo](forgejo/) | Self-hosted git forge — repos, PRs, issues; v15 LTS, SQLite, ~100 MB (Docker) | `cd forgejo && ./setup.sh` |
-| [jellyfin](jellyfin/) | Media server — films, shows, music to browser/phone/TV; software transcode, read-only media mount (Docker) | `cd jellyfin && ./setup.sh` |
-| [remote-desktop](remote-desktop/) | This box's GNOME desktop in a browser tab — Guacamole + gnome-remote-desktop; **needs sudo** (configures a system daemon) | `cd remote-desktop && ./setup.sh` |
-| [paperless-ngx](paperless-ngx/) | OCR'd, searchable archive of receipts, contracts and tax docs; SQLite + redis, ~659 MB (Docker) | `cd paperless-ngx && ./setup.sh` |
-| [firefly-iii](firefly-iii/) | Personal finance — accounts, budgets, categories, reports; app + Postgres + Data Importer, ~195 MB (Docker) | `cd firefly-iii && ./setup.sh` |
+| <a href="https://github.com/c-wenlong/manimkc"><img src="launcher/web/icons/manimkc.png" width="20" alt="manimkc"></a> manimkc | Narrated ManimGL explainer videos from a JSON brief (HTTP job server; lives in the [manimkc repo](https://github.com/c-wenlong/manimkc) at `server/`) | `~/dev/manimkc/server/setup.sh` |
+| <a href="https://beszel.dev/"><img src="launcher/web/icons/beszel.svg" width="20" alt="Beszel"></a> [beszel](beszel/) | Resource monitoring — CPU/RAM/GPU/disk/network/temperature graphs + alerts (Docker hub + native agent) | `cd beszel && ./setup.sh` |
+| <a href="https://docs.immich.app/"><img src="launcher/web/icons/immich.svg" width="20" alt="Immich"></a> [immich](immich/) | Self-hosted Google Photos: timeline, albums, phone background backup, optional face/semantic search (Docker) | `cd immich && ./setup.sh` |
+| <a href="https://forgejo.org/"><img src="launcher/web/icons/forgejo.svg" width="20" alt="Forgejo"></a> [forgejo](forgejo/) | Self-hosted git forge — repos, PRs, issues; v15 LTS, SQLite, ~100 MB (Docker) | `cd forgejo && ./setup.sh` |
+| <a href="https://jellyfin.org/"><img src="launcher/web/icons/jellyfin.svg" width="20" alt="Jellyfin"></a> [jellyfin](jellyfin/) | Media server — films, shows, music to browser/phone/TV; software transcode, read-only media mount (Docker) | `cd jellyfin && ./setup.sh` |
+| <a href="https://guacamole.apache.org/"><img src="launcher/web/icons/guacamole.svg" width="20" alt="Apache Guacamole"></a> [remote-desktop](remote-desktop/) | This box's GNOME desktop in a browser tab — Guacamole + gnome-remote-desktop; **needs sudo** (configures a system daemon) | `cd remote-desktop && ./setup.sh` |
+| <a href="https://docs.paperless-ngx.com/"><picture><source media="(prefers-color-scheme: dark)" srcset="launcher/web/icons/paperless-ngx-dark.svg"><img src="launcher/web/icons/paperless-ngx.svg" width="20" alt="Paperless-ngx"></picture></a> [paperless-ngx](paperless-ngx/) | OCR'd, searchable archive of receipts, contracts and tax docs; SQLite + redis, ~659 MB (Docker) | `cd paperless-ngx && ./setup.sh` |
+| <a href="https://docs.firefly-iii.org/"><img src="launcher/web/icons/firefly-iii.svg" width="20" alt="Firefly III"></a> [firefly-iii](firefly-iii/) | Personal finance — accounts, budgets, categories, reports; app + Postgres + Data Importer, ~195 MB (Docker) | `cd firefly-iii && ./setup.sh` |
 | [homepage](homepage/) | YAML-configured dashboard of every service, with live status dots and widgets — a read-only front door alongside the launcher (Docker) | `cd homepage && ./setup.sh` |
-| [adguard](adguard/) | Tailnet-wide DNS ad/tracker blocking — every device, no per-device app; needs one manual step in the Tailscale console to take effect (Docker) | `cd adguard && ./setup.sh` |
-| [home-assistant](home-assistant/) | Local-first home automation — lights, plugs, sensors, media players, with LAN device discovery (Docker, host net) | `cd home-assistant && ./setup.sh` |
-| [vaultwarden](vaultwarden/) | Password manager — Bitwarden-compatible server for the official Bitwarden apps; SQLite, ~12 MB, admin panel off (Docker) | `cd vaultwarden && ./setup.sh` |
-| [launcher](launcher/) | One-tap app launcher for every service on the box — tile grid with live status, and a Deploy button for services not installed yet (Python stdlib, systemd user unit) | `cd launcher && ./setup.sh` |
+| <a href="https://adguard.com/en/adguard-home/overview.html"><img src="launcher/web/icons/adguard.svg" width="20" alt="AdGuard Home"></a> [adguard](adguard/) | Tailnet-wide DNS ad/tracker blocking — every device, no per-device app; needs one manual step in the Tailscale console to take effect (Docker) | `cd adguard && ./setup.sh` |
+| <a href="https://www.home-assistant.io/"><img src="launcher/web/icons/home-assistant.svg" width="20" alt="Home Assistant"></a> [home-assistant](home-assistant/) | Local-first home automation — lights, plugs, sensors, media players, with LAN device discovery (Docker, host net) | `cd home-assistant && ./setup.sh` |
+| <a href="https://github.com/dani-garcia/vaultwarden/wiki"><img src="launcher/web/icons/vaultwarden.svg" width="20" alt="Vaultwarden"></a> [vaultwarden](vaultwarden/) | Password manager — Bitwarden-compatible server for the official Bitwarden apps; SQLite, ~12 MB, admin panel off (Docker) | `cd vaultwarden && ./setup.sh` |
+| <a href="launcher/"><img src="launcher/web/icons/launcher.png" width="20" alt="launcher"></a> [launcher](launcher/) | One-tap app launcher for every service on the box — tile grid with live status, and a Deploy button for services not installed yet (Python stdlib, systemd user unit) | `cd launcher && ./setup.sh` |
 
 Future service ideas live in [EXPLORATION.md](EXPLORATION.md).
 The live deployment (every running service, port map, credentials pointers)
