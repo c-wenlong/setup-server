@@ -1,0 +1,38 @@
+# Jellyfin — NVENC hardware transcoding overlay.
+#
+# NOT loaded by default. setup.sh adds this file to the compose invocation
+# only when JELLYFIN_NVENC=on in .env, which enable-nvenc.sh sets after it has
+# installed and verified nvidia-container-toolkit. Loading it without that
+# prerequisite makes the container fail to start with "could not select device
+# driver "nvidia" with capabilities: [[gpu]]".
+#
+# Turn it on:   ./enable-nvenc.sh          (one time, needs sudo)
+# Turn it off:  JELLYFIN_NVENC=off ./setup.sh
+#
+# Why the two environment variables, when `deploy.resources.reservations`
+# already asks for the GPU: the nvidia runtime injects only the driver
+# capabilities named in NVIDIA_DRIVER_CAPABILITIES, and its default is
+# "utility,compute" — which does NOT include `video`. Without `video` the GPU
+# is visible to the container and `nvidia-smi` works, but libnvidia-encode is
+# never mounted, so ffmpeg finds no NVENC device and Jellyfin falls back to
+# software transcoding while the dashboard still shows NVENC as enabled. That
+# failure mode looks like "hardware acceleration does nothing", which is why
+# it is spelled out here rather than left to the runtime default.
+
+name: jellyfin
+
+services:
+  jellyfin:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      # `all` = compute,compat32,graphics,utility,video,display. `video` is
+      # the one that matters (libnvidia-encode / libnvcuvid); the rest are
+      # harmless and keep this working if a plugin ever wants CUDA filters.
+      NVIDIA_DRIVER_CAPABILITIES: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

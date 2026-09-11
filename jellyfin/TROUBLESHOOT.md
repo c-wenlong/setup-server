@@ -24,7 +24,7 @@ If `docker` says "permission denied", you are not in the docker group in
 *this shell*: `sg docker -c './tests/run-tests.sh --live'`. The live suite
 detects this and says so rather than reporting a healthy container as down.
 
-## Read this before you debug anything: two endpoints that lie
+## Read this before you debug anything: three things that lie
 
 Most confusing Jellyfin failures on this box are one of these two.
 
@@ -52,6 +52,23 @@ curl -sS -X POST http://127.0.0.1:8096/Users/AuthenticateByName \
 ```
 
 `"IsAdministrator":true` is the only answer that means the deploy worked.
+Verified working as written on this deploy.
+
+**3. `HTTP 000` is not a status code, and `HTTP 000000` is a bug in whatever
+printed it.** `curl -w '%{http_code}'` prints `000` when it never connected —
+*and* exits non-zero, which is the part that catches people. A
+`code=$(curl … -w '%{http_code}' || echo 000)` fallback therefore fires on the
+very case it was written for and **concatenates**, producing the nonsense
+`000000` this deploy actually printed once. `setup.sh` now normalises anything
+that is not three digits back to `000` for exactly this reason. If you are
+scripting against Jellyfin:
+
+```bash
+code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8096/…)   # no `|| echo`
+```
+
+and treat `000` as "retry, the server is not listening yet", never as a
+verdict about the API.
 
 ## The wizard finished but there is no admin account
 
@@ -98,11 +115,19 @@ fails if the polling is removed.
 
 *(If the config directory does contain something you care about, the
 unsupported alternative is to stop the container, flip
-`<StartupWizardCompleted>` back to `false` in the server settings XML under
-`~/services/jellyfin/config/config/`, start it, and re-run the wizard. Copy
-the directory first. **Unverified on 12.0** — that filename and element come
-from 10.x, and 12.0 reworked the settings layer. Expect it to be fiddly, and
-prefer the re-deploy above whenever you can afford it.)*
+`<StartupWizardCompleted>` back to `false`, start it, and re-run the wizard.
+The file and element **do exist on 12.0** — confirmed on this box:*
+
+```bash
+grep -o 'StartupWizardCompleted>[a-z]*' ~/services/jellyfin/config/config/system.xml
+```
+
+*What is still unverified is whether flipping it actually reopens the wizard
+on 12.0 rather than leaving a half-initialised server, so copy the directory
+first (`cp -a ~/services/jellyfin/config ~/jellyfin-config.bak`) and prefer
+the re-deploy above whenever you can afford it. Note that `system.xml` is
+rewritten by the running server, so the edit has to happen while the
+container is stopped or it will be overwritten.)*
 
 ## Container won't start / keeps restarting
 
@@ -110,10 +135,12 @@ prefer the re-deploy above whenever you can afford it.)*
 docker compose --project-directory . logs --tail=100 jellyfin
 ```
 
-- **`Unable to create directory /config/…` / permission errors** — the UID
-  and GID in `.env` do not match the owner of `~/services/jellyfin/config`.
+- **`Unable to create directory /config/…` / permission errors** —
+  `JELLYFIN_UID`/`JELLYFIN_GID` in `.env` (compose feeds them straight to the
+  container's `user:`) do not match the owner of `~/services/jellyfin/config`.
   Fix the values (`id -u`, `id -g`) and re-run `./setup.sh`, or
-  `sudo chown -R $(id -u):$(id -g) ~/services/jellyfin`.
+  `sudo chown -R $(id -u):$(id -g) ~/services/jellyfin`. The same pair must
+  also be able to *read* `MEDIA_DIR`.
 - **`error while creating mount source path` for the media dir** — `MEDIA_DIR`
   in `.env` points at something that does not exist (a typo, or an external
   disk that is not mounted). Docker will happily create an empty directory in
@@ -171,27 +198,46 @@ Direct Stream or Transcode per session, plus the reason.
   Check the client's Tailscale connection type: a **relayed** (DERP) link is
   slow, a direct one is not. `tailscale status` on the box shows `relay` vs
   `direct` per peer.
-- **Transcoding, and the CPU is pinned** — expected. There is **no hardware
-  transcoding on this box**: the GTX 1070 is present but
-  `nvidia-container-toolkit` is not installed and Docker has no `nvidia`
-  runtime, so the container cannot see the GPU. The Ryzen 5 2600 does one
-  1080p transcode comfortably and 4K not at all. Options, cheapest first:
+- **Transcoding, and the CPU is pinned** — expected while hardware
+  transcoding is off. Check which mode you are in: `./enable-nvenc.sh
+  --check`. The Ryzen 5 2600 does one 1080p transcode comfortably and 4K not
+  at all. Options, cheapest first:
   1. Fix the client so it direct-plays (Jellyfin Media Player, Swiftfin or
      Infuse instead of the browser; the browser is the most common cause of
      an unnecessary transcode).
   2. Raise the client's quality setting — a client set to "auto" will ask for
      a lower bitrate and force a transcode of a file it could have played.
-  3. Actually install the NVIDIA runtime; SETUP.md has the exact steps, and
-     note that it requires restarting the Docker daemon, which bounces every
-     other service on this box.
+  3. Turn on the GPU: `./enable-nvenc.sh` (needs sudo, and restarts the
+     Docker daemon, which bounces every other service on this box).
+- **NVENC says it is enabled but transcodes still run on the CPU** — the
+  classic `NVIDIA_DRIVER_CAPABILITIES` trap. `--gpus all` defaults to
+  `utility,compute`, which omits `video`, so `libnvidia-encode` is never
+  mounted: `nvidia-smi` works inside the container and ffmpeg still finds no
+  encoder. `docker-compose.gpu.yml` sets the capability explicitly — confirm
+  it is actually layered (`./enable-nvenc.sh --check` should report
+  `JELLYFIN_NVENC=on`), then check the container really has it:
+  `docker inspect jellyfin --format '{{json .Config.Env}}' | tr ',' '\n' | grep NVIDIA`.
+  Watch `nvidia-smi dmon -s u` during a transcode; if the `enc` column stays
+  0, the GPU is not being used regardless of what the dashboard claims.
+- **Container will not start: `could not select device driver "nvidia"`** —
+  `JELLYFIN_NVENC=on` without the runtime installed. `setup.sh` refuses this
+  combination before touching the container, so seeing it means compose was
+  invoked by hand with the overlay. Fix: `./enable-nvenc.sh`, or
+  `JELLYFIN_NVENC=off ./setup.sh`.
+- **AV1 files fail instead of falling back to the CPU** — the GTX 1070 is
+  Pascal and has no AV1 decoder. Untick AV1 in Dashboard → Playback →
+  Transcoding; Jellyfin does not fall back gracefully from a hardware decoder
+  you told it to use.
 - **"Playback failed" immediately, no transcode attempted** — usually an
   unsupported audio codec in the browser (TrueHD, DTS). Use a real client.
 - **Transcodes fill the disk** — in-flight segments land in
-  `~/services/jellyfin/config/transcodes`, **not** in `cache/`. Dashboard →
-  Scheduled Tasks → **Clean Transcode Directory** clears them, and Dashboard
-  → Playback → Transcoding can cap the directory size. (`cache/` is the image
-  and subtitle cache; it is also safe to delete, but it is not what a runaway
-  transcode fills.)
+  `~/services/jellyfin/cache/transcodes` (`/cache/transcodes` in the
+  container). Verified on this deploy: `config/transcodes` does not exist, and
+  `encoding.xml` leaves `TranscodingTempPath` unset, so 12.0 uses the cache
+  default. Dashboard → Scheduled Tasks → **Clean Transcode Directory** clears
+  them, and Dashboard → Playback → Transcoding can cap the directory size.
+  `cache/` also holds the image and subtitle cache; the whole directory is
+  regenerable and safe to delete with the container stopped.
 
 ## Everything loads, but playback fails on every device except this box
 
@@ -230,9 +276,14 @@ an unreachable address".
 - **Port already claimed** — `tailscale serve status` will show what has
   `:8096`. Reset just this one: `tailscale serve --https=8096 off`.
   ⚠️ Never `tailscale serve reset` — that clears every mapping on the node,
-  taking all the other services down with it. `off` is undocumented in
-  `--help` but is what Tailscale prints itself, and is the only single-port
-  removal.
+  taking all the other services down with it, and every service's `setup.sh`
+  then has to be re-run. `off` is absent from `serve --help` (which lists only
+  `reset` and `clear`) but is what Tailscale prints itself after a successful
+  `serve`, and is the only single-port removal.
+
+  `:8096` is safe to `off` on its own. `:443` is not — it hosts two mounts,
+  code-server at `/` and the launcher at `/home/` — so never reach for a bare
+  `--https=443` here.
 
 ## HTTPS URL doesn't load from a client
 
@@ -277,16 +328,28 @@ an unreachable address".
   ```
 
   Once there *is* watch history worth keeping, the usual community fix is to
-  stop the container and clear the password hash directly in the SQLite user
-  database under `~/services/jellyfin/config/data/`, then log in with an empty
-  password and set a new one. ⚠️ **That has not been verified against 12.0**,
-  whose schema is a rewrite — the table and column names in 10.x guides do not
-  necessarily apply. Copy the whole config directory first
-  (`cp -a ~/services/jellyfin/config ~/jellyfin-config.bak`), inspect the
-  schema before you write anything (`sqlite3 <db> .tables`, then `.schema` on
-  whichever table holds users), and expect to iterate. Whatever you end up
-  with, mirror the new password into `.env` or the next `./setup.sh` fails its
-  verification login.
+  stop the container and clear the password hash directly in
+  `~/services/jellyfin/config/data/jellyfin.db`, then log in with an empty
+  password and set a new one.
+
+  ⚠️ **There is no `sqlite3` on this host, and none in the Jellyfin image
+  either.** Borrow one from the Forgejo image, which does ship it:
+
+  ```bash
+  cp -a ~/services/jellyfin/config ~/jellyfin-config.bak    # first, always
+  docker compose --project-directory . down
+  docker run --rm --entrypoint sqlite3 \
+    -v ~/services/jellyfin/config/data:/db codeberg.org/forgejo/forgejo:15 \
+    /db/jellyfin.db '.schema Users'
+  ```
+
+  On 12.0 the table is `Users` (verified on this box, via that exact command
+  against a copy). What is **not** verified is which column to blank and
+  whether Jellyfin then accepts an empty password — 12.0's schema is a
+  rewrite, so 10.x guides naming `Password`/`EasyPassword` may not apply. Read
+  the schema, expect to iterate, and never write to that DB with the container
+  running. Whatever you end up with, mirror the new password into `.env` or
+  the next `./setup.sh` fails its verification login.
 - **`setup.sh` dies with `Stale marker: … says the wizard has run, but the
   server reports StartupWizardCompleted=false`** — `~/services/jellyfin/config`
   was deleted (or replaced, or pointed somewhere else) while

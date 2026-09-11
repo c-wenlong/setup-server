@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 # docker stub. State in $STATE_DIR:
 #   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   nvidia_runtime  — exists => `docker info` reports the nvidia runtime
 #   compose_up      — touched by `compose ... up`
 #   compose_pull    — touched by `compose ... pull`
 #   compose_down    — touched by `compose ... down`
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
+  info)
+    # setup.sh asks for exactly one shape: --format '{{json .Runtimes}}'.
+    # Absent the state file this is what this box really reports today — runc
+    # and containerd, no nvidia — which is the case that must abort a
+    # JELLYFIN_NVENC=on deploy instead of handing compose a doomed config.
+    if [ -f "$STATE_DIR/nvidia_runtime" ]; then
+      echo '{"io.containerd.runc.v2":{"path":"runc"},"nvidia":{"path":"nvidia-container-runtime"},"runc":{"path":"runc"}}'
+    else
+      echo '{"io.containerd.runc.v2":{"path":"runc"},"runc":{"path":"runc"}}'
+    fi
+    ;;
+
   ps)
     if [ -f "$STATE_DIR/docker_no_perm" ]; then
       echo "permission denied while trying to connect to the docker API" >&2

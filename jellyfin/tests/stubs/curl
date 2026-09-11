@@ -13,6 +13,9 @@
 #                        admin account.
 #   wizard_done        — set by POST /Startup/Complete; makes
 #                        /System/Info/Public report StartupWizardCompleted:true
+#   wizard_false_left  — countdown of FALSE readings of StartupWizardCompleted
+#                        from an already-configured server (the cold-start
+#                        race; see the /System/Info/Public branch below)
 #   wizard_never_completes — Complete returns 204 but the flag never flips
 #                        (models a server that accepted the steps and did not
 #                        actually finish)
@@ -85,7 +88,17 @@ fi
 case "$url" in
   */System/Info/Public)
     wc=false
-    [ -f "$STATE_DIR/wizard_done" ] && wc=true
+    if [ -f "$STATE_DIR/wizard_done" ]; then
+      wc=true
+      # THE COLD-START RACE, observed for real on 2026-09-11. The readiness
+      # gate gets a 401 from /Startup/FirstUser (auth layer up) several
+      # seconds before the server config carrying StartupWizardCompleted is
+      # loaded — so an already-configured server transiently reports FALSE
+      # here. Sampling once and believing it makes setup.sh announce that the
+      # config directory was wiped, and tell the user to delete the wizard
+      # marker and re-run the wizard against a live, healthy server.
+      countdown wizard_false_left && wc=false
+    fi
     # LocalAddress echoes PublishedServerUrl on the real server, which in a
     # correct deploy is the address the request came in on — so mirror it.
     base="${url%/System/Info/Public}"
