@@ -54,6 +54,22 @@
       empty: 'Everything in the repo is deployed.' }
   ];
 
+  /* v3 view/sort/usage module (view.js), loaded just before this file. Every
+     call into it goes through here. It is optional on purpose: if that script
+     is missing or threw, the grid is exactly what it was in v2 — registry
+     order, tiles, no beacons — rather than a blank page. */
+  var VIEW = window.LauncherView || {
+    mode:     function () { return 'grid'; },
+    arrange:  function (list) { return list; },
+    table:    function () {},
+    ram:      function () { return ''; },
+    ramTag:   function () {},
+    detail:   function () {},
+    touch:    function () {},
+    toolbar:  function () {},
+    onChange: function () {}
+  };
+
   /* ---------- state ---------- */
 
   var services = [];
@@ -330,7 +346,17 @@
     return '#/service/' + encodeURIComponent(key);
   }
 
+  /* The corner slot is absolutely positioned and inert, which makes it the
+     one place a RAM figure can go without moving a single pixel of the tile's
+     own layout — the condition for putting it on the grid at all. view.js
+     fills it; with no resources in the payload it stays empty. */
   function cornerFor(svc, job) {
+    var slot = cornerSlot(svc, job);
+    VIEW.ramTag(slot, svc);
+    return slot;
+  }
+
+  function cornerSlot(svc, job) {
     var state = svc.state || 'planned';
     if (job)                  return cornerDot('dot-job', jobLabel(svc));
     if (state === 'active')   return cornerDot('dot-ok', 'Running');
@@ -388,6 +414,9 @@
       left.href = svc.url;
       left.target = '_blank';
       left.rel = 'noopener noreferrer';
+      /* Fire and forget: this click is navigating a tab away, so the beacon
+         uses keepalive and can never block it or fail loudly. */
+      left.addEventListener('click', function () { VIEW.touch(svc.key, 'launched'); });
     } else if (state === 'available') {
       left = make('button', 'tile-open');
       left.type = 'button';
@@ -465,9 +494,15 @@
   function tileFor(svc) {
     var sig = [svc.state, svc.url, svc.name, svc.tagline, svc.icon, liveJob(svc), jobAction(svc)].join('');
     var hit = tileCache[svc.key];
-    if (hit && hit.sig === sig) return hit.node;
-    var node = buildTile(svc);
-    tileCache[svc.key] = { sig: sig, node: node };
+    var node = (hit && hit.sig === sig) ? hit.node : null;
+    if (!node) {
+      node = buildTile(svc);
+      tileCache[svc.key] = { sig: sig, node: node };
+    }
+    /* RAM moves on every poll, so it is deliberately NOT part of the
+       signature: it is rewritten in place instead, and a 30s refresh still
+       never rebuilds the tile you happen to be hovering. */
+    VIEW.ramTag(node.querySelector('.tile-corner'), svc);
     return node;
   }
 
@@ -484,13 +519,21 @@
 
   function render() {
     if (!loaded) {
-      var frag = document.createDocumentFragment();
-      for (var s = 0; s < 8; s++) frag.appendChild(skeleton());
+      /* Skeleton tiles are the grid's loading state. In table view they would
+         be a flash of the wrong thing, so that view simply waits. */
+      var pending = VIEW.mode() === 'table';
       elGrid.textContent = '';
-      elGrid.appendChild(frag);
+      elGrid.hidden = pending;
+      VIEW.table(pending ? [] : null);
+      if (!pending) {
+        var frag = document.createDocumentFragment();
+        for (var s = 0; s < 8; s++) frag.appendChild(skeleton());
+        elGrid.appendChild(frag);
+      }
       elGrid.setAttribute('aria-busy', 'true');
       elEmpty.hidden = true;
       elTabs.hidden = false;
+      VIEW.toolbar(true);
       paintTabs(null);
       return;
     }
@@ -503,23 +546,39 @@
     var counts = {};
     for (var t = 0; t < TABS.length; t++) counts[TABS[t].id] = 0;
 
-    var nodes = [];
+    var shown = [];
     for (var i = 0; i < services.length; i++) {
       var svc = services[i];
       if (!matches(svc, q)) continue;
       for (var c = 0; c < TABS.length; c++) {
         if (TABS[c].match(svc)) counts[TABS[c].id]++;
       }
-      if (tab.match(svc)) nodes.push(tileFor(svc));
+      if (tab.match(svc)) shown.push(svc);
     }
 
-    syncGrid(nodes);
+    /* Sort order and grid-vs-table both live in view.js. It gets the list this
+       tab and filter already yielded, in registry order, and hands back the
+       order to paint — so the two views can never disagree about either. */
+    shown = VIEW.arrange(shown);
+
+    if (VIEW.mode() === 'table') {
+      elGrid.hidden = true;
+      syncGrid([]);
+      VIEW.table(shown);
+    } else {
+      VIEW.table(null);
+      elGrid.hidden = false;
+      var nodes = [];
+      for (var n = 0; n < shown.length; n++) nodes.push(tileFor(shown[n]));
+      syncGrid(nodes);
+    }
     elGrid.setAttribute('aria-busy', 'false');
 
     elTabs.hidden = services.length === 0;
+    VIEW.toolbar(services.length !== 0);
     paintTabs(counts);
 
-    if (nodes.length || services.length === 0) {
+    if (shown.length || services.length === 0) {
       elEmpty.hidden = true;
       elPanel.removeAttribute('tabindex');
     } else {
@@ -646,6 +705,9 @@
           if (fresh.control !== undefined) detailSvc.control = fresh.control;
           if (detailSvc.url == null) detailSvc.url = fresh.url;
           paintHead(detailSvc);
+          /* Resources ride the same poll — cpu_pct is null until the server
+             has two samples, so it appears on the second one. */
+          VIEW.detail(detailKey, fresh);
         }
       }
     }, function () {
@@ -1716,6 +1778,7 @@
 
     paintEnv(d.env, view.key);
     paintMeta(d.meta);
+    VIEW.detail(view.key, d);
   }
 
   /* --- routing --- */
@@ -1743,7 +1806,12 @@
     elVDetail.hidden = false;
     resetDetail();
 
+    /* Opening the page is a "use" in its own right; the launch click is the
+       other one. Fire and forget, like that one. */
+    VIEW.touch(key, 'opened');
+
     var known = find(key);
+    VIEW.detail(key, known);
     if (known) {
       detailSvc = known;
       paintHead(known);
@@ -1770,6 +1838,7 @@
     detailSvc = null;
     revealed = {};            // revealed secrets do not survive leaving the page
     elEnv.textContent = '';   // and none of them stay in the DOM either
+    VIEW.detail(null, null);
     document.title = 'Launcher';
 
     elVDetail.hidden = true;
@@ -1890,6 +1959,7 @@
   }
 
   activeTab = storedTab();   // survives a reload
+  VIEW.onChange(render);     // the View/Sort selects repaint through here
   render();
   route();                   // a deep link to #/service/<key> opens straight there
   load(true).then(function () {

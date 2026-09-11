@@ -1,0 +1,326 @@
+/* view.css — v3 view/sort controls, table view, resource figures
+ *
+ * Every selector here is prefixed `.vw-`, so this module can only style nodes
+ * it created itself. It shares the cascade with app.css, notes.css and
+ * tooltip.css and must not reach into any of them.
+ *
+ * It does reuse app.css's design tokens (--accent, --surface, --border, …) and
+ * three of its shells — `.d-sec` for the Resources section rule, `.d-sec-h`
+ * for its heading, and `.dot` for the state light — because the point is for
+ * this to look like it was always part of the page.
+ *
+ * No absolute URLs, no webfonts, nothing fetched: the page is served at both
+ * `/` and `/home/`, and the box may have no route out.
+ *
+ * Colours come only from the tokens, which already flip under
+ * prefers-color-scheme, so there is not a single media query for dark here —
+ * the same rules are correct in both themes.
+ */
+
+/* ---------- toolbar ----------
+ *
+ * Two native <select>s. Native on purpose: a custom dropdown would be a
+ * listbox, a focus trap and a scroll lock for the sake of six options, and on
+ * a phone the OS picker is better than anything drawn here.
+ */
+
+.vw-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 44px;
+  padding: 0 2px;
+}
+
+.vw-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vw-lab {
+  font-size: 12.5px;
+  font-weight: 540;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* The <select> is real and is the control — it just carries no ink. The value
+   beside it is drawn, so the box is exactly as wide as the word it shows and
+   the chevron sits right after it; a native select is as wide as its WIDEST
+   option, which strands the chevron 40px past "RAM". */
+.vw-selwrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition: border-color var(--dur) ease, background-color var(--dur) ease;
+}
+
+.vw-sel {
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  width: 100%; height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  font-family: inherit;
+  font-size: 16px;   /* iOS Safari zooms a focused control under 16px */
+  color: var(--text);
+  border: 0;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* The OS paints the option list, and on some platforms it inherits the
+   control's own (here: invisible) colours. Pin them. */
+.vw-sel option { color: var(--text); background: var(--surface); }
+
+/* Typographically a tab: same size, same weight, same tracking — so the row
+   reads as one strip of chrome rather than a form bolted to the side. */
+.vw-val {
+  font-size: 14px;
+  font-weight: 540;
+  letter-spacing: -.005em;
+  line-height: 1.4;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.vw-selwrap svg {
+  width: 13px; height: 13px;
+  flex: none;
+  color: var(--faint);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .vw-selwrap:hover { border-color: var(--border); background: var(--surface); }
+}
+
+/* The focus ring belongs to the box, because the thing actually focused
+   inside it is invisible. */
+.vw-selwrap:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+@media (max-width: 380px) {
+  .vw-bar { gap: 10px; }
+  .vw-val { font-size: 13.5px; }
+  .vw-lab { font-size: 12px; }
+}
+
+/* ---------- scroll container ----------
+ *
+ * The ONLY thing on this page allowed to scroll sideways. At 400px the table
+ * is wider than the viewport; the body must never be.
+ */
+
+.vw-wrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.vw-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- table ---------- */
+
+.vw-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.vw-table th {
+  padding: 9px 12px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.vw-table td {
+  padding: 8px 12px;
+  vertical-align: middle;
+  color: var(--muted);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.vw-table tbody tr:last-child td { border-bottom: 0; }
+
+/* `.vw-table th` is two-part, so a bare `.vw-c-num` loses to its text-align;
+   the numeric HEADINGS have to be named just as specifically or they sit over
+   the wrong edge of their own column. */
+.vw-c-num,
+.vw-table th.vw-c-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.vw-c-when { font-variant-numeric: tabular-nums; }
+
+.vw-c-name { width: 40%; min-width: 190px; white-space: normal; }
+
+.vw-table th.vw-c-go,
+.vw-table td.vw-c-go { width: 34px; padding-left: 0; padding-right: 8px; }
+
+/* --- rows --- */
+
+/* The whole row opens the detail page (a delegated click in view.js), exactly
+   like a tile's blank space. The chevron at the end is the same thing made
+   real, so the keyboard and a screen reader get a control rather than a
+   click-handler on a <tr>. */
+.vw-row { cursor: pointer; transition: background-color var(--dur) ease; }
+
+@media (hover: hover) and (pointer: fine) {
+  .vw-row:hover { background: var(--surface-2); }
+  .vw-row:hover .vw-go svg { opacity: .75; }
+}
+
+.vw-row:active { background: var(--surface-2); }
+
+/* The launch target: icon + name + tagline, shrink-wrapped to its own content
+   so everything either side of it belongs to the detail page. */
+.vw-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 6px;
+  margin: -3px -6px;
+  color: var(--text);
+  text-decoration: none;
+  border-radius: 8px;
+}
+
+.vw-open-flat { cursor: default; }
+
+@media (hover: hover) and (pointer: fine) {
+  a.vw-open:hover .vw-name { color: var(--accent); }
+}
+
+a.vw-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+
+.vw-icon { display: block; width: 20px; height: 20px; flex: none; color: var(--text); }
+.vw-icon > * { width: 20px; height: 20px; display: block; }
+
+.vw-stack { display: flex; flex-direction: column; min-width: 0; }
+
+.vw-name {
+  font-size: 13.5px;
+  font-weight: 560;
+  letter-spacing: -.005em;
+  line-height: 1.25;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--dur) ease;
+}
+
+.vw-tag {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- state --- */
+
+.vw-state { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.vw-state .dot { flex: none; }
+
+/* --- the row's detail control --- */
+
+.vw-go {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px; height: 28px;
+  color: var(--faint);
+  border-radius: 8px;
+}
+.vw-go svg {
+  width: 15px; height: 15px;
+  display: block;
+  opacity: 0;
+  transition: opacity var(--dur) ease;
+}
+.vw-go:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.vw-go:focus-visible svg { opacity: .9; }
+
+/* Touch has no hover, so the affordance would never appear at all. */
+@media (hover: none) {
+  .vw-go svg { opacity: .5; }
+}
+
+/* ---------- the tile's RAM figure ----------
+ *
+ * Lives inside `.tile-corner`, which app.css positions absolutely and makes
+ * pointer-events: none — so this adds a figure to the grid without moving one
+ * pixel of the tile's own layout, which was the condition for showing it.
+ */
+
+.vw-tileram {
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--faint);
+  margin-right: 6px;
+  white-space: nowrap;
+}
+
+/* ---------- detail: Resources ---------- */
+
+.vw-sum {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 12px 18px;
+  margin: 14px 0 0;
+}
+
+.vw-pair { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+.vw-sum dt {
+  font-size: 12px;
+  font-weight: 540;
+  color: var(--faint);
+}
+
+.vw-sum dd {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.01em;
+  color: var(--text);
+}
+
+.vw-partwrap { margin-top: 16px; }
+
+.vw-parts { min-width: 340px; font-size: 13px; }
+.vw-parts td { color: var(--text); }
+.vw-parts .vw-c-kind { color: var(--faint); }
+.vw-parts .vw-c-part {
+  width: 46%;
+  min-width: 150px;
+  font-family: var(--mono);
+  font-size: 12px;
+}

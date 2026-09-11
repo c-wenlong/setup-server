@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="app.css">
 <link rel="stylesheet" href="notes.css">
 <link rel="stylesheet" href="tooltip.css">
+<link rel="stylesheet" href="view.css">
 </head>
 <body>
 
@@ -58,6 +59,9 @@
       <button class="btn" id="notice-retry" type="button">Retry</button>
     </div>
 
+    <!-- The tab strip and the v3 view/sort toolbar share one hairline rule,
+         and wrap onto two lines when they cannot sit side by side. -->
+    <div class="toolrow" id="toolrow">
     <div class="tabs" id="tabs" role="tablist" aria-label="Filter by state">
       <button class="tab" type="button" role="tab" id="tab-all" data-tab="all"
               aria-controls="panel" aria-selected="true" tabindex="0">
@@ -77,8 +81,17 @@
       </button>
     </div>
 
+    <!-- Mount point for view.js's View/Sort controls. Empty until it loads;
+         if it never does, the grid below is exactly what it always was. -->
+    <div id="view-toolbar"></div>
+    </div><!-- /.toolrow -->
+
     <div class="panel" id="panel" role="tabpanel" aria-labelledby="tab-all">
       <div class="grid" id="grid" role="list" aria-busy="true"></div>
+
+      <!-- Table view. view.js renders into this; app.js hides #grid when the
+           toolbar says Table. -->
+      <div id="view-table"></div>
 
       <p class="empty" id="empty" hidden>No service matches that.</p>
     </div>
@@ -134,6 +147,10 @@
        </p>
        <p class="field-status" id="d-save" role="status" aria-live="polite"></p>
      </section>
+
+     <!-- Mount point for view.js's Resources block. Deliberately in the main
+          column, not the notes column beside it. -->
+     <div id="view-res"></div>
 
      <section class="d-sec" id="d-env-sec" hidden>
        <h3 class="d-sec-h">Environment</h3>
@@ -196,6 +213,7 @@
 <p class="sr-only" id="live" role="status" aria-live="polite"></p>
 
 <script src="icons.js"></script>
+<script src="view.js"></script>
 <script src="app.js"></script>
 <script src="notes.js"></script>
 <script src="tooltip.js"></script>

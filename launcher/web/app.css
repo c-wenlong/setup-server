@@ -292,6 +292,34 @@ h1, h2, p { margin: 0; }
   .tab-n { font-size: 11px; }
 }
 
+/* ---------- tool row ----------
+ *
+ * The only structural hook v3 needed in this file. The tab strip and view.js's
+ * View/Sort toolbar share one hairline rule: wide enough and they sit on one
+ * line, tabs left and controls pushed right by the strip's own flex-grow; at
+ * 400px the controls wrap onto their own line inside the same box, so the tabs
+ * keep their horizontal scroll and neither gets cut off. The rule and the
+ * bottom margin move off `.tabs` and onto the wrapper so there is still
+ * exactly one line under the pair.
+ */
+.toolrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 14px;
+  margin: 0 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.toolrow > .tabs {
+  flex: 1 1 280px;
+  min-width: 0;
+  margin: 0;
+  border-bottom: 0;
+}
+
+.toolrow > #view-toolbar { flex: 0 0 auto; }
+
 .panel:focus { outline: none; }
 .panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; }
 
