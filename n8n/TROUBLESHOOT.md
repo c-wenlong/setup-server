@@ -1,14 +1,30 @@
 # n8n — Troubleshooting
 
+**Before anything else: n8n is intentionally stopped on this box** (since
+2026-09-08, via ntfy-control; its Kuma monitor is paused and the launcher
+shows it as an amber "Paused" tile). "Container not running", "connection
+refused on :5678" and "no Kuma data" are all the expected state, not a fault.
+Start it with the ntfy panel, the launcher's start button, or
+`docker start n8n`. Scheduled workflows do not run while it is down.
+
 Quick triage (run in this directory):
 
 ```sh
 docker compose --project-directory . ps
 curl -fsS http://127.0.0.1:5678/healthz         # liveness
 curl -fsS http://127.0.0.1:5678/rest/settings   # REST API readiness
-tailscale serve status                          # :5678 mapped?
+tailscale serve status                          # :5678 -> 127.0.0.1:5678
 ./tests/run-tests.sh --live
 ```
+
+If `docker` says "permission denied while trying to connect to the docker
+API", you are not in the `docker` group *in this shell* — a shell opened
+before the group was granted never picks it up, and `docker inspect` will
+report a healthy container as not running. Re-run under
+`sg docker -c './tests/run-tests.sh --live'`.
+
+The Tailscale Serve mapping stays in place while the container is stopped, so
+`tailscale serve status` showing `:5678` proves nothing about the app.
 
 ## Container up but UI won't load / 503
 
@@ -50,12 +66,41 @@ tailscale serve status                          # :5678 mapped?
 
 - Workflow credentials are encrypted with `N8N_ENCRYPTION_KEY`. If the key
   in `.env` doesn't match the one the data was written with, every stored
-  credential is unreadable. Always restore `~/n8n/data` and `.env` as a pair.
+  credential is unreadable. Always restore `~/services/n8n/data` and `.env`
+  as a pair.
+
+## Kuma says n8n is down
+
+- Expected while it is deliberately stopped (top of this file) — and the
+  monitor should be *paused*, not red. A red monitor means someone stopped
+  the container without going through ntfy-control or the launcher, which is
+  what does the pausing.
+- Otherwise: the monitor probes the **tailnet** URL
+  (`https://…:5678/healthz`), not loopback, so it also goes red when
+  publishing is broken and the app is fine. Curl
+  `http://127.0.0.1:5678/healthz` first — if that answers, the fault is
+  Tailscale Serve or the cert. Everything red at once is tailscaled, not
+  every service failing at the same moment.
+
+## `tailscale serve` errors
+
+- **`Access denied: serve config denied`** — you are not the tailscaled
+  operator: `sudo tailscale set --operator=$USER`, then re-run `./setup.sh`.
+- **Re-adding the mapping by hand**:
+  `tailscale serve --bg --https=5678 http://127.0.0.1:5678`
+- ⚠️ **Never `tailscale serve reset`** to clear a bad mapping. It wipes the
+  serve config for the whole node — every published service dark at once, each
+  one's `setup.sh` to be re-run. The single-port removal is
+  `tailscale serve --https=5678 off`. `off` is absent from
+  `tailscale serve --help` on 1.102.3 (which only advertises `reset` and
+  `clear`) but is what Tailscale prints after a successful serve, and is
+  verified working here.
 
 ## Nuke and pave (destroys workflows + credentials)
 
 ```sh
 docker compose --project-directory . down
-rm -rf ~/n8n .env
+rm -rf ~/services/n8n .env
+tailscale serve --https=5678 off
 ./setup.sh
 ```

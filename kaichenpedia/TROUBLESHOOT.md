@@ -3,16 +3,37 @@
 Layered triage: deploy pipeline → local serving → publish → client. Work
 top-down; each layer assumes the one above it is healthy.
 
+**Before anything else: the nginx container is intentionally stopped** on this
+box (since 2026-09-08, via ntfy-control; its Kuma monitor is paused and the
+launcher shows it as an amber "Paused" tile). `Exited (0)`, connection refused
+on :8091, and a blank Kuma graph are all the expected state, not a fault.
+Start it from the ntfy panel, the launcher's start button, or
+`docker start kaichenpedia`.
+
+Note that the **deploy timer keeps running while the container is stopped** —
+it pulls from GitHub and rebuilds into `www/current` on schedule (verified:
+it built `c0c8d6e` at 23:58 with the container down since 2026-09-08). So a
+fresh `built-sha` proves the pipeline works and says nothing about whether
+anything is being served.
+
 ## Quick status
 
 ```sh
 systemctl --user list-timers kaichenpedia-deploy.timer   # poller scheduled?
 journalctl --user -u kaichenpedia-deploy -n 30           # last deploy runs
-cat ~/services/kaichenpedia/state/built-sha              # what's live
+cat ~/services/kaichenpedia/state/built-sha              # what was last built
 docker inspect -f '{{.State.Status}}' kaichenpedia       # nginx up?
 curl -sI http://127.0.0.1:8091/ | head -1                # serving locally?
-tailscale serve status                                   # published?
+tailscale serve status                                   # :8091 published?
 ```
+
+If `docker` says "permission denied while trying to connect to the docker
+API", you are not in the `docker` group *in this shell* — a shell opened
+before the group was granted never picks it up, and `docker inspect` reports a
+healthy container as not running. Re-run under `sg docker -c '...'`.
+
+The Serve mapping stays in place while the container is stopped, so `:8091`
+appearing in `tailscale serve status` proves nothing about the site.
 
 ## Layer 1 — deploys not happening
 
@@ -48,7 +69,11 @@ Run it by hand to see the full error:
 ## Layer 2 — local serving broken
 
 **`curl http://127.0.0.1:8091/` fails.**
-- `docker ps | grep kaichenpedia` — container gone? 
+- First check it is not the deliberate stop at the top of this file:
+  `docker inspect -f '{{.State.Status}} {{.State.FinishedAt}}' kaichenpedia`.
+  `exited` with a date and exit code 0 means someone stopped it on purpose;
+  `docker start kaichenpedia` brings it back.
+- `docker ps | grep kaichenpedia` — container gone entirely?
   `docker compose --project-directory ~/dev/setup-server/kaichenpedia up -d`
 - Container restarting → `docker logs kaichenpedia`; an nginx config error
   means `~/services/kaichenpedia/nginx.conf` was edited badly (delete it and
@@ -67,6 +92,17 @@ it if the config was customized.
   `tailscale serve --bg --https=8091 http://127.0.0.1:8091`
 - `Access denied` → operator not set: `sudo tailscale set --operator=$USER`.
 - First-ever HTTPS hit can take ~60s (cert minting).
+- ⚠️ **Never `tailscale serve reset`** to clear a bad mapping. It wipes the
+  serve config for the whole node — every published service dark at once, each
+  one's `setup.sh` to be re-run. The single-port removal is
+  `tailscale serve --https=8091 off`; `off` is absent from
+  `tailscale serve --help` on 1.102.3 (which only advertises `reset` and
+  `clear`) but is what Tailscale prints after a successful serve, and is
+  verified working here.
+- **Kuma red but the container is up** — the monitor probes the tailnet URL
+  (`https://…:8091/`), not loopback, so it goes red for a publishing failure
+  too. Curl `http://127.0.0.1:8091/` first; if that answers, the fault is
+  Serve or the cert. Everything red at once is tailscaled.
 
 ## Layer 4 — client broken
 

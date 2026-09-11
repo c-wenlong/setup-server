@@ -30,16 +30,20 @@ docker compose --project-directory . logs --tail=100 forgejo
 - **`sed: can't create temp file '/etc/passwdXXXXXX'`** — a `user:` key was
   added to the compose service. The entrypoint must start as root to rewrite
   `/etc/passwd` and take the s6 lock; it drops to `git` on its own. Remove
-  `user:` and use `USER_UID`/`USER_GID` instead (already in `.env`).
+  `user:`; the image's own `USER_UID`/`USER_GID` environment variables do the
+  remap instead, and compose already fills them from `FORGEJO_UID`/
+  `FORGEJO_GID` in `.env`.
 - **`FORGEJO_DATA missing from .env`, or Compose refuses to start with
   `variable is not set`** — `.env` is incomplete. `docker-compose.yml` uses
   `${...:?}` guards on `FORGEJO_DATA`, `FORGEJO_DOMAIN`, `FORGEJO_ROOT_URL`
   and `FORGEJO_SECRET_KEY` precisely so this fails at start rather than
   booting a half-configured forge. Check with
   `docker compose --project-directory . config`.
-- **Permission errors on `/data`** — `USER_UID`/`USER_GID` in `.env` do not
-  match the owner of `~/services/forgejo/data`. Fix the values (`id -u`,
-  `id -g`) and re-run `./setup.sh`, or
+- **Permission errors on `/data`** — the uid/gid the container runs as do not
+  match the owner of `~/services/forgejo/data`. The knobs are
+  **`FORGEJO_UID`/`FORGEJO_GID` in `.env`** (compose feeds them to the image's
+  `USER_UID`/`USER_GID` — the container-side names, not the `.env` ones). Fix
+  the values (`id -u`, `id -g`) and re-run `./setup.sh`, or
   `sudo chown -R $(id -u):$(id -g) ~/services/forgejo/data`.
 - **Exit 137 (OOM-killed)** — unusual for Forgejo at ~100 MiB, so suspect a
   neighbour: ollama with a model loaded claims ~5 GB. `docker stats` and
@@ -53,8 +57,11 @@ First boot creates the SQLite schema and can take a minute;
 `docker compose --project-directory . logs -f forgejo` shows progress.
 If it never finishes:
 
-- Check the port really is on loopback: `ss -ltn | grep 3000` → should show
-  `127.0.0.1:3000`, never `0.0.0.0`.
+- Check the port really is on loopback: `ss -ltn | grep 3000`. Three lines are
+  expected — `127.0.0.1:3000` is Forgejo, and `100.85.87.87:3000` plus the
+  `fd7a:…` v6 address are **tailscaled's** serve frontend (HTTPS port == local
+  port here, so they share the number). `0.0.0.0:3000` is the one that would
+  be wrong.
 - Check what the container actually decided its config was:
   `docker exec forgejo cat /data/gitea/conf/app.ini`. Remember this file is
   **derived from the environment on every start** — if it disagrees with
@@ -74,6 +81,10 @@ install wizard can reconfigure the instance, including choosing a new admin.
 curl -s -o /dev/null -w '%{http_code}\n' \
   https://kai-home-server.taild6a23f.ts.net:3000/install     # must be 404
 ```
+
+`000` is not a status — it is curl saying it never connected (and it also
+exits non-zero). Go back to the container/publish layers before reading
+anything into it.
 
 If it is 200:
 
@@ -98,9 +109,14 @@ serves the install page passes every other check.
 - **Port already claimed** — `tailscale serve status` will show what has
   `:3000`. Reset just this one: `tailscale serve --https=3000 off`.
   ⚠️ Never `tailscale serve reset` — that clears every mapping on the node,
-  taking all the other services down with it. `off` is undocumented in
-  `--help` but is what Tailscale prints itself, and is the only single-port
-  removal.
+  taking all the other services down with it, and every service's `setup.sh`
+  then has to be re-run. `off` is absent from `serve --help` (which lists only
+  `reset` and `clear`) but is what Tailscale prints itself after a successful
+  `serve`, and is the only single-port removal.
+
+  `:3000` is safe to `off` on its own. `:443` is not — it hosts two mounts,
+  code-server at `/` and the launcher at `/home/` — so never reach for a bare
+  `--https=443` on this box.
 
 ## HTTPS URL doesn't load from a client
 
@@ -137,15 +153,25 @@ serves the install page passes every other check.
   does not need the old one.
 - **Locked out with 2FA** — there is no CLI command to disable it; the TOTP
   row has to come out of the database. Stop the container first, and copy the
-  DB file before touching it:
+  DB file before touching it.
+
+  ⚠️ **There is no `sqlite3` on this host.** It ships *inside* the Forgejo
+  image (`/usr/bin/sqlite3`, verified), so run it from a throwaway container
+  over the same bind mount rather than installing anything:
 
   ```bash
   docker compose --project-directory . stop
   cp ~/services/forgejo/data/gitea/gitea.db /tmp/gitea.db.bak
-  sqlite3 ~/services/forgejo/data/gitea/gitea.db \
+  docker run --rm --entrypoint sqlite3 \
+    -v ~/services/forgejo/data:/data codeberg.org/forgejo/forgejo:15 \
+    /data/gitea/gitea.db \
     "delete from two_factor where uid = (select id from user where lower_name='kai');"
   docker compose --project-directory . start
   ```
+
+  `docker exec forgejo sqlite3 …` is the obvious-looking alternative and is
+  wrong here: `exec` needs the container running, and writing to that DB
+  underneath a live Forgejo is how you corrupt it.
 - **"user already exists" when creating a second account** — it does; pick
   another username. Existing accounts:
   `docker exec -u git forgejo forgejo admin user list`.
@@ -176,7 +202,9 @@ serves the install page passes every other check.
   follow the four steps in the ports block of `docker-compose.yml`.
 - **`remote: LFS support not enabled`** — `LFS_START_SERVER` was turned off.
   It is on in this compose; check
-  `docker exec forgejo grep -A2 '\[server\]' /data/gitea/conf/app.ini`.
+  `docker exec forgejo grep LFS_START_SERVER /data/gitea/conf/app.ini`
+  → `LFS_START_SERVER = true`. (Don't grep the `[server]` block with `-A2`;
+  the key is far below the section header.)
 - **Push rejected on a mirrored repo** — pull mirrors are read-only on this
   side, by design. Push to the upstream (GitHub) and let the mirror follow,
   or convert the repo: Settings → Mirror Settings → remove the mirror.
@@ -241,6 +269,13 @@ rm -f .env                         # forces new generated credentials
 tailscale serve --https=3000 off
 ./setup.sh
 ```
+
+⚠️ Deleting only `~/services/forgejo/data` leaves
+`~/services/forgejo/.admin-created` behind — a hidden file `ls` will not show
+you. `setup.sh` reads it as "the admin already exists" and skips creating one,
+and you get a fresh instance with no account and a password in `.env` that
+authenticates nothing. Delete the whole `~/services/forgejo`, or remove that
+marker too.
 
 To keep the repositories and rebuild only the account/settings layer, there
 is no shortcut — the SQLite DB *is* the metadata. Take a `forgejo dump`,

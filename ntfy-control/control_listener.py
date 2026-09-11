@@ -164,6 +164,18 @@ def load_registry():
         print(f"control registry: {len(services)} services from {path}",
               flush=True)
         return services
+    # Nothing parsed this time. If a registry loaded successfully earlier in
+    # this process, keep serving it rather than emptying the panel: one bad
+    # character in services.json (a hand-edit, a half-written file caught
+    # mid-save) would otherwise make every service uncontrollable from the
+    # phone, which is exactly when you are least able to fix it. Stale but
+    # working beats correct but empty. A restart still starts from scratch,
+    # so this can never mask a permanently broken file.
+    if _registry["services"]:
+        print("control registry unreadable — keeping the %d services last "
+              "loaded from %s" % (len(_registry["services"]), _registry["path"]),
+              flush=True)
+        return _registry["services"]
     print("no control registry found — nothing is controllable", flush=True)
     return {}
 
