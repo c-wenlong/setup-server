@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# ss stub — feeds setup.sh's listener audit.
+#
+# Real `ss` would report this host's own sockets, which in a sandbox means the
+# audit passes for reasons that have nothing to do with the script under test,
+# and the failure branch could never be reached at all.
+#
+# Output shape matches `ss -ltnH`: no header, local address in field 4.
+#
+# The default picture is a correct deploy: the app port on 127.0.0.1 only.
+#
+# State in $STATE_DIR:
+#   listen_lan       — the app port is also on a LAN address (the compose
+#                      publish lost its 127.0.0.1: prefix — the one-character
+#                      edit that puts an unauthenticated-by-default document
+#                      archive on the LAN)
+#   listen_wildcard  — the app port is on 0.0.0.0
+#   web_port         — which port to report (default 8095)
+echo "ss $*" >> "$CALLS_LOG"
+
+port=""
+for a in "$@"; do
+  case "$a" in
+    sport*) port="$(printf '%s' "$a" | sed -n 's/.*:\([0-9][0-9]*\).*/\1/p')" ;;
+  esac
+done
+[ -n "$port" ] || exit 0
+
+web_port="$(cat "$STATE_DIR/web_port" 2>/dev/null || echo 8095)"
+row() { printf 'LISTEN 0 4096 %s:%s 0.0.0.0:*\n' "$1" "$port"; }
+
+if [ "$port" = "$web_port" ]; then
+  if [ -f "$STATE_DIR/listen_wildcard" ]; then
+    row "0.0.0.0"
+  elif [ -f "$STATE_DIR/listen_lan" ]; then
+    row "192.168.1.42"
+  else
+    row "127.0.0.1"
+  fi
+fi
+exit 0

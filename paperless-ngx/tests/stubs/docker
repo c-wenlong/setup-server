@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# docker stub for paperless-ngx.
+#
+# Two jobs. The ordinary one is the usual: log every call, fake `ps`,
+# `inspect`, `compose up`. The load-bearing one is that at `compose up` time
+# this stub computes THE EFFECTIVE PAPERLESS ENVIRONMENT — docker-compose.yml's
+# `environment:` block with ${VAR} / ${VAR:-default} substituted from .env, plus
+# anything an `env_file:` pulls in — and writes it to $STATE_DIR/paperless_env.
+#
+# The curl stub then answers like Django would GIVEN THAT ENVIRONMENT. That is
+# what makes the suite mutation-sensitive rather than decorative: delete
+# PAPERLESS_URL from docker-compose.yml and no assertion string changes, but the
+# login POST starts coming back 403 with "Origin checking failed", exactly as
+# the real thing does behind Tailscale Serve.
+#
+# The same snapshot is also how the superuser model works. Measured in the
+# shipped image (src/documents/management/commands/manage_superuser.py, byte-
+# identical in 2.18.4 and 3.1.3): the container runs manage_superuser on EVERY
+# start, and it returns early — "Did not create superuser, a user X already
+# exists" — the moment the username is taken, or any superuser at all exists.
+# It NEVER resets the password. So this stub creates the account once, records
+# the password used, and leaves it alone on every subsequent `up`, no matter
+# what .env says now. A setup.sh that tries to force the password back in sync
+# has to do it with an explicit `docker exec ... changepassword`, which this
+# stub logs and the suite fails on.
+#
+# State in $STATE_DIR:
+#   docker_no_perm        — `docker ps` fails like a user outside the docker group
+#   compose_up            — touched by `compose ... up`
+#   compose_cmds          — full argv of every `docker compose` invocation
+#   up_fail               — keyword selecting how `compose up` fails:
+#                             inuse -> "port is already allocated" (8095 taken)
+#                             pull  -> image tag does not exist
+#                             other -> an unrecognised failure
+#   container_status      — `.State.Status` for every container (default running)
+#   container_status_<n>  — ...for container <n> specifically, e.g. paperless-redis
+#   restart_count         — `.RestartCount` (default 0)
+#   paperless_env         — the computed environment (KEY=VALUE), see above
+#   compose_at_up.yml     — docker-compose.yml as it stood at `up`
+#   env_at_up             — .env as it stood at `up`
+#   superuser             — "user:password" of the account manage_superuser made
+#   superuser_created_runs— one line per `up` that actually created the account.
+#                           More than one line means something wiped the DB.
+#   no_secret_key         — force the ImproperlyConfigured start failure the real
+#                           image raises when PAPERLESS_SECRET_KEY is unset or
+#                           left at "change-me"
+echo "docker $*" >> "$CALLS_LOG"
+
+# ---------------------------------------------------------------- helpers
+# Where compose was pointed. Every script in this repo uses
+# `docker compose --project-directory . ...` from the service dir, but read the
+# flag rather than assume it.
+project_dir() {
+  local prev="" a
+  for a in "$@"; do
+    case "$prev" in
+      --project-directory|-p|--project-name) printf '%s' "$a"; return ;;
+    esac
+    case "$a" in
+      --project-directory=*) printf '%s' "${a#--project-directory=}"; return ;;
+    esac
+    prev="$a"
+  done
+  printf '%s' "$PWD"
+}
+
+# Compute the environment the web container would actually see.
+#
+# Deliberately NOT a YAML parser: it walks docker-compose.yml for
+# `environment:` blocks in either syntax, and expands ${VAR}, ${VAR:-default}
+# and $VAR against .env. Comments are stripped first — the compose file in this
+# repo explains at length what it does NOT do, and a naive grep would otherwise
+# read the prose as config.
+compute_env() {  # compute_env <project-dir>
+  local dir="$1" compose="$1/docker-compose.yml" envf="$1/.env"
+  [ -f "$compose" ] || return 0
+  cp "$compose" "$STATE_DIR/compose_at_up.yml" 2>/dev/null
+  [ -f "$envf" ] && cp "$envf" "$STATE_DIR/env_at_up" 2>/dev/null
+
+  python3 - "$compose" "$envf" "$STATE_DIR/paperless_env" <<'PY' 2>/dev/null
+import os, re, sys
+
+compose_path, env_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# ---- .env ----------------------------------------------------------------
+dotenv = {}
+try:
+    for line in open(env_path):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        dotenv[k.strip()] = v
+except OSError:
+    pass
+
+def expand(s):
+    # ${VAR:-default} / ${VAR-default} / ${VAR} / $VAR, against .env then os.environ
+    def repl(m):
+        name = m.group("name") or m.group("bare")
+        default = m.group("default")
+        val = dotenv.get(name, os.environ.get(name))
+        if val is None or (val == "" and m.group("colon")):
+            return default if default is not None else ""
+        return val
+    pat = re.compile(
+        r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<colon>:)?-(?P<default>[^}]*))?\}"
+        r"|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+    )
+    return pat.sub(repl, s)
+
+def unquote(v):
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1]
+    return v
+
+# ---- walk the compose file ----------------------------------------------
+env = {}
+in_environment = False
+env_indent = 0
+uses_env_file = False
+
+for raw in open(compose_path):
+    line = raw.rstrip("\n")
+    # strip comments, but not a '#' inside a quoted value
+    if "#" in line:
+        q = None
+        for i, ch in enumerate(line):
+            if ch in "\"'":
+                q = None if q == ch else (q or ch)
+            elif ch == "#" and q is None:
+                line = line[:i]
+                break
+    if not line.strip():
+        continue
+    indent = len(line) - len(line.lstrip())
+    stripped = line.strip()
+
+    if in_environment and indent <= env_indent:
+        in_environment = False
+
+    if re.match(r"^environment:\s*$", stripped):
+        in_environment = True
+        env_indent = indent
+        continue
+    if re.match(r"^env_file:", stripped):
+        uses_env_file = True
+        continue
+
+    if in_environment:
+        m = re.match(r"^-\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$", stripped)
+        if m:
+            env[m.group(1)] = expand(unquote(m.group(2)))
+            continue
+        m = re.match(r"^-\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", stripped)
+        if m:                       # `- VAR` passes it through from the shell
+            env[m.group(1)] = expand("${%s}" % m.group(1))
+            continue
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", stripped)
+        if m:
+            env[m.group(1)] = expand(unquote(m.group(2)))
+            continue
+
+# env_file pulls the whole .env into the container.
+if uses_env_file:
+    for k, v in dotenv.items():
+        env.setdefault(k, v)
+
+with open(out_path, "w") as fh:
+    for k in sorted(env):
+        fh.write("%s=%s\n" % (k, env[k]))
+PY
+}
+
+env_get() {  # env_get KEY
+  sed -n "s/^$1=//p" "$STATE_DIR/paperless_env" 2>/dev/null | head -1
+}
+
+# manage_superuser, faithfully. See the header.
+run_superuser() {
+  local user pass
+  user="$(env_get PAPERLESS_ADMIN_USER)"
+  pass="$(env_get PAPERLESS_ADMIN_PASSWORD)"
+  if [ -z "$user" ]; then
+    # The init script skips the command entirely when the var is unset, which
+    # leaves an instance with NO way in: the login page loads and no account
+    # exists. Silent, and the deploy looks fine.
+    echo "[init-superuser] Not creating superuser" >> "$STATE_DIR/superuser_log"
+    return
+  fi
+  if [ -f "$STATE_DIR/superuser" ]; then
+    echo "Did not create superuser, a user $user already exists" \
+      >> "$STATE_DIR/superuser_log"
+    return
+  fi
+  if [ -z "$pass" ]; then
+    echo "Please check if PAPERLESS_ADMIN_PASSWORD has been set in the environment" \
+      >> "$STATE_DIR/superuser_log"
+    return
+  fi
+  printf '%s:%s' "$user" "$pass" > "$STATE_DIR/superuser"
+  echo "$user" >> "$STATE_DIR/superuser_created_runs"
+  echo "Created superuser \"$user\" with provided password." >> "$STATE_DIR/superuser_log"
+}
+
+# ------------------------------------------------------------------- main
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the Docker daemon socket" >&2
+      exit 1
+    fi
+    ;;
+
+  inspect)
+    fmt=""; name=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --format|-f) fmt="$2"; shift 2 ;;
+        --format=*)  fmt="${1#--format=}"; shift ;;
+        -*) shift ;;
+        *) name="$1"; shift ;;
+      esac
+    done
+    case "$fmt" in
+      *RestartCount*) cat "$STATE_DIR/restart_count" 2>/dev/null || echo 0 ;;
+      *State.Status*|*.State.Health*)
+        cat "$STATE_DIR/container_status_$name" 2>/dev/null \
+          || cat "$STATE_DIR/container_status" 2>/dev/null \
+          || echo running ;;
+      *Config.Image*)
+        # Whatever the compose file pins, so a floated tag shows up here too.
+        sed -n 's/.*image: *\(ghcr.io\/paperless-ngx\/[^ ]*\).*/\1/p' \
+          "$STATE_DIR/compose_at_up.yml" 2>/dev/null | head -1 \
+          || echo "ghcr.io/paperless-ngx/paperless-ngx:unknown" ;;
+      *Memory*) echo 1073741824 ;;
+      *) echo running ;;
+    esac
+    ;;
+
+  exec)
+    # `docker exec <container> <cmd...>`. The only thing the suite cares about
+    # is WHICH management command was run: a `changepassword` here would be a
+    # setup.sh forcing .env's password back over one the user changed in the UI.
+    printf '%s\n' "$*" >> "$STATE_DIR/exec_cmds"
+    case "$*" in
+      *manage_superuser*) run_superuser; cat "$STATE_DIR/superuser_log" 2>/dev/null | tail -1 ;;
+      *changepassword*)   touch "$STATE_DIR/changepassword_called"; echo "Password changed successfully" ;;
+      *document_exporter*) touch "$STATE_DIR/exporter_called" ;;
+      *)                  : ;;
+    esac
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        printf '%s\n' "$*" >> "$STATE_DIR/compose_cmds"
+        dir="$(project_dir "$@")"
+        for a in "$@"; do
+          case "$a" in
+            up)
+              if [ -f "$STATE_DIR/up_fail" ]; then
+                case "$(cat "$STATE_DIR/up_fail")" in
+                  inuse)
+                    echo "Error response from daemon: driver failed programming external connectivity on endpoint paperless-ngx: Bind for 127.0.0.1:8095 failed: port is already allocated" >&2 ;;
+                  pull)
+                    echo "Error response from daemon: manifest for ghcr.io/paperless-ngx/paperless-ngx:nope not found: manifest unknown" >&2 ;;
+                  *)
+                    echo "Error response from daemon: something else entirely" >&2 ;;
+                esac
+                exit 1
+              fi
+              compute_env "$dir"
+              # The real container refuses to start at all without a usable
+              # secret key: settings.py raises ImproperlyConfigured for an unset
+              # key and for the literal "change-me".
+              sk="$(env_get PAPERLESS_SECRET_KEY)"
+              if [ -f "$STATE_DIR/no_secret_key" ] || [ -z "$sk" ] || [ "$sk" = "change-me" ]; then
+                echo "paperless-ngx  | django.core.exceptions.ImproperlyConfigured: PAPERLESS_SECRET_KEY is not set or is the default 'change-me' value." >&2
+                echo exited > "$STATE_DIR/container_status"
+                touch "$STATE_DIR/secret_key_refused"
+                exit 1
+              fi
+              run_superuser
+              touch "$STATE_DIR/compose_up"
+              ;;
+            pull)    touch "$STATE_DIR/compose_pull" ;;
+            down)    touch "$STATE_DIR/compose_down" ;;
+            stop)    touch "$STATE_DIR/compose_stop" ;;
+            restart) touch "$STATE_DIR/compose_restart" ;;
+            logs)    cat "$STATE_DIR/superuser_log" 2>/dev/null ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0
