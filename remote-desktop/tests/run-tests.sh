@@ -434,6 +434,16 @@ test_fresh_deploy() {
   check "  the hash is the sha256 of GUAC_PASSWORD" \
     mapping_has "$(printf '%s' "$(env_val GUAC_PASSWORD)" | openssl dgst -sha256 | sed 's/^.*= //')"
   check "  RDP connection on port 3389"  mapping_has '<param name="port">3389</param>'
+  # gnome-remote-desktop is NLA-only; 'tls' fails negotiation before the
+  # credentials are checked and the browser shows "Log in failed". Found on
+  # the first real session -- this suite had no assertion on the mode at all.
+  check "  security mode is nla (the only one the backend accepts)" \
+    mapping_has '<param name="security">nla</param>'
+  # FreeRDP 2.11.7 (what guacd ships) advertises AUDIO_PLAYBACK v6, which
+  # gnome-remote-desktop rejects mid-session -- "Client protocol version (6)
+  # too old". Audio must stay off until guacd moves to FreeRDP 3.x.
+  check "  audio disabled (FreeRDP 2.x AUDIO_PLAYBACK is too old for the server)" \
+    mapping_has '<param name="disable-audio">true</param>'
   check "  points at GUAC_RDP_HOST"      mapping_has "<param name=\"hostname\">$(env_val GUAC_RDP_HOST)</param>"
   check "  ignores the self-signed cert" mapping_has '<param name="ignore-cert">true</param>'
   check "  wallpaper off (bandwidth)"    mapping_has '<param name="enable-wallpaper">false</param>'

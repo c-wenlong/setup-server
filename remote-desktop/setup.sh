@@ -652,14 +652,27 @@ else
             <param name="username">$RDP_USER</param>
             <param name="password">$RDP_PASSWORD</param>
 
-            <!-- gnome-remote-desktop is TLS-only and authenticates after the
-                 TLS handshake, so 'tls' is the mode to ask for. If the
-                 connection fails with a security-negotiation error, try
-                 'nla' and then 'any' before assuming the server is broken.
-                 ignore-cert because the certificate is self-signed by
-                 setup.sh; the tailnet is the trust boundary here. -->
-            <param name="security">tls</param>
+            <!-- gnome-remote-desktop accepts NLA and NOTHING ELSE. Measured on
+                 the first real session, 2026-09-12: with 'tls' the daemon
+                 logged "server supports only NLA Security" and guacd logged
+                 "Security negotiation failed (wrong security type?)", and
+                 Guacamole rendered that as "Log in failed" -- before the
+                 credentials were ever examined. NLA carries the credentials
+                 inside the security handshake, which is exactly why grdctl
+                 has set-credentials. 'any' would also negotiate to NLA; 'nla'
+                 is the precise value. ignore-cert because the certificate is
+                 self-signed by setup.sh; the tailnet is the trust boundary. -->
+            <param name="security">nla</param>
             <param name="ignore-cert">true</param>
+
+            <!-- Audio OFF, and not merely as a bandwidth choice. guacd
+                 ships FreeRDP 2.11.7, whose AUDIO_PLAYBACK protocol is
+                 version 6; gnome-remote-desktop's newer server rejects it
+                 with "Client protocol version (6) too old. Terminating
+                 protocol" and tears the channel down mid-session. Measured
+                 on the first real session, 2026-09-12. Leave this true
+                 until guacd ships FreeRDP 3.x. -->
+            <param name="disable-audio">true</param>
 
             <!-- Resize the remote desktop to the browser window. -->
             <param name="resize-method">display-update</param>
