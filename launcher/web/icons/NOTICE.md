@@ -48,6 +48,10 @@ else from that repo is included.
 | `karakeep.svg` | `karakeep-dark.svg` | Karakeep |
 | `karakeep-dark.svg` | `karakeep.svg` | Karakeep, dark theme |
 | `forgejo.svg` | `forgejo.svg` | Forgejo |
+| `vaultwarden.svg` | `vaultwarden.svg` | Vaultwarden |
+| `home-assistant.svg` | `home-assistant.svg` | Home Assistant |
+| `firefly-iii.svg` | `firefly-iii.svg` | Firefly III |
+| `guacamole.svg` | `guacamole.svg` | remote-desktop (Apache Guacamole is the engine; the service key is `remote-desktop`) |
 
 `karakeep` is swapped on purpose: upstream's `karakeep.svg` is the **white**
 mark and `karakeep-dark.svg` is the **black** one, so under this repo's

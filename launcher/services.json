@@ -109,6 +109,27 @@
       "description": "The Drive: file sync between laptop, phone and this box, plus a web UI, with desktop and mobile clients. Seafile plus MariaDB and Redis on a Docker network; only the web tier is published, on 127.0.0.1:8081. Camera upload stays off here on purpose — Immich owns photos, so nothing is stored twice. Also the destination manimkc uploads its finished videos to."
     },
     {
+      "key": "vaultwarden",
+      "name": "Vaultwarden",
+      "tagline": "Passwords",
+      "icon": "lock",
+      "url": "https://HOST:8222/",
+      "health": "http://127.0.0.1:8222/alive",
+      "marker": "~/services/vaultwarden",
+      "setup": "vaultwarden/setup.sh",
+      "env": "vaultwarden/.env",
+      "control": {
+        "parts": [
+          {
+            "container": "vaultwarden"
+          }
+        ],
+        "kuma": "vaultwarden",
+        "_comment": "Single container, embedded SQLite vault; nothing to order."
+      },
+      "description": "Self-hosted password vault, Bitwarden-compatible — the official Bitwarden browser extension, desktop and mobile apps all work, pointed at this server instead of Bitwarden's. One container, SQLite, tiny. The admin panel ships OFF (no ADMIN_TOKEN): it is an unnecessary surface on a vault, and enabling it needs an interactive terminal because `vaultwarden hash` will not run without a TTY. The setup script cannot create your account — the master password derives the vault key in the browser and must never reach the server — so signups stay open until you register, and re-running setup.sh closes them. ⚠️ Nothing backs this box up: losing ~/services/vaultwarden loses every password. Keep a client-side encrypted export somewhere else."
+    },
+    {
       "key": "code-server",
       "name": "code-server",
       "tagline": "Code",
@@ -289,12 +310,138 @@
       "name": "AdGuard Home",
       "tagline": "DNS",
       "icon": "shield",
-      "url": null,
-      "health": null,
-      "marker": null,
-      "setup": null,
-      "env": null,
-      "description": "Not built yet. Would be tailnet-wide DNS filtering: point Tailscale's DNS at it and every device gets ads and trackers blocked everywhere, cellular included. About 50 MB of RAM for the biggest daily win available on this box, which is why it is the agreed next service."
+      "url": "https://HOST:3080/",
+      "health": "http://127.0.0.1:3080/",
+      "marker": "~/services/adguard",
+      "setup": "adguard/setup.sh",
+      "env": "adguard/.env",
+      "description": "Tailnet-wide DNS filtering: every device that uses this resolver gets ads and trackers blocked everywhere, cellular included, with no per-device app. About 50 MB of RAM. Two things are worth knowing. Its DNS listener is the one service on this box that is not loopback-only — Tailscale Serve proxies HTTP, not UDP, so DNS binds the tailnet IP (100.85.87.87:53) directly; that is still tailnet-only, just not via Serve. And deploying it does nothing on its own: until you add that IP as a nameserver in the Tailscale admin console, nothing is being filtered. That step is deliberately manual, because it changes DNS for every device on your tailnet at once. Reverse it in the same order — remove the nameserver first, then stop AdGuard — or you take DNS down for your phone and laptop.",
+      "control": {
+        "parts": [
+          {
+            "container": "adguard"
+          }
+        ],
+        "kuma": "adguard",
+        "_comment": "Single container. Stopping it is safe ONLY while the tailnet is not pointed at it as a nameserver — see the description."
+      }
+    },
+    {
+      "key": "remote-desktop",
+      "name": "Remote Desktop",
+      "tagline": "Desktop",
+      "icon": "remote-desktop",
+      "url": "https://HOST:8094/",
+      "health": "http://127.0.0.1:8094/guacamole/",
+      "marker": "~/services/remote-desktop",
+      "setup": "remote-desktop/setup.sh",
+      "env": "remote-desktop/.env",
+      "description": "This box's own GNOME desktop, in a browser tab on the tailnet — Apache Guacamole translating HTML5 to RDP, backed by gnome-remote-desktop's system daemon. Two containers, file authentication, no database. Unlike everything else here it needs a login of its own, because Guacamole has no anonymous mode; that is auth-by-necessity, not a substitute for the tailnet. Two things make this service unusual. It is the only one that needs sudo, because it configures a system daemon. And its RDP port genuinely cannot be bound to one address — the daemon imports only GLib listener helpers that take no address — so :3389 sits on the wildcard and a packet filter is the only thing keeping it off the LAN. That filter is verified by behaviour, not by reading config: measured on this box, :3389 refuses on both LAN addresses and on the tailnet, accepts on loopback, and accepts from the Guacamole bridge, which is the one route guacd needs. There is no file transfer — this backend has no rdpdr channel.",
+      "control": {
+        "parts": [
+          {
+            "container": "guacamole"
+          },
+          {
+            "container": "guacd"
+          }
+        ],
+        "kuma": "remote-desktop",
+        "_comment": "Stop order: the webapp first, then the guacd it proxies through. Stopping these leaves the RDP backend and its packet filter running — a full rollback needs two sudo commands, see SETUP.md."
+      }
+    },
+    {
+      "key": "paperless-ngx",
+      "name": "Paperless-ngx",
+      "tagline": "Documents",
+      "icon": "paperless-ngx",
+      "url": "https://HOST:8095/",
+      "health": "http://127.0.0.1:8095/accounts/login/",
+      "marker": "~/services/paperless-ngx",
+      "setup": "paperless-ngx/setup.sh",
+      "env": "paperless-ngx/.env",
+      "description": "OCR'd, searchable archive of receipts, contracts and tax documents — drop a PDF or a photo in the consume directory and it comes back indexed, tagged and full-text searchable. Two containers on SQLite: the webserver and a redis queue that is published nowhere, because anything able to reach it could drive the workers. Tika and Gotenberg (Office formats) are left out as a commented opt-in — the webserver alone idles at about 650 MB, which makes this the heaviest service here after Immich. OCR is CPU-only on this Ryzen, so imports being slow is expected rather than broken. Health-check /accounts/login/, never / or /healthz: both are 302s, and /healthz is the trap because it looks like a health endpoint and is not. Your password is created on first boot and never touched again, so if you change it in the UI the copy in .env is simply stale — that is normal. ⚠️ This becomes the archive of record for tax and legal documents on a box with no backups; use document_exporter and keep a copy elsewhere.",
+      "control": {
+        "parts": [
+          {
+            "container": "paperless-ngx"
+          },
+          {
+            "container": "paperless-redis"
+          }
+        ],
+        "kuma": "paperless-ngx",
+        "_comment": "Stop order: the webserver first, then the redis queue it feeds from. Start is the reverse."
+      }
+    },
+    {
+      "key": "firefly-iii",
+      "name": "Firefly III",
+      "tagline": "Finance",
+      "icon": "firefly-iii",
+      "url": "https://HOST:8097/",
+      "health": "http://127.0.0.1:8097/login",
+      "marker": "~/services/firefly-iii",
+      "setup": "firefly-iii/setup.sh",
+      "env": "firefly-iii/.env",
+      "description": "Personal finance: accounts, budgets, categories and reports, replacing the manual download-PDFs-then-update-Notion loop. Three containers — the PHP app, its Postgres, and the Data Importer — at about 195 MB together, with Postgres published nowhere at all. Two things to know. The Data Importer on :8099 is deployed but deliberately idle: it needs a personal access token you mint from a logged-in session, so nothing imports until you do that. And only EUR is enabled out of the box — turn on SGD and USD at first login, because a silent 1:1 exchange rate is the failure mode that makes a multi-currency ledger quietly wrong. Health-check /login, never /health: nginx answers /health with 200 even when the PHP behind it is dead. ⚠️ This is a financial record on a box with no backups.",
+      "control": {
+        "parts": [
+          {
+            "container": "firefly-iii-importer"
+          },
+          {
+            "container": "firefly-iii"
+          },
+          {
+            "container": "firefly-iii-db"
+          }
+        ],
+        "kuma": "firefly-iii",
+        "_comment": "Stop order: the importer first, then the app, then the database both were talking to. Start is the reverse."
+      }
+    },
+    {
+      "key": "homepage",
+      "name": "Homepage",
+      "tagline": "Dashboard",
+      "icon": "web",
+      "url": "https://HOST:8100/",
+      "health": "http://127.0.0.1:8100/api/healthcheck",
+      "marker": "~/services/homepage",
+      "setup": "homepage/setup.sh",
+      "env": "homepage/.env",
+      "description": "A second dashboard for this box, configured entirely in YAML: tiles, live status dots and header widgets, edited in ~/services/homepage/config and reloaded without a restart. It overlaps this launcher on purpose — Homepage is the nicer read-only front door, while the launcher is the only one that can deploy, start and stop things. They share no code and neither knows the other exists, so a service added to one will not appear in the other. Runs on host networking because every service here binds 127.0.0.1: from a bridge network its health probes reach nothing and every tile is a dead link. Its own socket still binds loopback only. No login — the tailnet is the access control, same as code-server.",
+      "control": {
+        "parts": [
+          {
+            "container": "homepage"
+          }
+        ],
+        "kuma": "homepage",
+        "_comment": "Single container, config on a bind mount; nothing to order."
+      }
+    },
+    {
+      "key": "home-assistant",
+      "name": "Home Assistant",
+      "tagline": "Home",
+      "icon": "home",
+      "url": "https://HOST:8123/",
+      "health": "http://127.0.0.1:8123/manifest.json",
+      "marker": "~/services/home-assistant",
+      "setup": "home-assistant/setup.sh",
+      "env": "home-assistant/.env",
+      "description": "Local-first home automation: one place for smart lights, plugs, sensors and media players, with automations that keep running when the internet does not. Runs on host networking so it can discover devices on the LAN (zeroconf, SSDP, DHCP, USB), while the web UI itself still binds 127.0.0.1 and is published through Tailscale Serve like everything else. Bluetooth is deliberately switched off: this box's own bluetoothd owns the adapter, and letting Home Assistant fight it for hci0 produced an error every two seconds, forever. setup.sh creates the admin account and opts out of analytics, but deliberately leaves the location step to you — completing it automatically would pin the box to latitude 0 and UTC, and sunrise/sunset automations would silently be wrong.",
+      "control": {
+        "parts": [
+          {
+            "container": "homeassistant"
+          }
+        ],
+        "kuma": "home-assistant",
+        "_comment": "Single container on host networking; no sidecar to order."
+      }
     },
     {
       "key": "jellyfin",
@@ -316,18 +463,6 @@
         "kuma": "jellyfin",
         "_comment": "Single container with an embedded SQLite library database; nothing to order."
       }
-    },
-    {
-      "key": "paperless-ngx",
-      "name": "Paperless-ngx",
-      "tagline": "Documents",
-      "icon": "document",
-      "url": null,
-      "health": null,
-      "marker": null,
-      "setup": null,
-      "env": null,
-      "description": "Not built yet. Would be an OCR'd, full-text-searchable archive of receipts, contracts and tax documents: scan once, find it years later instead of digging through a drawer."
     },
     {
       "key": "karakeep",

@@ -21,6 +21,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server  # noqa: E402
 
 
+# Job steps run on daemon threads that outlive the test which started them: a
+# test that calls start_action without waiting returns while its thread has yet
+# to reach subprocess.Popen. Restoring the *real* Popen in tearDown therefore
+# handed those late steps a live host, and `systemctl --user stop
+# manimkc.service` ran for real. So the baseline Popen for the whole run is this
+# guard rather than the real one — an unstubbed call cannot reach the box, and
+# it is recorded so tearDown can fail the run instead of going quiet.
+ESCAPED_POPEN = []
+
+
+def _forbidden_popen(argv, **kwargs):
+    line = " ".join(str(a) for a in argv)
+    ESCAPED_POPEN.append(line)
+    raise AssertionError(
+        "a real subprocess escaped the sandbox: %s — stub subprocess.Popen "
+        "(see ControlTestBase.record_popen)" % line)
+
+
+subprocess.Popen = _forbidden_popen
+
+
 class FakeProc:
     """A subprocess that never exits: the reaper thread parks on the event,
     so every started job stays 'running' for the duration of the test."""
@@ -91,6 +112,12 @@ class SandboxTest(unittest.TestCase):
         server._probe_cache.clear()
         server._host_cache["value"] = None
         shutil.rmtree(self.tmp, ignore_errors=True)
+        # _run_steps catches every exception from a step, so the guard's
+        # AssertionError dies in the job thread. Surface it here instead. A
+        # thread can trip the guard after its own test has finished, so the
+        # blame may land on the next test — the argv still names the culprit.
+        escaped, ESCAPED_POPEN[:] = list(ESCAPED_POPEN), []
+        self.assertEqual(escaped, [], "unstubbed subprocess reached the host")
 
     def write_registry(self, doc):
         with open(server.REGISTRY_PATH, "w", encoding="utf-8") as fh:
@@ -2528,16 +2555,20 @@ class ControlTestBase(SandboxTest):
             svc("planned", None),
         ]}
 
-    def record_popen(self, failures=None):
+    def record_popen(self, failures=None, parked=False):
         """Patch Popen to record argv and hand back canned exit codes.
 
         `failures` maps a substring of the joined argv to the exit code that
-        invocation should report.
+        invocation should report. `parked=True` hands back processes that never
+        exit, so the job stays 'running' for the duration of the test — the
+        recording equivalent of a bare FakeProc.
         """
         failures = dict(failures or {})
 
         def fake(argv, **kwargs):
             self.spawned.append((list(argv), kwargs))
+            if parked:
+                return FakeProc(argv, **kwargs)
             joined = " ".join(argv)
             for needle, code in failures.items():
                 if needle in joined:
@@ -2545,6 +2576,22 @@ class ControlTestBase(SandboxTest):
             return RecordedProc(0)
 
         subprocess.Popen = fake
+
+    def wait_for_spawn(self, count, timeout=5.0):
+        """Block until `count` steps have actually been spawned.
+
+        A job runs on its own thread, so a test that only checks the job
+        registry can finish while that thread has yet to reach Popen. Waiting
+        here keeps the stub in place until the step it is meant to catch has
+        gone through it.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if len(self.spawned) >= count:
+                return
+            time.sleep(0.01)
+        self.fail("only %d of %d steps spawned"
+                  % (len(self.spawned), count))
 
     def argvs(self):
         return [argv for argv, _ in self.spawned]
@@ -2948,13 +2995,21 @@ class ControlJobTest(ControlTestBase):
         job_id = server.start_action("n8n", "stop")
         self.assertEqual(server.job_payload(job_id)["action"], "stop")
         self.assertEqual(server.job_payload(job_id)["key"], "n8n")
+        # Wait for the step to go through the stub before tearDown restores the
+        # real subprocess. Without this the job's thread can reach Popen after
+        # the patch is gone and run a REAL `docker stop n8n` against the host —
+        # observed once here, and the reason tearDown's "unstubbed subprocess
+        # reached the host" guard exists. The race is timing-dependent, so it
+        # hides for hundreds of runs and then stops a live service.
+        self.wait_for_spawn(1)
 
     def test_action_shows_on_the_tile_like_a_deploy_does(self):
-        subprocess.Popen = lambda argv, **kw: FakeProc(argv, **kw)
+        self.record_popen(parked=True)
         job_id = server.start_action("n8n", "stop")
         tiles = {s["key"]: s for s in server.services_payload()["services"]}
         self.assertEqual(tiles["n8n"]["job"],
                          {"id": job_id, "status": "running", "action": "stop"})
+        self.wait_for_spawn(1)
 
     def test_a_deploy_and_an_action_share_the_per_key_slot(self):
         self.make_script("n8n/setup.sh")
@@ -2963,19 +3018,23 @@ class ControlJobTest(ControlTestBase):
             if svc["key"] == "n8n":
                 svc["setup"] = "n8n/setup.sh"
         self.write_registry(registry)
-        subprocess.Popen = lambda argv, **kw: FakeProc(argv, **kw)
+        self.record_popen(parked=True)
         server.start_deploy("n8n")
         with self.assertRaises(server.DeployError) as ctx:
             server.start_action("n8n", "stop")
         self.assertEqual(ctx.exception.status, 409)
+        self.wait_for_spawn(1)
 
     def test_actions_respect_the_global_cap(self):
-        subprocess.Popen = lambda argv, **kw: FakeProc(argv, **kw)
+        self.record_popen(parked=True)
         server.start_action("n8n", "stop")
         server.start_action("manimkc", "stop")
         with self.assertRaises(server.DeployError) as ctx:
             server.start_action("immich", "stop")
         self.assertEqual(ctx.exception.status, 429)
+        # Both accepted jobs, or the manimkc thread trips the guard after this
+        # test has handed the stub back.
+        self.wait_for_spawn(2)
 
 
 class ControlRefusalTest(ControlTestBase):
@@ -3033,6 +3092,7 @@ class ControlRefusalTest(ControlTestBase):
     def test_uptime_kuma_stays_controllable(self):
         job_id = server.start_action("uptime-kuma", "stop")
         self.assertTrue(job_id)
+        self.wait_for_spawn(1)
 
 
 class ControlHttpTest(SandboxTest):
@@ -3207,10 +3267,30 @@ class SharedControlRegistryTest(unittest.TestCase):
             if monitor:
                 self.assertIn('"%s"' % monitor, text, monitor)
 
-    def test_planned_services_have_no_control_block(self):
-        for key in ("adguard", "jellyfin", "paperless-ngx", "karakeep",
-                    "forgejo"):
-            self.assertIsNone(self.services[key].get("control"), key)
+    def test_services_with_no_control_block_are_refused_not_half_wired(self):
+        # Derived from services.json rather than a hardcoded list of "planned"
+        # services: every service deployed since this test was written moved
+        # off that list, and a stale list fails for the wrong reason. What
+        # matters is not *which* services lack a control block but that the
+        # ones that do are cleanly refused by both front ends.
+        listener = self._ntfy_control()
+        try:
+            phone = listener.load_registry()
+        finally:
+            os.environ.pop("CONTROL_REGISTRY", None)
+        refused = [key for key, svc in self.services.items()
+                   if not server.control_status(svc)["controllable"]]
+        self.assertTrue(refused, "expected at least one uncontrollable service")
+        for key in refused:
+            svc = self.services[key]
+            self.assertTrue(server.control_status(svc)["reason"], key)
+            self.assertNotIn(key, phone)
+            # Refused for a stated reason (locked) or for the honest absence of
+            # a config — never a control block that exists but does nothing,
+            # which would draw buttons the server then refuses.
+            block = svc.get("control")
+            if block is not None:
+                self.assertTrue(block.get("locked"), key)
 
     def test_the_kuma_helper_paths_point_at_real_files(self):
         block = self.doc["control"]
@@ -3242,9 +3322,17 @@ class SharedControlRegistryTest(unittest.TestCase):
                if server.control_status(svc)["controllable"]}
         self.assertEqual(phone, web)
         # ...and it is the set we meant, not an empty one agreeing with itself.
-        self.assertEqual(sorted(web), [
-            "beszel", "code-server", "immich", "kaichenpedia", "manimkc",
-            "n8n", "open-webui", "seafile", "uptime-kuma"])
+        # Asserted as properties, not as a literal list: an exact list has to be
+        # edited every time a service is deployed, and when someone forgets, the
+        # failure points at this test instead of at whatever actually broke.
+        self.assertTrue(web)
+        for key in ("code-server", "seafile", "immich"):
+            self.assertIn(key, web)          # the core, which never leaves
+        for key in ("launcher", "ntfy", "ollama"):
+            self.assertNotIn(key, web)       # locked, and must stay locked
+        for key, svc in self.services.items():
+            if key in web:
+                self.assertTrue(svc["control"].get("parts"), key)
 
     def test_both_front_ends_agree_on_parts_order_and_monitors(self):
         listener = self._ntfy_control()
