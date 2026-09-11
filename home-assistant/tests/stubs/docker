@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   compose_up      — touched by `compose ... up`
+#   compose_pull    — touched by `compose ... pull`
+#   compose_down    — touched by `compose ... down`
+#
+# THE IMPORTANT PART: on `compose ... up` this stub freezes the state of the
+# sandbox $HOME. Home Assistant turns what it finds in configuration.yaml at
+# *its* first start into config entries under .storage/, and from then on
+# .storage wins — so a setup.sh that starts the container and then writes the
+# config has already failed, silently. Asserting "configuration.yaml exists at
+# the end of the run" would not catch that; asserting what existed at the
+# moment of `up` does.
+#
+# Recorded at `up` time:
+#   files_at_compose_up      — every file under $HOME, one per line
+#   config_at_compose_up.yaml — a byte copy of the first configuration.yaml
+#                               found under $HOME, or absent if there was none
+#   http_at_compose_up.json   — a byte copy of the first .storage/http found
+#                               under $HOME, or absent if there was none.
+#                               Same discipline, applied to the file that
+#                               ACTUALLY decides the listen address on 2026.9+:
+#                               an `http:` YAML block is migrated exactly once
+#                               into a `pending` trial that reverts to the
+#                               defaults (wildcard bind) unless a human
+#                               promotes it in the UI. So "does the YAML say
+#                               127.0.0.1" stopped being the question; "was
+#                               .storage/http already correct when the
+#                               container started" is.
+echo "docker $*" >> "$CALLS_LOG"
+
+snapshot_home() {
+  local snap="$STATE_DIR/files_at_compose_up" cfg http
+  find "$HOME" -type f 2>/dev/null > "$snap"
+  cfg="$(grep '/configuration\.yaml$' "$snap" 2>/dev/null | head -1)"
+  if [ -n "$cfg" ] && [ -f "$cfg" ]; then
+    cp "$cfg" "$STATE_DIR/config_at_compose_up.yaml"
+  fi
+  http="$(grep '/\.storage/http$' "$snap" 2>/dev/null | head -1)"
+  if [ -n "$http" ] && [ -f "$http" ]; then
+    cp "$http" "$STATE_DIR/http_at_compose_up.json"
+  fi
+}
+
+case "$1" in
+  info)
+    echo '{"io.containerd.runc.v2":{"path":"runc"},"runc":{"path":"runc"}}'
+    ;;
+
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    for a in "$@"; do
+      [ "$a" = "-a" ] && echo "home-assistant"
+    done
+    ;;
+
+  inspect)
+    # setup.sh inspects three different fields and branches on each, so the
+    # stub has to answer per-format rather than echoing one word. It also has
+    # to model "not started yet": the pre-flight port check is skipped when the
+    # container is already running, and that branch only exists because host
+    # networking makes a busy port a silent container-start failure.
+    fmt=""
+    while [ $# -gt 0 ]; do
+      case "$1" in -f|--format) fmt="$2"; shift 2 ;; *) shift ;; esac
+    done
+    if [ -f "$STATE_DIR/compose_up" ] && [ ! -f "$STATE_DIR/container_missing" ]; then
+      case "$fmt" in
+        *State.Running*) echo true ;;
+        *State.Status*)  cat "$STATE_DIR/container_status" 2>/dev/null || echo running ;;
+        *RestartCount*)  cat "$STATE_DIR/restart_count" 2>/dev/null || echo 0 ;;
+        *)               echo running ;;
+      esac
+    else
+      echo "Error: No such object: home-assistant" >&2
+      exit 1
+    fi
+    ;;
+
+  run)
+    # setup.sh reads and repairs .storage/http by running python3 *inside the
+    # pinned image* as root, because the store is mode 600 root-owned and the
+    # host user cannot touch it after the first boot:
+    #
+    #   docker run --rm -i -v "$CONFIG_DIR:/config" -e HA_SEED_PORT=... \
+    #     --entrypoint python3 <image> -        (script on stdin)
+    #
+    # Rather than fake a verdict, this runs the REAL script with the host's
+    # python3 and the bind-mount path rewritten. That means the store
+    # classifier and the repair merge are genuinely exercised by the mocked
+    # suite — a faked verdict would have tested nothing, and the repair path is
+    # the security-critical half.
+    mount_host=""; mount_ctr=""; entry=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -v|--volume) mount_host="${2%%:*}"; mount_ctr="${2#*:}"; mount_ctr="${mount_ctr%%:*}"; shift 2 ;;
+        -e|--env)    export "${2?}"; shift 2 ;;
+        --entrypoint) entry="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ "$entry" = "python3" ] || exit 0
+    [ -n "$mount_host" ] || exit 0
+    script="$(cat)"                       # the heredoc on stdin
+    printf '%s\n' "$script" \
+      | sed "s#${mount_ctr:-/config}#$mount_host#g" \
+      | python3 -
+    exit $?
+    ;;
+
+  logs)
+    # A clean log. The live suite is what actually greps for habluetooth.
+    echo "INFO (MainThread) [homeassistant.core] Starting Home Assistant"
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        for a in "$@"; do
+          case "$a" in
+            up)   snapshot_home; touch "$STATE_DIR/compose_up" ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0

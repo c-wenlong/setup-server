@@ -1,0 +1,164 @@
+# Home Assistant — the configuration this deploy boots with.
+#
+# THIS IS A TEMPLATE. setup.sh renders it into $HOME/services/home-assistant/
+# config/configuration.yaml, substituting:
+#
+#   __TIMEZONE__     the host's zone (timedatectl show -p Timezone --value,
+#                    falling back to readlink /etc/localtime)
+#   __SERVER_PORT__  LOCAL_PORT from .env (8123 unless overridden) — appears
+#                    only in the comments below; the real setting lives in
+#                    .storage/http, see "WHERE THE HTTP SETTINGS LIVE"
+#
+# It is written ONCE, before the container has ever started, and never
+# overwritten afterwards — the rendered copy is yours to edit.
+#
+# ---------------------------------------------------------------------------
+# WHY IT MUST EXIST BEFORE THE FIRST BOOT
+#
+# The decision below is first-boot-only in effect. Home Assistant turns what it
+# finds at startup into config entries under .storage/, and from then on
+# .storage wins — editing this file afterwards does not undo them. Measured:
+# removing `bluetooth` after a boot that already created its config entry
+# leaves the entry, and the error storm, exactly where they were.
+#
+# A setup script that starts the container and *then* writes this file has
+# already lost. setup.sh writes it first.
+# ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# WHERE THE HTTP SETTINGS LIVE — READ THIS BEFORE ADDING AN `http:` BLOCK
+#
+# They are NOT in this file, and putting them here does not work. As of
+# 2026.9, Home Assistant migrated `http:` out of YAML and into the storage
+# store at `.storage/http`. setup.sh seeds that file before the first boot
+# with:
+#
+#   server_host:          ["127.0.0.1"]        <- the loopback rule
+#   server_port:          __SERVER_PORT__
+#   use_x_forwarded_for:  true                 <- required behind Serve
+#   trusted_proxies:      ["127.0.0.1/32", "::1/128"]
+#
+# WHY, because this cost us a deploy and the failure was silent by design.
+# From homeassistant/components/http/config.py in the 2026.9.1 image:
+#
+#   - YAML `http:` is migrated into the store exactly ONCE, and the store then
+#     records `yaml_migration_done: true`. Every boot after that ignores the
+#     YAML completely.
+#   - The migrated settings do not land in `stable`. They land in `pending`,
+#     which is a TRIAL: `async_schedule_revert_to_stable()` gives it five
+#     minutes, and unless something promotes it, HA marks it
+#     `error: "not_promoted"`, reverts, and restarts.
+#   - Promotion is a frontend/websocket confirmation — it wants a human to load
+#     the UI and confirm the new config works. A scripted deploy never does it.
+#   - Resolution order is then "prefer `pending` UNLESS it has already failed a
+#     trial, otherwise `stable`". Once burned, every future boot uses `stable`:
+#     the defaults. Wildcard bind, no reverse-proxy trust.
+#
+# So a correct `http:` block here produces a correct server for about five
+# minutes and a wildcard-bound one forever after. On this box that surfaced as
+# EADDRINUSE only because tailscaled already held :__SERVER_PORT__ on the
+# tailnet addresses. Published on any other port number it would have come up
+# clean, bound 0.0.0.0, and put Home Assistant on the LAN with nothing in the
+# logs to say so.
+#
+# Leaving an `http:` block here is not harmless either: with the migration
+# already marked done, HA raises a `yaml_still_present_after_migration` repair
+# warning in the UI (breaks_in_ha_version 2027.2.0) and ignores the block. So
+# there is deliberately no `http:` section below.
+#
+# To change the port or the proxy settings, edit .storage/http with the
+# container STOPPED (it is root-owned, mode 600, and HA rewrites it on every
+# shutdown), then start it again. setup.sh verifies that file on every run and
+# repairs it if the settings have gone missing.
+# ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO `default_config:`
+#
+# `default_config:` is a meta-integration: it pulls in 21 dependencies, one of
+# which is `bluetooth`. This box has a USB Bluetooth adapter (hci0) and the
+# host's own bluetoothd is active and owns it. Under host networking HA
+# discovers hci0, tries to take the adapter, loses the fight, and logs
+#
+#   ERROR [habluetooth.scanner] hci0 (...): Failed to force stop scanner
+#
+# 24 times a minute, forever. Measured on this box against this image.
+#
+# The upstream suggestion (--cap-add NET_ADMIN --cap-add NET_RAW plus a
+# /run/dbus mount) was tried and does NOT fix it: it silences one
+# PermissionError line and the scanner fight continues at the same rate.
+# What does fix it is not loading the integration at all.
+#
+# So: the exact dependency list of `default_config` — read out of
+# default_config/manifest.json inside the 2026.9.1 image, not out of the docs —
+# minus `bluetooth`, and minus `go2rtc` (next section). 19 of 21. Everything
+# else `default_config` gives you, including zeroconf/ssdp/dhcp/usb discovery,
+# is here.
+#
+# To get Bluetooth back you must first free the adapter from the host:
+#   sudo systemctl stop bluetooth && sudo systemctl disable bluetooth
+# then add `bluetooth:` below plus cap_add NET_ADMIN/NET_RAW and a
+# /run/dbus:/run/dbus:ro mount in docker-compose.yml, and restart. Sharing one
+# adapter between host bluetoothd and HA does not work — do not try.
+# ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO `go2rtc:` EITHER
+#
+# go2rtc is HA's WebRTC camera streamer, and loading the integration starts a
+# go2rtc process alongside HA. Measured inside this exact image:
+#
+#   tcp  127.0.0.1:18554   RTSP        — loopback, fine
+#   tcp6        :::18555   WebRTC/TCP  — EVERY interface
+#
+# On bridge networking that second one stays inside the container. Under
+# `network_mode: host`, which this deploy needs for discovery, ":::18555" is
+# the host's every interface: the LAN, and the tailnet, with no Tailscale Serve
+# and no TLS in front of it. That is exactly what the loopback-only rule for
+# this box exists to prevent, and HA offers no setting to move it — the listen
+# address is baked into the config HA generates for the go2rtc process.
+#
+# Removing the line removes both listeners (measured: only the HA port is left,
+# and zero ERROR lines in the log). Nothing else in this deploy depends on it:
+# `stream:` is still here, so cameras work over HLS. The cost is WebRTC's
+# sub-second latency, and any integration that specifically requires a go2rtc
+# provider.
+#
+# If you add cameras and want it, add `go2rtc:` back and accept that port 18555
+# is open on the LAN — or switch the container to bridge networking and give up
+# discovery. Those are the only two options.
+# ---------------------------------------------------------------------------
+
+assist_pipeline:
+cloud:
+conversation:
+dhcp:
+energy:
+file:
+history:
+homeassistant_alerts:
+logbook:
+media_source:
+mobile_app:
+my:
+ssdp:
+stream:
+sun:
+usage_prediction:
+usb:
+webhook:
+zeroconf:
+
+homeassistant:
+  # From the host at deploy time. Set here rather than through the onboarding
+  # API on purpose: completing the onboarding `core_config` step over the API
+  # accepts its defaults — latitude 0, longitude 0, time_zone UTC — and marks
+  # the step done, so the UI never asks again and sunrise/sunset is silently
+  # wrong forever. setup.sh deliberately leaves that step for your first login,
+  # where HA shows a map picker. This line means the clock is right meanwhile.
+  #
+  # Unlike `http:`, this key is still read from YAML on every boot.
+  #
+  # Latitude/longitude are deliberately NOT set here: you will be asked for
+  # them at first login, and picking them on the map is better than a guess.
+  time_zone: __TIMEZONE__
