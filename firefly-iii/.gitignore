@@ -1,0 +1,27 @@
+# Secrets — never commit
+.env
+*.pem
+*.key
+tiger_openapi_config.properties
+
+# Real financial data — never commit
+statements/
+downloads/
+*.pdf
+*.csv
+*.xlsx
+*.ofx
+*.qif
+*.camt
+*.sta
+
+# Fixtures must be redacted; the allowlist is explicit
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/*.qif
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/

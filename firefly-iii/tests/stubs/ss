@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# ss stub: what a correct deploy looks like — both HTTP ports on loopback only,
+# plus tailscaled's own serve frontend on the tailnet address (the HTTPS port
+# equals the local port for both services here, so they collide on one number
+# and a naive "anything not 127.0.0.1 is a leak" check would false-positive).
+#
+# State in $STATE_DIR:
+#   port_busy       — exists => something else already holds the port, BEFORE
+#                     the container starts. 8098 on the real box is exactly
+#                     this shape (an ad-hoc python3 echosrv, not ours).
+#   wildcard_bind   — exists => report 0.0.0.0, i.e. a publish spec that lost
+#                     its 127.0.0.1 prefix. The leak this repo exists to stop.
+echo "ss $*" >> "$CALLS_LOG"
+
+# `ss -ltnH "sport = :8097"` (the live suite) asks about one port; a bare
+# `ss -ltn` (what setup.sh runs, then greps) asks about all of them. Answer
+# both shapes — reporting only one port for a bare call would leave setup.sh
+# warning "nothing is listening on 8099" on a perfectly correct deploy, and a
+# suite that tolerated that warning would be tolerating a real bug too.
+port="$(printf '%s' "$*" | sed -n 's/.*sport = :\([0-9]*\).*/\1/p')"
+PORTS="$port"
+[ -n "$PORTS" ] || PORTS="${STUB_PORTS:-8097 8099}"
+
+# The header line is load-bearing: callers read addresses with
+# `awk 'NR>1{print $4}'`, so a stub without a header silently drops its first
+# listener and a loopback-only assertion would pass for the wrong reason.
+echo "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port  Process"
+
+# 8098 is NOT ours and is always occupied on the real box. Modelled here so a
+# setup.sh that drifts onto it hits a busy port in the mocked suite too.
+for port in $PORTS; do
+  if [ "$port" = "8098" ]; then
+    echo "LISTEN 0      5      127.0.0.1:8098 0.0.0.0:* users:((\"python3\",pid=1781019,fd=3))"
+    continue
+  fi
+  if [ -f "$STATE_DIR/port_busy" ]; then
+    echo "LISTEN 0      128    127.0.0.1:$port 0.0.0.0:* users:((\"nginx\",pid=1,fd=1))"
+    continue
+  fi
+  # Before the containers start nothing is listening.
+  [ -f "$STATE_DIR/compose_up" ] || continue
+  if [ -f "$STATE_DIR/wildcard_bind" ]; then
+    echo "LISTEN 0      128    0.0.0.0:$port 0.0.0.0:*"
+    continue
+  fi
+  echo "LISTEN 0      128    127.0.0.1:$port 0.0.0.0:*"
+  echo "LISTEN 0      128    100.77.77.77:$port 0.0.0.0:*"
+done
+exit 0
