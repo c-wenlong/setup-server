@@ -17,6 +17,11 @@ tailscale serve status                          # :8093 / and :443 /home
 ./tests/run-tests.sh --live                     # all of the above at once
 ```
 
+`--live` also runs the backend unit tests (`tests/test_server.py`) as its last
+check, so a red line there is a *repo* problem — usually `services.json` and
+the tests' expectations having drifted apart after a service was added — not a
+deployment problem. Everything above it is the deployment.
+
 ## The unit won't start / keeps restarting
 
 ```bash
@@ -145,6 +150,88 @@ that on :443 on this box.
 - **A service is missing entirely** — it is not in `services.json`. Add it,
   then `./setup.sh` (which re-validates the JSON) or
   `systemctl --user restart launcher.service`.
+- **The launcher has no tile of its own** — deliberate; it is not in
+  `services.json` at all. (It is still in `HARD_LOCKED`, belt and braces, in
+  case someone adds it.)
+
+## Detail pages, edits and notes
+
+The detail page is `#/service/<key>` — a fragment route, so it is served by
+the same `index.html` and works identically at `:8093/` and `/home/`. If a
+tile opens the app instead of the detail page, that is the tile's link, not
+the router.
+
+Two files under `~/services/launcher/` back everything editable here:
+
+| File | Holds | Reset by |
+|---|---|---|
+| `overrides.json` | edited tile name / description | deleting the file |
+| `notes.json` | per-service notes | deleting the file |
+
+Both are written atomically (temp file in the same directory, then rename) and
+are read defensively: a mangled file logs a line and serves *defaults*, so the
+page comes up either way. That is deliberate — this is the page you open when
+other things are broken.
+
+- **An edit "didn't save"** — an override that equals the shipped default, or
+  is blanked, is *removed* rather than stored. So renaming a tile back to its
+  `services.json` name looks like the edit vanished; it did, and that is
+  correct. The detail payload's `meta.edited` lists exactly which fields
+  currently differ.
+- **A rename came back after a restart** — you edited `services.json` instead
+  of letting the UI write `overrides.json`. `services.json` is the shipped
+  default and is in git; overrides layer on top of it. Never hand-edit
+  overrides for a rename — use the UI, or delete the file to start clean.
+- **Notes vanished / "too many notes"** — the cap is 100 notes per service
+  (`MAX_NOTES_PER_SERVICE`), 8000 characters each; past that the POST is a
+  409. If notes disappeared wholesale, check the unit's log for
+  `notes unusable` — that is a corrupt `notes.json` being ignored, and the
+  file is still on disk to be repaired by hand.
+- **`overrides.json` and `notes.json` are not in git and not backed up.** They
+  exist only on this disk. Nothing warns you before they are gone; see
+  "Nuke and pave" below.
+
+## Env vars on the detail page
+
+- **The values are all missing** — by design. The detail payload carries
+  variable *names* and a `secret` flag only; no value is in it, not even
+  masked. Revealing one is a separate `POST api/services/<key>/env/<VAR>/reveal`
+  per variable, and the value is never logged.
+- **A variable is marked secret that isn't (or vice versa)** — the flag is a
+  substring match on the name (`PASS`, `SECRET`, `TOKEN`, `KEY`, `CRED`,
+  `PRIVATE`). It is a display hint, not a security boundary; every value needs
+  the same explicit POST regardless.
+- **"env file not found"** — the `env` path in `services.json` is wrong, or
+  that service has not been deployed yet and never generated its `.env`.
+- **A value looks truncated at a `#`** — it should not be; the parser leaves
+  `#` inside values alone precisely because several generated passwords here
+  contain one. If you see truncation, that is a bug worth reporting.
+
+## Start / stop / restart buttons
+
+`services.json`'s per-service `control` block is the **single source of truth**,
+shared with ntfy-control's phone panel — one allowlist, not two. Changing it
+changes both.
+
+- **A service has no buttons** — its `control` block is missing, malformed, or
+  carries an explicit `locked` string. The detail payload's
+  `control.reason` is the same sentence the UI shows and the same one a
+  refused request gets back, so read that first.
+- **`ntfy`, `ollama` and `launcher` refuse to be controlled, and editing
+  `services.json` doesn't help** — correct. They are hard-locked in
+  `server.py` (`HARD_LOCKED`), checked *before* the registry, so a config
+  mistake cannot hand the UI a button that stops ntfy (the only way to start
+  things from the phone), the launcher (the only UI), or ollama (a system
+  unit needing sudo).
+- **A stop worked but the Kuma monitor still alerts** — the pause is
+  best-effort: the launcher shells out to `ntfy-control/kuma_toggle.py` under
+  `uv`, and a missing `uv` silently skips that step. Pause the monitor by hand
+  in Kuma.
+- **A stopped service shows an amber "Paused" tile** — `kaichenpedia` and
+  `n8n` are intentionally stopped. That tile is accurate, not a fault.
+- **`Permission denied` from a container action** — see the docker-group note
+  at the end of the next section; the same `sg docker` workaround covers both
+  deploys and lifecycle actions.
 
 ## Deploy from the UI fails
 
@@ -162,23 +249,46 @@ that on :443 on this box.
 - **`Permission denied` on a docker command** — the unit's `PATH` is set but
   group membership is not: a systemd user manager bakes in supplementary groups
   at *its* start, so a `docker` grant newer than your login session is invisible
-  to it. `systemctl --user daemon-reexec`, or log out and back in.
+  to it. `server.py` already works around this — anything it runs is re-entered
+  as `sg docker -c '…'` when the process lacks the group (`sg_docker()`, shared
+  by deploys and the lifecycle actions), so this should be rare. It resurfaces
+  if `sg` itself is not installed, in which case the argv runs bare and fails.
+  Fix the underlying state with `systemctl --user daemon-reexec`, or log out
+  and back in.
+
+  The same trap bites you in a terminal: a shell that predates your docker
+  group membership makes `docker inspect` report healthy containers as down.
+  Re-run under `sg docker -c '…'` before believing an outage.
 
 ## Nuke and pave
 
-Nothing here holds data you care about — the registry is in git and the job
-logs are disposable.
+⚠️ **`~/services/launcher` is no longer just job logs.** It also holds
+`overrides.json` (your edited tile names and descriptions) and `notes.json`
+(per-service notes). Both are user-authored, **neither is in git, and neither
+is backed up** — `rm -rf` on that directory is the only way to lose them.
+Save them first:
+
+```bash
+cp ~/services/launcher/notes.json ~/services/launcher/overrides.json /tmp/ 2>/dev/null
+```
+
+Then:
 
 ```bash
 cd ~/dev/setup-server/launcher
 systemctl --user disable --now launcher.service
 rm -f ~/.config/systemd/user/launcher.service
 systemctl --user daemon-reload
-rm -rf ~/services/launcher          # job logs only
+rm -rf ~/services/launcher/jobs     # job logs — disposable
+# rm -rf ~/services/launcher        # ONLY if you also mean the notes/overrides
 tailscale serve --https=8093 off
 tailscale serve --https=443 --set-path=/home off   # leaves code-server's "/" alone
 ./setup.sh
 ```
+
+If that last `serve` form is refused, **do not fall back to
+`tailscale serve --https=443 off`** — that removes the whole port, code-server
+included. Recover it with `cd ../code-server && ./setup.sh`.
 
 macOS equivalent for the service part:
 

@@ -119,7 +119,11 @@ ExecStart=$BIN
 Environment="KEY=$KEY"
 Environment="LISTEN=127.0.0.1:$AGENT_PORT"
 Environment="GPU=true"
-Restart=on-failure
+# AGENTS.md mandates Restart=always for long-running user units: with
+# on-failure, a *clean* agent exit (code 0) is never restarted and beszel
+# goes silently blind — no alert, because the thing that would alert is the
+# thing that stopped.
+Restart=always
 
 [Install]
 WantedBy=default.target

@@ -11,11 +11,16 @@ Quick triage:
 
 ```bash
 cd ~/dev/setup-server/immich
-docker compose --project-directory . ps            # all four (or three) up?
+docker compose --project-directory . ps            # three up (four with ML on)
 curl -s http://127.0.0.1:2283/api/server/ping      # {"res":"pong"}
 tailscale serve status                             # :2283 -> 127.0.0.1:2283
 ./tests/run-tests.sh --live                        # everything at once
 ```
+
+If `docker` says "permission denied", you are not in the docker group in
+*this shell*: `sg docker -c './tests/run-tests.sh --live'`. The live suite
+checks for this up front and says so, rather than reporting three healthy
+containers as down — but a hand-run `docker inspect` will just lie to you.
 
 ## Containers won't start / keep restarting
 
@@ -47,9 +52,14 @@ First boot runs DB migrations and can take minutes; `docker logs -f` shows
 progress. If it never finishes:
 
 - Check the DB is actually reachable from the server container:
-  `docker exec immich_server sh -c 'nc -z database 5432 && echo ok'`
-- Check the port really is on loopback:
-  `ss -ltn | grep 2283` → should show `127.0.0.1:2283`, never `0.0.0.0`.
+  `docker exec immich_server pg_isready -h database -p 5432`
+  → `database:5432 - accepting connections`. (There is no `nc` in that image;
+  `pg_isready` is the tool it does ship.)
+- Check the port really is on loopback: `ss -ltn | grep 2283`. Three lines are
+  expected and correct — `127.0.0.1:2283` is Immich, and `100.85.87.87:2283`
+  plus the `fd7a:…` v6 address are **tailscaled's** own serve frontend, not a
+  leak. HTTPS port == local port here, which is why they collide on one number.
+  `0.0.0.0:2283` would be the real problem.
 - A half-migrated database after an interrupted upgrade usually needs the
   version pinned back: set `IMMICH_VERSION` in `.env` to the version you
   were on, `docker compose up -d`, let it settle, then upgrade forward.
@@ -63,9 +73,45 @@ progress. If it never finishes:
 - **Port already claimed** — `tailscale serve status` will show what has
   `:2283`. Reset just this one: `tailscale serve --https=2283 off`.
   ⚠️ Never `tailscale serve reset` — that clears every mapping on the node,
-  taking all the other services down with it. `off` is undocumented in
-  `--help` but is what Tailscale prints itself, and is the only single-port
-  removal.
+  taking all the other services down with it (including code-server on `:443`,
+  which is how you were reading this). Every service's `setup.sh` then has to
+  be re-run. `off` is absent from `--help` but is what Tailscale prints itself
+  after a successful `serve`, and is the only single-port removal.
+
+## `setup.sh` runs but the settings never change
+
+These are the three ways this deploy actually went wrong. Each has a
+regression test in `tests/run-tests.sh`, so if you hit one again, the test
+should have caught it — start by running the mocked suite.
+
+- **`GET /api/admin/config returned HTTP 404`, or the ML toggle stays wrong** —
+  the admin config endpoint is `/system-config` on v3.1.0, which is what this
+  box runs. `/admin/config` is the post-v3.1.0 rename and does not exist yet.
+  `setup.sh` probes `/admin/config`, sees the 404 and falls back, printing
+  `Using the pre-rename config endpoint (/system-config)` — that line is
+  normal, not a warning. Confirm which one your server has:
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:2283/api/admin/config    # 404 here
+  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:2283/api/system-config   # 401 = exists
+  ```
+
+  `401` means the path exists and just wants a token — that is the one in use.
+- **A run died partway and the re-run says "Settings unchanged"** — the
+  completion sentinel is `~/services/immich/.ml-mode`, *not* the admin
+  account. If the marker is missing, the low-RAM tuning is (re)applied even
+  though the admin already exists; if it is present and matches `IMMICH_ML`,
+  nothing is written. So `cat ~/services/immich/.ml-mode` answers "has a
+  settings pass ever completed?" — and deleting it is how you force the
+  tuning to be re-applied on the next run.
+- **`IMMICH_ML=off ./setup.sh` keeps starting the ML container anyway** — this
+  was a real bug. `setup.sh` sources `.env`, which *exports* its
+  `COMPOSE_PROFILES`, and Compose prefers the environment over the file, so a
+  stale `COMPOSE_PROFILES=ml` in the shell beat the freshly-rewritten `.env`.
+  The script now pins `export COMPOSE_PROFILES=` to the mode it resolved and
+  passes `--profile` too. If you drive Compose by hand, the same trap applies
+  to you: `COMPOSE_PROFILES= docker compose --project-directory . up -d`, or
+  the profile you sourced earlier comes back.
 
 ## HTTPS URL doesn't load from a client
 
@@ -103,6 +149,12 @@ progress. If it never finishes:
 - **ML is extremely slow** — it is CPU inference at concurrency 1 by design
   on this box. Let it run overnight; the queue draining slowly is not a
   fault.
+- **The marker and reality disagree** — three things must agree: the
+  `.ml-mode` marker, `COMPOSE_PROFILES` in `.env`, and whether the container
+  exists. `./tests/run-tests.sh --live` asserts exactly that pairing
+  ("ML container absent" / "ML container running"), so a red line there is
+  the fastest way to see the drift. `IMMICH_ML=on|off ./setup.sh` reconciles
+  all three; nothing else does.
 
 ## Import problems
 

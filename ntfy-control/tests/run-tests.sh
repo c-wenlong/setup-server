@@ -322,14 +322,29 @@ test_handle_pick() {
 test_handle_pick_empty() {
   echo "• handler: empty picker explains itself instead of showing nothing"
   setup
-  # every controllable service's *primary* part, down.
-  for c in seafile seafile-mysql seafile-redis n8n open-webui kaichenpedia \
-           uptime-kuma immich_server beszel; do
-    touch "$STATE_DIR/stopped_$c"
-  done
-  for u in code-server.service manimkc.service beszel-agent.service; do
-    touch "$STATE_DIR/stopped_$u"
-  done
+  # Every controllable service's parts, down. Derived from the shared
+  # registry rather than hardcoded: this list used to be a literal, and it
+  # silently went stale the moment services were added to
+  # launcher/services.json (forgejo, jellyfin, vaultwarden), leaving the
+  # picker non-empty and this test asserting the wrong thing.
+  while IFS= read -r part; do
+    [ -n "$part" ] && touch "$STATE_DIR/stopped_$part"
+  done <<EOF
+$(python3 - "$SERVICE_DIR/../launcher/services.json" <<'PYEOF'
+import json, sys
+HARD_LOCKED = {"launcher", "ntfy", "ollama"}
+doc = json.load(open(sys.argv[1]))
+for svc in doc.get("services") or []:
+    key, block = svc.get("key"), svc.get("control")
+    if key in HARD_LOCKED or not isinstance(block, dict) or block.get("locked"):
+        continue
+    for part in block.get("parts") or []:
+        name = part.get("container") or part.get("unit")
+        if name:
+            print(name)
+PYEOF
+)
+EOF
   run_handle "pick stop"
   check "explains nothing to stop"    calls_have "nothing to stop"
   check "offers menu"                 calls_have '"body": "panel"'

@@ -10,12 +10,41 @@ Quick triage (run on the server):
 
 ```sh
 systemctl --user is-active code-server        # expect: active
-curl -fsS http://127.0.0.1:8080/healthz       # expect: {"status":...}
-tailscale serve status                        # expect: proxy http://127.0.0.1:8080
+curl -fsS http://127.0.0.1:8080/healthz       # expect: {"status":"alive",...}
+tailscale serve status                        # expect: / proxy http://127.0.0.1:8080
 curl -fsS https://$(tailscale status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')/healthz
 ```
 
 Or just: `./tests/run-tests.sh --live`
+
+From a phone or another machine, the launcher at
+`https://kai-home-server.taild6a23f.ts.net/home/` shows code-server's live
+status and has a restart button — and it is served by a *different* backend
+(:8093), so it still works when code-server itself is the thing that's down.
+
+## :443 is shared — read this before touching Serve
+
+`:443` carries two mounts, added by two different `setup.sh` scripts:
+
+```
+https://kai-home-server.taild6a23f.ts.net (tailnet only)
+|-- /     proxy http://127.0.0.1:8080     # code-server (this service)
+|-- /home proxy http://127.0.0.1:8093     # launcher
+```
+
+- **Never run a bare `tailscale serve --https=443 http://...`** for anything
+  else. It replaces the `/` handler and code-server goes dark instantly, with
+  no error. A second service on :443 must use
+  `--set-path=/<name>`, which is additive and leaves `/` alone.
+- **Never run `tailscale serve reset`.** It is one of only two removal verbs
+  `tailscale serve --help` advertises, and it wipes the serve config for the
+  *entire node* — every mapping on it, every published service dark at
+  once, each one's `setup.sh` to be re-run. The single-port removal is
+  `tailscale serve --https=<port> off`; `off` is absent from `--help` on
+  1.102.3 but is what Tailscale prints after a successful serve, and it works
+  on this box.
+- Re-running this service's `setup.sh` is safe: it issues the bare
+  `tailscale serve --bg http://127.0.0.1:8080`, which sets only `/`.
 
 ## Service won't start / keeps restarting
 
@@ -26,8 +55,8 @@ journalctl --user -u code-server -e --no-pager
 - **`EADDRINUSE`** — port taken. Find the culprit: `ss -ltnp | grep 8080`.
   Either stop it or redeploy on another port: `PORT=9000 ./setup.sh`
   (delete `~/.config/code-server/config.yaml` first — the script won't
-  overwrite an existing config), then re-run `tailscale serve --bg` for the
-  new port.
+  overwrite an existing config). `setup.sh` re-publishes for you; by hand it
+  is `tailscale serve --bg http://127.0.0.1:9000` — bare, no `--https=443`.
 - **`code-server: command not found` in logs** — `~/.local/bin/code-server`
   symlink broken. Re-run `./setup.sh`.
 - **Service dies at logout / after reboot** — lingering is off. Check
@@ -48,6 +77,13 @@ journalctl --user -u code-server -e --no-pager
   approve, retry. Requires HTTPS certs + MagicDNS enabled on the tailnet.
 - **Serve config missing after tailscaled restart/upgrade** — reapply:
   `tailscale serve --bg http://127.0.0.1:8080`
+- **`/` 404s or serves the wrong app, but `/home/` still works** — something
+  else claimed `/` on :443 with a bare `--https=443`. Reapply the line above;
+  it only touches `/`.
+- **Every service on the box went dark at once, not just this one** — that is
+  `tailscale serve reset`, or tailscaled itself. `tailscale status` first;
+  if tailscaled is fine and `tailscale serve status` is empty, the config was
+  reset and every service's `setup.sh` has to be re-run to rebuild it.
 
 ## HTTPS URL doesn't load from the client
 
@@ -77,9 +113,15 @@ journalctl --user -u code-server -e --no-pager
 
 ```sh
 systemctl --user disable --now code-server
-tailscale serve --https=443 off
+tailscale serve --https=443 off        # ⚠️ clears the WHOLE :443 node
 rm -rf ~/.local/lib/code-server-* ~/.local/bin/code-server \
        ~/.config/code-server ~/.config/systemd/user/code-server.service
 systemctl --user daemon-reload
 ./setup.sh
+cd ../launcher && ./setup.sh           # restores the /home mount
 ```
+
+`--https=443 off` takes the launcher's `/home` mount with it — they share the
+port. Re-running `launcher/setup.sh` puts it back; it is idempotent and
+touches nothing else. Still never `tailscale serve reset`, which would do this
+to every published port instead of one.

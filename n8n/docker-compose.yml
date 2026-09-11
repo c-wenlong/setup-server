@@ -6,7 +6,7 @@
 # Serve terminates TLS in front of it.
 #
 # Runs as uid 1000 (node) inside the container — matches the host user, so
-# the ~/n8n/data volume needs no chown.
+# the ~/services/n8n/data volume needs no chown.
 
 services:
   n8n:
