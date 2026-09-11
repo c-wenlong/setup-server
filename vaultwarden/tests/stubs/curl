@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# curl stub — fakes the Vaultwarden HTTP surface. State in $STATE_DIR:
+#   conn_refused_left  — countdown of REAL connection failures from /alive
+#                        (exit 7, http_code 000), i.e. the container is up but
+#                        Rocket is not listening yet. This is what a cold start
+#                        actually looks like; it is not a 503, and a deploy
+#                        that treats the first 000 as fatal fails most cold
+#                        starts.
+#   alive_fails_left   — countdown of 503s from /alive (listening, unhealthy)
+#   wrong_domain       — exists => /api/config reports a different vault URL,
+#                        i.e. DOMAIN does not match the address clients use.
+#                        Breaks WebAuthn/passkeys with no server-side error.
+#   no_api_config      — exists => /api/config 404s, forcing setup.sh onto its
+#                        container-env fallback for the DOMAIN check
+#   admin_enabled      — exists => /admin/users answers 200 instead of 404,
+#                        i.e. an ADMIN_TOKEN got set and the vault admin
+#                        console is live. The worst regression this service
+#                        has, and the one the live suite exists to catch.
+#
+# Understands the flag shapes setup.sh actually uses: -sS, -o, -w %{http_code},
+# --max-time.
+echo "curl $*" >> "$CALLS_LOG"
+
+out=""; url=""; want_code=0; failonerr=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -u) shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -H|--max-time|--connect-timeout|-d|--data-binary|--retry) shift 2 ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <body>
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+# A refused connection: curl writes the (000) code under -w and nothing else,
+# and exits 7 whether or not -f was given.
+refuse() {
+  [ -n "$out" ] && : > "$out"
+  [ "$want_code" = "1" ] && printf '000'
+  echo "curl: (7) Failed to connect to 127.0.0.1: Connection refused" >&2
+  exit 7
+}
+
+case "$url" in
+  */alive)
+    if [ -f "$STATE_DIR/conn_refused_left" ]; then
+      left="$(cat "$STATE_DIR/conn_refused_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/conn_refused_left"
+        refuse
+      fi
+    fi
+    if [ -f "$STATE_DIR/alive_fails_left" ]; then
+      left="$(cat "$STATE_DIR/alive_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/alive_fails_left"
+        emit 503 ''
+      fi
+    fi
+    # The real endpoint answers 200 with a bare ISO timestamp, no JSON.
+    emit 200 '2026-09-11T00:00:00.000000000+08:00'
+    ;;
+
+  */api/config)
+    [ -f "$STATE_DIR/no_api_config" ] && emit 404 '<html>Not Found</html>'
+    # The real server echoes its configured DOMAIN back here, unauthenticated,
+    # which is what makes this check meaningful: it reports what the SERVER
+    # will hand to WebAuthn, not what .env claims. Mirror the address the
+    # request arrived on, so a correctly configured deploy agrees with itself.
+    base="${url%/api/config}"
+    [ -f "$STATE_DIR/wrong_domain" ] && base="https://old-name.tailfake.ts.net:9999"
+    emit 200 "{\"version\":\"1.37.2\",\"environment\":{\"vault\":\"$base\",\"api\":\"$base/api\"}}"
+    ;;
+
+  */admin/users|*/admin/users/*)
+    [ -f "$STATE_DIR/admin_enabled" ] && emit 200 '[{"Email":"kai@example.com"}]'
+    emit 404 '<html>Not Found</html>'
+    ;;
+
+  */admin|*/admin/)
+    # With no ADMIN_TOKEN this is a 200 carrying the "disabled" notice — the
+    # panel being off does NOT mean /admin 404s, which is why the meaningful
+    # assertion is on /admin/users.
+    [ -f "$STATE_DIR/admin_enabled" ] && emit 200 '<html>Vaultwarden Admin Panel</html>'
+    emit 200 "The admin panel is disabled, please configure the 'ADMIN_TOKEN' variable to enable it"
+    ;;
+
+  *)
+    emit 200 '{}'
+    ;;
+esac

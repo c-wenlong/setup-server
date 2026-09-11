@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# python3 stub — stands in for the two things setup.sh uses python3 for: the
+# preflight probe (`python3 -c 'import sqlite3'`) and counting rows in `users`
+# in the vault's SQLite file, which is how the script decides whether it is
+# safe to close registration.
+#
+# Both count queries arrive as a program on STDIN (`python3 - <path> <<'PY'`),
+# not as -c, so this stub reads stdin when it sees a bare `-`.
+#
+# State in $STATE_DIR:
+#   python3_missing  — exists => every invocation fails the way a missing
+#                      interpreter (or one built without the sqlite3 module)
+#                      does. python3 is load-bearing here, not a nicety:
+#                      without the count there is no way to know whether it is
+#                      safe to close signups.
+#   user_count       — the number both count queries return (default 0). The
+#                      stub does not care whether a db.sqlite3 exists on disk;
+#                      the absent-file case is handled inside setup.sh's own
+#                      python and is not what these tests are exercising.
+#   ro_count_fails   — exists => the read-only open fails (the container runs
+#                      as root, so a restrictive umask can leave db.sqlite3
+#                      unreadable to this user). Forces the `docker cp`
+#                      fallback.
+#   count_broken     — exists => BOTH count paths fail, i.e. the account count
+#                      is genuinely unknown. setup.sh must then leave
+#                      registration exactly as it is and exit non-zero:
+#                      assuming 0 would leave the vault open to signups,
+#                      assuming 1 would lock you out of ever registering.
+echo "python3 $*" >> "$CALLS_LOG"
+
+if [ -f "$STATE_DIR/python3_missing" ]; then
+  echo "python3: command not found" >&2
+  exit 127
+fi
+
+script=""; from_stdin=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c) script="$2"; shift 2 ;;
+    --version|-V) echo "Python 3.12.3-stub"; exit 0 ;;
+    -)  from_stdin=1; shift; break ;;
+    *)  shift ;;
+  esac
+done
+[ "$from_stdin" = "1" ] && script="$(cat)"
+
+count_out() {
+  [ -f "$STATE_DIR/count_broken" ] && exit 1
+  cat "$STATE_DIR/user_count" 2>/dev/null || echo 0
+}
+
+case "$script" in
+  *"from users"*)
+    case "$script" in
+      # count_users_ro: read-only URI open, straight off the host filesystem.
+      *mode=ro*|*pathname2url*)
+        [ -f "$STATE_DIR/ro_count_fails" ] && exit 1
+        count_out
+        ;;
+      # count_users_via_docker_cp: a throwaway copy, opened read-write.
+      *)
+        [ -f "$STATE_DIR/cp_count_fails" ] && exit 1
+        count_out
+        ;;
+    esac
+    ;;
+  *)
+    # The preflight probe and anything else: succeed silently.
+    exit 0
+    ;;
+esac
+exit 0
