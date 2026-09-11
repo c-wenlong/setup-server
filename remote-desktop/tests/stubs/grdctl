@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# grdctl stub — the RDP backend's control surface, and the single most
+# important stub in this suite.
+#
+# WHY IT MATTERS. gnome-remote-desktop is the one component of this service
+# that nobody has ever exercised: `sudo` needs a password on this box and the
+# session that built this was non-interactive, so `grdctl --system status` has
+# never actually been run here. Everything this stub emits is modelled on the
+# real binary's documented interface (`grdctl --help`, which WAS read on this
+# box), not on observed output. If the first real deploy disagrees with this
+# file, the real box wins — fix the stub, do not soften the test.
+#
+# THE FACT THIS STUB ENCODES, which the docs turn on: the real grdctl on this
+# box has `rdp set-port` and NO bind-address subcommand. The complete list,
+# read from `grdctl --help`:
+#
+#   set-port  enable  disable  set-tls-cert  set-tls-key  set-credentials
+#   clear-credentials  enable-view-only  disable-view-only
+#   enable-port-negotiation  disable-port-negotiation
+#
+# and the complete gsettings schema (org.gnome.desktop.remote-desktop.rdp) is
+# enable / negotiate-port / port / screen-share-mode / tls-cert / tls-key /
+# view-only. There is no address key anywhere. So :3389 lands on the wildcard
+# and that is not fixable from here.
+#
+# This stub therefore REFUSES any attempt to set a bind address, exactly as
+# the real binary would. A setup.sh that "solves" the wildcard problem by
+# calling a subcommand that does not exist must not go green.
+#
+# State in $STATE_DIR:
+#   grd_rdp_enabled     — exists => the RDP backend is already enabled
+#   grd_creds           — exists => credentials are already set (holds them)
+#   grd_port            — the configured port (default 3389)
+#   grd_status_fails    — exists => `status` exits non-zero (polkit denial)
+#   grd_enable_fails    — exists => `rdp enable` fails
+#   grd_no_system       — exists => --system is unsupported (older build)
+echo "grdctl $*" >> "$CALLS_LOG"
+
+SYSTEM=0; HEADLESS=0
+ARGS=""
+for a in "$@"; do
+  case "$a" in
+    --system)   SYSTEM=1 ;;
+    --headless) HEADLESS=1 ;;
+    --help)     ARGS="$ARGS help" ;;
+    *)          ARGS="$ARGS $a" ;;
+  esac
+done
+# shellcheck disable=SC2086
+set -- $ARGS
+
+if [ "$SYSTEM" = "1" ] && [ -f "$STATE_DIR/grd_no_system" ]; then
+  echo "grdctl: unrecognised option '--system'" >&2
+  exit 2
+fi
+
+port="$(cat "$STATE_DIR/grd_port" 2>/dev/null || echo 3389)"
+
+case "${1:-}" in
+  help|"")
+    cat <<'EOF'
+Usage: grdctl [OPTIONS...] COMMAND [SUBCOMMAND]...
+Commands:
+  rdp                                        - RDP subcommands:
+    set-port                                 - Set port the server binds to
+    enable                                   - Enable the RDP backend
+    disable                                  - Disable the RDP backend
+    set-tls-cert <path-to-cert>              - Set path to TLS certificate
+    set-tls-key <path-to-key>                - Set path to TLS key
+    set-credentials <username> <password>    - Set username and password
+    clear-credentials                        - Clear username and password
+    enable-view-only                         - Disable remote control
+    disable-view-only                        - Enable remote control
+    enable-port-negotiation                  - If unavailable, listen elsewhere
+    disable-port-negotiation                 - If unavailable, don't
+
+  status [--show-credentials]                - Show current status
+
+Options:
+  --headless                                 - Use headless credentials storage
+  --system                                   - Configure system daemon
+  --help                                     - Print this help text
+EOF
+    exit 0
+    ;;
+
+  status)
+    if [ -f "$STATE_DIR/grd_status_fails" ]; then
+      # What a polkit denial looks like. Not hypothetical: this is the wall
+      # the de-risking session hit, and it is why nothing below the RDP
+      # backend was ever verified on this box.
+      echo "Error: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: Not authorized" >&2
+      exit 1
+    fi
+    if [ -f "$STATE_DIR/grd_rdp_enabled" ]; then
+      echo "RDP:"
+      echo "        Status: enabled"
+      echo "        Port: $port"
+      echo "        TLS certificate: /var/lib/gnome-remote-desktop/tls.crt"
+      echo "        TLS key: /var/lib/gnome-remote-desktop/tls.key"
+      echo "        View-only: no"
+      if [ -f "$STATE_DIR/grd_creds" ]; then
+        echo "        Credentials:"
+        sed -n '1p' "$STATE_DIR/grd_creds" | sed 's/^/                username: /'
+      fi
+    else
+      echo "RDP:"
+      echo "        Status: disabled"
+    fi
+    exit 0
+    ;;
+
+  rdp)
+    shift
+    case "${1:-}" in
+      enable)
+        if [ -f "$STATE_DIR/grd_enable_fails" ]; then
+          echo "Error: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: Not authorized" >&2
+          exit 1
+        fi
+        touch "$STATE_DIR/grd_rdp_enabled"
+        ;;
+      disable)
+        rm -f "$STATE_DIR/grd_rdp_enabled"
+        ;;
+      set-port)
+        [ -n "${2:-}" ] || { echo "grdctl: set-port needs a port" >&2; exit 2; }
+        echo "$2" > "$STATE_DIR/grd_port"
+        ;;
+      set-credentials)
+        [ -n "${3:-}" ] || { echo "grdctl: set-credentials needs a username and password" >&2; exit 2; }
+        printf '%s\n%s\n' "$2" "$3" > "$STATE_DIR/grd_creds"
+        ;;
+      clear-credentials)
+        rm -f "$STATE_DIR/grd_creds"
+        ;;
+      set-tls-cert|set-tls-key|enable-view-only|disable-view-only|\
+      enable-port-negotiation|disable-port-negotiation)
+        : ;;
+      # ------------------------------------------------------------------
+      # Everything a hopeful author might reach for to constrain the listen
+      # address. NONE of these exist on the real binary. Refusing them here
+      # is the point of this stub: a setup.sh that thinks it pinned :3389 to
+      # loopback via grdctl is wrong, and must fail the suite rather than
+      # inherit a false sense of safety.
+      set-bind-address|set-address|set-listen-address|bind|set-interface)
+        echo "Unknown subcommand '$1'" >&2
+        exit 2
+        ;;
+      *)
+        echo "Unknown subcommand '${1:-}'" >&2
+        exit 2
+        ;;
+    esac
+    exit 0
+    ;;
+
+  *)
+    echo "Unknown command '${1:-}'" >&2
+    exit 2
+    ;;
+esac

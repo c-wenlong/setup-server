@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# uname stub: FAKE_UNAME overrides `uname -s`.
+#
+# Needed because this service is the one in the repo that must DIE on Darwin
+# rather than branch: a Mac cannot host this box's desktop session, so a
+# "portable" macOS path here would be a lie that half-works. The only way to
+# exercise that branch on a Linux box is to lie about the kernel.
+if [ "${1:-}" = "-s" ] && [ -n "${FAKE_UNAME:-}" ]; then
+  echo "$FAKE_UNAME"
+  exit 0
+fi
+exec /usr/bin/uname "$@"

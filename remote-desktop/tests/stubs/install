@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# install stub — a SHADOW ROOT for the files setup.sh puts under /etc.
+#
+# Why this exists rather than letting the real `install` run: setup.sh writes
+# /etc/remote-desktop/rdp-firewall.nft and
+# /etc/systemd/system/remote-desktop-firewall.service under sudo. A mocked
+# suite that actually did that would be installing a packet filter on Kai's
+# live machine — which is the precise opposite of "zero changes to the host
+# system", and on this service it would mean a test run silently changing
+# what the box lets through.
+#
+# SYSTEM paths (/etc, /usr, /var, /lib, /opt) are redirected into
+# $STATE_DIR/rootfs/<path>. Everything else is written for real, because
+# "everything else" means the sandbox: setup.sh also `install`s the public
+# certificate into $GUAC_STATE, which is an absolute path under the temp
+# $HOME. Shadowing that one too would be a bug with teeth — `cert_ok()` then
+# never finds the copy, CERT_NEW stays 1 on every run, the whole backend block
+# re-runs, and "a re-run needs no sudo" fails for a reason that exists only in
+# the test harness. (It did exactly that until this was narrowed.)
+#
+# The path predicate here MUST stay in sync with the `cmp` stub's.
+#
+# The `cmp` stub performs the same redirection, so setup.sh's idempotency
+# check — `cmp -s "$WORK/rdp-firewall.nft" "$FW_RULES"` — compares against
+# what a previous run really wrote. Without that pairing, fw_current() could
+# never return true in the sandbox and the "a re-run needs no sudo" test would
+# be untestable.
+echo "install $*" >> "$CALLS_LOG"
+
+ROOTFS="$STATE_DIR/rootfs"
+shadow() {  # system path -> shadow path; anything else unchanged
+  case "$1" in
+    /etc/*|/usr/*|/var/*|/lib/*|/opt/*) printf '%s%s' "$ROOTFS" "$1" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+MODE=""; DIRMODE=0; OWNER=""; GROUP=""
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d) DIRMODE=1; shift ;;
+    -m) MODE="$2"; shift 2 ;;
+    -o) OWNER="$2"; shift 2 ;;
+    -g) GROUP="$2"; shift 2 ;;
+    -*) shift ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+
+# Ownership is recorded, not applied: chown needs real root, and the point of
+# the assertion is that setup.sh ASKED for the right owner (the RDP private
+# key must belong to the gnome-remote-desktop user and nobody else).
+if [ -n "$OWNER" ] || [ -n "$GROUP" ]; then
+  printf '%s %s %s %s\n' "${OWNER:--}" "${GROUP:--}" "${MODE:--}" "${ARGS[*]}" \
+    >> "$STATE_DIR/install_owners"
+fi
+
+if [ "$DIRMODE" = "1" ]; then
+  for d in "${ARGS[@]}"; do
+    t="$(shadow "$d")"; mkdir -p "$t" || exit 1
+    [ -n "$MODE" ] && chmod "$MODE" "$t"
+  done
+  exit 0
+fi
+
+n=${#ARGS[@]}
+[ "$n" -ge 2 ] || exit 1
+dest="$(shadow "${ARGS[$((n - 1))]}")"
+mkdir -p "$(dirname "$dest")" || exit 1
+i=0
+while [ "$i" -lt $((n - 1)) ]; do
+  cp "${ARGS[$i]}" "$dest" || exit 1
+  i=$((i + 1))
+done
+[ -n "$MODE" ] && chmod "$MODE" "$dest"
+
+# The firewall rules file landing is what makes the filter real, as far as
+# every downstream probe is concerned.
+case "${ARGS[$((n - 1))]}" in
+  */rdp-firewall.nft) cp "${ARGS[0]}" "$STATE_DIR/fw_rules_installed" ;;
+esac
+exit 0

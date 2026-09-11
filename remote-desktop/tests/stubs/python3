@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# python3 stub — intercepts setup.sh's network probes, and NOTHING else.
+#
+# WHY THIS IS THE MOST IMPORTANT STUB IN THE SUITE. setup.sh does not verify
+# this service by looking at `ss` output, and it is right not to: the RDP port
+# is wildcard-bound and cannot be made otherwise, so "is it bound to
+# 127.0.0.1?" is a question with a permanently wrong answer here. Instead it
+# writes a small probe script to a temp dir and CONNECTS — `probe tcp` for
+# reachability, `probe rdp` for a real X.224 handshake.
+#
+# That means the entire security argument of this deploy, and its entire
+# health story, runs through this one interface. Modelling it faithfully is
+# what lets the suite say anything at all about either.
+#
+# Anything that is not the probe script is handed to the real python3, so a
+# future setup.sh that uses python3 for something else does not silently get
+# fake answers.
+#
+# ── THE TWO ANSWERS ─────────────────────────────────────────────────────────
+#
+#   probe tcp <host> <port>  -> open | refused | filtered
+#   probe rdp <host> <port>  -> rdp | refused | not-rdp | no-answer | error:...
+#
+# `rdp` is the strong one: it requires an RDP Connection Confirm, so a port
+# that is merely OPEN — a TCP proxy, a stray listener, something Docker
+# published — answers "not-rdp" and fails the deploy. A stub that returned
+# "rdp" for anything reachable would erase that distinction, which is the
+# whole reason setup.sh speaks the handshake at all.
+#
+# ── THE DEFAULT PICTURE IS A CORRECTLY-FILTERED HOST ────────────────────────
+#
+#   127.0.0.1        :3389  -> rdp        (loopback is accepted by the filter)
+#   <bridge gateway> :3389  -> rdp        (GUAC_SUBNET is accepted)
+#   LAN + tailnet    :3389  -> refused    (rejected with tcp reset)
+#   LAN + tailnet    :8094  -> refused    (published on 127.0.0.1 only)
+#
+# ...but ONLY once the firewall has been installed. Before that, the wildcard
+# listener answers everywhere — which is the true, unmitigated behaviour, and
+# is what makes test_filter_precedes_rdp_enable meaningful rather than
+# decorative. The state file the `install` stub creates is what flips it.
+#
+# State in $STATE_DIR:
+#   fw_installed     — written by the install/systemctl stubs once the nft
+#                      table is active. Absent => the wildcard answers the LAN.
+#   grd_rdp_enabled  — written by the grdctl stub on `rdp enable`. Absent =>
+#                      nothing is listening on 3389 anywhere. NOTE the `grd_`
+#                      prefix: this file originally read `rdp_enabled`, which no
+#                      stub ever wrote and no test ever set, so the probe always
+#                      answered "refused" and every happy-path scenario failed.
+#                      The name the grdctl stub writes, and that run-tests.sh
+#                      sets directly, is the canonical one.
+#   rdp_never_ready  — the backend never speaks RDP even after enable. The
+#                      big unknown: nobody has ever completed this step on
+#                      this box, and "Remote Login does not work on this
+#                      host" is a live possibility, not a hypothetical.
+#   rdp_not_rdp      — something answers 3389 but it is not an RDP server.
+#   rdp_leaks        — the filter is installed but 3389 STILL answers on the
+#                      LAN/tailnet. The catastrophic case: the desktop is on
+#                      the LAN and every other check is green.
+#   listen_web_lan   — the webapp answers on a non-loopback address.
+#                      (Same marker the `ss` stub uses for "bound to a
+#                      LAN address", so the two views cannot disagree.)
+#   bridge_blocked   — 3389 refuses on the bridge gateway. The opposite
+#                      mistake: a filter written too broadly takes guacd out
+#                      along with the LAN, and the symptom looks like a dead
+#                      backend rather than a firewall.
+#   guac_port        — the webapp's port (default 8094)
+#   guac_subnet_gw   — the bridge gateway address (default 172.28.0.1)
+
+script=""
+for a in "$@"; do
+  case "$a" in
+    -) ;;
+    -*) ;;
+    *) [ -z "$script" ] && script="$a" ;;
+  esac
+done
+
+case "$script" in
+  *probe.py) ;;
+  *)
+    # Not our probe: hand it to the real interpreter untouched.
+    for p in /usr/bin/python3 /usr/local/bin/python3 /opt/homebrew/bin/python3; do
+      [ -x "$p" ] && exec "$p" "$@"
+    done
+    exit 127 ;;
+esac
+
+mode="$2"; host="$3"; port="$4"
+echo "python3 probe $mode $host $port" >> "$CALLS_LOG"
+
+guac_port="$(cat "$STATE_DIR/guac_port" 2>/dev/null || echo 8094)"
+gw="$(cat "$STATE_DIR/guac_subnet_gw" 2>/dev/null || echo 172.28.0.1)"
+
+is_local() { [ "$1" = "127.0.0.1" ] || [ "$1" = "::1" ]; }
+is_bridge() { [ "$1" = "$gw" ]; }
+
+# ---------------------------------------------------------------- port 3389
+if [ "$port" = "3389" ] || [ "$port" = "$(cat "$STATE_DIR/grd_port" 2>/dev/null)" ]; then
+  # Nothing has been enabled yet: nothing is listening anywhere.
+  if [ ! -f "$STATE_DIR/grd_rdp_enabled" ]; then
+    echo refused; exit 0
+  fi
+
+  if is_local "$host"; then
+    if   [ -f "$STATE_DIR/rdp_never_ready" ]; then echo no-answer
+    elif [ -f "$STATE_DIR/rdp_not_rdp" ];     then echo not-rdp
+    elif [ "$mode" = "rdp" ];                 then echo rdp
+    else echo open; fi
+    exit 0
+  fi
+
+  if is_bridge "$host"; then
+    if [ -f "$STATE_DIR/bridge_blocked" ]; then echo refused; exit 0; fi
+    if   [ -f "$STATE_DIR/rdp_never_ready" ]; then echo no-answer
+    elif [ "$mode" = "rdp" ];                 then echo rdp
+    else echo open; fi
+    exit 0
+  fi
+
+  # Everything else: the LAN, the tailnet, anything routed here.
+  # Without the filter the wildcard listener answers all of them — that is
+  # the unmitigated truth of this backend, not a pessimistic fiction.
+  if [ ! -f "$STATE_DIR/fw_installed" ] || [ -f "$STATE_DIR/rdp_leaks" ]; then
+    if [ "$mode" = "rdp" ]; then echo rdp; else echo open; fi
+  else
+    echo refused
+  fi
+  exit 0
+fi
+
+# ------------------------------------------------------------ the web port
+if [ "$port" = "$guac_port" ]; then
+  if is_local "$host"; then echo open; exit 0; fi
+  if [ -f "$STATE_DIR/listen_web_lan" ]; then echo open; else echo refused; fi
+  exit 0
+fi
+
+# ------------------------------------------------------------- guacd (4822)
+# setup.sh asks this as a CONNECTION rather than by reading `ss` — it needs no
+# GNU-only tool and cannot be fooled by a port mapping that `ss` renders in an
+# unexpected shape. So this branch is the only thing standing behind the
+# "guacd must never be on the host" assertion.
+#
+# Default: refused, i.e. correctly container-internal. `listen_guacd` models
+# the dangerous misconfiguration — a `ports:` entry for 4822 — which is worse
+# than the :3389 exposure and entirely self-inflicted: guacd does not
+# authenticate its callers at all.
+if [ "$port" = "4822" ]; then
+  if [ -f "$STATE_DIR/listen_guacd" ]; then echo open; else echo refused; fi
+  exit 0
+fi
+
+echo refused
+exit 0

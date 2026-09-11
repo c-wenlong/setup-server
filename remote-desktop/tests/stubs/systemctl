@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# systemctl stub.
+#
+# ⚠️ THE GUARDRAIL THAT MATTERS MOST. This box's display manager is not
+# recoverable over a tailnet: Kai uses the machine physically, and a broken
+# gdm or graphical.target means someone has to walk over to it. So this stub
+# HARD-FAILS (exit 99, loud message) any attempt to touch gdm, the graphical
+# target or the desktop session — it does not merely log them. A setup.sh that
+# reaches for `systemctl set-default` or `restart gdm` dies in the mocked
+# suite, which is the only place it can die harmlessly.
+#
+# It also refuses to STOP or DISABLE gnome-remote-desktop: that unit was
+# active and enabled for a week before this service existed, and turning it
+# off is not this deploy's business. `grdctl --system rdp disable` is the
+# supported way to switch the backend off without taking the daemon with it.
+# (`restart` IS allowed — the system daemon reads its RDP settings only at
+# startup, so a restart is how a configuration change takes effect.)
+#
+# Units this stub models:
+#   gnome-remote-desktop.service       already active + enabled on this box
+#   remote-desktop-firewall.service    created by this deploy; its state is
+#                                      the shadow-root file the install stub
+#                                      wrote, so idempotency is real
+#
+# State in $STATE_DIR:
+#   grd_unit_inactive       gnome-remote-desktop reports inactive
+#   grd_unit_not_enabled    ...reports disabled (so setup.sh must enable it)
+#   grd_no_unit_file        the unit file is absent (broken install)
+#   fw_enable_fails         `enable --now remote-desktop-firewall` fails —
+#                           the mitigation silently not taking, which is
+#                           exactly how a firewall becomes a comment
+#   fw_dies                 it enables, then is not active afterwards
+#   restart_grd_fails       restarting the RDP daemon fails
+echo "systemctl $*" >> "$CALLS_LOG"
+
+verb=""; unit=""
+for a in "$@"; do
+  case "$a" in
+    --user|--system|--now|-q|--quiet|--no-pager|--no-block) ;;
+    *) if [ -z "$verb" ]; then verb="$a"; else [ -z "$unit" ] && unit="$a"; fi ;;
+  esac
+done
+
+# ── off limits, unconditionally ──────────────────────────────────────────
+case "$unit" in
+  gdm|gdm.service|gdm3|gdm3.service|display-manager|display-manager.service|\
+  graphical.target|gnome-session*|lightdm*|sddm*)
+    echo "STUB REFUSED: setup.sh tried 'systemctl $verb $unit'." >&2
+    echo "  This box's display manager and graphical target are OFF LIMITS: a" >&2
+    echo "  broken one cannot be fixed over the tailnet. Do not touch them." >&2
+    exit 99 ;;
+esac
+case "$verb" in
+  set-default|isolate)
+    echo "STUB REFUSED: setup.sh tried 'systemctl $verb $unit'." >&2
+    echo "  Changing the default or active target is off limits on this box." >&2
+    exit 99 ;;
+  stop|mask|disable)
+    case "$unit" in
+      gnome-remote-desktop|gnome-remote-desktop.service)
+        echo "STUB REFUSED: setup.sh tried to '$verb' gnome-remote-desktop." >&2
+        echo "  That unit was active and enabled before this service existed." >&2
+        echo "  Use 'grdctl --system rdp disable' to turn the backend off." >&2
+        exit 99 ;;
+    esac ;;
+esac
+
+FW_MARK="$STATE_DIR/fw_unit_enabled"
+
+case "$verb" in
+  list-unit-files)
+    case "$unit" in
+      gnome-remote-desktop.service)
+        [ -f "$STATE_DIR/grd_no_unit_file" ] && exit 1
+        echo "UNIT FILE                    STATE   PRESET"
+        echo "gnome-remote-desktop.service enabled enabled" ;;
+      *) exit 1 ;;
+    esac ;;
+
+  is-active)
+    case "$unit" in
+      remote-desktop-firewall.service)
+        [ -f "$FW_MARK" ] || exit 3
+        [ -f "$STATE_DIR/fw_dies" ] && exit 3
+        echo active ;;
+      *)
+        [ -f "$STATE_DIR/grd_unit_inactive" ] && { echo inactive; exit 3; }
+        echo active ;;
+    esac ;;
+
+  is-enabled)
+    case "$unit" in
+      remote-desktop-firewall.service)
+        [ -f "$FW_MARK" ] || exit 1
+        echo enabled ;;
+      *)
+        [ -f "$STATE_DIR/grd_unit_not_enabled" ] && { echo disabled; exit 1; }
+        echo enabled ;;
+    esac ;;
+
+  enable)
+    case "$unit" in
+      remote-desktop-firewall.service)
+        [ -f "$STATE_DIR/fw_enable_fails" ] && {
+          echo "Failed to enable unit: Unit remote-desktop-firewall.service not found." >&2
+          exit 1; }
+        touch "$FW_MARK"
+        # The filter is now real, so the probes stop seeing a wide-open
+        # wildcard listener on the LAN.
+        [ -f "$STATE_DIR/fw_dies" ] || touch "$STATE_DIR/fw_installed" ;;
+      *) : ;;
+    esac ;;
+
+  restart)
+    case "$unit" in
+      gnome-remote-desktop|gnome-remote-desktop.service)
+        [ -f "$STATE_DIR/restart_grd_fails" ] && {
+          echo "Job for gnome-remote-desktop.service failed." >&2; exit 1; } ;;
+    esac ;;
+
+  daemon-reload) : ;;
+  show) echo "MemoryCurrent=831488" ;;
+esac
+exit 0

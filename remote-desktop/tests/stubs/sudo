@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# sudo stub: logs the call, then runs the command (which resolves to other
+# stubs on PATH).
+#
+# ⚠️ On the real box sudo needs a PASSWORD, and the session that built this
+# service was non-interactive — so no sudo-gated step of this deploy has ever
+# actually been executed. Everything downstream of a `sudo` here is modelled,
+# not observed. The suite's job is therefore narrower than usual: it cannot
+# prove the sudo path works, only that the deploy ASKS FOR IT AT THE RIGHT
+# TIMES — and, crucially, that an idempotent re-run asks for it zero times.
+# See test_idempotent_rerun_needs_no_sudo.
+echo "sudo $*" >> "$CALLS_LOG"
+# Strip sudo's own options so `sudo -n cmd` still execs `cmd`.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|-E|-H|-k|-S) shift ;;
+    -u) shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+[ $# -gt 0 ] || exit 0
+exec "$@"

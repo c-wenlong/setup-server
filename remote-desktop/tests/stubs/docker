@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm     — `docker ps` fails like a user outside the docker group
+#   compose_up         — touched by `compose ... up`
+#   compose_cmds       — the full argv of every `docker compose` invocation
+#   up_fail            — a keyword selecting how `compose up` fails:
+#                          pool   -> "Pool overlaps with other one on this
+#                                    address space". THE failure for this
+#                                    service: 172.17-172.27 are ALL already
+#                                    allocated to other services' bridges on
+#                                    this box (measured 2026-09-11), so an
+#                                    unpinned or badly-pinned subnet collides.
+#                          inuse  -> host port already allocated
+#                          other  -> an unrecognised failure
+#   container_status   — `.State.Status` (default running)
+#   guacd_status       — override just guacd's status
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the Docker daemon socket" >&2
+      exit 1
+    fi
+    ;;
+
+  images)
+    # Both tags are already pulled on this box. Emitting them lets a deploy
+    # that checks before pulling take the fast path.
+    echo "guacamole/guacd:1.6.0"
+    echo "guacamole/guacamole:1.6.0"
+    ;;
+
+  inspect)
+    fmt=""; name=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --format|-f) fmt="$2"; shift 2 ;;
+        --format=*)  fmt="${1#--format=}"; shift ;;
+        -*) shift ;;
+        *) name="$1"; shift ;;
+      esac
+    done
+    case "$fmt" in
+      *RestartCount*) cat "$STATE_DIR/restart_count" 2>/dev/null || echo 0 ;;
+      *Config.Image*)
+        case "$name" in
+          *guacd*) echo "guacamole/guacd:1.6.0" ;;
+          *)       echo "guacamole/guacamole:1.6.0" ;;
+        esac ;;
+      *Memory*) echo 536870912 ;;
+      *State.Status*|*.Status*)
+        case "$name" in
+          *guacd*) cat "$STATE_DIR/guacd_status" 2>/dev/null \
+                     || cat "$STATE_DIR/container_status" 2>/dev/null || echo running ;;
+          *)       cat "$STATE_DIR/container_status" 2>/dev/null || echo running ;;
+        esac ;;
+      *) echo running ;;
+    esac
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        printf '%s\n' "$*" >> "$STATE_DIR/compose_cmds"
+        for a in "$@"; do
+          case "$a" in
+            up)
+              if [ -f "$STATE_DIR/up_fail" ]; then
+                case "$(cat "$STATE_DIR/up_fail")" in
+                  pool)
+                    echo "failed to create network remote-desktop_default: Error response from daemon: Pool overlaps with other one on this address space" >&2 ;;
+                  inuse)
+                    echo "Error response from daemon: driver failed programming external connectivity on endpoint guacamole: Bind for 127.0.0.1:8094 failed: port is already allocated" >&2 ;;
+                  *)
+                    echo "Error response from daemon: something else entirely" >&2 ;;
+                esac
+                exit 1
+              fi
+              touch "$STATE_DIR/compose_up"
+              ;;
+            pull)  touch "$STATE_DIR/compose_pull" ;;
+            down)  touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0

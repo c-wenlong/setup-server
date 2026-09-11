@@ -1,0 +1,79 @@
+# Apache Guacamole — the browser half of remote-desktop.
+#
+# Two containers, no database: Guacamole's built-in file authentication
+# (user-mapping.xml under GUACAMOLE_HOME) replaces the usual Postgres +
+# guacamole-auth-jdbc pair. That is the whole reason this is two containers
+# instead of four.
+#
+#   guacamole (Tomcat)  127.0.0.1:${GUAC_PORT} -> :8080   HTML5 front end
+#     └─ guacd          remote-desktop bridge, :4822      HTML5 <-> RDP
+#          └─ RDP       ${GUAC_RDP_HOST}:3389             gnome-remote-desktop
+#                                                          on THIS host
+#
+# Two deliberate choices worth not "fixing":
+#
+#   * guacd's 4822 is NOT published to the host. It speaks an unauthenticated
+#     protocol — anything that can reach it can open an RDP session to any
+#     host it can route to. It is reachable only from the webapp container on
+#     the private `remote-desktop` bridge.
+#
+#   * The webapp runs as ${GUAC_UID}:${GUAC_GID} (the deploying user) rather
+#     than the image's built-in uid 1001. That is what lets GUAC_HOME be
+#     0700 and user-mapping.xml 0600 while still being readable inside the
+#     container. user-mapping.xml holds the RDP password in plaintext — it
+#     must not be world-readable. Verified working on 1.6.0.
+#
+# The subnet is pinned because guacd reaches the host's RDP server at this
+# bridge's gateway address, and the host packet filter installed by setup.sh
+# allows port 3389 from exactly this subnet and nowhere else. Change one and
+# you must change the other (GUAC_SUBNET / GUAC_RDP_HOST in .env).
+
+name: remote-desktop
+
+services:
+  guacd:
+    image: guacamole/guacd:${GUACD_VERSION:-1.6.0}
+    container_name: guacd
+    restart: unless-stopped
+    # Measured idle: ~11 MiB. The limit is a blast radius, not a target.
+    mem_limit: 512m
+    networks:
+      - guac
+
+  guacamole:
+    image: guacamole/guacamole:${GUACAMOLE_VERSION:-1.6.0}
+    container_name: guacamole
+    restart: unless-stopped
+    # Measured idle: ~164 MiB (Tomcat + JVM). Heap grows with sessions.
+    mem_limit: 1g
+    user: "${GUAC_UID:?}:${GUAC_GID:?}"
+    depends_on:
+      # Start order only. NOT condition: service_healthy — guacd's healthcheck
+      # has a 300s interval and no start_period, so the first probe lands five
+      # minutes in and every deploy would block on it. The webapp does not
+      # need guacd at boot; it dials it per session.
+      - guacd
+    environment:
+      GUACD_HOSTNAME: guacd
+      GUACD_PORT: "4822"
+      # The image defaults this to /etc/guacamole; pointing it somewhere of
+      # our own keeps the mount from shadowing anything the image ships.
+      # The entrypoint symlinks this directory's contents into a private
+      # GUACAMOLE_HOME at startup, so a read-only mount is fine.
+      GUACAMOLE_HOME: /guac-home
+    volumes:
+      - ${GUAC_HOME:?}:/guac-home:ro
+    ports:
+      # Loopback only. The tailnet front door is `tailscale serve`, wired up
+      # by setup.sh; nothing here is reachable from the LAN.
+      - "127.0.0.1:${GUAC_PORT:-8094}:8080"
+    networks:
+      - guac
+
+networks:
+  guac:
+    name: remote-desktop
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${GUAC_SUBNET:-172.28.0.0/24}

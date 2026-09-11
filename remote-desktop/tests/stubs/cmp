@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# cmp stub — the read side of the shadow root the `install` stub writes.
+#
+# setup.sh decides whether the packet filter needs re-installing (and thus
+# whether this run needs sudo AT ALL) with:
+#
+#     cmp -s "$WORK/rdp-firewall.nft" /etc/remote-desktop/rdp-firewall.nft
+#     cmp -s "$WORK/remote-desktop-firewall.service" /etc/systemd/system/...
+#
+# In the sandbox those /etc paths do not and must not exist. Redirecting them
+# to $STATE_DIR/rootfs — exactly as the install stub does — is what lets the
+# idempotency test be a real test: on the second run cmp finds the file a
+# previous run wrote, fw_current() returns true, and the sudo branch is
+# skipped. Without this, every run would take the sudo path and
+# "a re-run needs no sudo" could never be asserted at all.
+#
+# Relative and sandbox-local paths go to the real cmp untouched.
+# This predicate MUST stay in sync with the `install` stub's shadow().
+ROOTFS="$STATE_DIR/rootfs"
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    /etc/*|/usr/*|/var/*|/lib/*|/opt/*) ARGS+=("$ROOTFS$a") ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+exec /usr/bin/cmp "${ARGS[@]}"
