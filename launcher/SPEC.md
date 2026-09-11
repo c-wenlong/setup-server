@@ -238,3 +238,106 @@ the design:
 | GET | `api/services/{key}` | detail: identity, meta, env var names + `secret` flags (no values) |
 | PATCH | `api/services/{key}` | `{name?, description?}` → persists to overrides.json |
 | POST | `api/services/{key}/env/{var}/reveal` | `{value}` for one variable |
+
+---
+
+## v3 — view/sort controls, usage tracking, resource use (2026-09-12)
+
+Requested: a dropdown to switch grid ↔ table, a dropdown for sort order
+(default = last launched/opened; also deployed-date and RAM), and resource
+use shown per service. Three agents build this against the contract below;
+they do not need to talk to each other if they honour it exactly.
+
+### Definitions
+
+- **launched** — the user clicked the tile's icon/title (the `<a
+  target="_blank">` on an installed tile) and the service opened in a tab.
+- **opened** — the user opened the service's detail page (`openDetail`).
+- **last_used** — the later of the two. The default sort key.
+- **deployed_at** — mtime of the service's `marker` path, as an epoch
+  float; `null` when the marker does not exist. This is what "chronological"
+  sorts by, newest first.
+- **resources** — RAM and CPU read from **cgroup v2 in sysfs**, never from
+  `docker stats`. Measured 2026-09-12 on this box: docker containers live at
+  `/sys/fs/cgroup/system.slice/docker-<64hex>.scope/`, user units at
+  `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/<unit>/`,
+  and both expose `memory.current` and `cpu.stat` (`usage_usec`), readable by
+  the launcher's own user. The **only** docker call is one cached
+  `sg docker -c "docker ps -a --no-trunc --format '{{.Names}}\t{{.ID}}'"`
+  to map container name → id, TTL 10 s, and if it fails every container
+  part simply reports `null`. Status must keep working with no docker group
+  at all — that rule is unchanged.
+
+### Payload contract (server → web)
+
+Every entry in `GET api/services` (list) AND the object from
+`GET api/services/{key}` (detail) gains these three keys. All are always
+present; missing data is `null`, never an absent key and never an error.
+
+```json
+"usage":       {"last_launched": 1757622000.1, "last_opened": null, "last_used": 1757622000.1},
+"deployed_at": 1757550470.0,
+"resources": {
+  "rss_bytes":  1234567,          // sum over parts; null if no part could be read
+  "cpu_pct":    2.4,              // percent of the WHOLE MACHINE (0-100), i.e.
+                                  // delta usage_usec / (delta wall usec * nproc) * 100;
+                                  // null until the server has two samples
+  "sampled_at": 1757622001.0,
+  "parts": [
+    {"name": "immich_server", "kind": "container", "rss_bytes": 512000000, "cpu_pct": 1.9},
+    {"name": "manimkc.service", "kind": "unit",    "rss_bytes": null,      "cpu_pct": null}
+  ]
+}
+```
+
+Parts come from the service's `control.parts` (container → `kind:
+"container"`, unit → `kind: "unit"`), in that order. A service with no
+control block gets `"parts": []` and nulls. The server keeps the previous
+`(usage_usec, wall)` per cgroup in memory to compute `cpu_pct`; it is
+recomputed on each list/detail request, cached with the same TTL discipline
+as probes so a busy grid cannot hammer sysfs.
+
+### New endpoint
+
+`POST api/services/{key}/touch` with body `{"event": "launched"}` or
+`{"event": "opened"}`. Records `time.time()` into
+`~/services/launcher/usage.json` (same atomic-replace pattern and lock
+discipline as `overrides.json`) and returns `200 {"usage": {...}}`.
+`404` for an unknown key, `400` for any other event, `413`/`400` for a body
+over 1 KB. The web fires it with `fetch(..., {keepalive: true})` on launch,
+because that click navigates the tab away.
+
+### Web behaviour
+
+- A toolbar beside the existing search/tabs with two native `<select>`s,
+  styled like the tabs: **View** (`Grid` | `Table`) and **Sort**
+  (`Last used` | `Deployed` | `RAM`). Both persist in `localStorage` (per
+  device, like `TAB_STORE`); default `Grid` + `Last used`.
+- Sort is applied to whatever the active tab/filter yields, in both views:
+  - Last used: `usage.last_used` desc; never-used services after, in
+    registry order.
+  - Deployed: `deployed_at` desc; not-deployed after, in registry order.
+  - RAM: `resources.rss_bytes` desc; `null` after, in registry order.
+- **Table view**: one row per service — icon, name + tagline, state pill,
+  RAM (human units, `—` for null), CPU (`x.x %`, `—` for null), last used
+  (relative, "3 h ago"), deployed (date), and the same two affordances as a
+  tile: icon/name launches (and fires `touch launched`), the rest of the row
+  opens details (and fires `touch opened`). The table sits in its own
+  `overflow-x: auto` container so the page never scrolls sideways at 400 px.
+- **Grid view** unchanged except that installed tiles may show the RAM
+  figure in small muted text; nothing else moves.
+- **Detail page**: a "Resources" block in the main column (not the notes
+  column): total RAM, CPU, deployed date, last launched, last opened, and a
+  per-part table (name, kind, RAM, CPU). Everything null-safe: the block
+  renders `—` cells, not errors, against a server that predates this
+  contract.
+- Nothing new is fetched: the grid's existing 30 s poll of `api/services`
+  carries the new keys; `cpu_pct` appears from the second poll.
+
+### Ownership
+
+- backend agent: `server.py`, `tests/test_server.py`
+- frontend agent: `web/view.js`, `web/view.css` (new), `web/app.js`,
+  `web/app.css`, `web/index.html`
+- readme agent: repo `README.md` only (service icons + links — unrelated to
+  this feature, batched for the same push)
