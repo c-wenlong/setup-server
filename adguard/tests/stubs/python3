@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# python3 stub — setup.sh uses python3 for exactly two things:
+#
+#   1. `python3 -c 'import secrets; print(secrets.token_hex(16))'` to generate
+#      the admin password.
+#   2. As the DNS query tool when the host has no `dig`. macOS 15 dropped
+#      dig/host/nslookup, so on a Mac this IS the verification path, and it
+#      must resolve a real name exactly as dig does — the whole point of the
+#      check is that a socket cannot fake it.
+#
+# The program for (2) arrives on STDIN (`python3 - <server> <name> <<'PY'`),
+# so a bare `-` means "read the script from stdin".
+#
+# State in $STATE_DIR: shared with the dig stub — configured, ts_ip, dns_dead,
+# filters_pending — so the two tools answer identically and neither branch of
+# the DNS_TOOL choice can pass while the other would fail.
+echo "python3 $*" >> "$CALLS_LOG"
+
+if [ -f "$STATE_DIR/python3_missing" ]; then
+  echo "python3: command not found" >&2
+  exit 127
+fi
+
+case "${1:-}" in
+  --version|-V) echo "Python 3.12.3-stub"; exit 0 ;;
+  -c)
+    case "$2" in
+      *secrets*|*token_hex*)
+        od -An -tx1 -N16 /dev/urandom | tr -d ' \n'
+        echo
+        exit 0
+        ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  -)
+    cat >/dev/null                      # swallow the heredoc program
+    server="${2:-}"; name="${3:-}"
+    ts_ip="$(cat "$STATE_DIR/ts_ip" 2>/dev/null || echo 100.77.77.77)"
+    [ -f "$STATE_DIR/configured" ] || exit 1
+    [ -f "$STATE_DIR/dns_dead" ] && exit 1
+    [ "$server" = "$ts_ip" ] || exit 1
+    case "$name" in
+      doubleclick.net|*.doubleclick.net|ads.*)
+        if [ -f "$STATE_DIR/filters_pending" ]; then
+          left="$(cat "$STATE_DIR/filters_pending")"
+          if [ "$left" -gt 0 ]; then
+            echo $((left - 1)) > "$STATE_DIR/filters_pending"
+            echo "142.250.66.14"
+            exit 0
+          fi
+        fi
+        echo "0.0.0.0"
+        ;;
+      # The real fallback prints A records only — no CNAME line, unlike
+      # `dig +short`.
+      *) echo "93.184.216.34" ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0

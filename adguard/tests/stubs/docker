@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm    — exists => `docker ps` fails like a non-docker-group user
+#   compose_up        — touched by `compose ... up`
+#   compose_cmds      — the full argv of every `docker compose` invocation
+#   up_fail           — a keyword selecting the stderr `compose up` fails with:
+#                         bind    -> "cannot assign requested address", i.e.
+#                                    the tailnet address does not exist yet.
+#                                    THE reboot-race failure for this service:
+#                                    the DNS ports bind to a specific IP and
+#                                    dockerd can start before tailscaled.
+#                         inuse   -> "port is already allocated"
+#                         other   -> an unrecognised failure
+#   container_status  — what `docker inspect .State.Status` reports (default
+#                       running)
+#   restart_count     — what `docker inspect .RestartCount` reports (default 0).
+#                       Non-zero is EXPECTED right after a reboot and must not
+#                       be reported as a fault.
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the Docker daemon socket" >&2
+      exit 1
+    fi
+    ;;
+
+  inspect)
+    fmt=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --format|-f) fmt="$2"; shift 2 ;;
+        --format=*)  fmt="${1#--format=}"; shift ;;
+        *) shift ;;
+      esac
+    done
+    case "$fmt" in
+      *RestartCount*) cat "$STATE_DIR/restart_count" 2>/dev/null || echo 0 ;;
+      *State.Status*) cat "$STATE_DIR/container_status" 2>/dev/null || echo running ;;
+      *) echo running ;;
+    esac
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        printf '%s\n' "$*" >> "$STATE_DIR/compose_cmds"
+        for a in "$@"; do
+          case "$a" in
+            up)
+              if [ -f "$STATE_DIR/up_fail" ]; then
+                case "$(cat "$STATE_DIR/up_fail")" in
+                  bind)
+                    echo "Error response from daemon: driver failed programming external connectivity on endpoint adguard: Error starting userland proxy: listen tcp4 100.77.77.77:53: bind: cannot assign requested address" >&2 ;;
+                  inuse)
+                    echo "Error response from daemon: driver failed programming external connectivity on endpoint adguard: Bind for 127.0.0.1:3080 failed: port is already allocated" >&2 ;;
+                  *)
+                    echo "Error response from daemon: something else entirely" >&2 ;;
+                esac
+                exit 1
+              fi
+              touch "$STATE_DIR/compose_up"
+              ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0
