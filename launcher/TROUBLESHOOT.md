@@ -227,6 +227,17 @@ changes both.
   best-effort: the launcher shells out to `ntfy-control/kuma_toggle.py` under
   `uv`, and a missing `uv` silently skips that step. Pause the monitor by hand
   in Kuma.
+- **Stop "exits with code 1", the tile still says running, and the job log
+  says `No such container`** — the `container` in that service's `control`
+  block is not the container's name. `docker stop` wants the
+  `container_name:` from the service's compose file, which is not always the
+  compose service key (`home-assistant` vs `homeassistant` was exactly this).
+  Fix the name in `services.json`; the launcher re-reads the file on change,
+  no restart needed. Note the Kuma pause ran *before* the failed stop and is
+  only un-paused by a successful start, so either stop again once fixed
+  (Home Assistant's case) or resume the monitor by hand.
+  `SharedControlRegistryTest.test_every_container_part_is_declared_by_a_compose_file`
+  now fails the unit suite on any such mismatch.
 - **A stopped service shows an amber "Paused" tile** — `kaichenpedia` and
   `n8n` are intentionally stopped. That tile is accurate, not a fault.
 - **`Permission denied` from a container action** — see the docker-group note

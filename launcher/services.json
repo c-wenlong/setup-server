@@ -436,7 +436,7 @@
       "control": {
         "parts": [
           {
-            "container": "homeassistant"
+            "container": "home-assistant"
           }
         ],
         "kuma": "home-assistant",

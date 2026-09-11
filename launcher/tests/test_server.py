@@ -9,6 +9,7 @@ at a sandbox. Run from launcher/:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -3266,6 +3267,32 @@ class SharedControlRegistryTest(unittest.TestCase):
             monitor = self.control(key).get("kuma")
             if monitor:
                 self.assertIn('"%s"' % monitor, text, monitor)
+
+    def test_every_container_part_is_declared_by_a_compose_file(self):
+        # `docker stop <name>` takes the CONTAINER name, which is the
+        # `container_name:` in the service's compose file — not the compose
+        # service key, and not the registry key. Home Assistant shipped with
+        # `homeassistant` (its compose service key) while the container is
+        # `home-assistant`; both stop buttons then failed with "No such
+        # container", after Kuma had already been paused. Read the compose
+        # files themselves so a rename on either side fails here, not on the
+        # phone.
+        import glob
+        pattern = re.compile(
+            r"^\s*container_name:\s*(?:\$\{[A-Z0-9_]+:-([^}]+)\}|(\S+))",
+            re.MULTILINE)
+        declared = set()
+        for compose in glob.glob(os.path.join(self.repo, "*",
+                                              "docker-compose.yml")):
+            with open(compose, encoding="utf-8") as fh:
+                for default, literal in pattern.findall(fh.read()):
+                    declared.add((default or literal).strip("\"'"))
+        self.assertTrue(declared)
+        for key in self.services:
+            for part in self.control(key).get("parts", []):
+                name = part.get("container")
+                if name:
+                    self.assertIn(name, declared, "%s: %s" % (key, name))
 
     def test_services_with_no_control_block_are_refused_not_half_wired(self):
         # Derived from services.json rather than a hardcoded list of "planned"
