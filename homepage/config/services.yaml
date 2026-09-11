@@ -1,0 +1,130 @@
+---
+# Homepage — services.yaml
+#
+# Seeded once by setup.sh from launcher/services.json, which is the box's real
+# service registry. setup.sh NEVER overwrites this file on a re-run, so edit it
+# freely; changes are picked up on the next page load with no restart (measured
+# against v1.4.5 — the file is re-read per API request).
+#
+# href        the tailnet URL the tile opens. Substituted at deploy time:
+#             __TS_HOST__ becomes this node's MagicDNS name.
+# siteMonitor Homepage fetches this itself and shows the HTTP status as the
+#             tile's status dot. It runs on the HOST network namespace
+#             (see docker-compose.yml), which is the only reason 127.0.0.1
+#             URLs work here — every service on this box binds loopback only,
+#             and a bridge-network container cannot reach any of them.
+#             Redirects ARE followed (measured: a 302 root shows as 200), so
+#             these are the same health paths launcher/services.json uses.
+#
+# A service that is deliberately stopped shows an error status. That is
+# correct, not a fault — several of these are start-on-demand.
+#
+# Icons come from the dashboard-icons CDN and are fetched by YOUR BROWSER,
+# not by this box. If you would rather the dashboard make no outbound
+# requests at all, replace each `icon:` with an `mdi-` name (bundled) or drop
+# the line.
+
+- Daily:
+    - Immich:
+        icon: immich.png
+        href: https://__TS_HOST__:2283/
+        description: Photos — timeline, albums, phone backup
+        siteMonitor: http://127.0.0.1:2283/api/server/ping
+
+    - Seafile:
+        icon: seafile.png
+        href: https://__TS_HOST__:8443/
+        description: Files — Drive sync across laptop, phone and this box
+        siteMonitor: http://127.0.0.1:8081/api2/ping/
+
+    - Vaultwarden:
+        icon: vaultwarden.png
+        href: https://__TS_HOST__:8222/
+        description: Passwords — Bitwarden-compatible vault
+        siteMonitor: http://127.0.0.1:8222/alive
+
+    - code-server:
+        icon: code-server.png
+        href: https://__TS_HOST__/
+        description: Code — full VS Code in the browser
+        siteMonitor: http://127.0.0.1:8080/healthz
+
+- AI & automation:
+    - Open WebUI:
+        icon: open-webui.png
+        href: https://__TS_HOST__:10000/
+        description: Chat over the local ollama models
+        siteMonitor: http://127.0.0.1:3001/health
+
+    - n8n:
+        icon: n8n.png
+        href: https://__TS_HOST__:5678/
+        description: Automation — visual workflows, schedules, webhooks
+        siteMonitor: http://127.0.0.1:5678/healthz
+
+    - ollama:
+        icon: ollama.png
+        description: Models — the local LLM runtime (no web UI of its own)
+        siteMonitor: http://127.0.0.1:11434/api/version
+
+    - manimkc:
+        icon: mdi-video-outline
+        href: https://__TS_HOST__:8090/docs
+        description: Video — POST a brief, get a narrated ManimGL render
+        siteMonitor: http://127.0.0.1:8090/health
+
+- Knowledge & media:
+    - kaichenpedia:
+        icon: mdi-book-open-variant
+        href: https://__TS_HOST__:8091/
+        description: Wiki — Quartz build, redeployed from GitHub daily
+        siteMonitor: http://127.0.0.1:8091/
+
+    - Jellyfin:
+        icon: jellyfin.png
+        href: https://__TS_HOST__:8096/
+        description: Media — films, shows and music to any tailnet device
+        siteMonitor: http://127.0.0.1:8096/health
+
+    - Forgejo:
+        icon: forgejo.png
+        href: https://__TS_HOST__:3000/
+        description: Git — self-hosted forge, repos and pull requests
+        siteMonitor: http://127.0.0.1:3000/api/healthz
+
+- Infrastructure:
+    - Launcher:
+        icon: mdi-view-dashboard-outline
+        href: https://__TS_HOST__/home/
+        description: The box's own service registry — deploy, start and stop
+        siteMonitor: http://127.0.0.1:8093/
+
+    - AdGuard Home:
+        icon: adguard-home.png
+        href: https://__TS_HOST__:3080/
+        description: DNS — tailnet-wide ad and tracker filtering
+        siteMonitor: http://127.0.0.1:3080/
+
+    - Home Assistant:
+        icon: home-assistant.png
+        href: https://__TS_HOST__:8123/
+        description: Home — local-first automation for lights and sensors
+        siteMonitor: http://127.0.0.1:8123/manifest.json
+
+    - Uptime Kuma:
+        icon: uptime-kuma.png
+        href: https://__TS_HOST__:3002/
+        description: Status — probes every service and pages the phone
+        siteMonitor: http://127.0.0.1:3002/
+
+    - Beszel:
+        icon: beszel.png
+        href: https://__TS_HOST__:8092/
+        description: Metrics — CPU, RAM, disk and temperature history
+        siteMonitor: http://127.0.0.1:8092/api/health
+
+    - ntfy:
+        icon: ntfy.png
+        href: https://__TS_HOST__:3003/
+        description: Alerts — push notifications to the phone
+        siteMonitor: http://127.0.0.1:3003/v1/health

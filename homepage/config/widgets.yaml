@@ -1,0 +1,30 @@
+---
+# Homepage — widgets.yaml (the header strip, not the service tiles)
+#
+# Seeded once by setup.sh; never overwritten on a re-run.
+# https://gethomepage.dev/widgets/
+#
+# The resources widget reads /proc from inside the container. Because the
+# container shares the HOST network and PID-visible /proc (no lxcfs), these
+# are the host's real numbers — measured against the host: MemTotal and nproc
+# match exactly, and disk "/" reports the overlay mount whose size and usage
+# track /dev/sda2. Do not "fix" the fs name; the figures are right.
+
+- resources:
+    label: This box
+    cpu: true
+    memory: true
+    disk: /
+    cputemp: false
+    uptime: true
+
+- datetime:
+    text_size: xl
+    format:
+      dateStyle: long
+      timeStyle: short
+      hourCycle: h23
+
+# Deliberately absent: the weather widget (needs an API key and your
+# coordinates, and phones them out on every load) and the search widget
+# (types into DuckDuckGo). Add them from the docs above if you want them.

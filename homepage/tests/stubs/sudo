@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# sudo stub: logs the call, then runs the command (which resolves to other
+# stubs). This deploy should need sudo at most once, for the operator grant.
+echo "sudo $*" >> "$CALLS_LOG"
+exec "$@"

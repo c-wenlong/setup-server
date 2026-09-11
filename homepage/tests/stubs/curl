@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# curl stub — a model of the running Homepage container, not a canned response.
+#
+# It reads the environment the docker stub resolved out of docker-compose.yml
+# + .env at `compose up` time, and then implements the two behaviours that make
+# this service hard to verify:
+#
+# 1. HOST VALIDATION, as decompiled from the shipped v1.4.5 middleware:
+#
+#        allow = [`localhost:${PORT}`, `127.0.0.1:${PORT}`]
+#        if (HOMEPAGE_ALLOWED_HOSTS) allow = allow.concat(split(","))
+#        wildcard = HOMEPAGE_ALLOWED_HOSTS === "*"
+#        matcher: "/api/:path*"
+#
+#    Exact string match, port included, and the matcher covers ONLY /api/*.
+#    So GET / here returns 200 and a fixed body no matter what the Host is —
+#    exactly as measured against the real image, where the working and broken
+#    responses are byte-identical (44801 bytes, cmp reports no difference).
+#
+#    That is the trap this whole suite exists to catch. A setup.sh that
+#    verifies with a status code, or even by asserting Homepage markup on /,
+#    passes against a dashboard whose every data fetch is 400ing.
+#
+# 2. GET / IS A BUILD-TIME STATIC SHELL. It carries the upstream
+#    "My First Service" placeholder in its __NEXT_DATA__ and NONE of the real
+#    group names, on a correctly configured install. The body below reproduces
+#    that, so a test — or a future setup.sh — that tried to assert real service
+#    names on / would fail here too, which is the correct outcome.
+#
+# /api/services is generated from the services.yaml actually on disk in the
+# mounted config dir, so the seeding step is load-bearing: if setup.sh seeds
+# after `compose up`, the docker stub's placeholder wins and the group names
+# come back as "My First Group".
+#
+# State in $STATE_DIR:
+#   conn_refused_left — N loopback attempts answered with a real refusal
+#                       (exit 7, http_code 000), not a tidy 503
+#   https_dead        — tailnet HTTPS never answers (cert still minting)
+#   yaml_broken       — /api/services returns [] with HTTP 200, as Homepage
+#                       really does when the YAML fails to parse
+#   container_status  — anything but `running` means nothing answers
+echo "curl $*" >> "$CALLS_LOG"
+
+STATE_DIR="${STATE_DIR:?STATE_DIR not set}"
+
+URL=""; OUT=""; WRITEOUT=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -o|--output) OUT="$a"; prev=""; continue ;;
+    -w|--write-out) WRITEOUT="$a"; prev=""; continue ;;
+    --max-time|-m) prev=""; continue ;;
+  esac
+  case "$a" in
+    http://*|https://*) URL="$a" ;;
+  esac
+  prev="$a"
+done
+
+emit() {  # emit <http_code> <body...>
+  local code="$1"; shift
+  if [ -n "$OUT" ]; then printf '%s' "$*" > "$OUT"; else printf '%s' "$*"; fi
+  case "$WRITEOUT" in
+    *'%{http_code}'*) printf '%s' "$code" ;;
+  esac
+  echo
+  exit 0
+}
+
+refuse() {  # what curl really does on a refused connection
+  [ -n "$OUT" ] && : > "$OUT"
+  case "$WRITEOUT" in *'%{http_code}'*) printf '000' ;; esac
+  echo
+  exit 7
+}
+
+# ------------------------------------------------------- parse the URL
+noproto="${URL#*://}"
+hostport="${noproto%%/*}"
+path="/${noproto#*/}"
+case "$noproto" in */*) ;; *) path="/" ;; esac
+scheme="${URL%%://*}"
+
+host="${hostport%%:*}"
+port="${hostport##*:}"
+[ "$port" = "$hostport" ] && port=""
+
+# The Host header a real client would send: the port is omitted only when it is
+# the scheme's default. This is why an allowlist entry must carry ":8100" for
+# the tailnet URL but a future move to :443 needs the bare name.
+HOSTHDR="$hostport"
+if { [ "$scheme" = "https" ] && [ "$port" = "443" ]; } ||
+   { [ "$scheme" = "http" ]  && [ "$port" = "80" ]; }; then
+  HOSTHDR="$host"
+fi
+
+# ------------------------------------------------ is anything answering?
+[ -f "$STATE_DIR/compose_up" ] || refuse
+status="$(cat "$STATE_DIR/container_status" 2>/dev/null || echo running)"
+[ "$status" = "running" ] || refuse
+
+# ------------------------------------------- the container's environment
+CENV="$STATE_DIR/container_env"
+cenv() { sed -n "s/^$1=//p" "$CENV" 2>/dev/null | head -1; }
+CPORT="$(cenv PORT)"; [ -n "$CPORT" ] || CPORT=3000
+ALLOWED="$(cenv HOMEPAGE_ALLOWED_HOSTS)"
+
+if [ "$scheme" = "https" ]; then
+  [ -f "$STATE_DIR/https_dead" ] && refuse
+  # Serve has to actually be mapped on that port, and the backend it proxies
+  # to has to be where the container is listening.
+  served="$(cat "$STATE_DIR/served_port" 2>/dev/null || true)"
+  target="$(cat "$STATE_DIR/served_target" 2>/dev/null || true)"
+  [ "$served" = "$port" ] || refuse
+  [ "$target" = "$CPORT" ] || refuse
+else
+  # The container binds PORT and nothing else. A compose file that sets PORT
+  # to something other than LOCAL_PORT leaves nothing on the port setup.sh
+  # publishes and polls — so this has to refuse rather than answer anyway.
+  [ "$port" = "$CPORT" ] || refuse
+  if [ -f "$STATE_DIR/conn_refused_left" ]; then
+    left="$(cat "$STATE_DIR/conn_refused_left")"
+    if [ "$left" -gt 0 ]; then
+      echo $((left - 1)) > "$STATE_DIR/conn_refused_left"
+      refuse
+    fi
+  fi
+fi
+
+# --------------------------------------------------- host validation
+# Only /api/* is validated. Everything else is served unconditionally.
+case "$path" in
+  /api/*)
+    ok=0
+    [ "$ALLOWED" = "*" ] && ok=1
+    if [ "$ok" = "0" ]; then
+      # The default allowlist, built from PORT — not from anything the
+      # operator wrote down.
+      for entry in "localhost:$CPORT" "127.0.0.1:$CPORT"; do
+        [ "$HOSTHDR" = "$entry" ] && ok=1
+      done
+    fi
+    if [ "$ok" = "0" ] && [ -n "$ALLOWED" ]; then
+      # Exact string match on comma-separated entries. No suffix matching.
+      oldIFS="$IFS"; IFS=,
+      for entry in $ALLOWED; do
+        [ "$HOSTHDR" = "$entry" ] && ok=1
+      done
+      IFS="$oldIFS"
+    fi
+    if [ "$ok" = "0" ]; then
+      echo "error: Host validation failed for: $HOSTHDR. Hint: Set the HOMEPAGE_ALLOWED_HOSTS environment variable to allow requests from this host / port." \
+        >> "$STATE_DIR/hv_log"
+      emit 400 '{"error":"Host validation failed. See logs for more details."}'
+    fi
+    ;;
+esac
+
+# --------------------------------------------------------------- routes
+CFG="$(cat "$STATE_DIR/config_dir" 2>/dev/null)"
+
+case "$path" in
+  /)
+    # The build-time static shell. Note what is and is NOT in here: the
+    # favicon link and the literal <title>Homepage</title> are, the upstream
+    # "My First Service" placeholder is, and no configured group name is.
+    emit 200 '<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><title data-next-head="">Homepage</title><link rel="shortcut icon" href="/homepage.ico"/></head><body><div id="__next"></div><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{},"fallback":{"/api/services":[{"name":"My First Group","services":[{"name":"My First Service"}]}]}}}</script></body></html>'
+    ;;
+
+  /api/healthcheck)
+    emit 200 'up'
+    ;;
+
+  /api/services)
+    if [ -f "$STATE_DIR/yaml_broken" ]; then
+      # Exactly what Homepage does with a syntax error: 200 and an empty
+      # array. The parse failure goes only to the log.
+      emit 200 '[]'
+    fi
+    if [ -z "$CFG" ] || [ ! -f "$CFG/services.yaml" ]; then
+      emit 200 '[]'
+    fi
+    # Built from the file that is actually on disk, hrefs included — so a test
+    # can prove __TS_HOST__ was substituted AND that the substituted value
+    # reached the container, not merely that a template got copied somewhere.
+    body="$(awk '
+      /^- .*:[ \t]*$/ {
+        if (insvc) { printf "}"; insvc = 0 }
+        if (ingrp)   printf "]},"
+        g = $0; sub(/^- /, "", g); sub(/:[ \t]*$/, "", g)
+        printf "{\"name\":\"%s\",\"services\":[", g
+        ingrp = 1; nsvc = 0
+        next
+      }
+      /^    - .*:[ \t]*$/ {
+        if (insvc) { printf "}"; insvc = 0 }
+        s = $0; sub(/^    - /, "", s); sub(/:[ \t]*$/, "", s)
+        if (nsvc++) printf ","
+        printf "{\"name\":\"%s\"", s
+        insvc = 1
+        next
+      }
+      /^        href:[ \t]/ {
+        h = $0; sub(/^        href:[ \t]*/, "", h)
+        printf ",\"href\":\"%s\"", h
+        next
+      }
+      /^        siteMonitor:[ \t]/ {
+        m = $0; sub(/^        siteMonitor:[ \t]*/, "", m)
+        printf ",\"siteMonitor\":\"%s\"", m
+        next
+      }
+      END { if (insvc) printf "}"; if (ingrp) printf "]}" }
+    ' "$CFG/services.yaml")"
+    [ -n "$body" ] || emit 200 '[]'
+    emit 200 "[$body]"
+    ;;
+
+  /api/widgets|/api/bookmarks)
+    emit 200 '[]'
+    ;;
+
+  *)
+    emit 404 'Not Found'
+    ;;
+esac
