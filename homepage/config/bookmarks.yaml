@@ -1,0 +1,37 @@
+---
+# Homepage — bookmarks.yaml
+#
+# Seeded once by setup.sh; never overwritten on a re-run. Plain links, no
+# status probing. __TS_HOST__ is substituted with this node's MagicDNS name
+# at deploy time.
+
+- This box:
+    - Launcher:
+        abbr: LN
+        href: https://__TS_HOST__/home/
+        description: Service registry with deploy and start/stop controls
+    - Uptime Kuma:
+        abbr: UK
+        href: https://__TS_HOST__:3002/
+    - Beszel:
+        abbr: BZ
+        href: https://__TS_HOST__:8092/
+
+- Admin:
+    - Tailscale admin:
+        abbr: TS
+        href: https://login.tailscale.com/admin/machines
+    - Tailscale DNS:
+        abbr: DN
+        href: https://login.tailscale.com/admin/dns
+    - setup-server repo:
+        abbr: GH
+        href: https://github.com/c-wenlong/setup-server
+
+- Reference:
+    - Homepage docs:
+        abbr: HP
+        href: https://gethomepage.dev/configs/services/
+    - Dashboard icons:
+        abbr: IC
+        href: https://dashboardicons.com/

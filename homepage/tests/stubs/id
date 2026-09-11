@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# id stub: FAKE_UID overrides the reported uid (for the run-as-root test).
+# Everything else falls through to the real id — setup.sh also asks for -g,
+# and those values end up in .env as HOMEPAGE_UID/HOMEPAGE_GID.
+if [ "${1:-}" = "-u" ]; then
+  echo "${FAKE_UID:-1000}"
+else
+  /usr/bin/id "$@"
+fi

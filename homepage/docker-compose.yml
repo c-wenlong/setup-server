@@ -1,0 +1,109 @@
+# Homepage — a self-hosted service dashboard.
+#
+# Values come from .env, which setup.sh generates on first run and never
+# rewrites afterwards. Do not hardcode the tailnet name or ports here.
+
+services:
+  homepage:
+    image: ghcr.io/gethomepage/homepage:${HOMEPAGE_VERSION:?HOMEPAGE_VERSION missing from .env}
+    container_name: homepage
+    restart: unless-stopped
+
+    # HOST NETWORKING, and it is load-bearing — not a shortcut.
+    #
+    # Every service on this box binds 127.0.0.1 only. Measured from a
+    # bridge-network container: 127.0.0.1 is the container itself (connection
+    # refused), the bridge gateway 172.17.0.1 is refused for the same reason,
+    # and MagicDNS names come back NXDOMAIN because Docker hands the container
+    # the router's resolver instead of Tailscale's. So on a bridge network
+    # Homepage cannot reach a single service it is supposed to be monitoring,
+    # and every tile is a dead link with no status.
+    #
+    # On the host namespace, `siteMonitor: http://127.0.0.1:<port>/` reaches
+    # all of them (verified against immich, seafile, vaultwarden, code-server,
+    # kuma, adguard and home-assistant).
+    #
+    # This does NOT weaken the loopback rule: HOSTNAME below pins the listener
+    # to 127.0.0.1, so the socket is loopback-only and `tailscale serve` is
+    # still the only way in. Verified with ss: the only 127.0.0.1:$PORT
+    # listener is next-server, and the tailnet-IP listener on the same port
+    # belongs to tailscaled's Serve proxy, not to this container.
+    # Same pattern as open-webui and n8n on this box.
+    network_mode: host
+
+    environment:
+      # Next.js binds ${HOSTNAME:-0.0.0.0}. The image ships HOSTNAME=0.0.0.0;
+      # overriding it to 127.0.0.1 is what keeps this off every other
+      # interface now that there is no Docker port mapping to do it for us.
+      # If you change this, you are publishing the dashboard to the LAN.
+      - HOSTNAME=127.0.0.1
+      - PORT=${LOCAL_PORT:?LOCAL_PORT missing from .env}
+
+      # Homepage runs as root inside the container and drops to PUID:PGID via
+      # su-exec, chowning /app/config on the way. Setting these to your own
+      # uid/gid is why the YAML files in ${HOMEPAGE_CONFIG} are yours to edit
+      # without sudo. Leave them and the config becomes root-owned.
+      - PUID=${HOMEPAGE_UID:?HOMEPAGE_UID missing from .env}
+      - PGID=${HOMEPAGE_GID:?HOMEPAGE_GID missing from .env}
+      - TZ=${TZ:-Etc/UTC}
+
+      # THE ONE THAT BREAKS THIS DEPLOY IF IT IS WRONG.
+      #
+      # v1.4.5 runs a Next.js middleware on `/api/:path*` that compares the
+      # Host header against an allowlist and answers HTTP 400 JSON if it does
+      # not match. The default allowlist is exactly [localhost:$PORT,
+      # 127.0.0.1:$PORT] — built from PORT, which is why setting PORT above
+      # to the published port makes loopback health checks work for free.
+      #
+      # `tailscale serve` forwards the Host header VERBATIM, port included
+      # (measured: an allowlist of only the ts.net name let tailnet requests
+      # through while loopback requests 400'd). So the tailnet name AND its
+      # HTTPS port must be in this list or every widget on the page fails.
+      #
+      # The failure is quiet and looks like success: the middleware matcher
+      # covers only /api/*, so `GET /` still returns a byte-identical 200 HTML
+      # page. A status check — even one asserting real Homepage markup —
+      # passes against a dashboard whose every data fetch is 400ing. Check
+      # /api/services, not /.
+      - HOMEPAGE_ALLOWED_HOSTS=${HOMEPAGE_ALLOWED_HOSTS:?HOMEPAGE_ALLOWED_HOSTS missing from .env}
+
+    volumes:
+      # Your YAML lives here. Homepage seeds any file that is missing on first
+      # request, so deleting one gets you the upstream default back.
+      - ${HOMEPAGE_CONFIG:?HOMEPAGE_CONFIG missing from .env}:/app/config
+
+      # ⚠️ OFF BY DEFAULT, AND YOU SHOULD THINK BEFORE TURNING IT ON.
+      #
+      # Uncommenting this gives Homepage live container status and per-tile
+      # CPU/RAM. It also gives a web-facing Node app with NO AUTHENTICATION
+      # OF ITS OWN root-equivalent control of this machine: anything that can
+      # reach the Docker socket can launch a privileged container and read or
+      # write the entire filesystem, /home and every service's secrets
+      # included. The tailnet is the only thing standing in front of it.
+      #
+      # `:ro` does not help — the socket is an HTTP API, and the dangerous
+      # calls are POSTs that a read-only file descriptor happily carries.
+      #
+      # What you would be buying: container-level stats you can already
+      # approximate. services.yaml uses `siteMonitor`, which asks each service
+      # over loopback whether it is actually answering — a better question
+      # than "is a container running", and it needs no privilege.
+      #
+      # If you enable it, also uncomment the `local:` block in
+      # config/docker.yaml, and consider a socket proxy instead
+      # (tecnativa/docker-socket-proxy with CONTAINERS=1 and nothing else).
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+
+    # Measured idle: ~112 MB RSS. 512m is roughly 4x headroom for the
+    # concurrent siteMonitor fetches on a page load, and a hard stop so a leak
+    # in the dashboard cannot push this box — already ~3.4 GB available of 7.7
+    # with swap in use — into swapping the services it is meant to be watching.
+    mem_limit: ${HOMEPAGE_MEM_LIMIT:-512m}
+
+    # Homepage also writes its own log to config/logs/homepage.log. This caps
+    # the Docker-side copy so `docker logs` cannot grow without bound.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# lsof stub — the macOS side of setup.sh's listener audit, reached only when
+# `ss` is absent. Mirrors the ss stub's picture so neither branch of that
+# fallback can pass while the other would fail.
+#
+# The behaviour that matters most here is the EXIT CODE: real lsof exits 1 when
+# nothing matches, and "nothing is listening on this port" is a legitimate
+# answer the caller already treats as nothing-bad. Under `set -o pipefail` that
+# non-zero status is enough to kill an unguarded assignment, so a stub that
+# helpfully exited 0 would hide a real portability bug in setup.sh.
+#
+# Output shape matches `lsof -nP -iTCP:<port> -sTCP:LISTEN`: a header line,
+# then rows whose 9th field is the NAME (addr:port).
+echo "lsof $*" >> "$CALLS_LOG"
+
+STATE_DIR="${STATE_DIR:?STATE_DIR not set}"
+
+port=""
+for a in "$@"; do
+  case "$a" in
+    -iTCP:*) port="${a#-iTCP:}" ;;
+  esac
+done
+[ -n "$port" ] || exit 1
+[ -f "$STATE_DIR/compose_up" ] || exit 1
+
+cenv() { sed -n "s/^$1=//p" "$STATE_DIR/container_env" 2>/dev/null | head -1; }
+bind="$(cenv HOSTNAME)"; [ -n "$bind" ] || bind="*"
+cport="$(cenv PORT)";    [ -n "$cport" ] || cport=3000
+ts_ip="$(cat "$STATE_DIR/ts_ip" 2>/dev/null || echo 100.77.77.77)"
+served="$(cat "$STATE_DIR/served_port" 2>/dev/null || true)"
+
+rows=""
+add() { rows="$rows
+next-ser 1 kai 20u IPv4 1 0t0 TCP $1:$port (LISTEN)"; }
+
+if [ "$port" = "$cport" ]; then
+  if [ -f "$STATE_DIR/listen_lan" ]; then
+    add "192.168.1.42"
+  else
+    add "$bind"
+  fi
+fi
+[ -n "$served" ] && [ "$port" = "$served" ] && add "$ts_ip"
+
+# Nothing matched: exit 1 with no output, exactly as lsof does.
+[ -n "$rows" ] || exit 1
+
+echo "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME"
+printf '%s\n' "$rows" | sed '/^$/d'
+exit 0

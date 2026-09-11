@@ -1,0 +1,47 @@
+---
+# Homepage — settings.yaml
+#
+# Seeded once by setup.sh; never overwritten on a re-run. Full reference:
+# https://gethomepage.dev/configs/settings/
+
+title: kai-home-server
+description: Self-hosted services on the tailnet
+
+# Groups render in this order, each as its own column-ish block. The names
+# MUST match the group keys in services.yaml exactly, or the group falls back
+# to alphabetical placement.
+layout:
+  Daily:
+    style: row
+    columns: 4
+  AI & automation:
+    style: row
+    columns: 4
+  Knowledge & media:
+    style: row
+    columns: 3
+  Infrastructure:
+    style: row
+    columns: 3
+
+headerStyle: boxed
+statusStyle: dot
+
+# Hides the footer version badge. That badge is not free: rendering it makes
+# this box call out to api.github.com for the latest Homepage release on every
+# load (measured — GET /api/releases returns live GitHub JSON). The version is
+# pinned in .env anyway, so the badge only tells you what you already wrote
+# down. Set to false if you want the upgrade nag back.
+hideVersion: true
+
+# Follow the browser's light/dark preference rather than forcing one.
+color: slate
+theme: dark
+useEqualHeights: true
+
+# No quicklaunch search provider is configured on purpose: the default sends
+# whatever you type to DuckDuckGo. Uncomment to opt in.
+# quicklaunch:
+#   searchDescriptions: true
+#   hideInternetSearch: true
+#   showSearchSuggestions: false

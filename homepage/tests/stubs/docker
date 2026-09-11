@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# docker stub.
+#
+# This one does more than record calls: on `compose up` it RESOLVES
+# docker-compose.yml against the generated .env exactly as Compose would, and
+# writes the result to $STATE_DIR/container_env and $STATE_DIR/container_mounts.
+# The curl and ss stubs then behave like a container started with that env.
+#
+# That indirection is the whole point. Without it the suite could only assert
+# that certain strings appear in a YAML file, which a mutation can satisfy
+# while breaking the deploy. With it:
+#
+#   - deleting HOMEPAGE_ALLOWED_HOSTS from the compose `environment:` block
+#     makes the curl stub fall back to Homepage's real default allowlist
+#     (localhost:$PORT, 127.0.0.1:$PORT) and the tailnet /api/* check 400s,
+#   - flipping HOSTNAME to 0.0.0.0 makes the ss stub report a wildcard
+#     listener and the listener audit fails,
+#   - uncommenting the docker.sock volume makes the socket assertion fire.
+#
+# Comments are stripped before parsing, so the compose file's long prose about
+# what it deliberately does NOT do (the commented-out socket mount especially)
+# cannot be mistaken for configuration. Getting that backwards would make the
+# suite assert the exact opposite of the truth.
+#
+# State in $STATE_DIR:
+#   docker_no_perm    — `docker ps` fails (user not in the docker group)
+#   pull_fail         — `compose pull` fails (a warning, not fatal)
+#   up_fail           — `compose up` fails; contents become the stderr text
+#   container_status  — what `docker inspect` reports (default: running)
+echo "docker $*" >> "$CALLS_LOG"
+
+STATE_DIR="${STATE_DIR:?STATE_DIR not set}"
+
+# --------------------------------------------------------------- helpers
+ENVF=""
+envval() { [ -n "$ENVF" ] && sed -n "s/^$1=//p" "$ENVF" 2>/dev/null | head -1; }
+
+# Compose-style ${NAME}, ${NAME:-default}, ${NAME:?message} interpolation.
+interp() {
+  local s="$1" out="" rest name def val
+  while [ -n "$s" ]; do
+    case "$s" in
+      *'${'*) : ;;
+      *) out="$out$s"; break ;;
+    esac
+    out="$out${s%%\$\{*}"
+    rest="${s#*\$\{}"
+    name="${rest%%\}*}"
+    s="${rest#*\}}"
+    def=""
+    case "$name" in
+      *:-*)  def="${name#*:-}"; name="${name%%:-*}" ;;
+      *:\?*) name="${name%%:\?*}" ;;
+      *:+*)  name="${name%%:+*}" ;;
+    esac
+    val="$(envval "$name")"
+    [ -n "$val" ] || val="$def"
+    out="$out$val"
+  done
+  printf '%s' "$out"
+}
+
+# Emit the `- item` entries under a given block key, comments stripped.
+block_items() {  # block_items <file> <key>
+  sed 's/#.*//' "$1" | awk -v key="$2:" '
+    $1 == key { inb = 1; next }
+    inb {
+      if ($1 == "-") { $1 = ""; sub(/^ +/, ""); print; next }
+      if ($0 ~ /^[[:space:]]*-[[:space:]]/) {
+        sub(/^[[:space:]]*-[[:space:]]*/, ""); print; next
+      }
+      if ($0 ~ /^[[:space:]]*$/) next
+      inb = 0
+    }
+  '
+}
+
+# ------------------------------------------------------------------ ps
+if [ "$1" = "ps" ]; then
+  if [ -f "$STATE_DIR/docker_no_perm" ]; then
+    echo "permission denied while trying to connect to the Docker daemon socket" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+# ------------------------------------------------------------- inspect
+if [ "$1" = "inspect" ]; then
+  fmt=""; prev=""
+  for a in "$@"; do
+    case "$prev" in --format|-f) fmt="$a" ;; esac
+    prev="$a"
+  done
+  [ -f "$STATE_DIR/compose_up" ] || { echo "Error: No such object: homepage" >&2; exit 1; }
+  case "$fmt" in
+    *State.Status*)
+      cat "$STATE_DIR/container_status" 2>/dev/null || echo running ;;
+    *Mounts*)
+      # `{{range .Mounts}}{{.Source}} {{end}}` — host-side sources, space
+      # separated. This is what setup.sh greps for docker.sock.
+      tr '\n' ' ' < "$STATE_DIR/container_mounts" 2>/dev/null; echo ;;
+    *Config.Env*)
+      # JSON-ish array, good enough for a grep.
+      printf '['
+      sep=""
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf '%s"%s"' "$sep" "$line"; sep=","
+      done < "$STATE_DIR/container_env"
+      printf ']\n' ;;
+    *) echo "" ;;
+  esac
+  exit 0
+fi
+
+# ---------------------------------------------------------------- logs
+if [ "$1" = "logs" ]; then
+  echo "info: settings.yaml was copied to the config folder"
+  [ -f "$STATE_DIR/hv_log" ] && cat "$STATE_DIR/hv_log"
+  [ -f "$STATE_DIR/yaml_broken" ] && {
+    echo "error: Failed to load services.yaml, please check for errors"
+    echo "error: YAMLException: unexpected end of the stream within a flow collection (6:1)"
+  }
+  exit 0
+fi
+
+# ------------------------------------------------------------- compose
+if [ "$1" = "compose" ]; then
+  shift
+  DIR="."
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project-directory) DIR="$2"; shift 2 ;;
+      *) break ;;
+    esac
+  done
+  ENVF="$DIR/.env"
+  COMPOSE_FILE="$DIR/docker-compose.yml"
+
+  case "$1" in
+    version) echo "Docker Compose version v2.29.0"; exit 0 ;;
+
+    pull)
+      if [ -f "$STATE_DIR/pull_fail" ]; then
+        echo "Error response from daemon: manifest unknown" >&2
+        exit 1
+      fi
+      echo "homepage Pulled"
+      exit 0 ;;
+
+    up)
+      if [ -f "$STATE_DIR/up_fail" ]; then
+        case "$(cat "$STATE_DIR/up_fail")" in
+          inuse) echo "Error starting userland proxy: listen tcp4 127.0.0.1:8100: bind: address already in use" >&2 ;;
+          *)     echo "Error response from daemon: something went wrong" >&2 ;;
+        esac
+        exit 1
+      fi
+      [ -f "$COMPOSE_FILE" ] || { echo "no configuration file provided" >&2; exit 1; }
+
+      # --- resolve the container's environment, as Compose would ---------
+      : > "$STATE_DIR/container_env"
+      block_items "$COMPOSE_FILE" "environment" | while IFS= read -r item; do
+        [ -n "$item" ] || continue
+        interp "$item"; echo
+      done >> "$STATE_DIR/container_env"
+
+      # --- resolve the volumes -------------------------------------------
+      : > "$STATE_DIR/container_mounts"
+      # Interpolate FIRST, then split on the first colon. The other order
+      # would cut ${HOMEPAGE_CONFIG:?...} in half at its own colon.
+      block_items "$COMPOSE_FILE" "volumes" | while IFS= read -r item; do
+        [ -n "$item" ] || continue
+        resolved="$(interp "$item")"
+        src="${resolved%%:*}"
+        [ -n "$src" ] && echo "$src"
+      done >> "$STATE_DIR/container_mounts"
+
+      # The config bind's host path, for the curl stub.
+      grep -m1 '^/' "$STATE_DIR/container_mounts" 2>/dev/null > "$STATE_DIR/config_dir" || true
+      cfg="$(cat "$STATE_DIR/config_dir" 2>/dev/null)"
+
+      # Homepage writes an upstream default for any config file that is
+      # ABSENT when the container starts. Modelled here because the ordering
+      # is load-bearing: setup.sh must seed BEFORE `up`, or this placeholder
+      # wins and the dashboard ships "My First Service" forever — a re-run
+      # will not fix it, since both writers skip files that already exist.
+      if [ -n "$cfg" ] && [ -d "$cfg" ]; then
+        if [ ! -f "$cfg/services.yaml" ]; then
+          cat > "$cfg/services.yaml" <<'YAML'
+---
+- My First Group:
+    - My First Service:
+        href: http://localhost/
+YAML
+        fi
+        [ -f "$cfg/settings.yaml" ]  || echo "---" > "$cfg/settings.yaml"
+        [ -f "$cfg/widgets.yaml" ]   || echo "---" > "$cfg/widgets.yaml"
+        [ -f "$cfg/bookmarks.yaml" ] || echo "---" > "$cfg/bookmarks.yaml"
+        # Written by Homepage itself, never by setup.sh.
+        [ -f "$cfg/docker.yaml" ]     || echo "---" > "$cfg/docker.yaml"
+        [ -f "$cfg/kubernetes.yaml" ] || echo "---" > "$cfg/kubernetes.yaml"
+        mkdir -p "$cfg/logs"; : >> "$cfg/logs/homepage.log"
+      fi
+
+      touch "$STATE_DIR/compose_up"
+      echo "Container homepage  Started"
+      exit 0 ;;
+
+    *) exit 0 ;;
+  esac
+fi
+
+exit 0

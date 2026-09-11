@@ -1,0 +1,33 @@
+---
+# Homepage — docker.yaml
+#
+# Deliberately empty. Homepage can read the Docker socket to show live
+# container state and per-container CPU/RAM on each tile, and that is the
+# only reason this file exists. Doing so means bind-mounting
+# /var/run/docker.sock into a web-facing Node app, which is root-equivalent
+# control of this machine: anything that can talk to that socket can start a
+# privileged container and read or write the whole filesystem. Homepage has no
+# authentication of its own — the tailnet is the entire access-control layer —
+# so the blast radius of one dashboard bug is the whole box.
+#
+# The status dots you actually wanted are already covered without it:
+# services.yaml uses `siteMonitor`, which asks each service over loopback
+# whether it is answering. That is the question worth asking, and it needs no
+# privilege at all.
+#
+# If you decide you want container stats anyway, it is two edits, both
+# deliberate:
+#
+#   1. uncomment the socket mount in docker-compose.yml (it is there, commented,
+#      with the same warning), and
+#   2. uncomment the block below, then add `server: local` and
+#      `container: <name>` to the services in services.yaml you want stats for.
+#
+# A read-only mount (`:ro`) is NOT a mitigation — the socket is an API, and
+# every dangerous call on it is a write over a read-only file descriptor.
+# The real mitigation is a socket proxy (e.g. tecnativa/docker-socket-proxy)
+# that allowlists GET /containers/*; that is a third container and is not
+# deployed here.
+#
+# local:
+#   socket: /var/run/docker.sock

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# ss stub — feeds setup.sh's listener audit.
+#
+# Real `ss` would report the sandbox host's own sockets, which means the audit
+# would pass for reasons that have nothing to do with the script under test,
+# and the failure branch could never be reached at all.
+#
+# What it reports is derived from the environment the docker stub resolved out
+# of docker-compose.yml — NOT from a hardcoded answer. Under `network_mode:
+# host` there is no Docker publish spec, so `HOSTNAME` in the compose file is
+# the only thing keeping this dashboard off the LAN, and `server.js` is
+# literally `process.env.HOSTNAME || '0.0.0.0'`. Modelling it that way means
+# flipping HOSTNAME to 0.0.0.0 in the compose file makes this stub report a
+# wildcard listener and the audit fails — which is exactly the regression that
+# matters and exactly what a string-grep test would miss.
+#
+# The tailnet address also appears on the same port once `tailscale serve` has
+# been configured: that listener is tailscaled's own proxy, not the container,
+# and the audit must ACCEPT it. Getting that wrong would make a correct deploy
+# red on this service, because HTTPS port == local port here.
+#
+# Output shape matches `ss -ltnH`: no header, local address in field 4.
+#
+# State in $STATE_DIR:
+#   listen_lan — force a LAN address onto the port, as if HOSTNAME had been
+#                changed behind the compose file's back
+echo "ss $*" >> "$CALLS_LOG"
+
+STATE_DIR="${STATE_DIR:?STATE_DIR not set}"
+
+port=""
+for a in "$@"; do
+  case "$a" in
+    sport*) port="$(printf '%s' "$a" | sed -n 's/.*:\([0-9][0-9]*\).*/\1/p')" ;;
+  esac
+done
+[ -n "$port" ] || exit 0
+
+[ -f "$STATE_DIR/compose_up" ] || exit 0
+
+cenv() { sed -n "s/^$1=//p" "$STATE_DIR/container_env" 2>/dev/null | head -1; }
+bind="$(cenv HOSTNAME)"; [ -n "$bind" ] || bind="0.0.0.0"
+cport="$(cenv PORT)";    [ -n "$cport" ] || cport=3000
+ts_ip="$(cat "$STATE_DIR/ts_ip" 2>/dev/null || echo 100.77.77.77)"
+served="$(cat "$STATE_DIR/served_port" 2>/dev/null || true)"
+
+row() { printf 'LISTEN 0 4096 %s:%s 0.0.0.0:*\n' "$1" "$port"; }
+
+if [ "$port" = "$cport" ]; then
+  if [ -f "$STATE_DIR/listen_lan" ]; then
+    row "192.168.1.42"
+  else
+    row "$bind"
+  fi
+fi
+# tailscaled's Serve proxy, on the HTTPS port.
+[ -n "$served" ] && [ "$port" = "$served" ] && row "$ts_ip"
+exit 0
