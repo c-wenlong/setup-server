@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm   — exists => `docker ps` fails like a non-docker-group user
+#   compose_up       — touched by `compose ... up`
+#   compose_cmds     — the full argv of every `docker compose` invocation, one
+#                      per line, so the suite can assert that the run which
+#                      flipped SIGNUPS_ALLOWED also passed --force-recreate
+#   recreate_count   — how many of those carried --force-recreate
+#   container_env    — the environment the "running container" was started
+#                      with. Rebuilt from the project's .env on every
+#                      `compose ... up`, which is the semantic setup.sh leans
+#                      on: editing .env does NOT change the running container
+#                      until it is recreated, and the script treats the
+#                      container's env — not .env — as the authority on
+#                      whether signups are open.
+#   admin_enabled    — exists => the rebuilt container_env also carries an
+#                      ADMIN_TOKEN, i.e. someone wired the panel into the
+#                      compose environment. The shipped compose has no such
+#                      key, so this models a regression, not a supported path.
+#   inspect_blind    — exists => `docker inspect` prints nothing and fails,
+#                      the way an older daemon or a missing container does.
+#                      setup.sh has a distinct "unconfirmed" branch for it.
+#   docker_cp_fails  — exists => `docker cp` fails, so the fallback account
+#                      count is unavailable too
+echo "docker $*" >> "$CALLS_LOG"
+
+# Rebuild the fake container environment from the project .env, exactly as
+# Compose would interpolate it into docker-compose.yml.
+refresh_container_env() {
+  local dir="$1" envf sig inv dom tz tok
+  envf="$dir/.env"
+  [ -f "$envf" ] || return 0
+  dom="$(sed -n 's/^VAULTWARDEN_DOMAIN=//p' "$envf" | head -1)"
+  sig="$(sed -n 's/^VAULTWARDEN_SIGNUPS_ALLOWED=//p' "$envf" | head -1)"
+  inv="$(sed -n 's/^VAULTWARDEN_INVITATIONS_ALLOWED=//p' "$envf" | head -1)"
+  tz="$(sed -n 's/^TZ=//p' "$envf" | head -1)"
+  tok="$(sed -n 's/^VAULTWARDEN_ADMIN_TOKEN=//p' "$envf" | head -1)"
+  # Compose defaults, from docker-compose.yml. Note SIGNUPS_ALLOWED fails
+  # CLOSED when .env does not say otherwise.
+  [ -n "$sig" ] || sig="false"
+  [ -n "$inv" ] || inv="false"
+  [ -n "$tz" ] || tz="Etc/UTC"
+  {
+    echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    echo "DOMAIN=$dom"
+    echo "SIGNUPS_ALLOWED=$sig"
+    echo "INVITATIONS_ALLOWED=$inv"
+    echo "SIGNUPS_VERIFY=false"
+    echo "SHOW_PASSWORD_HINT=false"
+    echo "TZ=$tz"
+    # The shipped compose passes no ADMIN_TOKEN at all, so the variable only
+    # reaches the container if someone added the key.
+    [ -f "$STATE_DIR/admin_enabled" ] && echo "ADMIN_TOKEN=${tok:-plain-token}"
+  } > "$STATE_DIR/container_env"
+}
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the Docker daemon socket" >&2
+      exit 1
+    fi
+    for a in "$@"; do
+      [ "$a" = "-a" ] && echo "vaultwarden"
+    done
+    ;;
+
+  inspect)
+    [ -f "$STATE_DIR/inspect_blind" ] && exit 1
+    fmt=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --format|-f) fmt="$2"; shift 2 ;;
+        --format=*)  fmt="${1#--format=}"; shift ;;
+        *) shift ;;
+      esac
+    done
+    case "$fmt" in
+      *Config.Env*)
+        [ -f "$STATE_DIR/container_env" ] || exit 1
+        cat "$STATE_DIR/container_env"
+        ;;
+      *State.Status*) echo running ;;
+      *Mounts*)       echo "/data" ;;
+      *)              echo running ;;
+    esac
+    ;;
+
+  cp)
+    # The fallback account count copies the live DB out through the daemon.
+    [ -f "$STATE_DIR/docker_cp_fails" ] && exit 1
+    # Materialise the destination so the copy looks real to anything that
+    # stats it. Last argument is the destination.
+    for dst in "$@"; do :; done
+    case "$dst" in
+      */*) : > "$dst" 2>/dev/null || true ;;
+    esac
+    ;;
+
+  run)
+    # `docker run -it ... /vaultwarden hash` is documented but never
+    # automated: it panics without a TTY, which is precisely why the admin
+    # panel is not set up by the script. Nothing in setup.sh may call this.
+    touch "$STATE_DIR/docker_run"
+    ;;
+
+  exec)
+    : ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        printf '%s\n' "$*" >> "$STATE_DIR/compose_cmds"
+        proj="."
+        prev=""
+        for a in "$@"; do
+          [ "$prev" = "--project-directory" ] && proj="$a"
+          prev="$a"
+          case "$a" in
+            up)   touch "$STATE_DIR/compose_up" ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+            --force-recreate)
+              n=0
+              [ -f "$STATE_DIR/recreate_count" ] && n="$(cat "$STATE_DIR/recreate_count")"
+              echo $((n + 1)) > "$STATE_DIR/recreate_count"
+              ;;
+          esac
+        done
+        for a in "$@"; do
+          [ "$a" = "up" ] && refresh_container_env "$proj"
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0
