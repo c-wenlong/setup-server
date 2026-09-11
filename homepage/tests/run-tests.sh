@@ -140,6 +140,12 @@ check() {
   fi
 }
 
+# Every "    - Name:" line must be followed by a "        - " list item, never a
+# bare "        key:" mapping -- see the bookmarks check for why.
+bookmarks_well_formed() {
+  awk '/^    - .+:[[:space:]]*$/{want=1;next} want&&/^        - /{want=0;next} want&&/^        [^ -]/{bad=1} END{exit bad}' "$1"
+}
+
 out_has()    { grep -q -- "$1" <<<"$OUT"; }
 out_hasF()   { grep -qF -- "$1" <<<"$OUT"; }
 out_lacks()  { ! grep -qi -- "$1" <<<"$OUT"; }
@@ -333,6 +339,12 @@ test_fresh_deploy() {
   check "seeded settings.yaml"           [ -f "$CFG/settings.yaml" ]
   check "seeded widgets.yaml"            [ -f "$CFG/widgets.yaml" ]
   check "seeded bookmarks.yaml"          [ -f "$CFG/bookmarks.yaml" ]
+  # Homepage's bookmark format is double-nested: each name maps to a LIST holding
+  # one {abbr, href} object. Written as a plain mapping, the loader drops href,
+  # the frontend does new URL(undefined), and every bookmark group renders
+  # "Something went wrong: Failed to construct URL". That shipped once.
+  check "  every bookmark is a single-item list (name: -> '- abbr:')" \
+    bookmarks_well_formed "$CFG/bookmarks.yaml"
   check "reported the seeding"           out_has "Seeded 5 config file"
   # The templates are tailnet-agnostic on purpose, so the substitution has to
   # actually happen — an unsubstituted href is a dead tile on every device.
@@ -1113,6 +1125,8 @@ test_live() {
   live_check "  settings.yaml present"  sh -c "test -f '$cfg/settings.yaml'"
   live_check "  widgets.yaml present"   sh -c "test -f '$cfg/widgets.yaml'"
   live_check "  bookmarks.yaml present" sh -c "test -f '$cfg/bookmarks.yaml'"
+  live_check "  every bookmark the frontend receives carries an href" \
+    sh -c "curl -s --max-time 10 http://127.0.0.1:$port/api/bookmarks | python3 -c 'import sys,json;d=json.load(sys.stdin);sys.exit(0 if d and all(b.get(\"href\") for g in d for b in g[\"bookmarks\"]) else 1)'"
   # The whole point of the service is editing these by hand. PUID/PGID exist
   # so that does not need sudo.
   live_check "  and they are writable without sudo" sh -c "test -w '$cfg/services.yaml'"

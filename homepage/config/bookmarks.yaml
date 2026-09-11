@@ -7,31 +7,31 @@
 
 - This box:
     - Launcher:
-        abbr: LN
-        href: https://__TS_HOST__/home/
-        description: Service registry with deploy and start/stop controls
+        - abbr: LN
+          href: https://__TS_HOST__/home/
+          description: Service registry with deploy and start/stop controls
     - Uptime Kuma:
-        abbr: UK
-        href: https://__TS_HOST__:3002/
+        - abbr: UK
+          href: https://__TS_HOST__:3002/
     - Beszel:
-        abbr: BZ
-        href: https://__TS_HOST__:8092/
+        - abbr: BZ
+          href: https://__TS_HOST__:8092/
 
 - Admin:
     - Tailscale admin:
-        abbr: TS
-        href: https://login.tailscale.com/admin/machines
+        - abbr: TS
+          href: https://login.tailscale.com/admin/machines
     - Tailscale DNS:
-        abbr: DN
-        href: https://login.tailscale.com/admin/dns
+        - abbr: DN
+          href: https://login.tailscale.com/admin/dns
     - setup-server repo:
-        abbr: GH
-        href: https://github.com/c-wenlong/setup-server
+        - abbr: GH
+          href: https://github.com/c-wenlong/setup-server
 
 - Reference:
     - Homepage docs:
-        abbr: HP
-        href: https://gethomepage.dev/configs/services/
+        - abbr: HP
+          href: https://gethomepage.dev/configs/services/
     - Dashboard icons:
-        abbr: IC
-        href: https://dashboardicons.com/
+        - abbr: IC
+          href: https://dashboardicons.com/
