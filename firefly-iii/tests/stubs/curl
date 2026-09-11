@@ -1,0 +1,451 @@
+#!/usr/bin/env bash
+# curl stub — fakes Firefly III's unauthenticated HTTP surface.
+#
+# This is the load-bearing stub. Every one of the behaviours below was measured
+# against fireflyiii/core:version-6.4.2, and each one is a way this deploy can
+# report success while having failed:
+#
+#   1. A cold container REFUSES the connection. curl exits 7 and prints the
+#      literal string 000 for -w '%{http_code}'. It is not a tidy 503 — nothing
+#      is listening at all for the first ~13s while the migrations run.
+#
+#   2. CSRF is cookie-bound. POST /register with a missing or mismatched cookie
+#      jar answers HTTP 419 "Page Expired" — NOT a validation error, so the
+#      body tells you nothing about what was actually wrong.
+#
+#   3. A password under 16 characters is rejected with a 302 BACK TO /register
+#      and NO USER CREATED. 302 is also the success code, so a script that
+#      checks only the status code cannot tell the two apart. The error is
+#      flashed into the session and only renders on the next GET /register.
+#
+#   4. The asset scheme is decided by TRUSTED_PROXIES ALONE. Measured as a
+#      four-way matrix on /login fetched with Serve's headers:
+#
+#        TRUSTED_PROXIES='**' + external APP_URL  -> 0 http:// refs
+#        TRUSTED_PROXIES='**' + loopback APP_URL  -> 0
+#        TRUSTED_PROXIES=''   + external APP_URL  -> 4   (broken page)
+#        TRUSTED_PROXIES=''   + loopback APP_URL  -> 4   (broken page)
+#
+#      Laravel 6.4.2 derives asset URLs from the PROXY-CORRECTED REQUEST, not
+#      from APP_URL — so "APP_URL must be external or the page breaks" is
+#      false, and a suite that asserted it would fail against a working deploy.
+#      With TRUSTED_PROXIES empty, /login still answers 200 and every <link
+#      href> and <script src> in it is http://, which a browser blocks as mixed
+#      content. curl cannot see this; only counting the schemes can. This stub
+#      renders the page from the config the docker stub snapshotted at
+#      `compose up` time, so removing TRUSTED_PROXIES really does serve a
+#      broken page to the mocked suite.
+#
+#   5. APP_KEY must be exactly 32 characters. A wrong length is a 500 on
+#      /login, not a startup failure — the container looks healthy.
+#
+# State in $STATE_DIR:
+#   conn_refused_left  — countdown of refusals (models the cold start)
+#   user_registered    — a user exists; / redirects to /login, not /register
+#   register_500       — force /register to 500 (a broken app)
+#   csrf_sessions/     — token -> session id, for the CSRF check
+#
+# Recorded for assertions:
+#   register_posts     — one line per POST /register
+#   register_body      — the body of the last POST /register
+#   register_pw_len    — the length of the last password posted
+#   registered_email   — the email the user was actually created with
+#   login_fetches      — one line per GET /login
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; want_code=0; failonerr=0; body=""; head_only=0
+jar_read=""; jar_write=""; wrote_out=0; follow=0; want_url=0
+
+add_body() {  # accumulate, so repeated -d pairs join with & like curl does
+  if [ -z "$body" ]; then body="$1"; else body="$body&$1"; fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X|--request) method="$2"; shift 2 ;;
+    -o|--output) out="$2"; shift 2 ;;
+    -b|--cookie) jar_read="$2"; shift 2 ;;
+    -c|--cookie-jar) jar_write="$2"; shift 2 ;;
+    -u|--user) shift 2 ;;
+    -w|--write-out)
+      case "$2" in
+        *'%{http_code}'*)     want_code=1 ;;
+        *'%{url_effective}'*) want_url=1 ;;
+      esac
+      shift 2 ;;
+    -d|--data|--data-raw|--data-binary|--data-urlencode)
+      piece="$2"
+      # curl's five --data-urlencode forms: `content`, `=content`,
+      # `name=content`, `@file`, `name@file`. Which one applies is decided by
+      # WHICH SEPARATOR COMES FIRST — so `email=kai@example.com` is
+      # name=content (the `=` is first) and only `password@/path` is the file
+      # form. Getting this backwards makes every address with an @ in it look
+      # like a filename, which is exactly the bug this stub had.
+      #
+      # The file form reads the value from the file and exits 26 WITHOUT
+      # SENDING ANYTHING when it cannot be read. Modelled faithfully: setup.sh
+      # writes the admin password to a mode-600 file rather than putting it on
+      # a command line where `ps` would show it to every user on the box, so
+      # this path carries the password on every deploy.
+      _eq="${piece%%=*}"; _at="${piece%%@*}"
+      _form=data
+      case "$piece" in
+        @*) _form=file_only ;;
+        *=*@*) [ "${#_eq}" -lt "${#_at}" ] && _form=data || _form=file ;;
+        *@*)   _form=file ;;
+      esac
+      case "$_form" in
+        file_only)
+          f="${piece#@}"
+          if [ ! -r "$f" ]; then
+            echo "curl: (26) Failed to open/read local data from file/application" >&2
+            exit 26
+          fi
+          piece="$(cat "$f")" ;;
+        file)
+          f="${piece#*@}"
+          if [ ! -r "$f" ]; then
+            echo "curl: (26) Failed to open/read local data from file/application" >&2
+            exit 26
+          fi
+          piece="${piece%%@*}=$(cat "$f")" ;;
+      esac
+      add_body "$piece"
+      method="POST"
+      shift 2 ;;
+    -H|--header|--max-time|--connect-timeout|--retry|--resolve|-A|--user-agent|--max-redirs)
+      shift 2 ;;
+    -L|--location) follow=1; shift ;;
+    -I|--head) head_only=1; shift ;;
+    -[a-zA-Z]*)
+      case "$1" in *f*) failonerr=1 ;; esac
+      case "$1" in *I*) head_only=1 ;; esac
+      shift ;;
+    --fail) failonerr=1; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+# ---------------------------------------------------------------- helpers
+emit() {  # emit <http_code> <body> [extra-header-line]
+  local code="$1" payload="$2" extra="${3:-}"
+  if [ "$head_only" = "1" ]; then
+    payload="HTTP/1.1 $code"$'\n'"Server: nginx"
+    [ -n "$extra" ] && payload="$payload"$'\n'"$extra"
+    payload="$payload"$'\n'
+  fi
+  if [ -n "$out" ]; then
+    printf '%s' "$payload" > "$out"; wrote_out=1
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$payload"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$code"
+  # `-w '%{url_effective}'` is how setup.sh asks WHERE `/` finally landed, and
+  # that answer — /register vs /login — is the entire state machine of the
+  # deploy. A stub that ignored it would make the script think the server never
+  # answered.
+  [ "$want_url" = "1" ] && printf '%s' "$url"
+  : "$wrote_out"
+  if [ "$failonerr" = "1" ] && [ "$code" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $code" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+# A 302 carries a Location, and the TARGET is the whole diagnostic here:
+# /register means no user exists, /login means one does. A -I fetch must show
+# it, because that is how setup.sh (and TROUBLESHOOT.md) tell the states apart.
+redirect() {  # redirect <absolute-or-path location>
+  local loc="$1" origin
+  # With -L, curl follows the chain and reports the FINAL url in
+  # %{url_effective}. Redirects here are built from the REQUEST host, so
+  # following one stays on whatever authority the caller used and never leaves
+  # the box — the same property setup.sh relies on to probe over loopback.
+  if [ "$follow" = "1" ] && [ "$redirs_left" -gt 0 ]; then
+    redirs_left=$((redirs_left - 1))
+    case "$loc" in
+      http://*|https://*) url="$loc" ;;
+      *) origin="$(printf '%s' "$url" | sed -n 's#^\(https\{0,1\}://[^/]*\).*#\1#p')"
+         url="$origin$loc" ;;
+    esac
+    PATH_INFO="$(path_of)"
+    [ -n "$PATH_INFO" ] || PATH_INFO="/"
+    method="GET"; body=""
+    dispatch
+    return
+  fi
+  emit 302 "<html><head><meta http-equiv=\"refresh\" content=\"0;url=$loc\"></head><body>Redirecting to <a href=\"$loc\">$loc</a>.</body></html>" \
+    "Location: $loc"
+}
+
+countdown() {  # countdown FILE -> 0 (and decrements) while ticks remain
+  local f="$STATE_DIR/$1" left
+  [ -f "$f" ] || return 1
+  left="$(cat "$f" 2>/dev/null)"
+  case "$left" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$left" -gt 0 ] || return 1
+  echo $((left - 1)) > "$f"
+  return 0
+}
+
+# The effective config, as it stood when the container started. The docker stub
+# snapshots .env and docker-compose.yml at `compose up`; reading them here is
+# what lets a wrong APP_URL produce a genuinely broken page instead of a
+# rubber-stamped 200.
+snap_env() {  # snap_env VAR -> value, quotes stripped
+  sed -n "s/^$1=//p" "$STATE_DIR/env_at_compose_up" 2>/dev/null \
+    | sed 's/^"//; s/"$//' | head -1
+}
+compose_snap() { sed 's/#.*//' "$STATE_DIR/compose_at_compose_up.yml" 2>/dev/null; }
+
+app_url()   { snap_env FIREFLY_APP_URL; }
+app_key()   { snap_env FIREFLY_APP_KEY; }
+trusted_proxies_set() { compose_snap | grep -q 'TRUSTED_PROXIES'; }
+
+# The host:port the request came in on, for building asset URLs the way the
+# real app does (from the Host header, with the scheme decided by APP_URL and
+# the proxy trust).
+req_authority() { printf '%s' "$url" | sed -n 's#^https\{0,1\}://\([^/]*\).*#\1#p'; }
+
+# THE MIXED-CONTENT MODEL. TRUSTED_PROXIES alone decides it (see the four-way
+# matrix at the top). With the proxy trusted, Laravel believes Serve's
+# X-Forwarded-Proto: https and builds asset URLs on the request's own authority
+# over https. Without it, it decides the request arrived over plain HTTP and
+# writes http:// — while still answering 200.
+#
+# APP_URL is deliberately NOT consulted here. It is still set to the external
+# tailnet URL, because it feeds generated mails and the importer's VANITY_URL,
+# but it does not drive the asset scheme and pretending otherwise would make
+# this suite fail against a correct deploy.
+asset_base() {
+  if trusted_proxies_set; then
+    printf 'https://%s' "$(req_authority)"
+  else
+    printf 'http://%s' "$(req_authority)"
+  fi
+}
+
+# Deterministic-enough random ids without needing od/urandom to exist.
+rand_hex() {  # rand_hex <chars>
+  local n="$1" s=""
+  while [ "${#s}" -lt "$n" ]; do
+    s="$s$(printf '%s%s' "$$" "$(date +%s%N 2>/dev/null || date +%s)" | cksum | tr -d ' \n')"
+  done
+  printf '%s' "$s" | cut -c1-"$n"
+}
+
+path_of() { printf '%s' "$url" | sed -n 's#^https\{0,1\}://[^/]*\(/.*\)$#\1#p'; }
+
+# ------------------------------------------------------- the cold start
+# Nothing is listening yet. Real curl prints the literal 000 for
+# -w '%{http_code}' AND exits 7 — the combination a readiness loop has to
+# survive. Modelling this as a 503 would be a lie: the port is not open.
+if countdown conn_refused_left; then
+  echo "curl: (7) Failed to connect to 127.0.0.1 port 8097: Connection refused" >&2
+  [ "$want_code" = "1" ] && printf '000'
+  exit 7
+fi
+
+user_exists() { [ -f "$STATE_DIR/user_registered" ]; }
+
+PATH_INFO="$(path_of)"
+[ -n "$PATH_INFO" ] || PATH_INFO="/"
+mkdir -p "$STATE_DIR/csrf_sessions" 2>/dev/null
+
+redirs_left=5
+
+# ------------------------------------------------------------- the routes
+dispatch() {
+case "$PATH_INFO" in
+
+  /register|/register/)
+    if [ "$method" = "POST" ]; then
+      printf '%s\n' "$body" > "$STATE_DIR/register_body"
+      echo "post" >> "$STATE_DIR/register_posts"
+
+      posted_token="$(printf '%s' "$body" | sed -n 's/.*[?&]\{0,1\}_token=\([^&]*\).*/\1/p' | head -1)"
+      email="$(printf '%s' "$body" | sed -n 's/.*[?&]\{0,1\}email=\([^&]*\).*/\1/p' | head -1)"
+      # `password_confirmation` also matches a naive `password=` pattern, so
+      # anchor on a field boundary.
+      pw="$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^password=//p' | head -1)"
+      pwc="$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^password_confirmation=//p' | head -1)"
+      printf '%s\n' "${#pw}" > "$STATE_DIR/register_pw_len"
+
+      # --- CSRF. A missing or mismatched jar is 419 "Page Expired", not a
+      # validation error. This is the shape that cost two attempts during
+      # de-risking, so the stub is strict about it.
+      jar_session=""
+      if [ -n "$jar_read" ] && [ -f "$jar_read" ]; then
+        jar_session="$(sed -n 's/.*XSRF-TOKEN[[:space:]]\{1,\}//p' "$jar_read" | head -1)"
+      fi
+      want_session=""
+      if [ -n "$posted_token" ] && [ -f "$STATE_DIR/csrf_sessions/$posted_token" ]; then
+        want_session="$(cat "$STATE_DIR/csrf_sessions/$posted_token")"
+      fi
+      if [ -z "$jar_session" ] || [ -z "$want_session" ] || [ "$jar_session" != "$want_session" ]; then
+        echo "419" >> "$STATE_DIR/csrf_rejections"
+        emit 419 '<!DOCTYPE html><html><head><title>Page Expired</title></head><body><h1>419</h1><h2>Page Expired</h2></body></html>'
+      fi
+
+      # --- single-user mode: once a user exists there is nothing to register.
+      user_exists && redirect "/login"
+
+      # THE SILENT FAILURE, forced. `registration_rejected` models a POST that
+      # Firefly bounces straight back to /register having created nothing —
+      # exactly what a short password produces, and what any other flashed
+      # validation error produces. The status code is 302, the same code
+      # success returns. A setup.sh that trusts the 302 exits zero here with
+      # no admin account and an open /register on the tailnet; one that
+      # verifies the user exists afterwards catches it.
+      if [ -f "$STATE_DIR/registration_rejected" ]; then
+        printf '%s\n' "The password must be at least 16 characters." \
+          > "$STATE_DIR/flash_error"
+        redirect "/register"
+      fi
+
+      # --- THE 16-CHARACTER MINIMUM. Measured: 15 chars is rejected with a
+      # 302 BACK to /register and no user created. Same status code as
+      # success. The error is flashed into the session and only appears on the
+      # next GET.
+      if [ "${#pw}" -lt 16 ]; then
+        printf '%s\n' "The password must be at least 16 characters." \
+          > "$STATE_DIR/flash_error"
+        redirect "/register"
+      fi
+      if [ "$pw" != "$pwc" ]; then
+        printf '%s\n' "The password field confirmation does not match." \
+          > "$STATE_DIR/flash_error"
+        redirect "/register"
+      fi
+      if [ -z "$email" ]; then
+        printf '%s\n' "The email field is required." > "$STATE_DIR/flash_error"
+        redirect "/register"
+      fi
+
+      # --- success
+      rm -f "$STATE_DIR/flash_error"
+      touch "$STATE_DIR/user_registered"
+      printf '%s\n' "$email" > "$STATE_DIR/registered_email"
+      redirect "/new-user"
+    fi
+
+    # --- GET /register
+    if [ -f "$STATE_DIR/register_500" ]; then
+      emit 500 '<html><body>Server Error</body></html>'
+    fi
+    if user_exists; then
+      # Single-user mode closes registration once the first account exists, and
+      # answers 200 with an explanatory page rather than a usable form. NOT
+      # measured on this box — it would have needed a populated instance — so
+      # setup.sh only warns on the shape it does not recognise, and nothing in
+      # the suite asserts on it.
+      emit 200 "<!DOCTYPE html><html><head><title>Register</title>
+<link rel=\"stylesheet\" href=\"$(asset_base)/build/assets/app-4f1c.css\">
+</head><body><p>Registration is currently not available.</p></body></html>"
+    fi
+
+    tok="$(rand_hex 40)"
+    sess="$(rand_hex 32)"
+    printf '%s' "$sess" > "$STATE_DIR/csrf_sessions/$tok"
+    if [ -n "$jar_write" ]; then
+      {
+        echo "# Netscape HTTP Cookie File"
+        printf '#HttpOnly_127.0.0.1\tFALSE\t/\tFALSE\t0\tXSRF-TOKEN\t%s\n' "$sess"
+      } > "$jar_write"
+    fi
+    err=""
+    if [ -f "$STATE_DIR/flash_error" ]; then
+      err="<ul><li>$(cat "$STATE_DIR/flash_error")</li></ul>"
+      rm -f "$STATE_DIR/flash_error"
+    fi
+    emit 200 "<!DOCTYPE html><html><head><title>Register</title>
+<link rel=\"stylesheet\" href=\"$(asset_base)/build/assets/app-4f1c.css\">
+<script src=\"$(asset_base)/build/assets/app-9b2e.js\"></script>
+</head><body>$err<form method=\"POST\" action=\"/register\">
+<input type=\"hidden\" name=\"_token\" value=\"$tok\">
+<input name=\"email\"><input name=\"password\" type=\"password\">
+<input name=\"password_confirmation\" type=\"password\">
+</form></body></html>"
+    ;;
+
+  /login|/login/)
+    echo "login" >> "$STATE_DIR/login_fetches"
+    # APP_KEY of the wrong length is a 500 here, not a container that fails to
+    # start. Measured: the plain 32-character form is what this image accepts.
+    k="$(app_key)"
+    if [ -n "$STATE_DIR" ] && [ -f "$STATE_DIR/env_at_compose_up" ] && [ "${#k}" -ne 32 ]; then
+      emit 500 '<html><body>Server Error</body></html>'
+    fi
+    # The second hop. While no user exists, /login itself redirects on to
+    # /register — which is why the readiness probe accepts 200 OR 302 here and
+    # why only the FINAL url of the chain tells you whether an account exists.
+    user_exists || redirect "/register"
+    # 200, always — even when the asset scheme is wrong. That is the whole
+    # trap: the status code is not the signal.
+    emit 200 "<!DOCTYPE html><html><head><title>Firefly III</title>
+<link rel=\"stylesheet\" href=\"$(asset_base)/build/assets/app-4f1c.css\">
+<link rel=\"icon\" href=\"$(asset_base)/images/favicon.ico\">
+<script src=\"$(asset_base)/build/assets/app-9b2e.js\"></script>
+<script src=\"$(asset_base)/build/assets/vendor-11a0.js\"></script>
+</head><body><form method=\"POST\" action=\"/login\">
+<input name=\"email\"><input name=\"password\" type=\"password\"></form></body></html>"
+    ;;
+
+  /new-user|/new-user/)
+    emit 200 "<!DOCTYPE html><html><head><title>New user</title>
+<link rel=\"stylesheet\" href=\"$(asset_base)/build/assets/app-4f1c.css\">
+</head><body>Welcome</body></html>"
+    ;;
+
+  /token|/token/)
+    # The Data Importer's first page with no access token configured. It is a
+    # 200 that TELLS you it has nothing to do, which is the intended end state
+    # of this deploy.
+    #
+    # The two http://app:8080 links are deliberate and are upstream behaviour:
+    # the importer prints its configured FIREFLY_III_URL — the
+    # container-to-container address — as informational text. They are not
+    # assets and they can never be https. A blanket `count http://` check would
+    # therefore fail forever on a correct deploy, which is why setup.sh scopes
+    # its importer check to /build/assets/. This stub exists to keep that
+    # distinction honest.
+    emit 200 "<!DOCTYPE html><html><head><title>Data importer</title>
+<link rel=\"stylesheet\" href=\"$(asset_base)/build/assets/app-4f1c.css\">
+<script src=\"$(asset_base)/build/assets/app-9b2e.js\"></script>
+</head><body><p>Firefly III is at <a href=\"http://app:8080\">http://app:8080</a>
+(and <a href=\"http://app:8080/profile\">your profile page</a>).</p>
+<p>No access token configured — paste one to continue.</p></body></html>"
+    ;;
+
+  /)
+    # NEVER 200 — but note it always redirects to /login, in BOTH states.
+    # Measured chain with no user:  / -> 302 -> /login -> 302 -> /register
+    #                with a user:   / -> 302 -> /login -> 200
+    # So a single-hop `curl -I /` and a look at Location is USELESS as an
+    # existence check: it says /login either way. Only following the chain and
+    # reading the FINAL url distinguishes them, which is what setup.sh does
+    # with `curl -L -w '%{url_effective}'`. A stub that answered /register
+    # directly here would let a single-hop check pass and hide that.
+    #
+    # A health check written as `curl -fsS <root>` gets an empty body and
+    # reads as a failure on a perfectly healthy server.
+    redirect "/login"
+    ;;
+
+  /health|/health/)
+    # 200 "OK" straight from nginx, on BOTH images — it answers even with
+    # php-fpm dead, so it can report a completely broken app as healthy. It is
+    # modelled here precisely so that nothing in this repo is tempted to use
+    # it: same class as AdGuard's listening socket that refuses every query.
+    emit 200 'OK'
+    ;;
+
+  *)
+    emit 404 '<html><body>404</body></html>'
+    ;;
+esac
+}
+
+dispatch

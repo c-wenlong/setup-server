@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# tailscale stub. State lives in $STATE_DIR:
+#   backend_state     — override BackendState (default Running)
+#   operator          — exists => serve allowed without sudo
+#   serve_fails_left  — countdown of forced serve failures (approval-link flow)
+#
+# The reported hostname is test-host.tailfake.ts.net, NOT this box's real
+# kai-home-server.taild6a23f.ts.net, and the IP is 100.77.77.77 rather than the
+# real 100.85.87.87 — so a hostname or address hardcoded in setup.sh or
+# docker-compose.yml cannot pass by coincidence. FIREFLY_APP_URL has to be
+# built from what this command reports.
+echo "tailscale $*" >> "$CALLS_LOG"
+
+case "$1" in
+  status)
+    state="Running"
+    [ -f "$STATE_DIR/backend_state" ] && state="$(cat "$STATE_DIR/backend_state")"
+    cat <<JSON
+{
+  "BackendState": "$state",
+  "Self": {
+    "DNSName": "test-host.tailfake.ts.net."
+  }
+}
+JSON
+    ;;
+  ip)
+    case "$2" in
+      -6) echo "fd7a:115c:a1e0::7777" ;;
+      *)  echo "100.77.77.77" ;;
+    esac
+    ;;
+  serve)
+    if [ -f "$STATE_DIR/serve_fails_left" ]; then
+      left="$(cat "$STATE_DIR/serve_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/serve_fails_left"
+        echo "Serve is not enabled on your tailnet." >&2
+        echo "To enable, visit: https://login.tailscale.com/f/serve?node=FAKE" >&2
+        exit 1
+      fi
+    fi
+    # Operator gating is a Linux tailscaled concept; macOS has no operator.
+    if [ "$(uname -s)" != "Darwin" ] && [ ! -f "$STATE_DIR/operator" ]; then
+      echo "sending serve config: Access denied: serve config denied" >&2
+      exit 1
+    fi
+    case "$2" in
+      status)
+        echo "https://test-host.tailfake.ts.net:8097 (tailnet only)"
+        echo "|-- / proxy http://127.0.0.1:8097"
+        echo "https://test-host.tailfake.ts.net:8099 (tailnet only)"
+        echo "|-- / proxy http://127.0.0.1:8099"
+        ;;
+      *) echo "Serve started and running in the background." ;;
+    esac
+    ;;
+  set)
+    case "$2" in
+      --operator=*) touch "$STATE_DIR/operator" ;;
+    esac
+    ;;
+  *)
+    exit 0
+    ;;
+esac

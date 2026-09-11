@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm   — exists => `docker ps` fails like a non-docker-group user
+#   compose_up       — touched by `compose ... up`
+#   compose_pull     — touched by `compose ... pull`
+#   compose_down     — touched by `compose ... down`
+#   compose_stop     — touched by `compose ... stop`
+#   container_missing — inspect fails even after an `up`
+#   unhealthy        — inspect reports the app as unhealthy
+#
+# THE IMPORTANT PART, same discipline as the home-assistant stub: on
+# `compose ... up` this stub FREEZES the configuration the containers were
+# started with —
+#
+#   env_at_compose_up          a byte copy of the .env compose interpolated
+#   compose_at_compose_up.yml  a byte copy of docker-compose.yml
+#   files_at_compose_up        every file in the project dir, one per line
+#
+# — and the curl stub renders Firefly's pages from that snapshot. So a setup.sh
+# that writes a loopback FIREFLY_APP_URL really does serve a login page full of
+# http:// assets to the mocked suite, and a wrong-length FIREFLY_APP_KEY really
+# does 500 on /login. Asserting on the .env at the END of the run would not
+# catch a script that started the containers first and fixed the config after —
+# the containers would still be running the broken config.
+echo "docker $*" >> "$CALLS_LOG"
+
+PROJECT_DIR="$PWD"
+
+snapshot_project() {
+  local d="$PROJECT_DIR"
+  [ -f "$d/docker-compose.yml" ] || d="$PWD"
+  find "$d" -maxdepth 2 -type f 2>/dev/null > "$STATE_DIR/files_at_compose_up"
+  [ -f "$d/.env" ] && cp "$d/.env" "$STATE_DIR/env_at_compose_up"
+  [ -f "$d/docker-compose.yml" ] && cp "$d/docker-compose.yml" "$STATE_DIR/compose_at_compose_up.yml"
+  printf '%s\n' "$d" > "$STATE_DIR/project_dir_at_compose_up"
+  return 0
+}
+
+# The three containers this project runs, and the mem_limit each carries.
+# Values are read out of the snapshotted compose file so `docker inspect` in
+# the mocked suite answers what the compose file actually says, rather than a
+# constant the suite could never disagree with.
+mem_bytes_for() {  # mem_bytes_for <container>
+  local var val n unit
+  case "$1" in
+    firefly-iii)           var='FIREFLY_MEM_LIMIT' ;;
+    firefly-iii-db)        var='FIREFLY_DB_MEM_LIMIT' ;;
+    firefly-iii-importer)  var='FIREFLY_IMPORTER_MEM_LIMIT' ;;
+    *) echo 0; return ;;
+  esac
+  val="$(sed 's/#.*//' "$STATE_DIR/compose_at_compose_up.yml" 2>/dev/null \
+         | sed -n "s/.*\${$var:-\([0-9]*[a-zA-Z]*\)}.*/\1/p" | head -1)"
+  [ -n "$val" ] || { echo 0; return; }
+  n="$(printf '%s' "$val" | tr -dc '0-9')"
+  unit="$(printf '%s' "$val" | tr -dc 'a-zA-Z' | tr 'A-Z' 'a-z')"
+  case "$unit" in
+    g) echo $((n * 1024 * 1024 * 1024)) ;;
+    m) echo $((n * 1024 * 1024)) ;;
+    k) echo $((n * 1024)) ;;
+    *) echo "$n" ;;
+  esac
+}
+
+image_for() {  # image_for <container> — resolved from the snapshotted compose
+  local line
+  case "$1" in
+    firefly-iii)          line='fireflyiii/core:${FIREFLY_VERSION:-' ;;
+    firefly-iii-db)       line='postgres:${POSTGRES_VERSION:-' ;;
+    firefly-iii-importer) line='fireflyiii/data-importer:${IMPORTER_VERSION:-' ;;
+    *) echo "unknown"; return ;;
+  esac
+  sed 's/#.*//' "$STATE_DIR/compose_at_compose_up.yml" 2>/dev/null \
+    | grep -F "$line" \
+    | sed 's/.*image: *//; s/\${[A-Z_]*:-\([^}]*\)}/\1/' \
+    | head -1
+}
+
+case "$1" in
+  info)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the Docker daemon socket" >&2
+      exit 1
+    fi
+    echo '{"io.containerd.runc.v2":{"path":"runc"},"runc":{"path":"runc"}}'
+    ;;
+
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the Docker daemon socket" >&2
+      exit 1
+    fi
+    if [ -f "$STATE_DIR/compose_up" ]; then
+      for a in "$@"; do
+        [ "$a" = "-a" ] && { echo "firefly-iii"; echo "firefly-iii-db"; echo "firefly-iii-importer"; }
+      done
+    fi
+    ;;
+
+  inspect)
+    fmt=""; target=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -f|--format) fmt="$2"; shift 2 ;;
+        -*) shift ;;
+        *) target="$1"; shift ;;
+      esac
+    done
+    if [ ! -f "$STATE_DIR/compose_up" ] || [ -f "$STATE_DIR/container_missing" ]; then
+      echo "Error: No such object: $target" >&2
+      exit 1
+    fi
+    case "$fmt" in
+      *State.Running*) echo true ;;
+      *State.Health*)
+        if [ -f "$STATE_DIR/unhealthy" ]; then echo unhealthy; else echo healthy; fi ;;
+      *State.Status*)  echo running ;;
+      *RestartCount*)  cat "$STATE_DIR/restart_count" 2>/dev/null || echo 0 ;;
+      *Config.Image*)  image_for "$target" ;;
+      *HostConfig.Memory*) mem_bytes_for "$target" ;;
+      *NetworkSettings.Ports*)
+        # setup.sh asks Docker directly whether the DATABASE is published,
+        # rather than port-scanning — a scan only tells you about the port you
+        # thought to look at. `{}` is what a service with no ports: block
+        # reports, and the db service must always be that.
+        case "$target" in
+          firefly-iii-db) echo '{}' ;;
+          firefly-iii)          echo "{\"8080/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"8097\"}]}" ;;
+          firefly-iii-importer) echo "{\"8080/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"8099\"}]}" ;;
+          *) echo '{}' ;;
+        esac ;;
+      *Config.Env*)
+        printf 'APP_URL=%s\n' "$(sed -n 's/^FIREFLY_APP_URL=//p' "$STATE_DIR/env_at_compose_up" 2>/dev/null | sed 's/^"//; s/"$//' | head -1)"
+        printf 'APP_KEY=%s\n' "$(sed -n 's/^FIREFLY_APP_KEY=//p' "$STATE_DIR/env_at_compose_up" 2>/dev/null | sed 's/^"//; s/"$//' | head -1)"
+        sed 's/#.*//' "$STATE_DIR/compose_at_compose_up.yml" 2>/dev/null \
+          | grep -q 'TRUSTED_PROXIES' && echo "TRUSTED_PROXIES=**"
+        : ;;
+      *) echo running ;;
+    esac
+    ;;
+
+  exec)
+    # Nothing in the deploy needs `docker exec`; if a future setup.sh grows a
+    # dependency on it, the call is logged and this is where to model it.
+    exit 0
+    ;;
+
+  stats)
+    if [ -f "$STATE_DIR/compose_up" ]; then
+      echo "firefly-iii 66.2MiB / 768MiB"
+      echo "firefly-iii-db 29.1MiB / 512MiB"
+      echo "firefly-iii-importer 80.4MiB / 512MiB"
+    fi
+    ;;
+
+  logs)
+    echo "Firefly III entrypoint: waiting for the database"
+    echo "Firefly III entrypoint: migrations complete"
+    ;;
+
+  compose)
+    shift
+    verb=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --project-directory) PROJECT_DIR="$2"; shift 2 ;;
+        -f|--file) PROJECT_DIR="$(dirname "$2")"; shift 2 ;;
+        -p|--project-name) shift 2 ;;
+        -*) shift ;;
+        version|up|pull|down|stop|start|ps|restart|config|exec|logs)
+          [ -n "$verb" ] || verb="$1"; shift ;;
+        *) shift ;;
+      esac
+    done
+    case "$PROJECT_DIR" in .|"") PROJECT_DIR="$PWD" ;; esac
+    case "$verb" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      up)      snapshot_project; touch "$STATE_DIR/compose_up" ;;
+      pull)    touch "$STATE_DIR/compose_pull" ;;
+      down)    touch "$STATE_DIR/compose_down"; rm -f "$STATE_DIR/compose_up" ;;
+      stop)    touch "$STATE_DIR/compose_stop" ;;
+      start)   touch "$STATE_DIR/compose_up" ;;
+      ps)      [ -f "$STATE_DIR/compose_up" ] && {
+                 echo "NAME                   IMAGE                                    STATUS"
+                 echo "firefly-iii            $(image_for firefly-iii)            Up (healthy)"
+                 echo "firefly-iii-db         $(image_for firefly-iii-db)         Up (healthy)"
+                 echo "firefly-iii-importer   $(image_for firefly-iii-importer)   Up"
+               } ;;
+      config)  cat "$PROJECT_DIR/docker-compose.yml" 2>/dev/null ;;
+      *)       : ;;
+    esac
+    ;;
+esac
+exit 0
