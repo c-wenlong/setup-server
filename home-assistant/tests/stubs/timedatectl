@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# timedatectl stub: the host timezone, deterministically.
+#
+# setup.sh takes homeassistant.time_zone from the host rather than hardcoding
+# it, because the onboarding API's core_config step would pin it to UTC. The
+# stub answers what this box really reports so the rendered configuration.yaml
+# is assertable.
+echo "timedatectl $*" >> "$CALLS_LOG"
+case "$*" in
+  *Timezone*) echo "${STUB_TZ:-Asia/Singapore}" ;;
+  *) echo "               Time zone: ${STUB_TZ:-Asia/Singapore} (+08, +0800)" ;;
+esac
+exit 0
