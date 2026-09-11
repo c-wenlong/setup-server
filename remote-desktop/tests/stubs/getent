@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# getent stub. setup.sh checks two accounts exist before touching anything:
+#   gnome-remote-desktop — the system user the RDP daemon runs as and which
+#                          must own the TLS private key
+#   $RDP_USER            — GNOME's Remote Login starts a REAL login session
+#                          for this account, so it has to be a real user
+#
+# State in $STATE_DIR:
+#   no_grd_user   — the gnome-remote-desktop system user is missing
+#   no_rdp_user   — $RDP_USER does not exist
+echo "getent $*" >> "$CALLS_LOG"
+[ "${1:-}" = "passwd" ] || exit 2
+case "${2:-}" in
+  gnome-remote-desktop)
+    [ -f "$STATE_DIR/no_grd_user" ] && exit 2
+    echo "gnome-remote-desktop:x:993:993::/var/lib/gnome-remote-desktop:/usr/sbin/nologin" ;;
+  nosuchuser)
+    exit 2 ;;
+  *)
+    [ -f "$STATE_DIR/no_rdp_user" ] && exit 2
+    echo "${2}:x:1000:1000::/home/${2}:/bin/bash" ;;
+esac
+exit 0

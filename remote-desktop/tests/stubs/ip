@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# ip stub — the address list setup.sh's exposure check iterates over.
+#
+# Reports this box's REAL measured interfaces (2026-09-11), because the whole
+# point of the exposure check is the shape of this particular host:
+#
+#   lo          127.0.0.1     excluded by setup.sh
+#   enp31s0     192.168.88.11  LAN, wired      ─┐ must all refuse :3389
+#   wlp30s0     192.168.88.13  LAN, wireless    ├─ and :8094
+#   tailscale0  100.77.77.77   tailnet         ─┘
+#   docker0/br-* 172.x         excluded by setup.sh
+#
+# TWO LAN ADDRESSES, not one. A mitigation written for a single interface
+# leaves the other open and looks fixed; a stub reporting one address could
+# never catch that. The tailnet address is the stub's fake one, not this box's
+# real 100.85.87.87, so a literal baked into setup.sh cannot pass by luck.
+echo "ip $*" >> "$CALLS_LOG"
+ts_ip="$(cat "$STATE_DIR/ts_ip" 2>/dev/null || echo 100.77.77.77)"
+case "$*" in
+  *addr*)
+    echo "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever"
+    echo "2: enp31s0    inet 192.168.88.11/24 brd 192.168.88.255 scope global enp31s0\\       valid_lft forever"
+    echo "3: wlp30s0    inet 192.168.88.13/24 brd 192.168.88.255 scope global wlp30s0\\       valid_lft forever"
+    echo "4: tailscale0    inet $ts_ip/32 scope global tailscale0\\       valid_lft forever"
+    echo "5: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever"
+    echo "6: br-2f673b1aafd8    inet 172.19.0.1/16 brd 172.19.255.255 scope global br-2f673b1aafd8\\       valid_lft forever"
+    ;;
+esac
+exit 0

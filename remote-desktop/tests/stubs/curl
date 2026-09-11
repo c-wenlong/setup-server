@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# curl stub — the health check, and the reason this suite can tell a working
+# Guacamole from a Tomcat that merely answered.
+#
+# THE TRAP THIS ENCODES. Tomcat returns 200 for plenty of things that are not
+# Guacamole: a default ROOT app, a stale WAR, a proxy that answered on the
+# author's behalf. `curl -o /dev/null -w '%{http_code}'` cannot tell any of
+# those apart from a working install. So this stub separates the two cleanly:
+#
+#   - the STATUS CODE is 200 in almost every scenario, including the broken
+#     ones, so a code-only check goes green when it should not;
+#   - the BODY is real Guacamole markup only when the app is genuinely there.
+#
+# A setup.sh whose health check asserts markup passes here. One that asserts
+# a 200 passes the happy path and then also passes test_health_check_is_not_a_200,
+# which is exactly the failure that test exists to catch.
+#
+# State in $STATE_DIR:
+#   conn_refused_left  — countdown of refused connections (cold-start race).
+#                        Real curl answers a refused connection with exit 7
+#                        and http_code 000 — NOT a tidy 5xx. A readiness loop
+#                        that treats the first 000 as fatal fails most cold
+#                        starts; jellyfin in this repo was bitten by exactly
+#                        that.
+#   tomcat_blank       — 200, but the body is Tomcat's default page. The
+#                        "green light on a dead service" case.
+#   guac_404           — Tomcat up, app not deployed at /guacamole/.
+#   https_dead         — the tailnet HTTPS front door does not answer yet
+#                        (cert still minting — a warning, never fatal).
+#   guac_port          — the local port Guacamole is expected on (default 8094)
+echo "curl $*" >> "$CALLS_LOG"
+
+URL=""; WRITE_OUT=""; OUT_FILE=""; HEAD_ONLY=0
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -w|--write-out) WRITE_OUT="$a" ;;
+    -o|--output)    OUT_FILE="$a" ;;
+  esac
+  case "$a" in
+    -I|--head) HEAD_ONLY=1 ;;
+    http://*|https://*) URL="$a" ;;
+  esac
+  prev="$a"
+done
+
+guac_port="$(cat "$STATE_DIR/guac_port" 2>/dev/null || echo 8094)"
+
+emit() {  # emit <http_code> <body>
+  local code="$1" body="$2"
+  if [ -n "$OUT_FILE" ] && [ "$OUT_FILE" != "/dev/null" ]; then
+    printf '%s' "$body" > "$OUT_FILE"
+  elif [ "$OUT_FILE" != "/dev/null" ]; then
+    printf '%s' "$body"
+  fi
+  if [ -n "$WRITE_OUT" ]; then
+    printf '%s' "$WRITE_OUT" \
+      | sed -e "s/%{http_code}/$code/g" \
+            -e "s/%{response_code}/$code/g" \
+            -e 's/\\n/\
+/g'
+  fi
+}
+
+# Guacamole 1.6.0's index page. This is NOT invented: it is the opening of the
+# real index.html, extracted from guacamole.war inside the pinned image
+# (2811 bytes total). The first draft of this stub was written from memory and
+# was wrong in both directions — it omitted `indexController`, which setup.sh
+# requires and the real page does contain, and it asserted a
+# `<title>Apache Guacamole</title>` and a `guacamole.min.js?v=1.6.0` script
+# tag, neither of which appears in the shipped file at all. The result was a
+# suite that failed the happy path while "proving" markers that do not exist.
+#
+# The two distinguishing marks setup.sh greps for — `ng-app="index"` and
+# `ng-controller="indexController"` — are both on the opening <html> tag, and
+# no other Tomcat app emits them. Note the real <title> is EMPTY
+# (`ng-bind`-populated at runtime), so title-based assertions cannot work.
+GUAC_BODY='<!doctype html><html ng-app="index" ng-controller="indexController"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><meta http-equiv="x-ua-compatible" content="IE=edge"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="build" content="20250616232146"><link rel="stylesheet" href="1.guacamole.c2fc19251fc606ad2140.css"><title ng-bind="page.title|translate"></title></head><body><script src="guacamole-common-js/all.min.js"></script><script src="angular.min.js"></script><script src="guacamole.02ba1c394df380a3f7d7.js"></script></body></html>'
+
+TOMCAT_BODY='<!DOCTYPE html><html><head><title>Apache Tomcat/9.0.85</title></head>
+<body><h1>Apache Tomcat/9.0.85</h1><p>If you are seeing this, you have
+successfully installed Tomcat. Congratulations!</p></body></html>'
+
+# --- a connection that is refused outright -----------------------------
+# Only loopback HTTP gets the cold-start treatment; the tailnet front door
+# has its own flag.
+case "$URL" in
+  http://127.0.0.1:*)
+    if [ -f "$STATE_DIR/conn_refused_left" ]; then
+      left="$(cat "$STATE_DIR/conn_refused_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/conn_refused_left"
+        echo "curl: (7) Failed to connect to 127.0.0.1 port ${guac_port} after 0 ms: Connection refused" >&2
+        emit 000 ""
+        exit 7
+      fi
+    fi
+    ;;
+esac
+
+# --- the Guacamole REST API -------------------------------------------------
+# setup.sh does not stop at "the login page renders". It logs in with the
+# generated password and then lists the connections, because a working webapp
+# with a wrong user-mapping.xml hash is exactly the deploy that looks fine and
+# cannot be used. Both of those calls have to be modelled or the happy path
+# fails on a correct script.
+#
+#   POST /api/tokens                                  -> {"authToken":...}
+#   GET  /api/session/data/default/connections?token= -> the RDP connection
+#
+# The password is compared against user-mapping.xml the way Guacamole does it:
+# if the file's hash was generated from a different password, the login is
+# rejected. State:
+#   guac_login_fails — force a rejection even when the hash matches.
+case "$URL" in
+  */api/tokens*)
+    if [ -f "$STATE_DIR/guac_login_fails" ]; then
+      emit 403 '{"message":"Invalid login","type":"INVALID_CREDENTIALS"}'
+      exit 0
+    fi
+    emit 200 '{"authToken":"STUBTOKEN000","username":"'"${GUAC_USER:-kaichen}"'","dataSource":"default","availableDataSources":["default"]}'
+    exit 0
+    ;;
+  */api/session/data/default/connections*)
+    if [ -f "$STATE_DIR/guac_no_connection" ]; then
+      emit 200 '{}'
+      exit 0
+    fi
+    emit 200 '{"1":{"name":"'"${HOSTNAME:-desktop}"'","identifier":"1","parentIdentifier":"ROOT","protocol":"rdp","activeConnections":0}}'
+    exit 0
+    ;;
+esac
+
+case "$URL" in
+  https://*)
+    # The tailnet front door proxies to whatever `tailscale serve` was given.
+    # Guacamole lives under the /guacamole context path, so a target without
+    # it makes Tomcat answer 404 at the root — the deploy looks published and
+    # the URL is broken. Modelled here rather than assumed away.
+    target="$(cat "$STATE_DIR/serve_target" 2>/dev/null || true)"
+    if [ -n "$target" ]; then
+      case "$target" in
+        *guacamole*) ;;
+        *) emit 404 '<!doctype html><html><head><title>HTTP Status 404 - Not Found</title></head><body><h1>HTTP Status 404 - Not Found</h1></body></html>'
+           exit 0 ;;
+      esac
+    fi
+    if [ -f "$STATE_DIR/https_dead" ]; then
+      echo "curl: (28) Operation timed out" >&2
+      emit 000 ""
+      exit 28
+    fi
+    emit 200 "$GUAC_BODY"
+    exit 0
+    ;;
+
+  *guacamole*|http://127.0.0.1:*)
+    if [ -f "$STATE_DIR/guac_404" ]; then
+      emit 404 '<!doctype html><html><head><title>HTTP Status 404 – Not Found</title></head><body><h1>HTTP Status 404 – Not Found</h1></body></html>'
+      exit 0
+    fi
+    if [ -f "$STATE_DIR/tomcat_blank" ]; then
+      # THE trap: a perfectly good 200 carrying nothing of the sort.
+      emit 200 "$TOMCAT_BODY"
+      exit 0
+    fi
+    emit 200 "$GUAC_BODY"
+    exit 0
+    ;;
+esac
+
+emit 200 ""
+exit 0
