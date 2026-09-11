@@ -23,10 +23,12 @@
 # `latest` — a media server that jumps a major version on its own can
 # invalidate the library database and every client's saved login.
 #
-# Transcoding is software only. The box has a GTX 1070, but Docker has no
-# `nvidia` runtime here (nvidia-container-toolkit is not installed), so a GPU
-# reservation would only make the container fail to start. docker-compose.yml
-# carries the commented-out NVENC block and the one apt prerequisite.
+# Transcoding is software unless JELLYFIN_NVENC=on in .env, in which case
+# docker-compose.gpu.yml is layered on and the container gets the GPU. This
+# script never installs the GPU plumbing itself — that needs sudo and lives in
+# ./enable-nvenc.sh, which sets the flag once the runtime is proven to work.
+# A flag set without that runtime is caught below rather than left to surface
+# as an unstartable container.
 #
 # Requirements: Linux or macOS, curl, Docker + Compose v2, Tailscale logged in.
 #
@@ -46,6 +48,14 @@ CONTAINER="jellyfin"
 # and a mismatch is warned about, so a re-run can never silently move a live
 # library out from under the running server.
 REQUESTED_MEDIA_DIR="${MEDIA_DIR:-}"
+
+# Same reason, different consequence: sourcing .env would overwrite a
+# JELLYFIN_NVENC passed on the command line, so `JELLYFIN_NVENC=off ./setup.sh`
+# would silently keep transcoding on the GPU. Unlike MEDIA_DIR (where .env
+# wins, because moving a live library by accident is unrecoverable) this flag
+# follows immich's IMMICH_ML idiom: the explicit request wins and is written
+# back, because flipping a transcoder is cheap and reversible.
+REQUESTED_NVENC="${JELLYFIN_NVENC:-}"
 
 # Metadata locale for the wizard. Affects which region's release dates,
 # certifications and artwork Jellyfin prefers when it scrapes.
@@ -175,6 +185,12 @@ JELLYFIN_PUBLISHED_URL=https://$TS_HOST:$HTTPS_PORT
 # Admin account, created once by driving the first-run wizard over the API.
 JELLYFIN_ADMIN_USERNAME=$ADMIN_USERNAME
 JELLYFIN_ADMIN_PASSWORD=$admin_pw
+
+# Hardware transcoding. Off means ffmpeg on the CPU, which handles 1080p.
+# Do not set this to \`on\` by hand — Docker needs the \`nvidia\` runtime first,
+# and without it the container will not start. Run ./enable-nvenc.sh instead;
+# it installs the runtime, proves it works, and then flips this line.
+JELLYFIN_NVENC=off
 EOF
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
@@ -221,6 +237,52 @@ fi
 
 # ---------------------------------------------------------------- deploy
 COMPOSE=(docker compose --project-directory "$SERVICE_DIR")
+
+# Hardware transcoding, as an overlay rather than a commented-out block in the
+# base file. Most explicit signal first: the flag on the command line, then
+# whatever .env last recorded (how enable-nvenc.sh persists it), then off.
+NVENC_MODE="${REQUESTED_NVENC:-${JELLYFIN_NVENC:-off}}"
+case "$NVENC_MODE" in on|off) ;; *) die "JELLYFIN_NVENC must be 'on' or 'off' (got: $NVENC_MODE)";; esac
+
+# setup.sh owns this one line in .env, so the file always describes what is
+# actually deployed — otherwise `JELLYFIN_NVENC=off ./setup.sh` would fix the
+# running container and leave .env claiming the GPU is in use.
+#
+# Compare against what the FILE says, not against $JELLYFIN_NVENC. Sourcing
+# .env cannot clear a variable the file does not mention, so on an .env
+# predating this flag the shell still holds the caller's own JELLYFIN_NVENC=on
+# — which equals $NVENC_MODE, and the line would never be written. That is
+# exactly what happened on 2026-09-11: the GPU was attached and running while
+# .env carried no flag at all, so the next plain ./setup.sh would silently
+# have dropped back to software transcoding. The mocked suite missed it
+# because a sandbox .env is always freshly generated, and therefore always
+# already has the line.
+recorded_nvenc="$(sed -n 's/^JELLYFIN_NVENC=//p' "$ENV_FILE" | head -1)"
+if [ "$recorded_nvenc" != "$NVENC_MODE" ]; then
+  info "Recording JELLYFIN_NVENC=$NVENC_MODE in .env"
+  if grep -q '^JELLYFIN_NVENC=' "$ENV_FILE"; then
+    awk -v v="$NVENC_MODE" '/^JELLYFIN_NVENC=/{print "JELLYFIN_NVENC=" v; next} {print}' \
+      "$ENV_FILE" > "$WORK/env.new"
+    cat "$WORK/env.new" > "$ENV_FILE"   # rewrite in place: keeps mode 600
+  else
+    printf '\n# Hardware transcoding; owned by setup.sh. See ./enable-nvenc.sh\nJELLYFIN_NVENC=%s\n' "$NVENC_MODE" >> "$ENV_FILE"
+  fi
+fi
+
+if [ "$NVENC_MODE" = "on" ]; then
+  GPU_OVERLAY="$SERVICE_DIR/docker-compose.gpu.yml"
+  [ -f "$GPU_OVERLAY" ] || die "JELLYFIN_NVENC=on but $GPU_OVERLAY is missing."
+  # Fail here, with an explanation, rather than letting compose fail with
+  # "could not select device driver \"nvidia\"" — which reads like a Jellyfin
+  # problem and is really a missing host package.
+  if ! docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"'; then
+    die "JELLYFIN_NVENC=on but dockerd has no \`nvidia\` runtime — nvidia-container-toolkit is not installed or not registered, and the container would fail to start. Fix: $SERVICE_DIR/enable-nvenc.sh (installs it, needs sudo). Or set JELLYFIN_NVENC=off in $ENV_FILE to stay on software transcoding."
+  fi
+  COMPOSE+=(-f "$SERVICE_DIR/docker-compose.yml" -f "$GPU_OVERLAY")
+  ok "Hardware transcoding ON — layering docker-compose.gpu.yml (NVENC)"
+else
+  ok "Hardware transcoding off — software (ffmpeg on the CPU)"
+fi
 
 info "Starting Jellyfin (docker compose up -d) — first run pulls ~500 MB"
 "${COMPOSE[@]}" up -d
@@ -278,6 +340,34 @@ wizard_completed() {
   resp_has '"StartupWizardCompleted":true'
 }
 
+# Same shape as jf_retry, for the same reason, one endpoint later.
+#
+# The readiness gate above waits for /Startup/FirstUser to stop returning
+# 503 — and on an already-configured server "not 503" means a 401 from the
+# auth layer, which comes up SEVERAL SECONDS BEFORE the server config that
+# carries StartupWizardCompleted is loaded. So /System/Info/Public transiently
+# answers 200 with StartupWizardCompleted:FALSE on a perfectly healthy server.
+#
+# Observed for real on 2026-09-11, on a container restart to attach the GPU:
+# a single sample said false, and the stale-marker branch below concluded the
+# config directory had been wiped — telling the user to delete the wizard
+# marker and re-run the wizard against a live server with a real library on
+# it. The diagnosis was wrong and the suggested repair was worse than the
+# imaginary fault, so only ever conclude "wiped" after the reading settles.
+#
+# Deliberately NOT used on the no-marker path: there, false is the expected
+# answer on a genuine first run, and waiting 30s for it would tax every fresh
+# deploy to pay for a case that cannot happen (no marker means no prior run).
+wizard_completed_settled() {
+  local attempt=1
+  while :; do
+    wizard_completed && return 0
+    [ "$attempt" -ge 15 ] && return 1
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+}
+
 # -------------------------------------------------------------- readiness
 # The trap: /System/Info/Public answers 200 while the server is STILL LOADING,
 # and every /Startup endpoint answers 503 ("Jellyfin Server is loading. Please
@@ -314,10 +404,10 @@ if [ -f "$WIZARD_MARKER" ]; then
   # the server is back at first-run with no users, and skipping the wizard
   # here would surface much later as "login rejected" — which blames the
   # password instead of the wipe. Cross-check and say exactly that.
-  if wizard_completed; then
+  if wizard_completed_settled; then
     ok "Setup wizard already completed ($ADMIN_USERNAME) — skipping"
   else
-    die "Stale marker: $WIZARD_MARKER says the wizard has run, but the server reports StartupWizardCompleted=false — $CONFIG_DIR was probably deleted or replaced, so there is no admin account. Fix: rm $WIZARD_MARKER && ./setup.sh (that re-runs the wizard and recreates $ADMIN_USERNAME from $ENV_FILE)."
+    die "Stale marker: $WIZARD_MARKER says the wizard has run, but the server has reported StartupWizardCompleted=false for 30s straight — so this is not the cold-start race, and $CONFIG_DIR was probably deleted or replaced, leaving no admin account. Before believing that, check the library is really gone: ls $CONFIG_DIR/data (a healthy install has jellyfin.db in there). If it IS gone: rm $WIZARD_MARKER && ./setup.sh re-runs the wizard and recreates $ADMIN_USERNAME from $ENV_FILE. If the data is still there, do NOT delete the marker — re-running the wizard against a configured server does not help."
   fi
 elif wizard_completed; then
   ok "Server reports the setup wizard is already complete — skipping (writing the marker)"
@@ -445,10 +535,15 @@ echo "  Desktop:  Jellyfin Media Player   Phone/tablet: Jellyfin for Android / S
 echo "  TV:       Jellyfin for Android TV, Fire TV, Roku, Kodi (Jellyfin add-on)"
 echo "  Browser:  just open $url"
 echo
-echo "Transcoding is software (ffmpeg on the CPU) — fine for 1080p. The GTX 1070"
-echo "  is unusable until nvidia-container-toolkit is installed; docker-compose.yml"
-echo "  has the two-line recipe. Prefer direct play: files the client can render"
-echo "  as-is never transcode at all."
+if [ "$NVENC_MODE" = "on" ]; then
+  echo "Transcoding: NVENC (GPU). Jellyfin still has to be told to use it in"
+  echo "  Dashboard -> Playback -> Transcoding. Confirm with: nvidia-smi dmon -s u"
+else
+  echo "Transcoding is software (ffmpeg on the CPU) — fine for 1080p. To put the"
+  echo "  GPU to work: ./enable-nvenc.sh (one time, needs sudo)."
+fi
+echo "  Prefer direct play either way: a file the client can render as-is never"
+echo "  transcodes at all, on the CPU or the GPU."
 echo
 echo "Backups: nothing backs this box up. The library database, users, watch"
 echo "  state and artwork live in $CONFIG_DIR — that is the backup target;"

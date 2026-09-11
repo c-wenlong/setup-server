@@ -39,13 +39,14 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" \
+     "$SERVICE_DIR/docker-compose.gpu.yml" "$SVC/"
 }
 
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT JELLYFIN_ADMIN_USERNAME \
+  unset FAKE_UID LOCAL_PORT HTTPS_PORT JELLYFIN_ADMIN_USERNAME JELLYFIN_NVENC \
         STATE_DIR CALLS_LOG
 }
 
@@ -66,6 +67,7 @@ check() {
 out_has()    { grep -q "$1" <<<"$OUT"; }
 out_lacks()  { ! grep -qi "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
+calls_lack() { ! grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 call_count() { grep -c -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
@@ -193,9 +195,11 @@ test_fresh_deploy() {
   check "no DLNA discovery port 1900"    compose_lacks '1900'
   check "no client-discovery port 7359"  compose_lacks '7359'
   check "no network_mode: host"          compose_lacks 'network_mode'
-  # The NVENC block must stay commented out: there is no nvidia runtime on this
-  # box, and an uncommented reservation makes the container fail to start.
-  check "NVENC block stays commented"    compose_lacks 'driver: *nvidia'
+  # The GPU reservation belongs in docker-compose.gpu.yml, never the base file.
+  # It is only valid once dockerd has the nvidia runtime; in the base file it
+  # would make the container unstartable on every box that lacks one.
+  check "no GPU reservation in base"     compose_lacks 'driver: *nvidia'
+  check "  no GPU overlay by default"    calls_lack "docker-compose.gpu.yml"
 
   # --- state + deploy
   check "config dir created"             [ -d "$(env_val JELLYFIN_CONFIG)" ]
@@ -244,7 +248,8 @@ test_fresh_deploy() {
   check "  says where media goes"        out_has "MEDIA_DIR"
   check "  explains the /media mount"    out_has "/media"
   check "says transcoding is software"   out_has "software"
-  check "  and why the GPU is unusable"  out_has "nvidia-container-toolkit"
+  check "  points at the GPU opt-in"     out_has "enable-nvenc.sh"
+  check "  defaults the flag to off"     [ "$(env_val JELLYFIN_NVENC)" = "off" ]
   check "warns there is no backup here"  out_has "backup"
   teardown
 }
@@ -531,6 +536,139 @@ test_serve_approval_prompt() {
   teardown
 }
 
+test_nvenc_without_runtime() {
+  echo "• JELLYFIN_NVENC=on with no nvidia runtime: refuses, does not start a doomed container"
+  # The whole point of the guard. Compose would fail here with 'could not
+  # select device driver "nvidia" with capabilities: [[gpu]]', which reads
+  # like a Jellyfin fault and is really a missing host package — and it would
+  # take the running container down on the way. Catch it before `up`.
+  setup
+  touch "$STATE_DIR/operator"
+  export JELLYFIN_NVENC=on
+  run_deploy
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "names the real cause"        out_has "nvidia-container-toolkit"
+  check "points at enable-nvenc.sh"   out_has "enable-nvenc.sh"
+  check "offers the off switch"       out_has "JELLYFIN_NVENC=off"
+  check "started no container"        [ ! -f "$STATE_DIR/compose_up" ]
+  teardown
+}
+
+test_nvenc_on() {
+  echo "• JELLYFIN_NVENC=on with the runtime present: layers the GPU overlay"
+  setup
+  touch "$STATE_DIR/operator"
+  touch "$STATE_DIR/nvidia_runtime"
+  export JELLYFIN_NVENC=on
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "layered the GPU overlay"     calls_have "docker-compose.gpu.yml"
+  check "kept the base compose too"   calls_have "-f $SVC/docker-compose.yml"
+  check "started the container"       [ -f "$STATE_DIR/compose_up" ]
+  check "persisted the flag to .env"  [ "$(env_val JELLYFIN_NVENC)" = "on" ]
+  check "says the GPU is in use"      out_has "NVENC"
+  check "reminds to enable in the UI" out_has "Dashboard -> Playback"
+  teardown
+}
+
+test_nvenc_off_overrides_env() {
+  echo "• JELLYFIN_NVENC=off overrides an .env that says on (the reversal path)"
+  # Regression guard: .env is sourced after the flag is read, so a naive
+  # implementation lets the file win and the 'off' request does nothing.
+  setup
+  touch "$STATE_DIR/operator"
+  touch "$STATE_DIR/nvidia_runtime"
+  export JELLYFIN_NVENC=on
+  run_deploy
+  check "first run: on"               [ "$(env_val JELLYFIN_NVENC)" = "on" ]
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_up"
+  export JELLYFIN_NVENC=off
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "flag flipped back in .env"   [ "$(env_val JELLYFIN_NVENC)" = "off" ]
+  check "overlay no longer layered"   calls_lack "docker-compose.gpu.yml"
+  check "restarted without the GPU"   [ -f "$STATE_DIR/compose_up" ]
+  check "admin password preserved"    [ -n "$(env_val JELLYFIN_ADMIN_PASSWORD)" ]
+  teardown
+}
+
+test_wizard_race_on_restart() {
+  echo "• restart race: StartupWizardCompleted reads false for a while — must not cry 'wiped'"
+  # Observed for real on 2026-09-11 while restarting the container to attach
+  # the GPU. The auth layer 401s /Startup/FirstUser (so the readiness gate
+  # passes) seconds before the config carrying StartupWizardCompleted loads,
+  # so a healthy server briefly reports false. Believing one sample made
+  # setup.sh announce the config directory was wiped and advise deleting the
+  # wizard marker — against a live server with a real library on it.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "first deploy ok"           [ "$CODE" -eq 0 ]
+  echo 3 > "$STATE_DIR/wizard_false_left"
+  rm -f "$STATE_DIR/compose_up"
+  run_deploy
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "did not claim a wipe"      out_lacks "Stale marker"
+  check "treated it as complete"    out_has "already completed"
+  check "restarted the container"   [ -f "$STATE_DIR/compose_up" ]
+  teardown
+}
+
+test_wizard_genuinely_wiped() {
+  echo "• config really wiped: still fails, but without the reckless advice"
+  # The other side of the retry: a reading that never settles must still be
+  # reported, and the message must not send the user to delete a marker on a
+  # server whose data is actually fine.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "first deploy ok"           [ "$CODE" -eq 0 ]
+  echo 999 > "$STATE_DIR/wizard_false_left"
+  run_deploy
+  check "exits non-zero"            [ "$CODE" -ne 0 ]
+  check "names the stale marker"    out_has "Stale marker"
+  check "says it waited it out"     out_has "30s"
+  check "says how to confirm first" out_has "jellyfin.db"
+  check "warns against a blind rm"  out_has "do NOT delete the marker"
+  teardown
+}
+
+test_nvenc_env_predates_flag() {
+  echo "• .env written before JELLYFIN_NVENC existed: the flag must still be recorded"
+  # The real box's .env was generated before this flag was added, so sourcing
+  # it could not clear the caller's own JELLYFIN_NVENC=on — the value matched
+  # $NVENC_MODE and the line was never written. Result on 2026-09-11: the GPU
+  # was attached and running while .env carried no flag at all, so the next
+  # plain ./setup.sh would have quietly reverted to software transcoding.
+  setup
+  touch "$STATE_DIR/operator"
+  touch "$STATE_DIR/nvidia_runtime"
+  run_deploy
+  check "first deploy ok"           [ "$CODE" -eq 0 ]
+
+  # Strip the line the way history did. Rewrite in place to keep mode 600.
+  grep -v '^JELLYFIN_NVENC=' "$SVC/.env" > "$SANDBOX/env.strip"
+  cat "$SANDBOX/env.strip" > "$SVC/.env"
+  check "flag really absent now"    [ -z "$(env_val JELLYFIN_NVENC)" ]
+
+  export JELLYFIN_NVENC=on
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "appended the flag as on"   [ "$(env_val JELLYFIN_NVENC)" = "on" ]
+  check "layered the GPU overlay"   calls_have "docker-compose.gpu.yml"
+
+  # The consequence that matters: a later run with no flag in the environment
+  # must stay on the GPU rather than silently dropping to software.
+  unset JELLYFIN_NVENC
+  : > "$CALLS_LOG"
+  run_deploy
+  check "plain re-run stays on"     [ "$(env_val JELLYFIN_NVENC)" = "on" ]
+  check "  overlay still layered"   calls_have "docker-compose.gpu.yml"
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -675,6 +813,12 @@ test_media_dir_override
 test_media_present
 test_operator_escalation
 test_serve_approval_prompt
+test_nvenc_without_runtime
+test_nvenc_on
+test_nvenc_off_overrides_env
+test_wizard_race_on_restart
+test_wizard_genuinely_wiped
+test_nvenc_env_predates_flag
 
 if [ "${1:-}" = "--live" ]; then
   echo

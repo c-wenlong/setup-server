@@ -232,20 +232,70 @@ starts, and on every run it:
   `/System/Info/Public` echoes `PublishedServerUrl`, so a mismatch there is
   reported rather than assumed away.
 
-## ⚠️ No hardware transcoding
+## Hardware transcoding (NVENC) — opt-in, one command
 
-Software transcoding only. `setup.sh` does not enable NVENC, and cannot.
+Software transcoding is the default. `setup.sh` never enables NVENC by
+itself, because the GPU plumbing needs `sudo`, touches the host's package
+manager and restarts the Docker daemon — none of which belong in a deploy
+script that is otherwise safe to re-run at any time.
 
-The box has the hardware — a **GTX 1070**, driver **580** — but not the
-plumbing:
+The box has the hardware — a **GTX 1070**, driver **580** — and the kernel
+driver is loaded (`nvidia-smi` works). What a container needs on top of that
+is `nvidia-container-toolkit`, which registers an `nvidia` runtime with
+dockerd. Until that is installed, no compose flag can reach the GPU.
 
-- `nvidia-container-toolkit` is **not installed**
-- Docker has **no `nvidia` runtime** registered
+That install lives in **`./enable-nvenc.sh`**, the sudo-requiring half:
 
-Without both, a container cannot see the GPU at all; there is no compose flag
-that works around it. This is an `apt install`, not a config tweak, and it is
-deliberately out of scope for a deploy script that does not touch the host's
-package manager or restart the Docker daemon.
+```bash
+./enable-nvenc.sh           # install the runtime, prove it, switch Jellyfin on
+./enable-nvenc.sh --check   # report status, change nothing
+JELLYFIN_NVENC=off ./setup.sh   # back to software (leaves the toolkit installed)
+```
+
+It adds NVIDIA's apt repo (the package is **not** in Ubuntu's archive),
+installs the toolkit, runs `nvidia-ctk runtime configure --runtime=docker`,
+restarts dockerd, then proves a container can actually see the GPU before it
+changes anything about Jellyfin. Every step is skipped if already done, so a
+re-run after a partial failure resumes rather than repeats.
+
+**⚠️ The dockerd restart bounces every container on this box** — Immich,
+Seafile, Forgejo, the lot. They all carry restart policies and come back on
+their own, but do it deliberately, not at 2am.
+
+### How the flag is wired
+
+`JELLYFIN_NVENC` in `.env` is owned by `setup.sh` (the same idiom as immich's
+`COMPOSE_PROFILES`). When it is `on`, setup.sh layers
+`docker-compose.gpu.yml` over the base file; when `off`, the overlay is never
+loaded. The GPU reservation is deliberately **not** a commented-out block in
+`docker-compose.yml`, because a commented block invites someone to uncomment
+it before the runtime exists and get a container that will not start.
+
+If the flag is `on` but dockerd has no `nvidia` runtime, setup.sh **aborts
+before `compose up`** rather than letting compose fail with `could not select
+device driver "nvidia"` — an error that reads like a Jellyfin fault, is
+really a missing host package, and would take the running container down on
+the way.
+
+### The trap worth knowing about
+
+`--gpus all` (and the compose `deploy.reservations` equivalent) defaults
+`NVIDIA_DRIVER_CAPABILITIES` to `utility,compute` — which does **not**
+include `video`. Without `video`, `libnvidia-encode` is never mounted into
+the container: `nvidia-smi` works inside it, the Jellyfin dashboard happily
+shows NVENC as enabled, and every transcode still runs on the CPU. That is
+why `docker-compose.gpu.yml` sets `NVIDIA_DRIVER_CAPABILITIES: all`
+explicitly, and why `enable-nvenc.sh` checks for the encoder library
+separately from checking for the GPU.
+
+### What this GPU can and cannot do
+
+Pascal GP104: **encode** H.264 and HEVC (8-bit and 10-bit); **decode** H.264,
+HEVC 8/10-bit, VP9, VC1, MPEG2. **No AV1** in either direction — Turing and
+later only, so leave AV1 unticked in the dashboard or those files fail
+instead of falling back to the CPU. Leave "low-power" off too; that is a
+QuickSync setting. GeForce drivers also cap concurrent NVENC sessions, which
+is fine for a household and a wall for a many-viewer server.
 
 **What software transcoding actually costs here.** The CPU is a Ryzen 5 2600
 (6 cores / 12 threads). It handles a 1080p transcode comfortably and can do
@@ -257,32 +307,16 @@ happen when the client can't handle the codec, or when you force a lower
 bitrate — and on a tailnet, where the "remote" clients are on the same LAN or
 a Tailscale link, forcing a lower bitrate is rarely necessary.
 
-**To enable NVENC later**, on the host:
+**After `./enable-nvenc.sh` succeeds, one manual step remains**: Jellyfin does
+not use the GPU until it is told to, in Dashboard → Playback → Transcoding →
+hardware acceleration **NVIDIA NVENC**. Tick the codecs listed above, then
+confirm a real transcode actually lands on the GPU — the `enc` column of
+`nvidia-smi dmon -s u` should leave 0 while something is transcoding, and the
+container log should mention `h264_nvenc`:
 
 ```bash
-# 1. add NVIDIA's container-toolkit repo, then:
-sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker         # ⚠️ restarts EVERY container on this box
-docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+docker compose --project-directory ~/dev/setup-server/jellyfin logs jellyfin | grep -i nvenc
 ```
-
-Then in `docker-compose.yml`, add to the `jellyfin` service:
-
-```yaml
-    runtime: nvidia
-    environment:
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
-```
-
-`./setup.sh` to recreate the container, then Dashboard → Playback →
-Transcoding → hardware acceleration **NVIDIA NVENC**, and tick the codecs the
-1070 actually supports: H.264 and HEVC decode/encode, **not** AV1 (Turing and
-later only). Leave "low-power" off; that is a QuickSync setting.
-
-Note the `systemctl restart docker` step — it bounces Immich, Seafile, n8n
-and everything else on this machine. Do it deliberately, not at 2am.
 
 ## ⚠️ The media directory is empty
 

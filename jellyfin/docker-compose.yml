@@ -64,28 +64,18 @@ services:
     # (`curl -fsS $HEALTHCHECK_URL` against http://localhost:8096/health,
     # 30s interval), so `docker ps` reports health without duplicating it.
 
-    # --- hardware transcoding (NVENC) — OFF, and it cannot be turned on here --
-    # This box has a GTX 1070 and driver 580.173.02, but Docker has no `nvidia`
-    # runtime (`docker info` shows only io.containerd.runc.v2 and runc) because
-    # nvidia-container-toolkit is not installed. Uncommenting the block below
-    # without that prerequisite makes the container fail to start.
+    # --- hardware transcoding (NVENC) — lives in docker-compose.gpu.yml ------
+    # Deliberately not a commented-out block here. The GPU reservation is only
+    # valid once dockerd has the `nvidia` runtime, so it sits in an overlay
+    # file that setup.sh layers on ONLY when JELLYFIN_NVENC=on in .env — which
+    # enable-nvenc.sh sets after installing that runtime and proving it works.
+    # A commented block invites someone to uncomment it first and get a
+    # container that will not start.
     #
-    # Prerequisite (one time, needs sudo):
-    #   sudo apt-get install -y nvidia-container-toolkit &&
-    #     sudo nvidia-ctk runtime configure --runtime=docker &&
-    #     sudo systemctl restart docker
+    #   ./enable-nvenc.sh              install the runtime + switch on (sudo)
+    #   ./enable-nvenc.sh --check      report status, change nothing
+    #   JELLYFIN_NVENC=off ./setup.sh  back to software transcoding
     #
-    # Then uncomment, re-run setup.sh, and turn on NVENC in
-    # Dashboard -> Playback -> Transcoding (hardware acceleration: NVENC).
-    #
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-    #
-    # Until then transcoding is software (ffmpeg on the Ryzen 5 2600), which
-    # handles 1080p comfortably. Direct play — the client rendering the file
-    # as-is — needs no transcode at all and is the common case.
+    # With it off, transcoding is ffmpeg on the Ryzen 5 2600, which handles
+    # 1080p comfortably. Direct play — the client rendering the file as-is —
+    # needs no transcode at all and is the common case either way.
