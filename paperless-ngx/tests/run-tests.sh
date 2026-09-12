@@ -886,7 +886,7 @@ live_check() {
 #
 # Note this service publishes HTTPS on the same number as the local port
 # (8095 -> 8095), so tailscaled legitimately listens on the tailnet IP for
-# that port. The other services here differ (e.g. 10000 -> 3001) and never
+# that port. The other services here differ (e.g. seafile 8443 -> 8081) and never
 # hit that overlap, which is why their simpler "anything not 127.0.0.1"
 # check works for them and would false-positive here.
 #

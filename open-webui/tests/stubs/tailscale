@@ -3,6 +3,12 @@
 #   backend_state       — override BackendState (default Running)
 #   operator            — exists => serve allowed without sudo
 #   serve_fails_left    — countdown of forced serve failures (approval-link flow)
+#   served: one "PORT TARGET" line per live mapping. Seed it to
+#                         model a box that was published before this run (the
+#                         legacy :10000 mapping the migration has to remove);
+#                         `serve status` reports it and `--https=N off` drops
+#                         the row, so "was it actually withdrawn" is a fact
+#                         about state rather than a string in the call log.
 echo "tailscale $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -19,6 +25,32 @@ case "$1" in
 EOF
     ;;
   serve)
+    # `serve status` reports the live mappings, in tailscaled's own format.
+    if [ "${2:-}" = "status" ]; then
+      [ -s "$STATE_DIR/served" ] || { echo "No serve config"; exit 0; }
+      while read -r sport starget; do
+        [ -n "$sport" ] || continue
+        echo "https://test-host.tailfake.ts.net:$sport (tailnet only)"
+        echo "|-- / proxy $starget"
+        echo
+      done < "$STATE_DIR/served"
+      exit 0
+    fi
+    # Withdraw one port: `serve --https=N off`.
+    port_arg=""
+    for a in "$@"; do
+      case "$a" in --https=*) port_arg="${a#--https=}" ;; esac
+    done
+    case " $* " in
+      *" off "*)
+        if [ -n "$port_arg" ] && [ -f "$STATE_DIR/served" ]; then
+          grep -v "^$port_arg " "$STATE_DIR/served" > "$STATE_DIR/served.new" 2>/dev/null || true
+          mv "$STATE_DIR/served.new" "$STATE_DIR/served"
+        fi
+        echo "Serve config removed."
+        exit 0
+        ;;
+    esac
     if [ -f "$STATE_DIR/serve_fails_left" ]; then
       left="$(cat "$STATE_DIR/serve_fails_left")"
       if [ "$left" -gt 0 ]; then
@@ -32,6 +64,17 @@ EOF
     if [ "$(uname -s)" != "Darwin" ] && [ ! -f "$STATE_DIR/operator" ]; then
       echo "sending serve config: Access denied: serve config denied" >&2
       exit 1
+    fi
+    # Record the mapping so `serve status` can report it back.
+    starget=""
+    for a in "$@"; do
+      case "$a" in http://*) starget="$a" ;; esac
+    done
+    if [ -n "$port_arg" ] && [ -n "$starget" ]; then
+      touch "$STATE_DIR/served"
+      grep -v "^$port_arg " "$STATE_DIR/served" > "$STATE_DIR/served.new" 2>/dev/null || true
+      mv "$STATE_DIR/served.new" "$STATE_DIR/served"
+      echo "$port_arg $starget" >> "$STATE_DIR/served"
     fi
     echo "Serve started and running in the background."
     ;;

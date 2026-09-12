@@ -12,7 +12,7 @@ Quick triage (run in this directory):
 docker compose --project-directory . ps
 curl -fsS http://127.0.0.1:3001/health          # expect {"status":true}
 curl -fsS http://127.0.0.1:11434/api/version    # ollama up?
-tailscale serve status                          # :10000 -> 127.0.0.1:3001
+tailscale serve status                          # :3001 -> 127.0.0.1:3001
 ./tests/run-tests.sh --live                     # all of the above at once
 ```
 
@@ -34,7 +34,7 @@ docker compose --project-directory . logs --tail 100 open-webui
 
 - **Port already in use** — host networking means the container competes for
   host ports directly: `ss -ltnp | grep 3001`. Change `LOCAL_PORT` in `.env`,
-  `docker compose up -d`, re-run `tailscale serve --bg --https=10000
+  `docker compose up -d`, re-run `tailscale serve --bg --https=<new port>
   http://127.0.0.1:<new port>`.
 - **`.env` missing** — re-run `./setup.sh` (regenerates only if absent).
 - **Slow first start** — the image runs DB migrations and downloads a small
@@ -73,7 +73,7 @@ docker compose --project-directory . logs --tail 100 open-webui
 
 ## Kuma says open-webui is down
 
-The monitor probes the **tailnet** URL (`https://…:10000/health`), not
+The monitor probes the **tailnet** URL (`https://…:3001/health`), not
 loopback, so it goes red for a publishing failure as readily as an app
 failure. Curl `http://127.0.0.1:3001/health` first — if that answers, the
 fault is Tailscale Serve or the cert. Everything red at once is tailscaled,
@@ -84,12 +84,12 @@ not every service failing at the same moment.
 Same patterns as the other services (see `../code-server/TROUBLESHOOT.md`):
 cert minting delay on first request, client must be on the tailnet, serve
 config reapply after tailscaled restarts:
-`tailscale serve --bg --https=10000 http://127.0.0.1:3001`
+`tailscale serve --bg --https=3001 http://127.0.0.1:3001`
 
 ⚠️ **Never `tailscale serve reset`** to clear a bad mapping. It wipes the
 serve config for the whole node — every published service dark at once, each
 one's `setup.sh` to be re-run. The single-port removal is
-`tailscale serve --https=10000 off`; `off` is absent from
+`tailscale serve --https=3001 off`; `off` is absent from
 `tailscale serve --help` on 1.102.3 (which only advertises `reset` and
 `clear`) but is what Tailscale prints after a successful serve, and is
 verified working here.
@@ -99,6 +99,6 @@ verified working here.
 ```sh
 docker compose --project-directory . down
 rm -rf ~/services/open-webui .env
-tailscale serve --https=10000 off
+tailscale serve --https=3001 off
 ./setup.sh
 ```

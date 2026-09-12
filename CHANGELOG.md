@@ -61,6 +61,17 @@ first, dated by merge.
   set explicitly, on the first run and on re-runs. The five whose `.env` holds
   no `HTTPS_PORT` carry the same read-back guard as immich; the three that
   store it needed only the default line. One mocked test per service.
+- **open-webui is published on `:3001`, not `:10000`.** The old number was
+  picked when Tailscale Serve only allowed 443/8443/10000, a limit that is
+  long gone, so the published port now follows the local port like every
+  other service. `HTTPS_PORT` still wins when set explicitly. The listener
+  audit in its live suite moved to the canonical `no_external_listener`:
+  with both ports on 3001, tailscaled's own Serve proxy holds the tailnet
+  address on that number, and the old "anything but 127.0.0.1 is a leak"
+  reading failed a correct deploy. DIRECTORY.md, the README of the service,
+  the Kuma seed, the Homepage tile and the launcher registry follow. A re-run
+  on a box still published on :10000 withdraws that mapping, but only when it
+  points at this service, since Serve otherwise keeps both ports alive.
 
 ## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
 

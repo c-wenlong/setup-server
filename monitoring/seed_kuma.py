@@ -25,7 +25,7 @@ HOST = os.environ.get("TAILNET_HOST", "kai-home-server.taild6a23f.ts.net")
 PUBLISHED = [
     ("code-server", None, "/healthz"),
     ("seafile", 8443, "/api2/ping/"),  # trailing slash: /api2/ping 301s
-    ("open-webui", 10000, "/health"),
+    ("open-webui", 3001, "/health"),
     # /rest/noauth/health ({"status":"OK"}) needs no API key; "/" is the GUI
     # and would 403 without insecureSkipHostcheck, which is a separate failure
     # this monitor should not conflate with "down". Says nothing about :22000.

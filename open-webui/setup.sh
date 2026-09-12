@@ -10,7 +10,8 @@
 #   - boot-persistent via Docker's restart policy (no systemd/launchd needed)
 #
 # Usage:
-#   ./setup.sh                                  # local 3001, HTTPS 10000
+#   ./setup.sh                                  # local 3001, HTTPS 3001
+#   LOCAL_PORT=3005 ./setup.sh                  # HTTPS follows LOCAL_PORT
 #   LOCAL_PORT=3005 HTTPS_PORT=8443 ./setup.sh
 #
 # Requirements: Linux or macOS, curl, Docker + Compose v2, Tailscale logged
@@ -21,7 +22,12 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-3001}"
-HTTPS_PORT="${HTTPS_PORT:-10000}"
+# HTTPS follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. Until 2026-09-13 this defaulted to a literal 10000, chosen back when
+# Tailscale Serve only allowed 443/8443/10000; that limit is long gone.
+# This script never sources .env, so there is no read-back to guard.
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
@@ -119,6 +125,25 @@ if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT
   done
 fi
 ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
+
+# One-time repair for boxes deployed before 2026-09-13, when this service was
+# published on :10000. Serve keeps every mapping it has ever been given, so
+# without this a re-run would simply add :$HTTPS_PORT and leave the old port
+# published alongside it: two URLs for one service, and the retired one still
+# answering. Only withdrawn when it actually points at this service, so a
+# :10000 belonging to something else is never touched.
+LEGACY_HTTPS_PORT=10000
+if [ "$HTTPS_PORT" != "$LEGACY_HTTPS_PORT" ] \
+   && "$TAILSCALE" serve status 2>/dev/null \
+      | grep -A2 ":$LEGACY_HTTPS_PORT " \
+      | grep -q "proxy http://127.0.0.1:$LOCAL_PORT$"; then
+  info "Withdrawing the legacy :$LEGACY_HTTPS_PORT mapping (this service moved to :$HTTPS_PORT)"
+  if "$TAILSCALE" serve --https="$LEGACY_HTTPS_PORT" off >/dev/null 2>&1; then
+    ok "Legacy :$LEGACY_HTTPS_PORT mapping withdrawn"
+  else
+    warn "Could not withdraw the legacy :$LEGACY_HTTPS_PORT mapping. Remove it by hand: tailscale serve --https=$LEGACY_HTTPS_PORT off"
+  fi
+fi
 
 # ------------------------------------------------------------ final check
 url="https://$host:$HTTPS_PORT"

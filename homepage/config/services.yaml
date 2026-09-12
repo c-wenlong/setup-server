@@ -58,7 +58,7 @@
 - AI & automation:
     - Open WebUI:
         icon: open-webui.png
-        href: https://__TS_HOST__:10000/
+        href: https://__TS_HOST__:3001/
         description: Chat over the local ollama models
         siteMonitor: http://127.0.0.1:3001/health
 
