@@ -53,7 +53,7 @@ first, dated by merge.
 - **The structure check could fail CI on a branch whose README was identical
   to main's.** `links_to` piped `grep` into `grep -q` under `pipefail`; when
   the reader exited on its first match the writer took SIGPIPE and the row
-  was reported missing. One grep now, no pipe.
+  was reported missing. One awk scan now, no pipe.
 
 ## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
 
