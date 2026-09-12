@@ -47,12 +47,18 @@ check "macOS agent runs as a launchd LaunchAgent" \
       grep -q 'Library/LaunchAgents/com.henrygd.beszel-agent.plist' "$SETUP"
 check "lingering is Linux-gated" \
       bash -c "grep -B6 'loginctl enable-linger' '$SETUP' | grep -q 'OS\" = \"Linux'"
+check "operator grant is Linux-gated" \
+      bash -c "grep -B2 'set --operator=' '$SETUP' | grep -q 'OS\" = \"Linux'"
+check "serve retries only on an approval link, dies otherwise" \
+      bash -c "grep -q '\*login.tailscale.com\*) ;;' '$SETUP' && grep -A1 '\*login.tailscale.com\*) ;;' '$SETUP' | grep -q 'die'"
+check "port from .env is re-validated" \
+      grep -q 'BESZEL_PORT in \$ENV_FILE must be numeric' "$SETUP"
 check "final URL is resolved, not hardcoded" \
       bash -c "! grep -q 'kai-home-server\.taild6a23f' '$SETUP'"
 # Sudo is surgical: exactly the two one-time Linux grants the reference
 # implementation (code-server) makes, and nothing else.
 check "sudo only for lingering + tailscale operator" \
-      bash -c "[ \"\$(grep -c '^ *sudo ' '$SETUP')\" -eq 2 ] && grep -q '^ *sudo loginctl enable-linger' '$SETUP' && grep -q '^ *sudo tailscale set --operator=' '$SETUP'"
+      bash -c "[ \"\$(grep -c '^ *sudo ' '$SETUP')\" -eq 2 ] && grep -q '^ *sudo loginctl enable-linger' '$SETUP' && grep -q '^ *sudo \"\$TAILSCALE\" set --operator=' '$SETUP'"
 check "hub bound to loopback" grep -q 'serve --http "127.0.0.1' "$COMPOSE"
 check "hub uses host networking (reaches agent loopback)" \
       grep -q 'network_mode: host' "$COMPOSE"

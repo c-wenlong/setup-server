@@ -61,9 +61,10 @@ if ! command -v docker >/dev/null; then
   die "Docker is not installed. On macOS install Docker Desktop or OrbStack."
 fi
 
-# Tailscale CLI: on PATH, or inside the macOS app bundle.
+# Tailscale CLI: on PATH, or inside the macOS app bundle. Kept as an absolute
+# path so the one sudo call below finds it regardless of sudo's secure_path.
 if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
+  TAILSCALE="$(command -v tailscale)"
 elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
   TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 else
@@ -124,6 +125,7 @@ fi
 REQUESTED_PORT="$PORT"
 set -a; . "$ENV_FILE"; set +a
 PORT="${BESZEL_PORT:-$PORT}"
+case "$PORT" in ''|*[!0-9]*) die "BESZEL_PORT in $ENV_FILE must be numeric (got: $PORT)";; esac
 BESZEL_ADMIN_EMAIL="${BESZEL_ADMIN_EMAIL:?BESZEL_ADMIN_EMAIL missing from $ENV_FILE}"
 BESZEL_ADMIN_PASSWORD="${BESZEL_ADMIN_PASSWORD:?BESZEL_ADMIN_PASSWORD missing from $ENV_FILE}"
 if [ "$PORT" != "$REQUESTED_PORT" ]; then
@@ -281,9 +283,17 @@ fi
 if ! "$TAILSCALE" serve --bg --https="$PORT" "http://127.0.0.1:$PORT" >/dev/null 2>&1; then
   if [ "$OS" = "Linux" ]; then
     info "Granting Tailscale operator rights to $USER (needs sudo, one time)"
-    sudo tailscale set --operator="$USER"
+    sudo "$TAILSCALE" set --operator="$USER"
   fi
-  until "$TAILSCALE" serve --bg --https="$PORT" "http://127.0.0.1:$PORT"; do
+  # Only the one-time enablement (Tailscale prints an approval link) earns a
+  # wait-and-retry; any other Serve error is reported and fatal, so a bad
+  # config cannot loop forever behind an Enter prompt.
+  until serve_out="$("$TAILSCALE" serve --bg --https="$PORT" "http://127.0.0.1:$PORT" 2>&1)"; do
+    printf '%s\n' "$serve_out"
+    case "$serve_out" in
+      *login.tailscale.com*) ;;
+      *) die "tailscale serve failed (see above)" ;;
+    esac
     echo
     info "Tailscale Serve needs one-time enablement — open the URL above, approve, then press Enter to retry."
     read -r
