@@ -17,6 +17,7 @@
 #   ./setup.sh                       # local 2283, HTTPS 2283, ML OFF
 #   IMMICH_ML=on ./setup.sh          # turn machine learning on (needs ~8 GB RAM)
 #   IMMICH_ML=off ./setup.sh         # turn it back off
+#   LOCAL_PORT=2284 ./setup.sh       # HTTPS follows LOCAL_PORT (2284 -> 2284)
 #   LOCAL_PORT=2284 HTTPS_PORT=8443 ./setup.sh
 #
 # Machine learning is OFF by default on purpose: Immich's documented minimum
@@ -35,7 +36,11 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-2283}"
-HTTPS_PORT="${HTTPS_PORT:-2283}"
+# The HTTPS port follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. Whether it was explicit is remembered for the .env read-back below.
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 ADMIN_EMAIL="${IMMICH_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
 ADMIN_NAME="${IMMICH_ADMIN_NAME:-Kai}"
 ML_URL="http://immich-machine-learning:3003"
@@ -183,6 +188,9 @@ DB_DATA_LOCATION="${DB_DATA_LOCATION:?DB_DATA_LOCATION missing from $ENV_FILE}"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
+# .env holds no HTTPS_PORT, so a default HTTPS port keeps following the local
+# port .env settled on; an explicit HTTPS_PORT is honoured as given.
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
 API="http://127.0.0.1:$LOCAL_PORT/api"
 
 mkdir -p "$UPLOAD_LOCATION" "$DB_DATA_LOCATION"
