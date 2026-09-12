@@ -248,7 +248,14 @@ gnome-remote-desktop accepts **NLA only**. The connection in
 `user-mapping.xml` must carry `security=nla` (setup.sh writes that; an
 older version wrote `tls`, which is what produced the above) and
 `ignore-cert=true`, because the backend presents the self-signed
-certificate setup.sh generated. `ignore-cert=false` fails at exactly the
+certificate setup.sh generated. **A mapping from that older version is
+repaired by re-running `./setup.sh`**: it rewrites exactly `security=tls`
+to `nla`, adds `disable-audio=true` if the param is missing, leaves every
+other line alone, and restarts the webapp (Guacamole caches connection
+parameters at login, so without the restart the fix only reaches sessions
+that log in afterwards). A hand-chosen mode such as `any` is not touched.
+If the file is damaged beyond that, use the rm-and-rerun recipe under
+[the reliable fix](#the-reliable-fix) below. `ignore-cert=false` fails at exactly the
 same point as bad credentials, which is why this is worth checking before
 assuming a password problem.
 
@@ -427,7 +434,7 @@ likelihood:
 `0600` and its directory `0700`, and why `SETUP.md` recommends a separate
 account for remote sessions if that password is also your `sudo` password.
 
-**The reliable fix** is to let `setup.sh` regenerate the mapping rather
+<a name="the-reliable-fix"></a>**The reliable fix** is to let `setup.sh` regenerate the mapping rather
 than hand-editing hashes:
 
 ```bash

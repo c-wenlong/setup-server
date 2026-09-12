@@ -614,6 +614,7 @@ fi
 GUAC_HASH="$(printf '%s' "$GUAC_PASSWORD" | sha256)"
 UM="$GUAC_HOME/user-mapping.xml"
 
+UM_MIGRATED=0
 if [ -f "$UM" ]; then
   if grep -q "$GUAC_HASH" "$UM" 2>/dev/null; then
     ok "user-mapping.xml already present and matches GUAC_PASSWORD"
@@ -622,6 +623,29 @@ if [ -f "$UM" ]; then
     echo "   Either the password was rotated in .env, or you edited the XML."
     echo "   To regenerate from .env:  rm $UM && ./setup.sh"
   fi
+  # Targeted repair of the two values earlier versions of THIS script wrote
+  # wrong (found on the first real session): security=tls, which the backend
+  # rejects before it looks at the credentials, and a missing disable-audio,
+  # which tears the session down when guacd's FreeRDP 2.x offers a playback
+  # protocol the server considers too old. Only the exact generated value is
+  # touched — `tls` becomes `nla`; `any` or anything hand-chosen is left —
+  # and disable-audio is only ADDED when absent, never flipped if you set
+  # it. Truncate in place (`cat >`) so the file keeps its inode and 0600.
+  if grep -qF '<param name="security">tls</param>' "$UM"; then
+    sed 's#<param name="security">tls</param>#<param name="security">nla</param>#' "$UM" > "$WORK/um.new"
+    cat "$WORK/um.new" > "$UM"; UM_MIGRATED=1
+    ok "Repaired security=tls -> nla in $UM (gnome-remote-desktop accepts NLA only)"
+  fi
+  if ! grep -qF '<param name="disable-audio">' "$UM"; then
+    awk '{ print } !done && /<param name="ignore-cert">/ { print "            <param name=\"disable-audio\">true</param>"; done = 1 }' "$UM" > "$WORK/um.new"
+    if grep -qF '<param name="disable-audio">true</param>' "$WORK/um.new"; then
+      cat "$WORK/um.new" > "$UM"; UM_MIGRATED=1
+      ok "Added disable-audio=true to $UM (FreeRDP 2.x audio is rejected by the server mid-session)"
+    else
+      warn "$UM has no disable-audio param and no ignore-cert line to anchor one on — add <param name=\"disable-audio\">true</param> to the connection yourself, or sessions may drop when audio starts."
+    fi
+  fi
+  chmod 600 "$UM"
 else
   info "Writing user-mapping.xml (file authentication — no database)"
   cat > "$UM" <<EOF
@@ -717,6 +741,14 @@ if ! "${COMPOSE[@]}" up -d 2>"$WORK/up.err"; then
   esac
 fi
 
+# Guacamole caches connection parameters at login, so a repaired mapping is
+# only picked up by sessions started after the webapp restarts. `up -d` above
+# is a no-op for an unchanged container; force the restart.
+if [ "$UM_MIGRATED" = "1" ]; then
+  info "Restarting the webapp so the repaired user-mapping.xml takes effect"
+  "${COMPOSE[@]}" restart guacamole >/dev/null 2>&1 || warn "docker compose restart guacamole failed — restart it by hand: ${COMPOSE[*]} restart guacamole"
+fi
+
 BASE="http://127.0.0.1:$GUAC_PORT/guacamole"
 info "Waiting for the Guacamole webapp on $BASE/ (Tomcat takes ~20s to deploy the war)"
 code=""
@@ -781,6 +813,20 @@ if curl -sS -o "$WORK/token.json" -w '' --max-time 15 \
     ok "The RDP connection is present in the connection list"
   else
     fail "Logged in, but no RDP connection is visible — check $UM."
+  fi
+  # The list says a connection exists, nothing about its parameters — and
+  # the two that decide whether a session works are in the file, not the
+  # API. A mapping still on tls, or without disable-audio, passes every
+  # check above and fails at first click.
+  if grep -qF '<param name="security">nla</param>' "$UM"; then
+    ok "Connection negotiates NLA (the only mode the backend accepts)"
+  else
+    fail "$UM does not set security=nla — the backend refuses everything else. Re-run ./setup.sh (it repairs tls) or fix the param by hand."
+  fi
+  if grep -qF '<param name="disable-audio">true</param>' "$UM"; then
+    ok "Audio disabled (guacd's FreeRDP 2.x playback is rejected by the server)"
+  else
+    fail "$UM does not set disable-audio=true — sessions drop when audio starts. Re-run ./setup.sh or add the param."
   fi
 else
   fail "Login as '$GUAC_USER' was rejected. GUAC_PASSWORD in $ENV_FILE does not match the hash in $UM. Fix: rm $UM && ./setup.sh

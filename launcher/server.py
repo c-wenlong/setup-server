@@ -748,14 +748,17 @@ def docker_name_map():
     failed call every 10s, not one per container per request.
     """
     now = time.time()
+    # The lock is held ACROSS the docker call on purpose (single-flight):
+    # two polls that miss the cache together run one `docker ps`, not two,
+    # and the second gets the first's answer. Only callers that actually
+    # need the map wait here; nothing else in the server shares this lock.
     with _docker_map_lock:
         if now - _docker_map_cache["at"] < DOCKER_MAP_TTL:
             return _docker_map_cache["map"]
-    mapping = _read_docker_names()
-    with _docker_map_lock:
+        mapping = _read_docker_names()
         _docker_map_cache["at"] = time.time()
         _docker_map_cache["map"] = mapping
-    return mapping
+        return mapping
 
 
 def _container_cgroup(name, docker_map):
@@ -839,6 +842,12 @@ def _cpu_percent(cgroup, usage_usec, now):
     with _cpu_lock:
         previous = _cpu_samples.get(cgroup)
         _cpu_samples[cgroup] = (now, usage_usec)
+        # Keys embed the container id, so every recreate leaves an orphan
+        # behind. Drop any whose cgroup no longer exists — cheap (one stat
+        # per stale key, and there are only ever a few) and bounded.
+        for stale in [k for k in _cpu_samples if k != cgroup
+                      and not os.path.isdir(k)]:
+            _cpu_samples.pop(stale, None)
     if not previous:
         return None
     prev_wall, prev_usage = previous
@@ -849,9 +858,19 @@ def _cpu_percent(cgroup, usage_usec, now):
     return max(0.0, min(100.0, pct))
 
 
-def _measure_resources(svc, now):
-    """One sysfs pass over a service's control parts. Caller holds the lock."""
-    docker_map = None
+def _has_container_part(svc):
+    return any(p["kind"] == "container"
+               for p in control_parts(control_block(svc)))
+
+
+def _measure_resources(svc, now, docker_map=None):
+    """One sysfs pass over a service's control parts. Caller holds the lock.
+
+    `docker_map` is the name -> id map, fetched by the caller OUTSIDE the
+    resources lock (see service_resources). Left None, it is fetched here on
+    first use, which is what the tests do and what a unit-only service
+    never triggers.
+    """
     measured = []
     total_rss = None
     total_cpu = None
@@ -882,9 +901,14 @@ def _measure_resources(svc, now):
 def service_resources(svc):
     """The `resources` block for one service. Never raises.
 
-    Cached for RESOURCE_TTL under one lock that does double duty: a busy grid
-    cannot hammer sysfs, and two concurrent polls can neither both run the
-    docker call nor both take a CPU sample microseconds apart.
+    Cached for RESOURCE_TTL under one lock, so a busy grid cannot hammer
+    sysfs and two concurrent polls cannot take a CPU sample microseconds
+    apart. The one slow thing in the path -- `docker ps`, up to
+    DOCKER_MAP_TIMEOUT when the daemon is wedged -- runs OUTSIDE that lock:
+    it has its own single-flight cache, and holding the shared lock across
+    it would stall every other service's sample and every concurrent list
+    request for those seconds. Measurements themselves are sysfs reads and
+    take microseconds under the lock.
     """
     key = svc.get("key")
     now = time.time()
@@ -893,7 +917,14 @@ def service_resources(svc):
             hit = _resources_cache.get(key)
             if hit and now - hit[0] < RESOURCE_TTL:
                 return hit[1]
-            payload = _measure_resources(svc, now)
+        docker_map = docker_name_map() if _has_container_part(svc) else {}
+        with _resources_lock:
+            # Re-check: another request may have sampled this service while
+            # this one was waiting on docker.
+            hit = _resources_cache.get(key)
+            if hit and now - hit[0] < RESOURCE_TTL:
+                return hit[1]
+            payload = _measure_resources(svc, now, docker_map)
             _resources_cache[key] = (now, payload)
             return payload
     except Exception as exc:
