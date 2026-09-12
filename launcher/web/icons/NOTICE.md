@@ -69,6 +69,14 @@ and `launcher.png` are raster forms of the launcher's own icon, also original
 to this repo. The launcher tile itself has no registry entry and so falls
 back to the hand-drawn glyphs in `../icons.js`.
 
+`homepage.png` is also outside the collection above: dashboard-icons has no
+mark for gethomepage.dev (its `homarr` is a different dashboard). It is the
+project's own `public/android-chrome-512x512.png` from
+[gethomepage/homepage](https://github.com/gethomepage/homepage), fetched
+unmodified at commit `541b2fe9f13de9b4efbbc4d1e5fbc4c8d637734b` (2026-09-12).
+That repository is GPL-3.0; the logo remains the Homepage project's brand mark
+and is used here only to identify the service.
+
 ## Modifications
 
 1. **Light minification.** XML declarations, comments, `<metadata>`,
