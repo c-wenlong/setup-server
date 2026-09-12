@@ -68,9 +68,6 @@ first, dated by merge.
 
 ### Fixed
 
-
-### Fixed
-
 - The homepage mocked suite compared `PUID` against the real uid while the
   `id` stub always reports 1000, so it failed on a GitHub runner (uid 1001).
 
