@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# curl stub — two personalities.
+#
+# 1. THE RELEASE DOWNLOAD. A URL under github.com/syncthing/syncthing/
+#    releases/download/<ver>/ gets a REAL tarball (or .zip on macOS) built on
+#    the fly around syncthing.tmpl, and sha256sum.txt.asc gets a real digest
+#    of that tarball — so setup.sh's verify/extract/install path is exercised
+#    with real tar and real sha256sum, not faked. State in $STATE_DIR:
+#      download_fails  — the asset URL 404s (exit 22)
+#      bad_checksum    — the checksum list carries a wrong digest
+#      sha_unlisted    — the checksum list does not mention the asset at all
+#
+# 2. THE REST API. Answers are derived from the sandbox's config.xml (its
+#    path is recorded by the fake binary's `generate`), so a test that edits
+#    config.xml sees the "running instance" reflect the edit — which is how
+#    the drift test works. State in $STATE_DIR:
+#      conn_refused_left — countdown of refused connections on /rest/noauth/
+#                          health (exit 7, code 000): a cold start
+#      hostcheck_403     — GET / through the tailnet URL answers 403, i.e.
+#                          insecureSkipHostcheck is not in effect
+#      folders.json      — the folder list; POST appends and touches
+#                          folder_post
+echo "curl $*" >> "$CALLS_LOG"
+
+out=""; url=""; want_code=0; failonerr=0; method=GET; body=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -d|--data|--data-binary) body="$2"; shift 2 ;;
+    -H|--max-time|--connect-timeout|--retry|-u) shift 2 ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <body>
+  if [ -n "$out" ]; then printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then printf '%s' "$2"; fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2; exit 22
+  fi
+  exit 0
+}
+refuse() {
+  [ -n "$out" ] && : > "$out"
+  [ "$want_code" = "1" ] && printf '000'
+  echo "curl: (7) Failed to connect to 127.0.0.1: Connection refused" >&2
+  exit 7
+}
+
+# ------------------------------------------------------------ downloads
+case "$url" in
+  */releases/download/*/sha256sum.txt.asc)
+    [ -n "$out" ] || exit 2
+    {
+      echo "-----BEGIN PGP SIGNED MESSAGE-----"; echo "Hash: SHA256"; echo
+      echo "0000000000000000000000000000000000000000000000000000000000000000  stdiscosrv-linux-amd64-stub.tar.gz"
+      if [ ! -f "$STATE_DIR/sha_unlisted" ]; then
+        for f in "$STATE_DIR"/assets/*; do
+          [ -f "$f" ] || continue
+          if [ -f "$STATE_DIR/bad_checksum" ]; then
+            echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  $(basename "$f")"
+          else
+            echo "$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") | awk '{print $1}')  $(basename "$f")"
+          fi
+        done
+      fi
+      echo "-----BEGIN PGP SIGNATURE-----"; echo "stub"; echo "-----END PGP SIGNATURE-----"
+    } > "$out"
+    exit 0
+    ;;
+  */releases/download/*/syncthing-*)
+    [ -f "$STATE_DIR/download_fails" ] && { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+    [ -n "$out" ] || exit 2
+    asset="$(basename "$url")"
+    ver="$(printf '%s' "$url" | sed -n 's#.*/releases/download/\([^/]*\)/.*#\1#p')"
+    stem="${asset%.tar.gz}"; stem="${stem%.zip}"
+    build="$STATE_DIR/build/$stem"
+    rm -rf "$build"; mkdir -p "$build" "$STATE_DIR/assets"
+    sed "s/__VERSION__/$ver/g" "$STUBS/syncthing.tmpl" > "$build/syncthing"
+    chmod 755 "$build/syncthing"
+    echo "stub release notes" > "$build/README.txt"
+    # The real tarball ships a ufw profile at etc/firewall-ufw/syncthing — a
+    # text file with the binary's name. A `find -name syncthing` returns it
+    # first; the real deploy installed it once. Keep the decoy.
+    mkdir -p "$build/etc/firewall-ufw"
+    printf '[syncthing]\ntitle=Syncthing\nports=22000/tcp|21027/udp\n' > "$build/etc/firewall-ufw/syncthing"
+    case "$asset" in
+      *.tar.gz) tar -czf "$STATE_DIR/assets/$asset" -C "$STATE_DIR/build" "$stem" ;;
+      *.zip)    (cd "$STATE_DIR/build" && zip -qr "$STATE_DIR/assets/$asset" "$stem") ;;
+    esac
+    cp "$STATE_DIR/assets/$asset" "$out"
+    exit 0
+    ;;
+esac
+
+# ------------------------------------------------------------ REST views
+cfg=""
+[ -f "$STATE_DIR/config_dir" ] && cfg="$(cat "$STATE_DIR/config_dir")/config.xml"
+xval() { [ -f "$cfg" ] && sed -n "s/.*<$1>\([^<]*\)<\/$1>.*/\1/p" "$cfg" | head -1; }
+# Values scoped to the <gui> block — <address> also occurs under <device>.
+gval() { [ -f "$cfg" ] && sed -n '/<gui/,/<\/gui>/p' "$cfg" | sed -n "s/.*<$1>\([^<]*\)<\/$1>.*/\1/p" | head -1; }
+jbool() { case "$(xval "$1")" in true) echo true;; *) echo false;; esac; }
+listen_json() {
+  [ -f "$cfg" ] || { echo '[]'; return; }
+  sed -n 's/.*<listenAddress>\([^<]*\)<\/listenAddress>.*/\1/p' "$cfg" \
+    | awk 'BEGIN{printf "["} {printf "%s\"%s\"", (NR>1?",":""), $0} END{printf "]"}'
+}
+skip_hostcheck() { case "$(gval insecureSkipHostcheck)" in true) echo true;; *) echo false;; esac; }
+
+# PATCH /rest/config/{options,gui}: apply the body to the sandbox config.xml
+# the way the real server persists it, so the next GET reflects the repair.
+apply_patch() {  # apply_patch options|gui BODY
+  [ -f "$cfg" ] || exit 1
+  python3 - "$cfg" "$1" "$2" <<'PYS'
+import sys, json
+import xml.etree.ElementTree as ET
+path, which, body = sys.argv[1:4]
+d = json.loads(body); t = ET.parse(path); r = t.getroot()
+if which == "options":
+    o = r.find("options")
+    if "listenAddresses" in d:
+        for el in o.findall("listenAddress"): o.remove(el)
+        for i, u in enumerate(d["listenAddresses"]):
+            el = ET.Element("listenAddress"); el.text = u; o.insert(i, el)
+    for k, v in d.items():
+        if k == "listenAddresses": continue
+        el = o.find(k)
+        if el is None: el = ET.SubElement(o, k)
+        el.text = json.dumps(v) if not isinstance(v, bool) else ("true" if v else "false")
+else:
+    g = r.find("gui")
+    for k, v in d.items():
+        el = g.find(k)
+        if el is None: el = ET.SubElement(g, k)
+        el.text = ("true" if v else "false") if isinstance(v, bool) else str(v)
+ET.indent(t, space="    ")   # one element per line: the stub's sed views read line-wise
+t.write(path)
+PYS
+}
+
+case "$url" in
+  */rest/config/options)
+    if [ "$method" = "PATCH" ]; then
+      touch "$STATE_DIR/options_patched"; printf '%s' "$body" >> "$STATE_DIR/options_patch_bodies"
+      [ -f "$STATE_DIR/patch_fails" ] && emit 500 'nope'
+      apply_patch options "$body"; emit 200 ''
+    fi
+    ;;
+  */rest/config/gui)
+    if [ "$method" = "PATCH" ]; then
+      touch "$STATE_DIR/gui_patched"; printf '%s' "$body" >> "$STATE_DIR/gui_patch_bodies"
+      apply_patch gui "$body"; emit 200 ''
+    fi
+    ;;
+  */rest/system/restart)
+    touch "$STATE_DIR/restart_posted"; emit 200 '{"ok":"restarting"}' ;;
+esac
+
+case "$url" in
+  https://*/rest/noauth/health)
+    emit 200 '{"status":"OK"}' ;;
+  https://*/)
+    [ -f "$STATE_DIR/hostcheck_403" ] && emit 403 'Host check error'
+    emit 200 '<!DOCTYPE html><html><head><title>Syncthing</title></head></html>' ;;
+  */rest/noauth/health)
+    if [ -f "$STATE_DIR/conn_refused_left" ]; then
+      left="$(cat "$STATE_DIR/conn_refused_left")"
+      if [ "$left" -gt 0 ]; then echo $((left - 1)) > "$STATE_DIR/conn_refused_left"; refuse; fi
+    fi
+    emit 200 '{"status":"OK"}' ;;
+  */rest/system/status)
+    emit 200 '{"myID":"STUBDEV-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG","uptime":3,"connectionServiceStatus":{}}' ;;
+  */rest/config/options)
+    ur="$(xval urAccepted)"; up="$(xval autoUpgradeIntervalH)"
+    emit 200 "{\"listenAddresses\":$(listen_json),\"globalAnnounceEnabled\":$(jbool globalAnnounceEnabled),\"localAnnounceEnabled\":$(jbool localAnnounceEnabled),\"relaysEnabled\":$(jbool relaysEnabled),\"natEnabled\":$(jbool natEnabled),\"crashReportingEnabled\":$(jbool crashReportingEnabled),\"urAccepted\":${ur:-0},\"autoUpgradeIntervalH\":${up:-12},\"announceLANAddresses\":$(jbool announceLANAddresses)}" ;;
+  */rest/config/gui)
+    emit 200 "{\"enabled\":true,\"address\":\"$(gval address)\",\"user\":\"$(gval user)\",\"password\":\"\",\"apiKey\":\"$(gval apikey)\",\"insecureSkipHostcheck\":$(skip_hostcheck),\"useTLS\":false}" ;;
+  */rest/config/folders)
+    if [ "$method" = "POST" ]; then
+      touch "$STATE_DIR/folder_post"
+      printf '[%s]' "$body" > "$STATE_DIR/folders.json"
+      emit 200 ''
+    fi
+    [ -f "$STATE_DIR/folders.json" ] && emit 200 "$(cat "$STATE_DIR/folders.json")"
+    emit 200 '[]' ;;
+  *)
+    emit 200 '{}' ;;
+esac

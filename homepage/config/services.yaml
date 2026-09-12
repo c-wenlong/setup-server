@@ -37,6 +37,12 @@
         description: Files — Drive sync across laptop, phone and this box
         siteMonitor: http://127.0.0.1:8081/api2/ping/
 
+    - Syncthing:
+        icon: syncthing.png
+        href: https://__TS_HOST__:8384/
+        description: Sync — folders kept identical across laptop, phone and this box
+        siteMonitor: http://127.0.0.1:8384/rest/noauth/health
+
     - Vaultwarden:
         icon: vaultwarden.png
         href: https://__TS_HOST__:8222/

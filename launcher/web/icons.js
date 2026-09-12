@@ -45,6 +45,7 @@
     'kaichenpedia':  { file: 'kaichenpedia', ext: 'png' },
     'manimkc':       { file: 'manimkc',      ext: 'png' },
     'seafile':       { file: 'seafile' },
+    'syncthing':     { file: 'syncthing' },
     'code-server':   { file: 'code-server' },
     'open-webui':    { file: 'open-webui',    dark: true },  /* black disc  */
     'n8n':           { file: 'n8n' },

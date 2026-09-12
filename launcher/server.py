@@ -14,6 +14,8 @@ Serves web/ as static files and a small JSON API:
     GET    api/services/{key}      detail: identity, meta, env var NAMES
     PATCH  api/services/{key}      {name?, description?} -> overrides.json
     POST   api/services/{key}/env/{var}/reveal   one value, deliberately POST
+    PATCH  api/services/{key}/env/{var}   {"value"} -> rewrites that line in .env
+    POST   api/services/{key}/touch  {"event": launched|opened} -> usage.json
     GET    api/services/{key}/notes            newest-first
     POST   api/services/{key}/notes            {title?, body} -> 201
     PATCH  api/services/{key}/notes/{id}       {title?, body?}
@@ -23,7 +25,8 @@ Serves web/ as static files and a small JSON API:
 
 Env values are never in a list or detail payload, not even masked: the
 detail response carries names and a `secret` flag only, and revealing one
-is a separate explicit POST that is never logged.
+is a separate explicit POST that is never logged. Editing one rewrites
+exactly that line of the .env file, leaving every other byte alone.
 
 Paths arrive WITHOUT any mount prefix: `tailscale serve --set-path=/home`
 strips `/home` before proxying, so the backend sees `/` and `/api/services`
@@ -43,6 +46,7 @@ import re
 import shlex
 import socket
 import socketserver
+import stat
 import subprocess
 import sys
 import tempfile
@@ -79,6 +83,12 @@ OVERRIDES_PATH = os.path.expanduser("~/services/launcher/overrides.json")
 # be written into services.json and must survive a redeploy of the repo.
 NOTES_PATH = os.path.expanduser("~/services/launcher/notes.json")
 
+# Last-launched / last-opened timestamps per service, which the grid sorts by
+# out of the box. Beside overrides.json and for the same reasons: per-box
+# state that is not in git, must survive a redeploy of the repo, and is reset
+# by deleting the file.
+USAGE_PATH = os.path.expanduser("~/services/launcher/usage.json")
+
 # Deploy scripts may only live under one of these roots. The repo is the
 # normal case; ~/dev is needed because some services keep their code in
 # their own repo (manimkc lives at ~/dev/manimkc/server/setup.sh) while
@@ -91,6 +101,15 @@ PROBE_TIMEOUT = 2.0  # seconds; loopback, so anything slower is "down"
 PROBE_TTL = 5.0      # cache probes so a page refresh can't stampede
 MAX_JOBS = 2         # global concurrent jobs (deploys and lifecycle actions)
 LOG_TAIL_BYTES = 64 * 1024
+
+# Resource use is read from cgroup v2 in sysfs, never from `docker stats`.
+# The root is an env var so the tests can point it at a fixture tree instead
+# of monkeypatching open().
+CGROUP_ROOT = os.environ.get("LAUNCHER_CGROUP_ROOT", "/sys/fs/cgroup")
+RESOURCE_TTL = 5.0     # same reasoning as PROBE_TTL: a grid full of tiles
+                       # polling every 30s must not hammer sysfs
+DOCKER_MAP_TTL = 10.0  # container name -> id; at most one docker call per 10s
+DOCKER_MAP_TIMEOUT = 5.0
 
 # How long a finished (done/failed) job keeps being reported on its tile by
 # api/services. Long enough that you can lock your phone mid-deploy, come
@@ -108,6 +127,16 @@ MAX_JOB_HISTORY = 50
 MAX_NAME = 60        # characters, after cleaning
 MAX_DESCRIPTION = 2000
 MAX_BODY_BYTES = 64 * 1024   # nothing this API accepts is anywhere near this
+
+# A touch body is {"event": "launched"} and nothing else, so it is capped far
+# below the global limit rather than at it.
+MAX_TOUCH_BYTES = 1024
+
+# One env value. The longest line in any .env on this box is under 100
+# characters; a PEM key would be the only thing near this, and those are
+# multi-line, which .env cannot hold anyway.
+MAX_ENV_VALUE = 4096
+TOUCH_EVENTS = ("launched", "opened")
 
 # Notes. A title is one collapsed line because the UI shows notes collapsed to
 # exactly that; a body is long enough for a paste of a compose fragment or a
@@ -291,6 +320,97 @@ def effective(svc, overrides=None):
     return name, description
 
 
+# ------------------------------------------------------------------ usage
+
+# When each service was last launched (its tile opened the service in a tab)
+# or opened (its detail page). The default sort order on the grid, so this is
+# read on every list request and written on every click — hence the same
+# atomic-replace + single-lock discipline as overrides.json, and the same
+# "delete the file to reset" property.
+_usage_lock = threading.Lock()
+
+
+def load_usage():
+    """key -> {"last_launched"?, "last_opened"?}, epoch floats. Never raises.
+
+    Degrades exactly as load_overrides() does: missing, corrupt, unreadable
+    or the wrong shape all mean "nothing used yet". A scrambled sort key must
+    never be able to take the grid down. Bools are numbers in Python and are
+    not timestamps, so they are dropped along with everything else odd.
+    """
+    try:
+        with open(USAGE_PATH, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log("usage unusable (%s); starting from no history" % exc)
+        return {}
+    if not isinstance(doc, dict):
+        log("usage is not an object; starting from no history")
+        return {}
+    services = doc.get("services")
+    if not isinstance(services, dict):
+        return {}
+    clean = {}
+    for key, entry in services.items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            continue
+        kept = {}
+        for field in ("last_launched", "last_opened"):
+            value = entry.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                kept[field] = float(value)
+        if kept:
+            clean[key] = kept
+    return clean
+
+
+def _write_usage(data):
+    """Atomically replace usage.json. Caller holds _usage_lock."""
+    _write_json_atomically(USAGE_PATH, {"services": data}, ".usage-")
+
+
+def usage_entry(usage, key):
+    """The `usage` block for one service; all three keys always present.
+
+    last_used is derived rather than stored, so it cannot drift out of step
+    with the two stamps it is the maximum of.
+    """
+    entry = usage.get(key) or {}
+    launched = entry.get("last_launched")
+    opened = entry.get("last_opened")
+    stamps = [t for t in (launched, opened) if t is not None]
+    return {"last_launched": launched, "last_opened": opened,
+            "last_used": max(stamps) if stamps else None}
+
+
+def record_touch(key, body):
+    """POST api/services/{key}/touch -> {"usage": {...}}.
+
+    The key is looked up in the registry first, so a stray client cannot grow
+    this file with names of its own, and the event is an allowlist of exactly
+    two words: nothing from the request is ever written here but a timestamp
+    this process took itself.
+    """
+    if find_service(key) is None:
+        raise DeployError(404, "unknown service")
+    if not isinstance(body, dict):
+        raise DeployError(400, "body must be a JSON object")
+    event = body.get("event")
+    if event not in TOUCH_EVENTS:
+        raise DeployError(400, "event must be one of: %s"
+                          % ", ".join(TOUCH_EVENTS))
+    now = time.time()
+    with _usage_lock:
+        data = load_usage()
+        entry = dict(data.get(key) or {})
+        entry["last_" + event] = now
+        data[key] = entry
+        _write_usage(data)
+    return {"usage": usage_entry(data, key)}
+
+
 # ------------------------------------------------------------------ env files
 
 # Secret detection is by NAME, case-insensitively, because the value is never
@@ -302,6 +422,20 @@ SECRET_MARKERS = ("PASS", "SECRET", "TOKEN", "KEY", "CRED", "PRIVATE")
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_EXPORT_RE = re.compile(r"^export\s+")
+
+# Inside a double-quoted value, exactly the escapes that a POSIX shell, Docker
+# Compose's .env reader and this parser all agree on: \\ -> \ and \" -> ".
+# `\$` and \` are deliberately NOT here — the shell unescapes both and Compose
+# (measured 2026-09-12 with `docker compose config`) unescapes neither — so
+# quote_env_value refuses to ever write one.
+_DQ_UNESCAPE_RE = re.compile(r'\\([\\"])')
+
+# A value that can sit bare after `NAME=` and mean the same thing to a shell
+# `source`, to Docker Compose and to parse_env. Deliberately narrow: no
+# whitespace, no quotes, no `#` (an inline comment to Compose after a space),
+# no `$` (interpolated by both), no `~` (tilde-expanded by the shell), and
+# none of the shell's other metacharacters. Anything outside it is quoted.
+_ENV_BARE_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,-]*$")
 
 
 def is_secret(name):
@@ -325,21 +459,37 @@ def parse_env(text):
     """
     out = {}
     for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+        hit = _split_assignment(line)
+        if hit is None:
             continue
-        line = _ENV_EXPORT_RE.sub("", line, count=1)
-        if "=" not in line:
-            continue
-        name, value = line.split("=", 1)   # only the FIRST = splits
-        name = name.strip()
-        if not _ENV_NAME_RE.match(name):
-            continue
+        name, value = hit
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            quote = value[0]
             value = value[1:-1]
+            if quote == '"':
+                value = _DQ_UNESCAPE_RE.sub(r"\1", value)
         out[name] = value
     return out
+
+
+def _split_assignment(line):
+    """(name, raw value) for a line parse_env would take, else None.
+
+    Shared by the parser and the editor so that "which line sets X" has one
+    answer: the editor rewrites exactly the lines the parser would read.
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    line = _ENV_EXPORT_RE.sub("", line, count=1)
+    if "=" not in line:
+        return None
+    name, value = line.split("=", 1)   # only the FIRST = splits
+    name = name.strip()
+    if not _ENV_NAME_RE.match(name):
+        return None
+    return name, value
 
 
 def read_env(svc):
@@ -512,6 +662,295 @@ def derive_state(setup, installed, active):
     return "available"
 
 
+# ------------------------------------------------------------------ resources
+#
+# RAM and CPU per service, read from cgroup v2 in sysfs — never from `docker
+# stats`, which would put resource use behind the docker group and drag the
+# rest of the page down with it whenever that is missing. Measured on this
+# box (2026-09-12), both exposing memory.current and cpu.stat:
+#
+#   container   <root>/system.slice/docker-<64hex>.scope/
+#   user unit   <root>/user.slice/user-<uid>.slice/user@<uid>.service/
+#                   app.slice/<unit>/
+#
+# The ONLY docker call anywhere in this path is one cached `docker ps` to map
+# container name -> id. If it fails — no group, no daemon, no docker at
+# all — every container part reports null and nothing else on the page moves.
+# Parts come from the same `control.parts` the start/stop buttons use, so a
+# service is measured exactly where it is controlled.
+
+_docker_map_cache = {"at": 0.0, "map": {}}
+_docker_map_lock = threading.Lock()
+
+_resources_cache = {}      # key -> (sampled_at, payload)
+_resources_lock = threading.Lock()
+
+_cpu_samples = {}          # cgroup path -> (wall seconds, usage_usec)
+_cpu_lock = threading.Lock()
+
+# Container ids as `docker ps --no-trunc` prints them. Anything else is
+# dropped rather than pasted into a path this then opens — the same instinct
+# as _CONTROL_NAME_RE.
+_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def _null_resources(now):
+    """The all-null block. Shape is identical to a measured one, always."""
+    return {"rss_bytes": None, "cpu_pct": None, "sampled_at": now,
+            "parts": []}
+
+
+def _read_docker_names():
+    """{container name: full id}, or {} when docker cannot be reached.
+
+    Goes through sg_docker for the reason the lifecycle actions do (a systemd
+    *user* unit does not reliably inherit the docker group), and through
+    subprocess so the test stub catches it. Every failure — missing binary,
+    missing group, dead daemon, garbage output, a hung call — is the empty
+    map, which is what makes "status keeps working with no docker" true here
+    as well.
+    """
+    argv = sg_docker(["docker", "ps", "-a", "--no-trunc",
+                      "--format", "{{.Names}}\t{{.ID}}"])
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+    except Exception as exc:
+        log("docker ps unusable (%s); container resources report null" % exc)
+        return {}
+    try:
+        out, _ = proc.communicate(timeout=DOCKER_MAP_TIMEOUT)
+    except Exception as exc:
+        # A wedged docker (the daemon is up but not answering) must not leave
+        # a process behind on every poll.
+        log("docker ps unusable (%s); container resources report null" % exc)
+        try:
+            proc.kill()
+            proc.communicate(timeout=1)
+        except Exception:
+            pass
+        return {}
+    if proc.returncode:
+        return {}
+    mapping = {}
+    for line in (out or "").splitlines():
+        name, _, cid = line.partition("\t")
+        name, cid = name.strip(), cid.strip()
+        if name and _CONTAINER_ID_RE.match(cid):
+            mapping[name] = cid
+    return mapping
+
+
+def docker_name_map():
+    """The cached name -> id map (TTL DOCKER_MAP_TTL).
+
+    A failure is cached too: on a box with no docker group this must cost one
+    failed call every 10s, not one per container per request.
+    """
+    now = time.time()
+    # The lock is held ACROSS the docker call on purpose (single-flight):
+    # two polls that miss the cache together run one `docker ps`, not two,
+    # and the second gets the first's answer. Only callers that actually
+    # need the map wait here; nothing else in the server shares this lock.
+    with _docker_map_lock:
+        if now - _docker_map_cache["at"] < DOCKER_MAP_TTL:
+            return _docker_map_cache["map"]
+        mapping = _read_docker_names()
+        _docker_map_cache["at"] = time.time()
+        _docker_map_cache["map"] = mapping
+        return mapping
+
+
+def _container_cgroup(name, docker_map):
+    """The cgroup directory for a running container, or None.
+
+    The id is re-checked here and not only where the map is built, so that
+    the shape of what gets pasted into a path this opens is guaranteed at
+    the point of use — the same belt-and-braces as resolve_registry_path.
+    """
+    cid = docker_map.get(name)
+    if not cid or not _CONTAINER_ID_RE.match(cid):
+        return None
+    path = os.path.join(CGROUP_ROOT, "system.slice",
+                        "docker-%s.scope" % cid)
+    return path if os.path.isdir(path) else None
+
+
+def _unit_cgroup(name):
+    """The cgroup directory for a systemd --user unit, or None.
+
+    app.slice is where every unit controlled from here actually lives; the
+    other candidates cost one isdir() each and cover a unit started outside
+    it, or a system unit. A stopped unit has no cgroup at all, which is the
+    ordinary reason this returns None — manimkc.service, dead, is not
+    missing from the tree, it simply has none.
+    """
+    uid = os.getuid()
+    user = os.path.join(CGROUP_ROOT, "user.slice", "user-%d.slice" % uid,
+                        "user@%d.service" % uid)
+    for candidate in (os.path.join(user, "app.slice", name),
+                      os.path.join(user, "session.slice", name),
+                      os.path.join(user, name),
+                      os.path.join(CGROUP_ROOT, "system.slice", name)):
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def _read_rss(cgroup):
+    """memory.current in bytes, or None.
+
+    A missing or unreadable file is the ordinary case for a stopped service,
+    so this is silent: no log line and certainly no traceback, just null.
+    """
+    try:
+        path = os.path.join(cgroup, "memory.current")
+        with open(path, encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except Exception:
+        return None
+
+
+def _read_usage_usec(cgroup):
+    """usage_usec out of cpu.stat, in microseconds, or None. Also silent."""
+    try:
+        with open(os.path.join(cgroup, "cpu.stat"), encoding="utf-8") as fh:
+            for line in fh:
+                field, _, value = line.partition(" ")
+                if field == "usage_usec":
+                    return int(value.strip())
+    except Exception:
+        return None
+    return None
+
+
+def _cpu_percent(cgroup, usage_usec, now):
+    """Percent of the WHOLE MACHINE since this cgroup's previous sample.
+
+    null until two samples exist, which is why cpu_pct only appears on the
+    grid's second poll. Clamped to [0, 100]: a restarted container resets
+    usage_usec (negative delta) and a clock that jumped can make the wall
+    delta small enough for the ratio to be absurd. Either should read as "no
+    useful number", never as a spike.
+    """
+    if usage_usec is None:
+        # Drop the stale sample: the next reading after a restart must not be
+        # differenced against a counter that no longer exists.
+        with _cpu_lock:
+            _cpu_samples.pop(cgroup, None)
+        return None
+    with _cpu_lock:
+        previous = _cpu_samples.get(cgroup)
+        _cpu_samples[cgroup] = (now, usage_usec)
+        # Keys embed the container id, so every recreate leaves an orphan
+        # behind. Drop any whose cgroup no longer exists — cheap (one stat
+        # per stale key, and there are only ever a few) and bounded.
+        for stale in [k for k in _cpu_samples if k != cgroup
+                      and not os.path.isdir(k)]:
+            _cpu_samples.pop(stale, None)
+    if not previous:
+        return None
+    prev_wall, prev_usage = previous
+    wall_usec = (now - prev_wall) * 1e6
+    if wall_usec <= 0:
+        return None
+    pct = (usage_usec - prev_usage) / (wall_usec * (os.cpu_count() or 1)) * 100
+    return max(0.0, min(100.0, pct))
+
+
+def _has_container_part(svc):
+    return any(p["kind"] == "container"
+               for p in control_parts(control_block(svc)))
+
+
+def _measure_resources(svc, now, docker_map=None):
+    """One sysfs pass over a service's control parts. Caller holds the lock.
+
+    `docker_map` is the name -> id map, fetched by the caller OUTSIDE the
+    resources lock (see service_resources). Left None, it is fetched here on
+    first use, which is what the tests do and what a unit-only service
+    never triggers.
+    """
+    measured = []
+    total_rss = None
+    total_cpu = None
+    for part in control_parts(control_block(svc)):
+        if part["kind"] == "container":
+            # Fetched only when a container part actually exists, so a
+            # unit-only service never goes near docker.
+            if docker_map is None:
+                docker_map = docker_name_map()
+            cgroup = _container_cgroup(part["name"], docker_map)
+        else:
+            cgroup = _unit_cgroup(part["name"])
+        rss = _read_rss(cgroup) if cgroup else None
+        cpu = _cpu_percent(cgroup, _read_usage_usec(cgroup), now) \
+            if cgroup else None
+        if rss is not None:
+            total_rss = rss if total_rss is None else total_rss + rss
+        if cpu is not None:
+            total_cpu = cpu if total_cpu is None else total_cpu + cpu
+        measured.append({"name": part["name"], "kind": part["kind"],
+                         "rss_bytes": rss, "cpu_pct": cpu})
+    if total_cpu is not None:
+        total_cpu = max(0.0, min(100.0, total_cpu))
+    return {"rss_bytes": total_rss, "cpu_pct": total_cpu,
+            "sampled_at": now, "parts": measured}
+
+
+def service_resources(svc):
+    """The `resources` block for one service. Never raises.
+
+    Cached for RESOURCE_TTL under one lock, so a busy grid cannot hammer
+    sysfs and two concurrent polls cannot take a CPU sample microseconds
+    apart. The one slow thing in the path -- `docker ps`, up to
+    DOCKER_MAP_TIMEOUT when the daemon is wedged -- runs OUTSIDE that lock:
+    it has its own single-flight cache, and holding the shared lock across
+    it would stall every other service's sample and every concurrent list
+    request for those seconds. Measurements themselves are sysfs reads and
+    take microseconds under the lock.
+    """
+    key = svc.get("key")
+    now = time.time()
+    try:
+        with _resources_lock:
+            hit = _resources_cache.get(key)
+            if hit and now - hit[0] < RESOURCE_TTL:
+                return hit[1]
+        docker_map = docker_name_map() if _has_container_part(svc) else {}
+        with _resources_lock:
+            # Re-check: another request may have sampled this service while
+            # this one was waiting on docker.
+            hit = _resources_cache.get(key)
+            if hit and now - hit[0] < RESOURCE_TTL:
+                return hit[1]
+            payload = _measure_resources(svc, now, docker_map)
+            _resources_cache[key] = (now, payload)
+            return payload
+    except Exception as exc:
+        # Resource use is the least important thing on this page: it may
+        # never be the reason a tile fails to render.
+        log("resources unavailable for %s (%s)" % (key, exc))
+        return _null_resources(now)
+
+
+def deployed_at(marker):
+    """mtime of the service's marker path, epoch float, or None.
+
+    "When was this deployed", without docker and without a package manager:
+    the marker is the state dir or generated .env that setup.sh creates, the
+    same file `installed` is already derived from.
+    """
+    if not marker:
+        return None
+    try:
+        return os.path.getmtime(os.path.expanduser(marker))
+    except OSError:
+        return None
+
+
+# ------------------------------------------------------------------ payload
+
 def services_payload():
     host = magicdns_host()
     registry = load_registry()
@@ -523,6 +962,9 @@ def services_payload():
     # One read for the whole payload; a rename must show on the grid, not
     # only on the detail page it was made from.
     overrides = load_overrides()
+    # Likewise one read for the usage stamps the grid's default sort needs,
+    # rather than one open() per tile.
+    usage = load_usage()
 
     services = []
     for svc in registry:
@@ -550,6 +992,12 @@ def services_payload():
             # Whether this tile gets start/stop buttons at all — and when it
             # does not, the same sentence the server refuses the request with.
             "control": control_status(svc),
+            # v3 sort keys and resource use. All three are always present and
+            # null when unknown, never absent: the grid sorts on them, and a
+            # missing key is harder to be null-safe about than a null.
+            "usage": usage_entry(usage, svc.get("key")),
+            "deployed_at": deployed_at(svc.get("marker")),
+            "resources": service_resources(svc),
         })
     return {"host": host, "services": services}
 
@@ -595,6 +1043,9 @@ def service_detail(key):
         "active": active,
         "job": jobs_by_key().get(key),
         "control": control_status(svc),
+        "usage": usage_entry(load_usage(), key),
+        "deployed_at": deployed_at(svc.get("marker")),
+        "resources": service_resources(svc),
         "description": description,
         "meta": {
             # Registry facts, verbatim: paths as written, so what is shown is
@@ -701,6 +1152,151 @@ def reveal_env_var(key, var):
             log("revealed %s.%s" % (key, name))   # name only, never the value
             return {"name": name, "value": value}
     raise DeployError(404, "unknown variable")
+
+
+# ---- edit
+
+# The .env files this rewrites are read by THREE things that must all agree
+# on what a line means: `set -a; . .env` in every setup.sh (a POSIX shell),
+# Docker Compose (interpolation + env_file), and parse_env above. The quoting
+# rules below are the intersection of the three, verified against the
+# Compose .env syntax docs and dash/bash:
+#
+#   bare            only for _ENV_BARE_RE — every reader takes it literally
+#   'single quotes' the shell and Compose both take these literally, with no
+#                   interpolation, so this is the default for anything else
+#   "double quotes" only when the value itself contains an apostrophe; \\ and
+#                   \" are escaped, and a `$` or a backtick is REFUSED, because
+#                   the shell would unescape \$ and \` and Compose would not —
+#                   there is no spelling of that value all three readers agree
+#                   on (measured, see _DQ_UNESCAPE_RE).
+#
+# One lock for every env file. Edits are rare and tiny; the lock exists so
+# two saves cannot interleave a read-modify-write on the same file.
+_env_lock = threading.Lock()
+
+
+def quote_env_value(value):
+    """`value` rendered for the right-hand side of NAME=..., or raise 400."""
+    if _ENV_BARE_RE.match(value):
+        return value
+    if "'" not in value:
+        return "'" + value + "'"
+    if "$" in value or "`" in value:
+        raise DeployError(
+            400, "a value containing an apostrophe cannot also contain $ or `")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def render_env_edit(text, var, rendered):
+    """`text` with every line that assigns `var` rewritten; -> (text, count).
+
+    Every other byte survives untouched: comments, blank lines, ordering, the
+    other variables, a missing final newline, CRLF endings. On a rewritten
+    line the indentation and any `export ` prefix are kept too. *Every*
+    assignment is rewritten, not just the last, so a file with a stale
+    duplicate cannot read one way to the shell and another way here.
+    """
+    out = []
+    count = 0
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        hit = _split_assignment(body)
+        if hit is None or hit[0] != var:
+            out.append(line)
+            continue
+        ending = line[len(body):]
+        stripped = body.lstrip()
+        indent = body[:len(body) - len(stripped)]
+        prefix = _ENV_EXPORT_RE.match(stripped)
+        out.append(indent + (prefix.group(0) if prefix else "")
+                   + var + "=" + rendered + ending)
+        count += 1
+    return "".join(out), count
+
+
+def _write_env_atomically(path, text, st):
+    """Replace the env file with `text`; caller holds _env_lock.
+
+    Same discipline as the JSON stores (temp file beside the target, fsync,
+    one os.replace), plus: the original mode is copied onto the new file —
+    setup.sh made these 0600 for a reason — and the group is kept where the
+    process is allowed to. Bytes that were not valid UTF-8 round-trip via
+    surrogateescape rather than being silently replaced.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".env-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape",
+                       newline="") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        try:
+            os.chown(tmp, -1, st.st_gid)
+        except OSError:
+            pass   # not our group any more; the mode is what protects the file
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def update_env_var(key, var, body):
+    """Set one variable in one service's env file; -> {"name", "secret"}.
+
+    `var` must already be assigned in the file — this edits, it does not
+    add, so the request can never introduce a name the service's setup.sh
+    did not put there. Unknown names are a 404 that never echoes the request,
+    exactly like reveal. The value goes into the file and into the response
+    to the caller and nowhere else: never a log line.
+
+    A last check before writing: the rewritten text is parsed back and must
+    yield the value that was sent. If the quoting rules and the parser ever
+    disagree, the request fails and the file is left alone.
+    """
+    svc = find_service(key)
+    if svc is None:
+        raise DeployError(404, "unknown service")
+    if not isinstance(body, dict):
+        raise DeployError(400, "body must be a JSON object")
+    value = body.get("value")
+    if not isinstance(value, str):
+        raise DeployError(400, "value must be a string")
+    if len(value) > MAX_ENV_VALUE:
+        raise DeployError(400, "value is too long (max %d characters)" % MAX_ENV_VALUE)
+    if "\n" in value or "\r" in value or "\0" in value:
+        raise DeployError(400, "value must be a single line")
+
+    raw = svc.get("env")
+    if not raw:
+        raise DeployError(404, "service has no env file")
+    path = resolve_registry_path(raw, "env")   # allowed-roots gate: 403
+    rendered = quote_env_value(value)          # 400
+
+    with _env_lock:
+        try:
+            st = os.stat(path)
+            # newline="" both ways: a CRLF file stays a CRLF file.
+            with open(path, "r", encoding="utf-8", errors="surrogateescape",
+                      newline="") as fh:
+                text = fh.read()
+        except OSError:
+            raise DeployError(404, "env file not readable")
+        new_text, count = render_env_edit(text, var, rendered)
+        if count == 0:
+            raise DeployError(404, "unknown variable")
+        if parse_env(new_text).get(var) != value:
+            log("refusing to write %s.%s: quoting does not round-trip" % (key, var))
+            raise DeployError(500, "could not encode that value safely")
+        _write_env_atomically(path, new_text, st)
+    log("updated %s.%s" % (key, var))   # name only, never the value
+    return {"name": var, "secret": is_secret(var), "value": value}
 
 
 # ------------------------------------------------------------------ notes
@@ -1549,11 +2145,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._dispatch("DELETE")
 
-    def _read_json_body(self):
+    def _read_json_body(self, limit=MAX_BODY_BYTES):
         """Parsed JSON body, or None when empty. Raises DeployError on junk.
 
         Always drains the body first so the connection stays usable for the
-        next keep-alive request.
+        next keep-alive request — except over the limit, where the body is
+        deliberately not read at all and the connection is closed instead.
         """
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1561,7 +2158,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise DeployError(400, "bad Content-Length")
         if length < 0:
             raise DeployError(400, "bad Content-Length")
-        if length > MAX_BODY_BYTES:
+        if length > limit:
             self.close_connection = True
             raise DeployError(413, "body too large")
         raw = self.rfile.read(length) if length else b""
@@ -1631,11 +2228,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._serve_static(path)
 
     def _route_post(self, path):
-        # Read (and, for deploy, discard) any body first so the connection
-        # stays sane.
-        body = self._read_json_body()
-
         parts = path.strip("/").split("/")
+        # Read (and, for deploy, discard) any body first so the connection
+        # stays sane. `touch` is the one endpoint with a tighter cap: its
+        # whole body is {"event": "launched"}, so 1 KB is already generous
+        # and there is no reason to read 64 KB from a click handler.
+        is_touch = (len(parts) == 4 and parts[0] == "api"
+                    and parts[1] == "services" and parts[3] == "touch")
+        limit = MAX_TOUCH_BYTES if is_touch else MAX_BODY_BYTES
+        body = self._read_json_body(limit)
+
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "services" \
                 and parts[3] == "deploy":
             job_id = start_deploy(parts[2])
@@ -1656,6 +2258,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 and parts[3] == "notes":
             self._json(201, create_note(parts[2], body))
             return
+        # One click, one timestamp. Fired with keepalive:true on launch,
+        # because that click is navigating the tab away as it goes.
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "services" \
+                and parts[3] == "touch":
+            self._json(200, record_touch(parts[2], body))
+            return
         # Revealing one secret is a POST on purpose: a GET could be
         # prefetched, link-previewed, or left sitting in browser history.
         if len(parts) == 6 and parts[0] == "api" and parts[1] == "services" \
@@ -1673,6 +2281,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[0] == "api" and parts[1] == "services" \
                 and parts[3] == "notes":
             self._json(200, update_note(parts[2], parts[4], body))
+            return
+        # Editing one env value. PATCH, not POST: the reveal endpoint next to
+        # it is a POST, and the two must never be confusable.
+        if len(parts) == 5 and parts[0] == "api" and parts[1] == "services" \
+                and parts[3] == "env":
+            self._json(200, update_env_var(parts[2], parts[4], body))
             return
         self._error(404, "unknown endpoint")
 

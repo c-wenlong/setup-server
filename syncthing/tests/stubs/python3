@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# python3 stub: a pass-through to the REAL interpreter, so the config.xml
+# patch and every JSON check run for real against the sandbox. It exists
+# only so the "python3 missing" preflight can be driven:
+#   $STATE_DIR/python3_missing — every invocation fails like a missing
+#                                interpreter
+[ -f "$STATE_DIR/python3_missing" ] && { echo "python3: command not found" >&2; exit 127; }
+here="$(cd "$(dirname "$0")" && pwd)"
+real=""
+for p in $(type -aP python3 2>/dev/null); do
+  case "$p" in "$here"/*) continue ;; *) real="$p"; break ;; esac
+done
+[ -n "$real" ] || { echo "python3 stub: no real python3 on PATH" >&2; exit 127; }
+exec "$real" "$@"

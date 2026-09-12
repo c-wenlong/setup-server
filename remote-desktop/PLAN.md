@@ -66,7 +66,7 @@ from the tailnet address.
 **D2 — xrdp or gnome-remote-desktop as the RDP backend.** Plan assumes
 xrdp + XFCE: lighter, and by far the better-trodden pairing with Guacamole.
 If the box already runs GNOME, pointing guacd at GNOME's system Remote
-Login (`security=tls`, `ignore-cert=true`) avoids a second DE and gives the
+Login (`security=nla`, `ignore-cert=true`) avoids a second DE and gives the
 Mac a native RDP path off the same backend. Less well-trodden. Ask.
 
 **D3 — session recording.** Guacamole can record sessions to

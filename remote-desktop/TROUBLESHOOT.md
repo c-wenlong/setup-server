@@ -231,11 +231,47 @@ sudo grdctl --system set-credentials <user> <password>
 sudo systemctl restart gnome-remote-desktop
 ```
 
-For TLS failures, the connection must carry `security=any` (or `tls`) and
-`ignore-cert=true` — the backend presents a self-signed certificate and
-guacd has no way to trust it otherwise. `ignore-cert=false` fails at
-exactly the same point as bad credentials, which is why this is worth
-checking before assuming a password problem.
+**"Log in failed. Please reconnect and try again." in the browser, before
+you ever typed an RDP password.** This is a security-mode mismatch, not a
+credentials problem, and it was the very first failure of the very first
+real session on this box. The two sides say it plainly:
+
+```
+docker logs guacd                      -> Security mode: TLS
+                                          RDP server closed/refused connection:
+                                          Security negotiation failed (wrong security type?)
+journalctl -u gnome-remote-desktop     -> server supports only NLA Security
+                                          Protocol security negotiation failed, disconnecting.
+```
+
+gnome-remote-desktop accepts **NLA only**. The connection in
+`user-mapping.xml` must carry `security=nla` (setup.sh writes that; an
+older version wrote `tls`, which is what produced the above) and
+`ignore-cert=true`, because the backend presents the self-signed
+certificate setup.sh generated. **A mapping from that older version is
+repaired by re-running `./setup.sh`**: it rewrites exactly `security=tls`
+to `nla`, adds `disable-audio=true` if the param is missing, leaves every
+other line alone, and restarts the webapp (Guacamole caches connection
+parameters at login, so without the restart the fix only reaches sessions
+that log in afterwards). A hand-chosen mode such as `any` is not touched.
+If the file is damaged beyond that, use the rm-and-rerun recipe under
+[the reliable fix](#the-reliable-fix) below. `ignore-cert=false` fails at exactly the
+same point as bad credentials, which is why this is worth checking before
+assuming a password problem.
+
+**The session authenticates, the desktop starts to paint, and then it drops.** Check the *handover* daemon, not the system one -- after login GNOME redirects the client to a per-user daemon and the failure lands there:
+
+```bash
+journalctl --user -u gnome-remote-desktop-handover.service -n 30
+```
+
+If it says `[RDP.AUDIO_PLAYBACK] Client protocol version (6) too old. Terminating protocol`, that is guacd's FreeRDP 2.11.7 negotiating an audio-playback version this server refuses. The connection needs `disable-audio=true` (setup.sh writes it). There is no audio over this connection until guacd ships FreeRDP 3.x; that is a known cost, not a misconfiguration.
+
+⚠️ Editing `user-mapping.xml` is not enough on its own once someone is
+logged in: Guacamole resolves the connection parameters at **login** and
+caches them in the session, so the browser's automatic reconnect keeps
+using the old ones. Either log out and back in, or
+`docker restart guacamole`.
 
 ---
 
@@ -398,7 +434,7 @@ likelihood:
 `0600` and its directory `0700`, and why `SETUP.md` recommends a separate
 account for remote sessions if that password is also your `sudo` password.
 
-**The reliable fix** is to let `setup.sh` regenerate the mapping rather
+<a name="the-reliable-fix"></a>**The reliable fix** is to let `setup.sh` regenerate the mapping rather
 than hand-editing hashes:
 
 ```bash

@@ -58,6 +58,33 @@ class FakeProc:
         return 0
 
 
+class CapturedProc:
+    """A subprocess that has already exited, with canned stdout.
+
+    The lifecycle steps only ever wait() on a process; the resources path's
+    one `docker ps` reads its output instead, so this is the stub that grows
+    communicate() and returncode. Like the others it is a pure fake: nothing
+    here can reach the daemon.
+    """
+
+    def __init__(self, stdout="", code=0, raises=None):
+        self.stdout_text = stdout
+        self.returncode = code
+        self.raises = raises
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        if self.raises is not None and not self.killed:
+            raise self.raises
+        return self.stdout_text, ""
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self):
+        return self.returncode
+
+
 class SandboxTest(unittest.TestCase):
     """Base: fresh temp repo + registry + jobs dir, restored on teardown."""
 
@@ -78,6 +105,11 @@ class SandboxTest(unittest.TestCase):
             "WEB_DIR": server.WEB_DIR,
             "OVERRIDES_PATH": server.OVERRIDES_PATH,
             "NOTES_PATH": server.NOTES_PATH,
+            "USAGE_PATH": server.USAGE_PATH,
+            "CGROUP_ROOT": server.CGROUP_ROOT,
+            "RESOURCE_TTL": server.RESOURCE_TTL,
+            "DOCKER_MAP_TTL": server.DOCKER_MAP_TTL,
+            "docker_name_map": server.docker_name_map,
             "probe": server.probe,
             "probe_all": server.probe_all,
             "magicdns_host": server.magicdns_host,
@@ -92,14 +124,27 @@ class SandboxTest(unittest.TestCase):
         server.REGISTRY_PATH = os.path.join(self.tmp, "services.json")
         server.JOBS_DIR = os.path.join(self.tmp, "jobs")
         server.WEB_DIR = os.path.join(self.tmp, "web")
-        # Never the real ~/services/launcher/overrides.json or notes.json.
+        # Never the real ~/services/launcher/overrides.json, notes.json or
+        # usage.json.
         server.OVERRIDES_PATH = os.path.join(self.tmp, "state", "overrides.json")
         server.NOTES_PATH = os.path.join(self.tmp, "state", "notes.json")
+        server.USAGE_PATH = os.path.join(self.tmp, "state", "usage.json")
+        # Never the real /sys/fs/cgroup either: a tree under the sandbox that
+        # a test builds if it cares, and that otherwise simply does not
+        # exist, so resources measure nothing rather than this box.
+        server.CGROUP_ROOT = os.path.join(self.tmp, "cgroup")
+        # The docker map is the only thing in the resources path that shells
+        # out, and every payload test renders services with container parts.
+        # Default it to "no docker" so an unrelated test can never reach the
+        # unstubbed-Popen guard, let alone the daemon; the resource tests
+        # restore the real function and stub Popen underneath it.
+        server.docker_name_map = lambda: {}
 
         self.write_registry(self.REGISTRY)
         server._registry_cache["mtime"] = None
         server._registry_cache["data"] = None
         server._probe_cache.clear()
+        self.reset_resource_caches()
         server._jobs.clear()
         server._host_cache["value"] = None
 
@@ -112,6 +157,7 @@ class SandboxTest(unittest.TestCase):
         server._jobs.clear()
         server._probe_cache.clear()
         server._host_cache["value"] = None
+        self.reset_resource_caches()
         shutil.rmtree(self.tmp, ignore_errors=True)
         # _run_steps catches every exception from a step, so the guard's
         # AssertionError dies in the job thread. Surface it here instead. A
@@ -119,6 +165,45 @@ class SandboxTest(unittest.TestCase):
         # blame may land on the next test — the argv still names the culprit.
         escaped, ESCAPED_POPEN[:] = list(ESCAPED_POPEN), []
         self.assertEqual(escaped, [], "unstubbed subprocess reached the host")
+
+    def reset_resource_caches(self):
+        """No sample, no cached payload and no cached docker map may survive
+        into the next test: they are keyed by service name and cgroup path,
+        both of which repeat across tests."""
+        server._resources_cache.clear()
+        server._cpu_samples.clear()
+        server._docker_map_cache["at"] = 0.0
+        server._docker_map_cache["map"] = {}
+
+    def read_usage_file(self):
+        with open(server.USAGE_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def write_usage_file(self, text):
+        os.makedirs(os.path.dirname(server.USAGE_PATH), exist_ok=True)
+        with open(server.USAGE_PATH, "w", encoding="utf-8") as fh:
+            fh.write(text if isinstance(text, str) else json.dumps(text))
+
+    def stub_docker_ps(self, output="", code=0, raises=None, hangs=None):
+        """Stub Popen for the resources path's one `docker ps`.
+
+        Records every argv, exactly like record_popen, so a call that was
+        meant to be stubbed and is not still trips the guard rather than
+        reaching this box. `raises` fails the spawn itself (no docker at
+        all); `hangs` fails the read (a daemon that never answers).
+        """
+        self.docker_calls = []
+        self.docker_procs = []
+
+        def fake(argv, **kwargs):
+            self.docker_calls.append(list(argv))
+            if raises is not None:
+                raise raises
+            proc = CapturedProc(output, code, hangs)
+            self.docker_procs.append(proc)
+            return proc
+
+        subprocess.Popen = fake
 
     def write_registry(self, doc):
         with open(server.REGISTRY_PATH, "w", encoding="utf-8") as fh:
@@ -523,10 +608,14 @@ class ServiceJobFieldTest(SandboxTest):
                  for k, v in self.tiles().items()}
         self.assertEqual(before, after)
 
-    def test_no_field_beyond_job_and_control_was_added(self):
+    def test_no_field_beyond_the_contract_was_added(self):
+        # The whole list contract in one assertion: the original eight, then
+        # job and control, then the three v3 keys. Anything else appearing
+        # here is a key the frontend was never told about.
         server.start_deploy("alpha")
         for tile in self.tiles().values():
-            self.assertEqual(list(tile), self.EIGHT + ["job", "control"])
+            self.assertEqual(list(tile), self.EIGHT + [
+                "job", "control", "usage", "deployed_at", "resources"])
 
     # ---- restart
 
@@ -657,9 +746,10 @@ class HttpTest(SandboxTest):
         doc = json.loads(body)
         self.assertEqual(doc["host"], "box.ts.net")
         svc = doc["services"][0]
-        self.assertEqual(sorted(svc), ["active", "control", "description",
-                                       "icon", "installed", "job", "key",
-                                       "name", "state", "tagline", "url"])
+        self.assertEqual(sorted(svc), ["active", "control", "deployed_at",
+                                       "description", "icon", "installed",
+                                       "job", "key", "name", "resources",
+                                       "state", "tagline", "url", "usage"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
         self.assertIsNone(svc["job"])
 
@@ -671,7 +761,7 @@ class HttpTest(SandboxTest):
         self.assertEqual(list(doc["services"][0]),
                          ["key", "name", "tagline", "description", "icon",
                           "url", "state", "installed", "active", "job",
-                          "control"])
+                          "control", "usage", "deployed_at", "resources"])
 
     def test_services_list_carries_the_effective_description(self):
         # Without this the hover tooltip has to fetch every service one by
@@ -932,8 +1022,9 @@ class DetailTest(SandboxTest):
     def test_shape(self):
         detail = server.service_detail("alpha")
         self.assertEqual(sorted(detail), [
-            "active", "control", "description", "env", "icon", "installed",
-            "job", "key", "meta", "name", "state", "tagline", "url"])
+            "active", "control", "deployed_at", "description", "env", "icon",
+            "installed", "job", "key", "meta", "name", "resources", "state",
+            "tagline", "url", "usage"])
         self.assertEqual(detail["key"], "alpha")
         self.assertEqual(detail["name"], "Alpha")
         self.assertEqual(detail["description"], "Shipped description.")
@@ -944,7 +1035,8 @@ class DetailTest(SandboxTest):
         detail = server.service_detail("alpha")
         tile = {s["key"]: s for s in server.services_payload()["services"]}["alpha"]
         for field in ("key", "name", "tagline", "icon", "url", "state",
-                      "installed", "active", "job", "control"):
+                      "installed", "active", "job", "control", "usage",
+                      "deployed_at", "resources"):
             self.assertEqual(detail[field], tile[field], field)
 
     def test_meta(self):
@@ -1307,6 +1399,19 @@ class RevealTest(SandboxTest):
         self.assertEqual(server.reveal_env_var("alpha", "QUOTED")["value"],
                          "quoted value")
 
+    def test_double_quoted_escapes_are_unescaped(self):
+        # Exactly the two escapes a shell, Compose and this parser agree on.
+        self.make_env("alpha/.env",
+                      'A="say \\"hi\\" and \\\\ back"\n'
+                      'B="kept \\$ and \\` and \\n as-is"\n'
+                      "C='no \\\\ unescape \\\" in single'\n")
+        self.assertEqual(server.reveal_env_var("alpha", "A")["value"],
+                         'say "hi" and \\ back')
+        self.assertEqual(server.reveal_env_var("alpha", "B")["value"],
+                         "kept \\$ and \\` and \\n as-is")
+        self.assertEqual(server.reveal_env_var("alpha", "C")["value"],
+                         'no \\\\ unescape \\" in single')
+
     def test_unknown_variable_is_404_and_is_not_echoed_back(self):
         # Near-misses included: the lookup is exact, and the refusal never
         # repeats what was asked for.
@@ -1415,6 +1520,314 @@ class RevealTest(SandboxTest):
             server.log = real
         for line in logged:
             self.assertNotIn(SECRET_VALUE, line)
+
+
+# ---------------------------------------------------------------- env edit
+
+ORIGINAL_ENV = "\n".join([
+    "# Generated by setup.sh. Gitignored; mode 600.",
+    "IMMICH_VERSION=%s" % VISIBLE_VALUE,
+    "",
+    "  export DB_PASSWORD=%s" % SECRET_VALUE,
+    "QUOTED=\"quoted value\"",
+    "EMPTY=",
+    "DUP=first",
+    "DUP=second",
+    "not an assignment",
+    "# DB_PASSWORD=commented-out",
+    "",
+])
+
+
+class EnvEditTest(SandboxTest):
+    """PATCH api/services/{key}/env/{var}: rewrite one line, nothing else."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = self.make_env("alpha/.env", ORIGINAL_ENV)
+        os.chmod(self.path, 0o600)
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "camera",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "env": "alpha/.env", "description": ""},
+            {"key": "bare", "name": "Bare", "tagline": "t", "icon": "cpu",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "env": None, "description": ""},
+        ]})
+        server.magicdns_host = lambda: "box.ts.net"
+        server.probe_all = lambda urls: {}
+
+    def env_text(self):
+        with open(self.path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def set(self, var, value, key="alpha"):
+        return server.update_env_var(key, var, {"value": value})
+
+    # ---- happy path
+
+    def test_sets_the_value_and_reveal_reads_it_back(self):
+        res = self.set("DB_PASSWORD", "new-secret-123")
+        self.assertEqual(res, {"name": "DB_PASSWORD", "secret": True,
+                               "value": "new-secret-123"})
+        self.assertEqual(server.reveal_env_var("alpha", "DB_PASSWORD")["value"],
+                         "new-secret-123")
+
+    def test_every_other_byte_survives(self):
+        self.set("DB_PASSWORD", "new-secret-123")
+        expected = ORIGINAL_ENV.replace(
+            "  export DB_PASSWORD=%s" % SECRET_VALUE,
+            "  export DB_PASSWORD=new-secret-123")
+        self.assertEqual(self.env_text(), expected)
+
+    def test_indent_and_export_prefix_are_kept(self):
+        self.set("DB_PASSWORD", "x")
+        self.assertIn("\n  export DB_PASSWORD=x\n", self.env_text())
+
+    def test_missing_final_newline_and_crlf_are_kept(self):
+        with open(self.path, "w", encoding="utf-8", newline="") as fh:
+            fh.write("A=1\r\nB=2\r\nC=3")
+        self.set("B", "two")
+        with open(self.path, encoding="utf-8", newline="") as fh:
+            self.assertEqual(fh.read(), "A=1\r\nB=two\r\nC=3")
+        self.set("C", "three")
+        with open(self.path, encoding="utf-8", newline="") as fh:
+            self.assertEqual(fh.read(), "A=1\r\nB=two\r\nC=three")
+
+    def test_every_duplicate_assignment_is_rewritten(self):
+        # A stale duplicate would otherwise read one way to the shell (last
+        # wins) and could be edited into reading another way here.
+        self.set("DUP", "both")
+        self.assertEqual(self.env_text().count("DUP=both\n"), 2)
+        self.assertNotIn("first", self.env_text())
+        self.assertNotIn("second", self.env_text())
+
+    def test_the_commented_out_copy_is_not_touched(self):
+        self.set("DB_PASSWORD", "x")
+        self.assertIn("# DB_PASSWORD=commented-out\n", self.env_text())
+
+    def test_mode_is_preserved(self):
+        os.chmod(self.path, 0o640)
+        self.set("DB_PASSWORD", "x")
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o640)
+        os.chmod(self.path, 0o600)
+        self.set("DB_PASSWORD", "y")
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+
+    def test_no_temp_file_is_left_behind(self):
+        self.set("DB_PASSWORD", "x")
+        self.assertEqual(sorted(os.listdir(os.path.dirname(self.path))), [".env"])
+
+    def test_empty_value_is_allowed_and_bare(self):
+        self.set("DB_PASSWORD", "")
+        self.assertIn("\n  export DB_PASSWORD=\n", self.env_text())
+        self.assertEqual(server.reveal_env_var("alpha", "DB_PASSWORD")["value"], "")
+
+    def test_non_secret_and_unknown_flags(self):
+        self.assertFalse(self.set("IMMICH_VERSION", "v2")["secret"])
+
+    # ---- quoting: what lands in the file, and that it reads back
+
+    def test_bare_when_safe(self):
+        self.set("DB_PASSWORD", "Ab9+/=._:@%,-")
+        self.assertIn("DB_PASSWORD=Ab9+/=._:@%,-\n", self.env_text())
+
+    def test_single_quoted_for_anything_the_shell_or_compose_would_touch(self):
+        for value in ("has space", "a#b", "a$b", "~/x", "a;b|c&d", "`t`",
+                      "back\\slash", "\"dq\"", "a*b?[c]", "  pad  ", "\t"):
+            self.set("DB_PASSWORD", value)
+            self.assertIn("DB_PASSWORD='%s'\n" % value, self.env_text(), value)
+            self.assertEqual(
+                server.reveal_env_var("alpha", "DB_PASSWORD")["value"], value)
+
+    def test_double_quoted_only_for_apostrophes(self):
+        self.set("DB_PASSWORD", "it's \"q\" \\s")
+        self.assertIn('DB_PASSWORD="it\'s \\"q\\" \\\\s"\n', self.env_text())
+        self.assertEqual(server.reveal_env_var("alpha", "DB_PASSWORD")["value"],
+                         "it's \"q\" \\s")
+
+    def test_apostrophe_with_dollar_or_backtick_is_refused_unwritten(self):
+        for value in ("it's $1", "it's `x`"):
+            with self.assertRaises(server.DeployError) as ctx:
+                self.set("DB_PASSWORD", value)
+            self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(self.env_text(), ORIGINAL_ENV)
+
+    def test_quoting_round_trips_through_the_shell(self):
+        # The contract that matters: what a setup.sh `set -a; . .env` sees is
+        # what was saved. This deliberately runs a real /bin/sh — via
+        # os.system, which the subprocess.Popen guard does not (and should
+        # not) cover: the guard exists to catch SERVER code reaching the box,
+        # and this is the test itself sourcing a file inside its own sandbox.
+        import shlex
+        import shutil
+        if not shutil.which("sh"):
+            self.skipTest("no sh on this machine")
+        values = ["plain", "with space", "a#b$c`d\\e", "it's \"q\" \\s", "",
+                  "~/tilde;|&<>*?[]!", "  padded  "]
+        out_path = os.path.join(self.tmp, "seen")
+        for value in values:
+            self.set("DB_PASSWORD", value)
+            rc = os.system(
+                "sh -c 'set -a; . \"$1\"; set +a; printf %%s \"$DB_PASSWORD\" > \"$2\"' "
+                "sh %s %s" % (shlex.quote(self.path), shlex.quote(out_path)))
+            self.assertEqual(rc, 0, value)
+            with open(out_path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), value)
+
+    # ---- validation
+
+    VALID = {"value": "x"}
+
+    def assert_refused(self, status, var="DB_PASSWORD", body=VALID, key="alpha"):
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_env_var(key, var, body)
+        self.assertEqual(ctx.exception.status, status)
+        self.assertEqual(self.env_text(), ORIGINAL_ENV)   # nothing written
+        return ctx.exception
+
+    def test_unknown_variable_is_404_and_is_not_echoed_back(self):
+        for var in ("NOPE", "db_password", "", "../../etc/passwd",
+                    "DB_PASSWORD ", "not"):
+            exc = self.assert_refused(404, var=var)
+            self.assertEqual(exc.message, "unknown variable")
+
+    def test_editing_cannot_add_a_variable(self):
+        self.assert_refused(404, var="BRAND_NEW")
+        self.assertNotIn("BRAND_NEW", self.env_text())
+
+    def test_unknown_service_is_404(self):
+        self.assert_refused(404, key="ghost")
+
+    def test_service_without_an_env_file_is_404(self):
+        self.assert_refused(404, key="bare")
+
+    def test_missing_env_file_is_404(self):
+        os.unlink(self.path)
+        with self.assertRaises(server.DeployError) as ctx:
+            self.set("DB_PASSWORD", "x")
+        self.assertEqual(ctx.exception.status, 404)
+        self.assertFalse(os.path.exists(self.path))   # not created either
+
+    def test_bad_bodies_are_400(self):
+        for body in (None, [], "x", {}, {"value": None}, {"value": 1},
+                     {"value": ["x"]}, {"val": "x"}):
+            self.assert_refused(400, body=body)
+
+    def test_multi_line_values_are_400(self):
+        for value in ("a\nb", "a\rb", "a\r\nb", "a\0b", "\n"):
+            self.assert_refused(400, body={"value": value})
+
+    def test_too_long_is_400_and_the_limit_is_400_exact(self):
+        self.assert_refused(400, body={"value": "x" * (server.MAX_ENV_VALUE + 1)})
+        self.set("DB_PASSWORD", "x" * server.MAX_ENV_VALUE)
+
+    def test_env_path_outside_the_allowed_roots_is_refused(self):
+        outside = os.path.join(self.tmp, "outside", ".env")
+        os.makedirs(os.path.dirname(outside))
+        with open(outside, "w") as fh:
+            fh.write("DB_PASSWORD=%s\n" % SECRET_VALUE)
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "camera",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "env": outside, "description": ""},
+        ]})
+        with self.assertRaises(server.DeployError) as ctx:
+            self.set("DB_PASSWORD", "x")
+        self.assertEqual(ctx.exception.status, 403)
+        with open(outside) as fh:
+            self.assertIn(SECRET_VALUE, fh.read())
+
+    def test_no_value_is_logged(self):
+        logged = []
+        real = server.log
+        server.log = lambda msg: logged.append(msg)
+        try:
+            self.set("DB_PASSWORD", "brand-new-secret-value")
+        finally:
+            server.log = real
+        self.assertTrue(logged)
+        for line in logged:
+            self.assertNotIn("brand-new-secret-value", line)
+            self.assertNotIn(SECRET_VALUE, line)
+
+
+class EnvEditHttpTest(SandboxTest):
+
+    def setUp(self):
+        super().setUp()
+        import threading
+        self.path = self.make_env("alpha/.env", ORIGINAL_ENV)
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "camera",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "env": "alpha/.env", "description": ""},
+        ]})
+        server.magicdns_host = lambda: "box.ts.net"
+        server.probe_all = lambda urls: {}
+        self.srv = server.Server(("127.0.0.1", 0), server.Handler)
+        self.port = self.srv.server_address[1]
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        super().tearDown()
+
+    def call(self, method, path, body=None):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(method, path, body=body,
+                     headers={"Content-Type": "application/json"} if body else {})
+        resp = conn.getresponse()
+        data = resp.read().decode()
+        conn.close()
+        return resp.status, data
+
+    def test_patch_writes_and_the_detail_still_carries_no_value(self):
+        status, body = self.call("PATCH", "/api/services/alpha/env/DB_PASSWORD",
+                                 json.dumps({"value": "over-http"}))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["name"], "DB_PASSWORD")
+        with open(self.path) as fh:
+            self.assertIn("DB_PASSWORD=over-http\n", fh.read())
+        status, body = self.call("GET", "/api/services/alpha")
+        self.assertNotIn("over-http", body)
+        status, body = self.call("POST", "/api/services/alpha/env/DB_PASSWORD/reveal")
+        self.assertEqual(json.loads(body)["value"], "over-http")
+
+    def test_works_under_the_path_mount_too(self):
+        # `tailscale serve --set-path=/home` strips the prefix; both spellings
+        # must route the same way.
+        status, _ = self.call("PATCH", "api/services/alpha/env/QUOTED",
+                              json.dumps({"value": "v"}))
+        self.assertEqual(status, 200)
+
+    def test_errors_map_to_statuses(self):
+        cases = [
+            ("/api/services/alpha/env/NOPE", {"value": "x"}, 404),
+            ("/api/services/ghost/env/DB_PASSWORD", {"value": "x"}, 404),
+            ("/api/services/alpha/env/DB_PASSWORD", {"value": 5}, 400),
+            ("/api/services/alpha/env/DB_PASSWORD", {"value": "a\nb"}, 400),
+            ("/api/services/alpha/env/DB_PASSWORD", {"value": "it's $"}, 400),
+        ]
+        for path, body, expected in cases:
+            status, _ = self.call("PATCH", path, json.dumps(body))
+            self.assertEqual(status, expected, path)
+        status, _ = self.call("PATCH", "/api/services/alpha/env/DB_PASSWORD",
+                              "{not json")
+        self.assertEqual(status, 400)
+
+    def test_post_and_get_on_the_edit_path_are_not_edits(self):
+        # POST .../env/{var} is not reveal (that has /reveal) and not an edit.
+        status, _ = self.call("POST", "/api/services/alpha/env/DB_PASSWORD",
+                              json.dumps({"value": "x"}))
+        self.assertEqual(status, 404)
+        status, _ = self.call("GET", "/api/services/alpha/env/DB_PASSWORD")
+        self.assertEqual(status, 404)
+        with open(self.path) as fh:
+            self.assertEqual(fh.read(), ORIGINAL_ENV)
 
 
 # ---------------------------------------------------------------- notes
@@ -3388,6 +3801,825 @@ class SharedControlRegistryTest(unittest.TestCase):
             self.assertNotIn(key, phone, key)
             self.assertIn(key, listener.HARD_LOCKED, key)
             self.assertIn(key, server.HARD_LOCKED, key)
+
+
+# ---------------------------------------------------------------- v3: usage
+#
+# usage.json is the sort key the grid defaults to, so it is written on every
+# click and read on every poll. These care about three things: that a bad
+# file can never take the grid down, that a write is atomic, and that
+# last_used really is the later of the two stamps.
+
+
+class UsageStoreTest(SandboxTest):
+    """load_usage / _write_usage, on their own terms."""
+
+    REGISTRY = {"services": [
+        {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
+         "url": None, "health": None, "marker": None, "setup": None},
+    ]}
+
+    def test_missing_file_is_no_history(self):
+        self.assertEqual(server.load_usage(), {})
+
+    def test_round_trip(self):
+        with server._usage_lock:
+            server._write_usage({"alpha": {"last_launched": 12.5,
+                                           "last_opened": 3.0}})
+        self.assertEqual(server.load_usage(),
+                         {"alpha": {"last_launched": 12.5, "last_opened": 3.0}})
+
+    def test_deleting_the_file_resets_every_stamp(self):
+        server.record_touch("alpha", {"event": "launched"})
+        os.unlink(server.USAGE_PATH)
+        self.assertEqual(server.load_usage(), {})
+        self.assertEqual(server.usage_entry(server.load_usage(), "alpha"),
+                         {"last_launched": None, "last_opened": None,
+                          "last_used": None})
+
+    def test_corrupt_file_degrades_to_no_history(self):
+        self.write_usage_file("{not json")
+        self.assertEqual(server.load_usage(), {})
+
+    def test_non_object_document_degrades(self):
+        self.write_usage_file("[1, 2, 3]")
+        self.assertEqual(server.load_usage(), {})
+
+    def test_missing_services_key_degrades(self):
+        self.write_usage_file({"something": "else"})
+        self.assertEqual(server.load_usage(), {})
+
+    def test_only_numeric_stamps_survive(self):
+        # A bool is a number in Python and is not a timestamp; a string is
+        # not sortable against a float. Both are dropped rather than served.
+        self.write_usage_file({"services": {
+            "alpha": {"last_launched": "yesterday", "last_opened": 5},
+            "bravo": {"last_launched": True},
+            "charlie": {"last_launched": 7.5},
+            "not-a-dict": 3,
+        }})
+        self.assertEqual(server.load_usage(),
+                         {"alpha": {"last_opened": 5.0},
+                          "charlie": {"last_launched": 7.5}})
+
+    def test_write_is_atomic_and_leaves_no_temp_file(self):
+        with server._usage_lock:
+            server._write_usage({"alpha": {"last_launched": 1.0}})
+        directory = os.path.dirname(server.USAGE_PATH)
+        self.assertEqual([f for f in os.listdir(directory)
+                          if f != "usage.json"], [])
+        # and the file on disk is a complete, parseable document
+        self.assertEqual(self.read_usage_file(),
+                         {"services": {"alpha": {"last_launched": 1.0}}})
+
+    def test_a_failed_write_leaves_the_previous_file_intact(self):
+        with server._usage_lock:
+            server._write_usage({"alpha": {"last_launched": 1.0}})
+        before = self.read_usage_file()
+        try:
+            with server._usage_lock:
+                # sets are not JSON: the dump fails halfway, after the temp
+                # file exists but before any os.replace.
+                server._write_usage({"alpha": {"last_launched": {1.0}}})
+        except TypeError:
+            pass
+        self.assertEqual(self.read_usage_file(), before)
+        directory = os.path.dirname(server.USAGE_PATH)
+        self.assertEqual([f for f in os.listdir(directory)
+                          if f != "usage.json"], [])
+
+    def test_entry_last_used_is_the_max(self):
+        usage = {"a": {"last_launched": 10.0, "last_opened": 4.0},
+                 "b": {"last_launched": 4.0, "last_opened": 10.0}}
+        self.assertEqual(server.usage_entry(usage, "a")["last_used"], 10.0)
+        self.assertEqual(server.usage_entry(usage, "b")["last_used"], 10.0)
+
+    def test_entry_with_one_stamp_uses_it(self):
+        usage = {"a": {"last_opened": 8.0}}
+        self.assertEqual(server.usage_entry(usage, "a"),
+                         {"last_launched": None, "last_opened": 8.0,
+                          "last_used": 8.0})
+
+    def test_entry_for_a_never_used_service_is_all_null(self):
+        self.assertEqual(server.usage_entry({}, "ghost"),
+                         {"last_launched": None, "last_opened": None,
+                          "last_used": None})
+
+
+class TouchTest(SandboxTest):
+    """POST api/services/{key}/touch, at the function level."""
+
+    def setUp(self):
+        super().setUp()
+        server.magicdns_host = lambda: "box.ts.net"
+        server.probe_all = lambda urls: {u: False for u in urls}
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
+             "url": "https://HOST:1/", "health": None, "marker": None,
+             "setup": None},
+            {"key": "bravo", "name": "Bravo", "tagline": "t", "icon": "code",
+             "url": "https://HOST:2/", "health": None, "marker": None,
+             "setup": None},
+        ]})
+
+    def test_launched_records_a_timestamp(self):
+        before = time.time()
+        out = server.record_touch("alpha", {"event": "launched"})
+        after = time.time()
+        stamp = out["usage"]["last_launched"]
+        self.assertTrue(before <= stamp <= after)
+        self.assertIsNone(out["usage"]["last_opened"])
+        self.assertEqual(out["usage"]["last_used"], stamp)
+
+    def test_opened_records_a_timestamp(self):
+        out = server.record_touch("alpha", {"event": "opened"})
+        self.assertIsNone(out["usage"]["last_launched"])
+        self.assertIsNotNone(out["usage"]["last_opened"])
+        self.assertEqual(out["usage"]["last_used"],
+                         out["usage"]["last_opened"])
+
+    def test_last_used_is_the_later_of_the_two(self):
+        server.record_touch("alpha", {"event": "opened"})
+        out = server.record_touch("alpha", {"event": "launched"})
+        usage = out["usage"]
+        self.assertGreaterEqual(usage["last_launched"], usage["last_opened"])
+        self.assertEqual(usage["last_used"], usage["last_launched"])
+        # and the older stamp is still the max when it is the later one
+        stored = server.load_usage()["alpha"]
+        stored["last_opened"] = stored["last_launched"] + 100
+        self.assertEqual(server.usage_entry({"alpha": stored}, "alpha")
+                         ["last_used"], stored["last_opened"])
+
+    def test_a_second_touch_overwrites_only_its_own_field(self):
+        first = server.record_touch("alpha", {"event": "opened"})["usage"]
+        time.sleep(0.01)
+        second = server.record_touch("alpha", {"event": "launched"})["usage"]
+        self.assertEqual(second["last_opened"], first["last_opened"])
+        self.assertNotEqual(second["last_launched"], first["last_opened"])
+
+    def test_touching_one_service_leaves_the_others_alone(self):
+        server.record_touch("alpha", {"event": "launched"})
+        server.record_touch("bravo", {"event": "opened"})
+        stored = server.load_usage()
+        self.assertEqual(sorted(stored), ["alpha", "bravo"])
+        self.assertEqual(sorted(stored["alpha"]), ["last_launched"])
+        self.assertEqual(sorted(stored["bravo"]), ["last_opened"])
+
+    def test_unknown_key_is_404(self):
+        with self.assertRaises(server.DeployError) as caught:
+            server.record_touch("ghost", {"event": "launched"})
+        self.assertEqual(caught.exception.status, 404)
+        self.assertFalse(os.path.exists(server.USAGE_PATH))
+
+    def test_unknown_key_is_refused_before_the_event_is_looked_at(self):
+        with self.assertRaises(server.DeployError) as caught:
+            server.record_touch("ghost", {"event": "nonsense"})
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_bad_event_is_400(self):
+        for event in ("deployed", "", None, 5, ["launched"]):
+            with self.assertRaises(server.DeployError) as caught:
+                server.record_touch("alpha", {"event": event})
+            self.assertEqual(caught.exception.status, 400, event)
+        self.assertFalse(os.path.exists(server.USAGE_PATH))
+
+    def test_non_object_body_is_400(self):
+        for body in (None, [], "launched", 5):
+            with self.assertRaises(server.DeployError) as caught:
+                server.record_touch("alpha", body)
+            self.assertEqual(caught.exception.status, 400, body)
+
+    def test_usage_is_on_every_list_entry(self):
+        server.record_touch("alpha", {"event": "launched"})
+        tiles = {s["key"]: s for s in server.services_payload()["services"]}
+        self.assertEqual(sorted(tiles["alpha"]["usage"]),
+                         ["last_launched", "last_opened", "last_used"])
+        self.assertIsNotNone(tiles["alpha"]["usage"]["last_used"])
+        self.assertEqual(tiles["bravo"]["usage"],
+                         {"last_launched": None, "last_opened": None,
+                          "last_used": None})
+
+    def test_usage_is_on_the_detail_entry_too(self):
+        recorded = server.record_touch("alpha", {"event": "opened"})["usage"]
+        self.assertEqual(server.service_detail("alpha")["usage"], recorded)
+
+
+class TouchHttpTest(SandboxTest):
+    """The touch endpoint over a real socket, including the size cap."""
+
+    def setUp(self):
+        super().setUp()
+        import threading
+        server.magicdns_host = lambda: "box.ts.net"
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
+             "url": "https://HOST:1/", "health": None, "marker": None,
+             "setup": None},
+        ]})
+        self.srv = server.Server(("127.0.0.1", 0), server.Handler)
+        self.port = self.srv.server_address[1]
+        self.thread = threading.Thread(target=self.srv.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        super().tearDown()
+
+    def call(self, path, method="POST", body=None, raw=None):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        payload = raw if raw is not None else (
+            json.dumps(body).encode() if body is not None else None)
+        conn.request(method, path, body=payload,
+                     headers={"Content-Type": "application/json"}
+                     if payload else {})
+        resp = conn.getresponse()
+        data = resp.read().decode()
+        status = resp.status
+        conn.close()
+        return status, data
+
+    def test_touch_over_http(self):
+        status, body = self.call("/api/services/alpha/touch",
+                                 body={"event": "launched"})
+        self.assertEqual(status, 200)
+        doc = json.loads(body)
+        self.assertEqual(sorted(doc), ["usage"])
+        self.assertEqual(sorted(doc["usage"]),
+                         ["last_launched", "last_opened", "last_used"])
+        self.assertEqual(doc["usage"]["last_used"],
+                         doc["usage"]["last_launched"])
+
+    def test_touch_is_visible_on_the_next_list(self):
+        self.call("/api/services/alpha/touch", body={"event": "opened"})
+        doc = json.loads(self.call("/api/services", "GET")[1])
+        self.assertIsNotNone(doc["services"][0]["usage"]["last_opened"])
+
+    def test_unknown_key_is_404_over_http(self):
+        status, body = self.call("/api/services/ghost/touch",
+                                 body={"event": "launched"})
+        self.assertEqual(status, 404)
+        self.assertIn("error", json.loads(body))
+
+    def test_bad_event_is_400_over_http(self):
+        status, body = self.call("/api/services/alpha/touch",
+                                 body={"event": "deployed"})
+        self.assertEqual(status, 400)
+        self.assertIn("error", json.loads(body))
+
+    def test_oversized_body_is_413_well_below_the_global_cap(self):
+        # Far under MAX_BODY_BYTES, so this only passes because touch has a
+        # cap of its own.
+        big = {"event": "launched", "pad": "x" * (server.MAX_TOUCH_BYTES + 10)}
+        self.assertLess(len(json.dumps(big)), server.MAX_BODY_BYTES)
+        status, body = self.call("/api/services/alpha/touch", body=big)
+        self.assertEqual(status, 413)
+        self.assertIn("error", json.loads(body))
+        self.assertFalse(os.path.exists(server.USAGE_PATH))
+
+    def test_a_body_just_under_the_cap_is_accepted(self):
+        big = {"event": "launched", "pad": "x" * 800}
+        self.assertLess(len(json.dumps(big)), server.MAX_TOUCH_BYTES)
+        self.assertEqual(self.call("/api/services/alpha/touch", body=big)[0],
+                         200)
+
+    def test_malformed_body_is_400_over_http(self):
+        status, _ = self.call("/api/services/alpha/touch", raw=b"{nope")
+        self.assertEqual(status, 400)
+
+    def test_touch_is_not_available_over_get(self):
+        self.assertEqual(self.call("/api/services/alpha/touch", "GET")[0], 404)
+
+
+# ----------------------------------------------------------- v3: deployed_at
+
+class DeployedAtTest(SandboxTest):
+    """mtime of the marker: "when was this deployed", without docker."""
+
+    def setUp(self):
+        super().setUp()
+        server.magicdns_host = lambda: "box.ts.net"
+        server.probe_all = lambda urls: {u: False for u in urls}
+
+    def marker(self, name, mtime=None):
+        path = os.path.join(self.tmp, name)
+        os.makedirs(path)
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def test_marker_mtime(self):
+        path = self.marker("state", 1757550470.0)
+        self.assertEqual(server.deployed_at(path), 1757550470.0)
+
+    def test_missing_marker_is_null(self):
+        self.assertIsNone(server.deployed_at(os.path.join(self.tmp, "nope")))
+
+    def test_no_marker_configured_is_null(self):
+        self.assertIsNone(server.deployed_at(None))
+        self.assertIsNone(server.deployed_at(""))
+
+    def test_tilde_is_expanded_like_everywhere_else(self):
+        # Registry markers are written "~/services/immich"; this must read
+        # the same path `installed` does.
+        home = os.environ.get("HOME")
+        os.environ["HOME"] = self.tmp
+        try:
+            self.marker("services", 1700000000.0)
+            self.assertEqual(server.deployed_at("~/services"), 1700000000.0)
+        finally:
+            if home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = home
+
+    def test_on_list_and_detail(self):
+        deployed = self.marker("deployed", 1757550470.0)
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": deployed, "setup": None},
+            {"key": "bravo", "name": "Bravo", "tagline": "t", "icon": "code",
+             "url": None, "health": None,
+             "marker": os.path.join(self.tmp, "never"), "setup": None},
+        ]})
+        tiles = {s["key"]: s for s in server.services_payload()["services"]}
+        self.assertEqual(tiles["alpha"]["deployed_at"], 1757550470.0)
+        self.assertIsNone(tiles["bravo"]["deployed_at"])
+        self.assertEqual(server.service_detail("alpha")["deployed_at"],
+                         1757550470.0)
+        self.assertIsNone(server.service_detail("bravo")["deployed_at"])
+
+
+# ------------------------------------------------------------ v3: resources
+#
+# Everything here runs against a fake cgroup tree under the sandbox
+# (LAUNCHER_CGROUP_ROOT / server.CGROUP_ROOT), never /sys/fs/cgroup, and the
+# one docker call is stubbed at subprocess.Popen like every other command in
+# this file. The rules being defended: a part that cannot be read is null and
+# never an error, docker being unavailable nulls container parts and changes
+# nothing else, and cpu_pct is null until there are two samples.
+
+CID = "a" * 64
+OTHER_CID = "b" * 64
+
+
+class ResourceTestBase(SandboxTest):
+
+    def setUp(self):
+        super().setUp()
+        server.magicdns_host = lambda: "box.ts.net"
+        server.probe_all = lambda urls: {u: False for u in urls}
+        # Plain `docker ...` argv, so the assertions do not depend on whether
+        # the user running the tests happens to be in the docker group.
+        server._have_docker_group = lambda: True
+        self.uid = os.getuid()
+
+    # ---- fixture tree
+
+    def unit_dir(self, name):
+        path = os.path.join(server.CGROUP_ROOT, "user.slice",
+                            "user-%d.slice" % self.uid,
+                            "user@%d.service" % self.uid, "app.slice", name)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def container_dir(self, cid=CID):
+        path = os.path.join(server.CGROUP_ROOT, "system.slice",
+                            "docker-%s.scope" % cid)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def write_cgroup(self, path, rss=None, usage_usec=None):
+        if rss is not None:
+            with open(os.path.join(path, "memory.current"), "w") as fh:
+                fh.write("%s\n" % rss)
+        if usage_usec is not None:
+            with open(os.path.join(path, "cpu.stat"), "w") as fh:
+                fh.write("usage_usec %s\nuser_usec 1\nsystem_usec 2\n"
+                         % usage_usec)
+
+    def registry_with(self, control, key="svc", **extra):
+        entry = {"key": key, "name": key, "tagline": "t", "icon": "code",
+                 "url": None, "health": None, "marker": None, "setup": None,
+                 "control": control}
+        entry.update(extra)
+        self.write_registry({"services": [entry]})
+        return server.find_service(key)
+
+    def set_cpus(self, count):
+        real = os.cpu_count
+        os.cpu_count = lambda: count
+        self.addCleanup(setattr, os, "cpu_count", real)
+
+    def measure(self, svc, now):
+        """One measurement at an explicit clock reading — the mocked clock
+        for every CPU assertion, with no patching of time.time itself."""
+        return server._measure_resources(svc, now)
+
+
+class ResourceReadingTest(ResourceTestBase):
+    """What comes out of the fake sysfs tree."""
+
+    def test_unit_part_reports_rss(self):
+        self.write_cgroup(self.unit_dir("beszel-agent.service"), rss=4096)
+        svc = self.registry_with({"parts": [{"unit": "beszel-agent.service"}]})
+        out = self.measure(svc, 100.0)
+        self.assertEqual(out["rss_bytes"], 4096)
+        self.assertEqual(out["parts"], [
+            {"name": "beszel-agent.service", "kind": "unit",
+             "rss_bytes": 4096, "cpu_pct": None}])
+
+    def test_container_part_reports_rss_through_the_docker_map(self):
+        self.write_cgroup(self.container_dir(), rss=512000000)
+        server.docker_name_map = lambda: {"n8n": CID}
+        svc = self.registry_with({"parts": [{"container": "n8n"}]})
+        out = self.measure(svc, 100.0)
+        self.assertEqual(out["rss_bytes"], 512000000)
+        self.assertEqual(out["parts"][0]["kind"], "container")
+
+    def test_unreadable_part_is_null_and_the_rest_still_sum(self):
+        self.write_cgroup(self.unit_dir("one.service"), rss=1000)
+        self.write_cgroup(self.container_dir(), rss=2000)
+        # three parts, and the middle one has no cgroup at all
+        server.docker_name_map = lambda: {"c1": CID}
+        svc = self.registry_with({"parts": [{"unit": "one.service"},
+                                            {"unit": "gone.service"},
+                                            {"container": "c1"}]})
+        out = self.measure(svc, 100.0)
+        self.assertEqual([p["rss_bytes"] for p in out["parts"]],
+                         [1000, None, 2000])
+        self.assertEqual(out["rss_bytes"], 3000)
+
+    def test_no_part_readable_is_a_null_total(self):
+        svc = self.registry_with({"parts": [{"unit": "gone.service"}]})
+        out = self.measure(svc, 100.0)
+        self.assertIsNone(out["rss_bytes"])
+        self.assertIsNone(out["cpu_pct"])
+        self.assertEqual(out["parts"],
+                         [{"name": "gone.service", "kind": "unit",
+                           "rss_bytes": None, "cpu_pct": None}])
+
+    def test_garbage_in_a_cgroup_file_is_null_not_an_error(self):
+        path = self.unit_dir("weird.service")
+        self.write_cgroup(path, rss="not-a-number")
+        with open(os.path.join(path, "cpu.stat"), "w") as fh:
+            fh.write("nonsense\n")
+        svc = self.registry_with({"parts": [{"unit": "weird.service"}]})
+        out = self.measure(svc, 100.0)
+        self.assertIsNone(out["parts"][0]["rss_bytes"])
+        self.assertIsNone(out["parts"][0]["cpu_pct"])
+
+    def test_a_service_with_no_control_block_has_no_parts(self):
+        svc = self.registry_with(None)
+        out = self.measure(svc, 100.0)
+        self.assertEqual(out, {"rss_bytes": None, "cpu_pct": None,
+                               "sampled_at": 100.0, "parts": []})
+
+    def test_parts_follow_control_parts_in_order_and_kind(self):
+        server.docker_name_map = lambda: {}
+        svc = self.registry_with({"parts": [{"unit": "u.service"},
+                                            {"container": "c1"},
+                                            {"container": "c2"}]})
+        out = self.measure(svc, 100.0)
+        self.assertEqual([(p["name"], p["kind"]) for p in out["parts"]],
+                         [("u.service", "unit"), ("c1", "container"),
+                          ("c2", "container")])
+
+    def test_every_key_is_always_present(self):
+        svc = self.registry_with({"parts": [{"unit": "gone.service"}]})
+        out = self.measure(svc, 100.0)
+        self.assertEqual(sorted(out),
+                         ["cpu_pct", "parts", "rss_bytes", "sampled_at"])
+        self.assertEqual(sorted(out["parts"][0]),
+                         ["cpu_pct", "kind", "name", "rss_bytes"])
+
+    def test_a_container_id_that_is_not_a_container_id_is_ignored(self):
+        # Nothing shaped unlike a docker id may be pasted into a path this
+        # then opens.
+        self.write_cgroup(self.container_dir("../../etc"), rss=1)
+        server.docker_name_map = lambda: {"c1": "../../etc"}
+        svc = self.registry_with({"parts": [{"container": "c1"}]})
+        self.assertIsNone(self.measure(svc, 100.0)["parts"][0]["rss_bytes"])
+
+
+class ResourceDockerMapTest(ResourceTestBase):
+    """The one docker call, and what happens when it is not there."""
+
+    def setUp(self):
+        super().setUp()
+        # SandboxTest stubs the map out so that no unrelated test can shell
+        # out; these are the tests that put the real one back, over a stubbed
+        # Popen.
+        server.docker_name_map = self._saved["docker_name_map"]
+
+    def test_map_parses_names_to_ids(self):
+        self.stub_docker_ps("n8n\t%s\nbeszel\t%s\n" % (CID, OTHER_CID))
+        self.assertEqual(server.docker_name_map(),
+                         {"n8n": CID, "beszel": OTHER_CID})
+
+    def test_argv_is_the_documented_command(self):
+        self.stub_docker_ps("")
+        server.docker_name_map()
+        self.assertEqual(self.docker_calls, [[
+            "docker", "ps", "-a", "--no-trunc",
+            "--format", "{{.Names}}\t{{.ID}}"]])
+
+    def test_argv_goes_through_sg_when_the_group_is_missing(self):
+        server._have_docker_group = lambda: False
+        server._which = lambda name: "/usr/bin/sg" if name == "sg" else None
+        self.stub_docker_ps("")
+        server.docker_name_map()
+        argv = self.docker_calls[0]
+        self.assertEqual(argv[:3], ["/usr/bin/sg", "docker", "-c"])
+        self.assertIn("docker ps -a --no-trunc", argv[3])
+
+    def test_one_cached_call_inside_the_ttl(self):
+        self.stub_docker_ps("n8n\t%s\n" % CID)
+        first = server.docker_name_map()
+        second = server.docker_name_map()
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.docker_calls), 1)
+
+    def test_the_map_is_re_read_once_the_ttl_expires(self):
+        server.DOCKER_MAP_TTL = 0.0
+        self.stub_docker_ps("n8n\t%s\n" % CID)
+        server.docker_name_map()
+        server.docker_name_map()
+        self.assertEqual(len(self.docker_calls), 2)
+
+    def test_a_failure_is_cached_too(self):
+        # With no docker group at all this must cost one failed call per TTL,
+        # not one per container per request.
+        self.stub_docker_ps("", code=1)
+        server.docker_name_map()
+        server.docker_name_map()
+        self.assertEqual(len(self.docker_calls), 1)
+
+    def test_nonzero_exit_gives_no_map(self):
+        self.stub_docker_ps("n8n\t%s\n" % CID, code=1)
+        self.assertEqual(server.docker_name_map(), {})
+
+    def test_docker_missing_entirely_gives_no_map(self):
+        self.stub_docker_ps(raises=FileNotFoundError("no docker"))
+        self.assertEqual(server.docker_name_map(), {})
+
+    def test_a_wedged_docker_is_killed_and_gives_no_map(self):
+        self.stub_docker_ps(hangs=subprocess.TimeoutExpired("docker", 5))
+        self.assertEqual(server.docker_name_map(), {})
+        self.assertTrue(self.docker_procs[0].killed)
+
+    def test_garbage_output_is_dropped_line_by_line(self):
+        self.stub_docker_ps(
+            "good\t%s\nnoseparator\nbad\tnothex\n\t%s\nalso\t%s\n"
+            % (CID, CID, OTHER_CID))
+        self.assertEqual(server.docker_name_map(),
+                         {"good": CID, "also": OTHER_CID})
+
+    def test_docker_failure_nulls_container_parts_and_nothing_else(self):
+        # The rule that matters: no docker group, no daemon, no docker at
+        # all — container resources go null and status is untouched.
+        self.write_cgroup(self.unit_dir("u.service"), rss=64)
+        self.stub_docker_ps(raises=FileNotFoundError("no docker"))
+        self.write_registry({"services": [
+            {"key": "svc", "name": "Svc", "tagline": "t", "icon": "code",
+             "url": None, "health": "http://127.0.0.1:9/h",
+             "marker": self.tmp, "setup": None,
+             "control": {"parts": [{"container": "c1"},
+                                   {"unit": "u.service"}]}},
+        ]})
+        server.probe_all = lambda urls: {u: True for u in urls}
+        tile = server.services_payload()["services"][0]
+        self.assertEqual([p["rss_bytes"] for p in tile["resources"]["parts"]],
+                         [None, 64])
+        self.assertEqual(tile["resources"]["rss_bytes"], 64)
+        # status, state and the control block are exactly what they were
+        self.assertEqual(tile["state"], "active")
+        self.assertTrue(tile["active"])
+        self.assertTrue(tile["installed"])
+        self.assertEqual(tile["control"], {"controllable": True,
+                                           "reason": None})
+
+    def test_a_unit_only_service_never_shells_out(self):
+        self.write_cgroup(self.unit_dir("u.service"), rss=64)
+        self.stub_docker_ps("")
+        svc = self.registry_with({"parts": [{"unit": "u.service"}]})
+        self.assertEqual(self.measure(svc, 100.0)["rss_bytes"], 64)
+        self.assertEqual(self.docker_calls, [])
+
+
+class ResourceCpuTest(ResourceTestBase):
+    """cpu_pct: percent of the whole machine, across two samples."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_cpus(4)
+        self.path = self.unit_dir("u.service")
+        self.svc = self.registry_with({"parts": [{"unit": "u.service"}]})
+
+    def sample(self, usage_usec, now):
+        self.write_cgroup(self.path, rss=10, usage_usec=usage_usec)
+        return self.measure(self.svc, now)["parts"][0]["cpu_pct"]
+
+    def test_first_sample_is_null(self):
+        self.assertIsNone(self.sample(1_000_000, 1000.0))
+
+    def test_second_sample_is_percent_of_the_whole_machine(self):
+        self.sample(1_000_000, 1000.0)
+        # 2s of CPU over 1s of wall on 4 cores = half the machine
+        self.assertAlmostEqual(self.sample(3_000_000, 1001.0), 50.0)
+
+    def test_a_single_busy_core_is_a_quarter_of_four(self):
+        self.sample(0, 1000.0)
+        self.assertAlmostEqual(self.sample(1_000_000, 1001.0), 25.0)
+
+    def test_it_is_clamped_to_100(self):
+        self.sample(0, 1000.0)
+        # 100s of CPU in 1s of wall: impossible, and must not render as
+        # 10000%.
+        self.assertEqual(self.sample(100_000_000, 1001.0), 100.0)
+
+    def test_a_counter_reset_is_zero_not_negative(self):
+        self.sample(5_000_000, 1000.0)
+        self.assertEqual(self.sample(1_000_000, 1001.0), 0.0)
+
+    def test_no_wall_time_between_samples_is_null(self):
+        self.sample(1_000_000, 1000.0)
+        self.assertIsNone(self.sample(2_000_000, 1000.0))
+
+    def test_the_sample_is_dropped_when_the_cgroup_goes_away(self):
+        self.sample(1_000_000, 1000.0)
+        os.unlink(os.path.join(self.path, "cpu.stat"))
+        self.assertIsNone(self.measure(self.svc, 1001.0)["parts"][0]["cpu_pct"])
+        # coming back must start counting again rather than differencing
+        # against a counter from before the restart
+        self.assertIsNone(self.sample(9_000_000, 1002.0))
+        self.assertAlmostEqual(self.sample(10_000_000, 1003.0), 25.0)
+
+    def test_the_service_total_sums_its_parts_and_is_clamped(self):
+        other = self.unit_dir("v.service")
+        svc = self.registry_with({"parts": [{"unit": "u.service"},
+                                            {"unit": "v.service"}]})
+        self.write_cgroup(self.path, rss=1, usage_usec=0)
+        self.write_cgroup(other, rss=2, usage_usec=0)
+        self.assertIsNone(self.measure(svc, 1000.0)["cpu_pct"])
+        self.write_cgroup(self.path, rss=1, usage_usec=1_000_000)
+        self.write_cgroup(other, rss=2, usage_usec=1_000_000)
+        out = self.measure(svc, 1001.0)
+        self.assertAlmostEqual(out["cpu_pct"], 50.0)   # 25 + 25
+        self.assertEqual(out["rss_bytes"], 3)
+
+    def test_a_service_total_above_the_machine_is_clamped(self):
+        # Three parts at a legal 60% each; the sum is not legal, and must
+        # read as "the whole machine", never as 180%.
+        names = ["p%d.service" % i for i in range(3)]
+        dirs = [self.unit_dir(n) for n in names]
+        svc = self.registry_with({"parts": [{"unit": n} for n in names]})
+        for path in dirs:
+            self.write_cgroup(path, rss=1, usage_usec=0)
+        self.assertIsNone(self.measure(svc, 1000.0)["cpu_pct"])
+        for path in dirs:
+            self.write_cgroup(path, rss=1, usage_usec=2_400_000)
+        out = self.measure(svc, 1001.0)
+        self.assertEqual([round(p["cpu_pct"]) for p in out["parts"]],
+                         [60, 60, 60])
+        self.assertEqual(out["cpu_pct"], 100.0)
+
+    def test_cpu_is_null_when_there_is_no_cgroup_at_all(self):
+        svc = self.registry_with({"parts": [{"unit": "gone.service"}]})
+        self.assertIsNone(self.measure(svc, 1000.0)["parts"][0]["cpu_pct"])
+        self.assertIsNone(self.measure(svc, 1001.0)["parts"][0]["cpu_pct"])
+
+
+class ResourceCacheTest(ResourceTestBase):
+    """The TTL that stops a grid full of tiles hammering sysfs."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = self.unit_dir("u.service")
+        self.write_cgroup(self.path, rss=2048, usage_usec=1)
+        self.svc = self.registry_with({"parts": [{"unit": "u.service"}]})
+        self.reads = []
+        real = server._read_rss
+        server._read_rss = lambda cgroup: (self.reads.append(cgroup),
+                                           real(cgroup))[1]
+        self.addCleanup(setattr, server, "_read_rss", real)
+
+    def test_two_calls_inside_the_ttl_read_sysfs_once(self):
+        first = server.service_resources(self.svc)
+        second = server.service_resources(self.svc)
+        self.assertEqual(len(self.reads), 1)
+        self.assertIs(first, second)
+
+    def test_the_cached_answer_survives_the_file_disappearing(self):
+        # The same claim without counting anything: nothing was re-read.
+        first = server.service_resources(self.svc)
+        os.unlink(os.path.join(self.path, "memory.current"))
+        self.assertEqual(server.service_resources(self.svc)["rss_bytes"],
+                         first["rss_bytes"])
+
+    def test_an_expired_entry_is_re_measured(self):
+        server.RESOURCE_TTL = 0.0
+        server.service_resources(self.svc)
+        server.service_resources(self.svc)
+        self.assertEqual(len(self.reads), 2)
+
+    def test_the_cache_is_per_service(self):
+        other = self.registry_with({"parts": [{"unit": "u.service"}]},
+                                   key="other")
+        server.service_resources(self.svc)
+        server.service_resources(other)
+        self.assertEqual(len(self.reads), 2)
+
+    def test_sampled_at_is_when_the_sample_was_taken(self):
+        before = time.time()
+        out = server.service_resources(self.svc)
+        self.assertTrue(before <= out["sampled_at"] <= time.time())
+        time.sleep(0.02)
+        self.assertEqual(server.service_resources(self.svc)["sampled_at"],
+                         out["sampled_at"])
+
+    def test_a_broken_measurement_is_nulls_not_a_500(self):
+        boom = server._measure_resources
+        server._measure_resources = lambda svc, now: (_ for _ in ()).throw(
+            RuntimeError("sysfs on fire"))
+        self.addCleanup(setattr, server, "_measure_resources", boom)
+        out = server.service_resources(self.svc)
+        self.assertEqual(sorted(out),
+                         ["cpu_pct", "parts", "rss_bytes", "sampled_at"])
+        self.assertEqual(out["parts"], [])
+        self.assertIsNone(out["rss_bytes"])
+
+
+class ResourcePayloadTest(ResourceTestBase):
+    """The three v3 keys on the list and the detail object, over a socket."""
+
+    def setUp(self):
+        super().setUp()
+        import threading
+        self.write_cgroup(self.unit_dir("u.service"), rss=4096, usage_usec=1)
+        self.write_registry({"services": [
+            {"key": "svc", "name": "Svc", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "control": {"parts": [{"unit": "u.service"}]}},
+            {"key": "bare", "name": "Bare", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None},
+        ]})
+        self.srv = server.Server(("127.0.0.1", 0), server.Handler)
+        self.port = self.srv.server_address[1]
+        self.thread = threading.Thread(target=self.srv.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        super().tearDown()
+
+    def get(self, path):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        data = resp.read().decode()
+        status = resp.status
+        conn.close()
+        return status, json.loads(data)
+
+    def test_list_carries_all_three_keys_for_every_service(self):
+        status, doc = self.get("/api/services")
+        self.assertEqual(status, 200)
+        for tile in doc["services"]:
+            self.assertEqual(sorted(tile["usage"]),
+                             ["last_launched", "last_opened", "last_used"])
+            self.assertIn("deployed_at", tile)
+            self.assertEqual(sorted(tile["resources"]),
+                             ["cpu_pct", "parts", "rss_bytes", "sampled_at"])
+        tiles = {t["key"]: t for t in doc["services"]}
+        self.assertEqual(tiles["svc"]["resources"]["rss_bytes"], 4096)
+        self.assertEqual(tiles["bare"]["resources"]["parts"], [])
+        self.assertIsNone(tiles["bare"]["resources"]["rss_bytes"])
+
+    def test_detail_carries_the_same_block(self):
+        status, doc = self.get("/api/services/svc")
+        self.assertEqual(status, 200)
+        self.assertEqual(doc["resources"]["rss_bytes"], 4096)
+        self.assertEqual(doc["resources"]["parts"][0]["kind"], "unit")
+        self.assertEqual(sorted(doc["usage"]),
+                         ["last_launched", "last_opened", "last_used"])
+        self.assertIn("deployed_at", doc)
+
+    def test_a_missing_cgroup_root_entirely_is_still_a_200(self):
+        # /sys/fs/cgroup not being there at all (a container, a mac) must
+        # look like "no numbers", not like a broken launcher.
+        server.CGROUP_ROOT = os.path.join(self.tmp, "no-such-root")
+        self.reset_resource_caches()
+        status, doc = self.get("/api/services")
+        self.assertEqual(status, 200)
+        tiles = {t["key"]: t for t in doc["services"]}
+        self.assertIsNone(tiles["svc"]["resources"]["rss_bytes"])
+        self.assertEqual(tiles["svc"]["state"], "planned")
 
 
 if __name__ == "__main__":

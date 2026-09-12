@@ -434,6 +434,16 @@ test_fresh_deploy() {
   check "  the hash is the sha256 of GUAC_PASSWORD" \
     mapping_has "$(printf '%s' "$(env_val GUAC_PASSWORD)" | openssl dgst -sha256 | sed 's/^.*= //')"
   check "  RDP connection on port 3389"  mapping_has '<param name="port">3389</param>'
+  # gnome-remote-desktop is NLA-only; 'tls' fails negotiation before the
+  # credentials are checked and the browser shows "Log in failed". Found on
+  # the first real session -- this suite had no assertion on the mode at all.
+  check "  security mode is nla (the only one the backend accepts)" \
+    mapping_has '<param name="security">nla</param>'
+  # FreeRDP 2.11.7 (what guacd ships) advertises AUDIO_PLAYBACK v6, which
+  # gnome-remote-desktop rejects mid-session -- "Client protocol version (6)
+  # too old". Audio must stay off until guacd moves to FreeRDP 3.x.
+  check "  audio disabled (FreeRDP 2.x AUDIO_PLAYBACK is too old for the server)" \
+    mapping_has '<param name="disable-audio">true</param>'
   check "  points at GUAC_RDP_HOST"      mapping_has "<param name=\"hostname\">$(env_val GUAC_RDP_HOST)</param>"
   check "  ignores the self-signed cert" mapping_has '<param name="ignore-cert">true</param>'
   check "  wallpaper off (bandwidth)"    mapping_has '<param name="enable-wallpaper">false</param>'
@@ -582,6 +592,57 @@ test_idempotent_rerun_needs_no_sudo() {
   check "compose up re-invoked"         [ -f "$STATE_DIR/compose_up" ]
   check "re-applied serve config"       calls_have "tailscale serve --bg --https=8094 http://127.0.0.1:8094/guacamole/$"
   check "re-verified by markup"         out_has "guacamole"
+  teardown
+}
+
+test_mapping_migration() {
+  echo "• re-run against a mapping from an older deploy: tls->nla and disable-audio repaired, then left alone"
+  # A user-mapping.xml written by the first version of this script says
+  # security=tls (the backend rejects it before checking credentials) and has
+  # no disable-audio (the session drops when audio starts). "Written only if
+  # absent" would leave both broken forever; the repair must be surgical --
+  # those two values, nothing else in the user's file -- and Guacamole caches
+  # parameters at login, so the webapp must be restarted for it to matter.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy                                   # first deploy, current template
+  check "first run succeeded"           [ "$CODE" -eq 0 ]
+  local m; m="$(mapping_file)"
+  sed -e 's#<param name="security">nla</param>#<param name="security">tls</param>#' \
+      -e '/<param name="disable-audio">/d' "$m" > "$m.old" && cat "$m.old" > "$m" && rm -f "$m.old"
+  echo '<!-- my-custom-marker -->' >> "$m"
+  check "setup: mapping now says tls"   mapping_has '<param name="security">tls</param>'
+  check "setup: and has no disable-audio" sh -c "! grep -qF 'disable-audio' '$m'"
+  : > "$CALLS_LOG"
+
+  run_deploy                                   # second deploy: the repair
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "security repaired to nla"      mapping_has '<param name="security">nla</param>'
+  check "  tls gone"                    sh -c "! grep -qF 'name=\"security\">tls' '$m'"
+  check "  said so"                     out_has "Repaired security=tls"
+  check "disable-audio added"           mapping_has '<param name="disable-audio">true</param>'
+  check "  said so"                     out_has "Added disable-audio"
+  check "  anchored inside the connection (after ignore-cert)" \
+    sh -c "grep -A1 'ignore-cert' '$m' | grep -qF 'disable-audio'"
+  check "user's other content kept"     mapping_has 'my-custom-marker'
+  check "  still 0600"                  [ "$(file_mode "$m")" = "600" ]
+  check "  hash still matches .env"     out_has "matches GUAC_PASSWORD"
+  check "webapp restarted to pick it up" calls_have "docker compose .*restart guacamole"
+  check "no sudo for a mapping repair"  no_call "^sudo "
+
+  local after; after="$(cksum < "$m")"
+  : > "$CALLS_LOG"
+  run_deploy                                   # third deploy: nothing to repair
+  check "third run: exits zero"         [ "$CODE" -eq 0 ]
+  check "third run: mapping byte-identical" [ "$(cksum < "$m")" = "$after" ]
+  check "third run: no restart"         no_call "restart guacamole"
+  no_repair_msg() { ! grep -qiE 'Repaired security|Added disable-audio' <<<"$OUT"; }
+  check "third run: no repair message"  no_repair_msg
+
+  # A hand-chosen mode is the user's, not this script's: `any` is left alone.
+  sed 's#<param name="security">nla</param>#<param name="security">any</param>#' "$m" > "$m.new" && cat "$m.new" > "$m" && rm -f "$m.new"
+  run_deploy
+  check "security=any (hand-chosen) untouched" mapping_has '<param name="security">any</param>'
   teardown
 }
 
@@ -1473,6 +1534,7 @@ test_never_ready
 test_guacamole_login_rejected
 test_connection_missing_from_list
 test_idempotent_rerun_needs_no_sudo
+test_mapping_migration
 test_stale_marker_dead_backend
 test_grdctl_denied
 test_rdp_never_comes_up

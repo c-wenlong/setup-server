@@ -206,6 +206,26 @@ other things are broken.
 - **A value looks truncated at a `#`** — it should not be; the parser leaves
   `#` inside values alone precisely because several generated passwords here
   contain one. If you see truncation, that is a bug worth reporting.
+- **I saved a new value but the service still uses the old one** — expected.
+  Services read `.env` when their container starts; the pencil edits the
+  *file*. Use the Restart button on the same page. The reverse is also
+  true: a password you changed inside an app is live already, and editing
+  `.env` afterwards only brings the record back in line.
+- **"a value containing an apostrophe cannot also contain $ or `"** — the
+  one shape of value the file cannot hold, because a shell `source` and
+  Docker Compose disagree on how to escape it inside double quotes. Pick a
+  password without one of the two characters. Everything else (spaces, `#`,
+  `$`, quotes, backslashes) is fine and is quoted for you.
+- **"unknown variable" on save** — the pencil edits existing lines only; it
+  never adds a name `setup.sh` did not put there. Add the line by hand if
+  you really need a new variable.
+- **Editing changed the file's group or mode** — it must not: the
+  replacement copies the original mode (0600) and keeps the group where the
+  launcher's user is allowed to. If `ls -l` disagrees, that is a bug.
+- **Nothing happens when I tap the pencil** — the current value is fetched
+  first (the same reveal call as the eye); if that fails the row shows why
+  under the field. The edit is refused on the server side for a path
+  outside the repo or `~/dev`, exactly like reveal.
 
 ## Start / stop / restart buttons
 
