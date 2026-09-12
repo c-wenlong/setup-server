@@ -704,6 +704,38 @@ test_https_port_follows_local_port() {
   check "served :8443 -> 127.0.0.1:2284" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:2284"
   check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
   teardown
+
+  # The importer pair follows the same rule, independently of the main pair.
+  echo "• IMPORTER_PORT alone moves its HTTPS port; an explicit IMPORTER_HTTPS_PORT still wins"
+  setup
+  touch "$STATE_DIR/operator"
+  export IMPORTER_PORT=8199
+  export STUB_PORTS="8097 8199"
+  run_deploy
+  check "exits zero"                          [ "$CODE" -eq 0 ]
+  check ".env records IMPORTER_PORT=8199"     grep -qx 'IMPORTER_PORT=8199' "$SVC/.env"
+  check ".env records IMPORTER_HTTPS_PORT=8199" grep -qx 'IMPORTER_HTTPS_PORT=8199' "$SVC/.env"
+  check "served :8199 -> 127.0.0.1:8199"      calls_have "tailscale serve --bg --https=8199 http://127.0.0.1:8199"
+  check "  and never :8099"                   no_call "tailscale serve --bg --https=8099"
+  check "the main pair is untouched: still :8097 -> 127.0.0.1:8097" \
+    calls_have "tailscale serve --bg --https=8097 http://127.0.0.1:8097"
+  unset IMPORTER_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"                   [ "$CODE" -eq 0 ]
+  check "re-run kept :8199 -> 127.0.0.1:8199" calls_have "tailscale serve --bg --https=8199 http://127.0.0.1:8199"
+  check "  and never :8099"                   no_call "tailscale serve --bg --https=8099"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  export IMPORTER_PORT=8199 IMPORTER_HTTPS_PORT=8444
+  export STUB_PORTS="8097 8199"
+  run_deploy
+  check "exits zero"                          [ "$CODE" -eq 0 ]
+  check "served :8444 -> 127.0.0.1:8199"      calls_have "tailscale serve --bg --https=8444 http://127.0.0.1:8199"
+  check "  main pair still :8097 -> 127.0.0.1:8097" calls_have "tailscale serve --bg --https=8097 http://127.0.0.1:8097"
+  teardown
 }
 
 test_publish_is_loopback_only() {
