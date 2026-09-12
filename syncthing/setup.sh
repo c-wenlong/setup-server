@@ -83,6 +83,20 @@ BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/syncthing"
 OS="$(uname -s)"
 
+# A recovery instruction is only useful if it names the service manager this
+# box actually has. This script already branches on $OS in eight places and
+# prints the launchd form in its closing "Manage it with" block; these two
+# strings are so that the hints buried inside error messages cannot quietly
+# drift back to being Linux-only. `\$(id -u)` stays literal on purpose — it
+# is printed for the user to run, not expanded here.
+if [ "$OS" = "Linux" ]; then
+  RESTART_HINT="systemctl --user restart syncthing"
+  LOGS_HINT="journalctl --user -u syncthing -n 50"
+else
+  RESTART_HINT="launchctl kickstart -k gui/\$(id -u)/net.syncthing.syncthing"
+  LOGS_HINT="tail -n 50 ~/Library/Logs/syncthing.log"
+fi
+
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
@@ -637,9 +651,9 @@ case "$GUI_STATE" in
     # only edits the config; the address is read when the API service starts,
     # so a restart that never happened leaves the OLD listener in place —
     # while every read-back below happily echoes the config we just wrote.
-    [ "$ST_CODE" = "200" ] || die "POST /rest/system/restart returned HTTP $ST_CODE: $(head -c 200 "$WORK/resp"). The GUI address was changed in the config but the running process still holds the old bind — it may still be reachable off loopback. Restart by hand (systemctl --user restart syncthing) and re-run."
+    [ "$ST_CODE" = "200" ] || die "POST /rest/system/restart returned HTTP $ST_CODE: $(head -c 200 "$WORK/resp"). The GUI address was changed in the config but the running process still holds the old bind — it may still be reachable off loopback. Restart by hand ($RESTART_HINT) and re-run."
     sleep 2
-    wait_health "http://127.0.0.1:$LOCAL_PORT" 30 || die "Syncthing did not come back after the GUI repair (last HTTP $ST_CODE). Logs: journalctl --user -u syncthing -n 50"
+    wait_health "http://127.0.0.1:$LOCAL_PORT" 30 || die "Syncthing did not come back after the GUI repair (last HTTP $ST_CODE). Logs: $LOGS_HINT"
     api GET /rest/config/gui
     [ "$ST_CODE" = "200" ] || die "GET /rest/config/gui returned HTTP $ST_CODE after the repair"
     GUI_STATE="$(check_gui)"
@@ -655,7 +669,7 @@ case "$GUI_STATE" in
     [ -n "$SOCKET_TOOL" ] || die "Repaired the GUI config over REST, but this box has neither ss nor lsof, so where the GUI is actually bound cannot be checked. Refusing to report it as loopback-only while it may still be on 0.0.0.0:$LOCAL_PORT. Install iproute2 (Linux), or verify by hand, then re-run."
     [ -n "$(listener_addrs "$LOCAL_PORT")" ] || die "Repaired the GUI config over REST and Syncthing answered on 127.0.0.1:$LOCAL_PORT, but $SOCKET_TOOL shows nothing listening on :$LOCAL_PORT — the new bind cannot be confirmed, so the repair is not proven. Check by hand and re-run."
     gui_off_loopback="$(gui_foreign)"
-    [ -z "$gui_off_loopback" ] || die "The GUI repair did NOT take: :$LOCAL_PORT is still listening on$gui_off_loopback — off loopback and off this node's tailnet addresses, i.e. reachable from the LAN, with no GUI password. The config now says 127.0.0.1:$LOCAL_PORT, so the process never rebound. Restart it (systemctl --user restart syncthing) and re-run; if it comes back on the same address, something other than Syncthing holds :$LOCAL_PORT."
+    [ -z "$gui_off_loopback" ] || die "The GUI repair did NOT take: :$LOCAL_PORT is still listening on$gui_off_loopback — off loopback and off this node's tailnet addresses, i.e. reachable from the LAN, with no GUI password. The config now says 127.0.0.1:$LOCAL_PORT, so the process never rebound. Restart it ($RESTART_HINT) and re-run; if it comes back on the same address, something other than Syncthing holds :$LOCAL_PORT."
     ok "Repaired: GUI on 127.0.0.1:$LOCAL_PORT with the host check relaxed for Serve (confirmed on the wire, not just in the config)"
     ;;
 esac
@@ -727,7 +741,7 @@ if [ "$ST_CODE" = "200" ] || wait_health "$url" 15; then
   http "$url/"
   case "$ST_CODE" in
     200) ok "GUI answers through Serve (host check passed)" ;;
-    403) PROBLEMS=1; warn "GUI root is a 403 through Serve — Syncthing's host check is rejecting the tailnet Host header even though the running config says insecureSkipHostcheck=true. Restart the service (systemctl --user restart syncthing) and re-run; if it persists, check <gui> in $CONFIG_FILE." ;;
+    403) PROBLEMS=1; warn "GUI root is a 403 through Serve — Syncthing's host check is rejecting the tailnet Host header even though the running config says insecureSkipHostcheck=true. Restart the service ($RESTART_HINT) and re-run; if it persists, check <gui> in $CONFIG_FILE." ;;
     *)   warn "GUI root returned HTTP $ST_CODE through Serve (expected 200)." ;;
   esac
 else
@@ -754,8 +768,21 @@ fi
 # answers on 0.0.0.0 or a LAN address is the whole security model gone, and
 # nothing that reads config.xml or the REST API can see that happen.
 gui_addrs="$(listener_addrs "$LOCAL_PORT")"
-if [ -z "$gui_addrs" ]; then
-  warn "Could not see any listening socket on :$LOCAL_PORT${SOCKET_TOOL:+ ($SOCKET_TOOL showed nothing)} even though Syncthing answered there — this run could not confirm on the wire that the GUI is loopback-only."
+if [ -z "$SOCKET_TOOL" ]; then
+  # No ss and no lsof: where the GUI is bound — the single fact the
+  # tailnet-as-the-auth-layer model rests on — cannot be established on this
+  # box by any means. That is not "probably fine". The deploy stays up (it
+  # may well be correct) but the run carries the finding out in its exit
+  # status, the same way every other unverifiable security fact in this repo
+  # does. Distinct from the case below on purpose: "the tool looked and saw
+  # nothing" is evidence, "there is no tool" is the absence of evidence.
+  PROBLEMS=1
+  warn "Could not verify where the GUI is bound: this box has neither ss nor lsof. The GUI has no password, so a bind that escaped loopback would be reachable from the LAN and nothing in this run would see it. Install iproute2 (Linux) or use a box with lsof (macOS ships it), then re-run."
+elif [ -z "$gui_addrs" ]; then
+  # The tool ran and found no rows. Same treatment the sync port gets a few
+  # lines up: a bind that has not appeared yet is a normal, self-healing
+  # state, not a finding.
+  warn "$SOCKET_TOOL showed nothing listening on :$LOCAL_PORT even though Syncthing answered there — this run could not confirm on the wire that the GUI is loopback-only."
 else
   gui_off_loopback="$(gui_foreign)"
   if [ -z "$gui_off_loopback" ]; then

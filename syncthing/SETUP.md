@@ -209,9 +209,14 @@ No Docker, no root. Sudo is asked at most twice on Linux, once each, for
     number the GUI binds).
 12. Prints the Device ID, the sync address, and how to add a device.
 
-Exit status is non-zero only if step 11 still finds a listener off the
-tailnet or a GUI that 403s after the repairs above, or a repair itself was
-refused by the API — the deploy is up in those cases, but not as designed.
+Exit status is non-zero only if step 11 still finds a sync listener off the
+tailnet, a GUI answering off loopback, or a GUI that 403s after the repairs
+above; if a repair itself was refused by the API; or if the box has neither
+`ss` nor `lsof`, so the GUI's bind could not be checked at all — the deploy
+is up in those cases, but not as designed, or not shown to be. (A socket
+tool that runs and simply sees nothing bound yet is a warning, not a
+failure: that is the normal, self-healing state while `tailscale0` comes
+up.)
 
 ## Adding your devices
 

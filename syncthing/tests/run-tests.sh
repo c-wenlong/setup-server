@@ -108,6 +108,9 @@ check() {
 }
 
 out_has()    { grep -q -- "$1" <<<"$OUT"; }
+# Fixed-string variant, for addresses full of regex metacharacters: the
+# wildcard listener renders as `*:8384` and IPv6 rows as `[::]:8384`.
+out_hasF()   { grep -qF -- "$1" <<<"$OUT"; }
 out_lacks()  { ! grep -qi -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
@@ -120,11 +123,16 @@ file_mode()  { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; 
 bin_version() { CALLS_LOG=/dev/null "$HOME/.local/bin/syncthing" --version 2>/dev/null | awk '{print $2}'; }
 
 # The mocked suite runs whichever platform it is on; the service-manager
-# assertions differ accordingly.
+# assertions differ accordingly. RESTART_HINT is the recovery command an
+# error message is expected to name — systemd here, launchd on a Mac.
+# Asserting the Linux string unconditionally would pass on this box while
+# the macOS branch printed an instruction nobody can run.
 if [ "$OS" = "Linux" ]; then
   ASSET_HINT="syncthing-linux-"
+  RESTART_HINT="systemctl --user restart syncthing"
 else
   ASSET_HINT="syncthing-macos-"
+  RESTART_HINT="launchctl kickstart -k gui/"
 fi
 
 # ----------------------------------------------------------------- tests
@@ -515,7 +523,7 @@ test_gui_repair_restart_refused() {
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "names the refused restart"     out_has "POST /rest/system/restart returned HTTP 500"
   check "  says the old bind is live"   out_has "still holds the old bind"
-  check "  gives the manual fix"        out_has "systemctl --user restart syncthing"
+  check "  names this OS's restart"     out_hasF "$RESTART_HINT"
   check "never claimed repaired"        out_lacks "Repaired: GUI"
   check "never reached the summary"     out_lacks "This device ID:"
   teardown
@@ -546,6 +554,7 @@ test_gui_repair_not_on_the_wire() {
   check "still caught the live bind"    out_has "GUI repair did NOT take"
   check "  names the address"           out_has "0.0.0.0:8384"
   check "  says it is LAN-reachable"    out_has "reachable from the LAN"
+  check "  names this OS's restart"     out_hasF "$RESTART_HINT"
   check "never claimed repaired"        out_lacks "Repaired: GUI"
   check "never reached the summary"     out_lacks "This device ID:"
   teardown
@@ -607,6 +616,80 @@ test_socket_check_without_ss() {
   teardown
 }
 
+test_ipv6_listener_rows() {
+  echo "• IPv6 rows: bracketed loopback and this node's tailnet v6 pass; [::] and *: fail the deploy"
+  # Two things had no fixture at all: the bracket-stripping that turns
+  # "[::1]:8384" into a host, and the tailnet IPv6 entry in the GUI
+  # allow-list (tailscaled's Serve frontend listens on BOTH tailnet
+  # addresses, on the same port number the GUI binds). Untested, either was
+  # free to be wrong in either direction — rejecting a healthy v6 row, or
+  # waving through a v6 wildcard, which is the same exposure as 0.0.0.0: an
+  # unauthenticated GUI answering the LAN. Both socket tools, because on
+  # macOS lsof is the only one there is.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "first run succeeded"            [ "$CODE" -eq 0 ]
+  local noss="$SANDBOX/noss"
+  minimal_path "$noss" ss
+
+  # --- allowed: v6 loopback and the node's own tailnet v6, both bracketed
+  printf '100.100.100.100:22000\n[::1]:8384\n[fd7a:115c:a1e0::1234]:8384\n' > "$STATE_DIR/listeners"
+  run_deploy
+  check "ss: [::1] + tailnet v6 accepted"  [ "$CODE" -eq 0 ]
+  check "  reported clean"                 out_has "GUI port :8384 answers on loopback"
+  run_deploy_path "$noss"
+  check "lsof: same rows accepted"         [ "$CODE" -eq 0 ]
+  check "  reported clean"                 out_has "GUI port :8384 answers on loopback"
+
+  # --- foreign: the v6 wildcard. Must FAIL, not merely be mentioned.
+  printf '100.100.100.100:22000\n[::]:8384\n' > "$STATE_DIR/listeners"
+  run_deploy
+  check "ss: [::]:8384 fails the deploy"   [ "$CODE" -ne 0 ]
+  check "  names the address"              out_hasF "[::]:8384"
+  check "  says the GUI has no password"   out_has "GUI has no password"
+  check "  and the non-zero banner"        out_has "Exiting non-zero"
+  check "  did not call it clean"          out_lacks "answers on loopback"
+  run_deploy_path "$noss"
+  check "lsof: [::]:8384 fails the deploy" [ "$CODE" -ne 0 ]
+  check "  names the address"              out_hasF "[::]:8384"
+
+  # --- foreign: how ss renders a wildcard bind with no address family shown
+  printf '100.100.100.100:22000\n*:8384\n' > "$STATE_DIR/listeners"
+  run_deploy
+  check "ss: *:8384 fails the deploy"      [ "$CODE" -ne 0 ]
+  check "  names the address"              out_hasF "*:8384"
+  run_deploy_path "$noss"
+  check "lsof: *:8384 fails the deploy"    [ "$CODE" -ne 0 ]
+  check "  names the address"              out_hasF "*:8384"
+  teardown
+}
+
+test_no_socket_tool_at_all() {
+  echo "• neither ss nor lsof on the box: the GUI bind cannot be verified, so the run exits non-zero"
+  # Fail closed on the absence of evidence. The GUI has no password — the
+  # tailnet IS the auth layer — so "where is :8384 bound" is a security fact,
+  # and a deploy that cannot check one does not get to report it as fine. The
+  # deploy itself still comes up; the exit status is what carries the finding.
+  #
+  # Deliberately NOT the same as "the tool ran and saw nothing": that stays a
+  # warning, the way the sync port already treats a bind that has not
+  # appeared yet (test_nothing_listening_yet asserts exit 0 for it).
+  setup
+  touch "$STATE_DIR/operator"
+  minimal_path "$SANDBOX/nosock" ss lsof
+  run_deploy_path "$SANDBOX/nosock"
+  check "exits non-zero"                 [ "$CODE" -ne 0 ]
+  check "says neither tool is present"   out_has "neither ss nor lsof"
+  check "  gives the install fix"        out_has "iproute2"
+  check "  and the non-zero banner"      out_has "Exiting non-zero"
+  check "called neither tool"            sh -c "! grep -qE '^(ss|lsof) ' '$CALLS_LOG'"
+  check "never claimed the bind is fine" out_lacks "answers on loopback"
+  check "the deploy still came up"       out_has "Device ID: STUBDEV-AAAAAAA"
+  check "  and was published"            calls_have "tailscale serve --bg --https=8384"
+  teardown
+}
+
 test_repair_that_does_not_take_dies() {
   echo "• the REST repair is refused: dies with the manual fix, never claims repaired"
   setup
@@ -644,6 +727,7 @@ test_hostcheck_403() {
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "names the host check"          out_has "host check"
   check "  gives the fix"               out_has "Restart the service"
+  check "  in this OS's terms"          out_hasF "$RESTART_HINT"
   check "health still passed"           out_has "End-to-end HTTPS check passed"
   check "did not claim GUI works"       out_lacks "GUI answers through Serve"
   teardown
@@ -844,6 +928,8 @@ test_hostcheck_403
 test_wildcard_socket
 test_nothing_listening_yet
 test_socket_check_without_ss
+test_ipv6_listener_rows
+test_no_socket_tool_at_all
 test_operator_escalation
 test_serve_approval_prompt
 
