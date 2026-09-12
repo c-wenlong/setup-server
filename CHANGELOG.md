@@ -8,6 +8,14 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Changed
+
+- The README coverage badge carries Codecov's graphing token, which is what a
+  private repo needs for the badge to render a number instead of "unknown".
+  The token is read-only and badge-scoped, so it is safe in the README.
+
+## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
+
 ### Added
 
 - **Open-source hygiene for the repo itself.** An MIT `LICENSE`, this
@@ -43,6 +51,11 @@ first, dated by merge.
 
 - Documentation audit across the root docs and the per-service pages, checking
   the claims in them against what the scripts actually do.
+
+### Fixed
+
+- The homepage mocked suite compared `PUID` against the real uid while the
+  `id` stub always reports 1000, so it failed on a GitHub runner (uid 1001).
 
 ## [PR #4](https://github.com/c-wenlong/setup-server/pull/4) - 2026-09-12
 
