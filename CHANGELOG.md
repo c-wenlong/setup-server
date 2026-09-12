@@ -54,6 +54,20 @@ first, dated by merge.
 
 ### Fixed
 
+- **Stale comments and dead code left over from the docs audit.**
+  code-server's suite header named a script that never existed; seafile's
+  header and SETUP.md still said `~/seafile/` (it is
+  `~/services/seafile/{data,mysql}`); home-assistant's suite and SETUP.md
+  cited an `HA-DERISK.md` that is not in the repo. Removed
+  `HTTP_STORE_ACTION` (home-assistant), `CONTAINER` (jellyfin) and two unused
+  locals in the paperless-ngx and remote-desktop live suites, all assigned
+  and never read. `control.primary` in `launcher/services.json` is read by
+  ntfy-control's listener, not the launcher; the schema comment and the
+  copy in `launcher/server.py` now say so instead of implying the launcher
+  uses it.
+
+### Fixed
+
 - The homepage mocked suite compared `PUID` against the real uid while the
   `id` stub always reports 1000, so it failed on a GitHub runner (uid 1001).
 

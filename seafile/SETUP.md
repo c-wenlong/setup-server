@@ -30,7 +30,8 @@ Tailscale Serve (:8443) ──▶ seafile container (127.0.0.1:8081)
 - `restart: unless-stopped` + the system dockerd makes it boot-persistent —
   no systemd unit needed.
 - Differences from the official compose: no Caddy proxy (Tailscale replaces
-  it), SeaDoc/notification/AI services disabled, volumes under `~/seafile/`.
+  it), SeaDoc/notification/AI services disabled, volumes under
+  `~/services/seafile/` (`data/` and `mysql/`).
 
 ## Dependencies
 
@@ -100,7 +101,7 @@ it by hand.
 
 Sound procedure (in order):
 1. `docker exec seafile-mysql mysqldump -uroot -p"$INIT_SEAFILE_MYSQL_ROOT_PASSWORD" --all-databases > seafile-db.sql`
-2. Snapshot `~/seafile/data` (rsync/restic to another disk or machine)
+2. Snapshot `~/services/seafile/data` (rsync/restic to another disk or machine)
 3. Keep `.env` with the backup — without its secrets the DB dump is useless
 
 Plain-file escape hatch: `seaf-fuse` can mount libraries as a browsable

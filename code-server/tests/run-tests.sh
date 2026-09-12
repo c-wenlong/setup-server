@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for deploy-code-server.sh.
+# Tests for code-server/setup.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (simulated fresh server, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment on this machine

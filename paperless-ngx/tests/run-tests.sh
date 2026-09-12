@@ -898,7 +898,7 @@ test_live() {
     FAIL=$((FAIL + 1))
     return
   fi
-  local ts port https_port url env_of_url web redis
+  local ts port https_port url web redis
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   env_of() { sed -n "s/^$1=//p" "$SERVICE_DIR/.env" | sed 's/^"//; s/"$//' | head -1; }
