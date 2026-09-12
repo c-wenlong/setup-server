@@ -7,8 +7,8 @@
 #     => boot-persistent through dockerd, no systemd unit needed)
 #   - web listens on 127.0.0.1:LOCAL_PORT only
 #   - published tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
-#   - data under ~/seafile/ (documents/photos live INSIDE Seafile's chunked
-#     store — see SETUP.md for the backup story)
+#   - data under ~/services/seafile/{data,mysql} (documents/photos live
+#     INSIDE Seafile's chunked store — see SETUP.md for the backup story)
 #
 # Usage:
 #   ./setup.sh                              # defaults: local 8081, HTTPS 8443

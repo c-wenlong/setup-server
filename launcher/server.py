@@ -1793,7 +1793,9 @@ def _reap(job, proc, logfile):
 #     "parts": [{"container": "immich_server"},
 #               {"container": "immich_machine_learning", "optional": true},
 #               {"container": "immich_redis"}],   # STOP order; start reverses
-#     "primary": "immich_server",   # which part reports state (default: first)
+#     "primary": "immich_server",   # ntfy-control only: which part reports
+#                                   # state on the phone panel (default: first);
+#                                   # this server never reads it
 #     "kuma": "immich",             # monitor paused on stop, resumed on start
 #     "locked": "why this one is deliberately not controllable"
 #   }

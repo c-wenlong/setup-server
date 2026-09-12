@@ -1380,7 +1380,7 @@ test_live() {
     return
   fi
 
-  local ts port url ts4 rdp_host lan addr any_open=0
+  local ts port url ts4 rdp_host addr any_open=0
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^GUAC_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env" | head -1)"

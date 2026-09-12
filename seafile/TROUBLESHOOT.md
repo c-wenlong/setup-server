@@ -28,9 +28,9 @@ for you — it just goes red.
 
 **State lives in `~/services/seafile/`**: `data/` (the chunked object store
 and `conf/`) and `mysql/`. `SEAFILE_VOLUME` / `SEAFILE_MYSQL_VOLUME` in `.env`
-are authoritative. Older notes — and `setup.sh`'s own header comment — still
-say `~/seafile/`; that path has not existed since the 2026-09-07 layout
-change, so any command quoting it is a silent no-op.
+are authoritative. Older notes may still say `~/seafile/`; that path has not
+existed since the 2026-09-07 layout change, so any command quoting it is a
+silent no-op.
 
 ## Containers won't start / keep restarting
 

@@ -41,7 +41,6 @@ set -euo pipefail
 LOCAL_PORT="${LOCAL_PORT:-8096}"
 HTTPS_PORT="${HTTPS_PORT:-8096}"
 ADMIN_USERNAME="${JELLYFIN_ADMIN_USERNAME:-kai}"
-CONTAINER="jellyfin"
 
 # Captured before .env is sourced, because sourcing overwrites MEDIA_DIR with
 # the file's value. On a first run this seeds the file; afterwards .env wins
