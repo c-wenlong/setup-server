@@ -37,6 +37,12 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 STUBS="$TESTS_DIR/stubs"
 export STUBS
+# The python3 stub is a pass-through to the real interpreter, and it finds it
+# on PATH. The minimal-PATH runs below (the "no ss on this box" case) leave
+# the stub as the only python3 on PATH, so hand it the real one now, while
+# PATH is still the caller's.
+REAL_PYTHON3="$(command -v python3)"
+export REAL_PYTHON3
 
 PASS=0; FAIL=0
 ORIG_HOME="$HOME"
@@ -64,6 +70,34 @@ teardown() {
 
 run_deploy() {
   OUT="$(printf '%s' "${1:-}" | PATH="$STUBS:$PATH" bash "$SVC/setup.sh" 2>&1)"
+  CODE=$?
+}
+
+# A PATH holding nothing but the stubs and the handful of real utilities
+# setup.sh shells out to — with named stubs left out. That is how "this box
+# has no ss" is made true: with the real /usr/sbin/ss still reachable, the
+# lsof branch (the ONLY socket-level check macOS has) would never run, and a
+# bug in it would be invisible. Same shape as adguard's suite.
+minimal_path() {  # minimal_path <dir> [stub-basename-to-omit ...]
+  local dir="$1"; shift
+  mkdir -p "$dir"
+  local c p s base omit skip
+  for c in bash sh env uname mktemp rm cat head cut sed awk grep tr chmod \
+           mkdir rmdir df cp mv ln ls stat od readlink dirname basename seq \
+           touch sort wc test sleep install find tar gzip unzip zip \
+           sha256sum shasum; do
+    p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "$dir/$c"
+  done
+  for s in "$STUBS"/*; do
+    base="$(basename "$s")"
+    skip=0
+    for omit in "$@"; do [ "$base" = "$omit" ] && skip=1; done
+    [ "$skip" = "1" ] || ln -sf "$s" "$dir/$base"
+  done
+}
+
+run_deploy_path() {  # run_deploy_path <path> [stdin]
+  OUT="$(printf '%s' "${2:-}" | PATH="$1" bash "$SVC/setup.sh" 2>&1)"
   CODE=$?
 }
 
@@ -247,6 +281,7 @@ test_fresh_deploy() {
   check "verified over tailnet HTTPS"       calls_have "https://test-host.tailfake.ts.net:8384/rest/noauth/health"
   check "  and the GUI root (host check)"   out_has "GUI answers through Serve"
   check "checked the sync socket"           out_has "bound to 100.100.100.100 only"
+  check "  and the GUI socket"              out_has "GUI port :8384 answers on loopback"
   check "prints final URL"                  out_has "https://test-host.tailfake.ts.net:8384"
   check "prints the sync address"           out_has "tcp://test-host.tailfake.ts.net:22000"
   check "explains adding a device"          out_has "Add Remote Device"
@@ -458,6 +493,117 @@ test_gui_drift_repaired() {
   check "config.xml back on loopback"   cfg_has '<address>127.0.0.1:8384</address>'
   check "  host check relaxed again"    cfg_has '<insecureSkipHostcheck>true</insecureSkipHostcheck>'
   check "no options patch (they were fine)" [ ! -f "$STATE_DIR/options_patched" ]
+  check "  and confirmed it on the wire"  out_has "confirmed on the wire"
+  teardown
+}
+
+test_gui_repair_restart_refused() {
+  echo "• GUI repair: the restart is refused — dies, never claims the GUI is back on loopback"
+  # The PATCH only edits the config. Syncthing reads the GUI address when the
+  # API service starts, so a restart that did not happen leaves the OLD,
+  # unauthenticated listener exactly where it was — on 0.0.0.0, answering the
+  # LAN — while every read-back below echoes the config just written.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  cfg="$(cfg_path)"
+  sed 's#<address>127.0.0.1:8384</address>#<address>0.0.0.0:8384</address>#' "$cfg" > "$cfg.new" \
+    && cat "$cfg.new" > "$cfg" && rm "$cfg.new"
+  touch "$STATE_DIR/restart_fails"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "names the refused restart"     out_has "POST /rest/system/restart returned HTTP 500"
+  check "  says the old bind is live"   out_has "still holds the old bind"
+  check "  gives the manual fix"        out_has "systemctl --user restart syncthing"
+  check "never claimed repaired"        out_lacks "Repaired: GUI"
+  check "never reached the summary"     out_lacks "This device ID:"
+  teardown
+}
+
+test_gui_repair_not_on_the_wire() {
+  echo "• GUI repair: config says loopback but :8384 is still on 0.0.0.0 — caught, deploy fails"
+  # The failure no API call can see. GET /rest/config/gui reads back the PATCH
+  # this script just sent, so it agrees with itself, and wait_health passing
+  # proves nothing either — a wildcard bind answers on 127.0.0.1 too. Only the
+  # socket table knows the unauthenticated GUI is still reachable from the LAN.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  cfg="$(cfg_path)"
+  sed 's#<address>127.0.0.1:8384</address>#<address>0.0.0.0:8384</address>#' "$cfg" > "$cfg.new" \
+    && cat "$cfg.new" > "$cfg" && rm "$cfg.new"
+  # The restart is accepted and the config comes back clean; the process just
+  # never rebound. The sync port is where it belongs, so nothing else in the
+  # run is complaining.
+  printf '100.100.100.100:22000\n0.0.0.0:8384\n' > "$STATE_DIR/listeners"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "did PATCH the GUI config"      [ -f "$STATE_DIR/gui_patched" ]
+  check "  and did post a restart"      [ -f "$STATE_DIR/restart_posted" ]
+  check "  and the API agreed with it"  calls_have "127.0.0.1:8384/rest/config/gui"
+  check "still caught the live bind"    out_has "GUI repair did NOT take"
+  check "  names the address"           out_has "0.0.0.0:8384"
+  check "  says it is LAN-reachable"    out_has "reachable from the LAN"
+  check "never claimed repaired"        out_lacks "Repaired: GUI"
+  check "never reached the summary"     out_lacks "This device ID:"
+  teardown
+}
+
+test_stale_listen_ip_without_config() {
+  echo "• .env pins a tailnet IP this host no longer holds, config.xml gone: refuses to generate one"
+  # Warning and carrying on was worse than useless here: the fresh config.xml
+  # would be written against the dead address, and every later check would
+  # then agree with itself — the exposure check compares the running config
+  # to that same dead address, and an empty socket table is only a warning —
+  # so the run ended "Done." over a listener that can never bind.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "first run succeeded"           [ "$CODE" -eq 0 ]
+  rm -f "$(cfg_path)"                   # .env kept, config.xml lost
+  echo "100.100.100.200" > "$STATE_DIR/ts_ip"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "names the stale .env value"    out_has "SYNCTHING_LISTEN_IP in $SVC/.env is 100.100.100.100"
+  check "  and this node's real IP"     out_has "tailnet IP is 100.100.100.200"
+  check "  gives the one-line fix"      out_has "set SYNCTHING_LISTEN_IP=100.100.100.200"
+  check "generated no config"           no_call "^syncthing generate"
+  check "  so none exists"              [ ! -f "$(cfg_path)" ]
+  check "started no service"            sh -c "! grep -qE 'systemctl --user restart|launchctl bootstrap' '$CALLS_LOG'"
+  check "published nothing"             no_call "tailscale serve"
+  check ".env left alone"               grep -qx 'SYNCTHING_LISTEN_IP=100.100.100.100' "$SVC/.env"
+  teardown
+}
+
+test_socket_check_without_ss() {
+  echo "• no ss on this box (the macOS path): the check falls back to lsof and still catches a wildcard"
+  # On macOS lsof IS the socket-level check — there is no second opinion. In
+  # every other test here the `ss` stub answers, so a broken lsof branch is
+  # invisible: run the whole deploy with ss taken off PATH, healthy first and
+  # then with :22000 also on 0.0.0.0.
+  setup
+  touch "$STATE_DIR/operator"
+  minimal_path "$SANDBOX/noss" ss
+  run_deploy_path "$SANDBOX/noss"
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "used lsof"                      calls_have "^lsof "
+  check "  never called ss"              no_call "^ss "
+  check "  asked it about :22000 (tcp)"  calls_have "lsof -nP -iTCP:22000 -sTCP:LISTEN"
+  check "  and :22000 (udp)"             calls_have "lsof -nP -iUDP:22000"
+  check "  and the GUI port"             calls_have "lsof -nP -iTCP:8384"
+  check "sync bind confirmed"            out_has "bound to 100.100.100.100 only"
+  check "GUI bind confirmed"             out_has "GUI port :8384 answers on loopback"
+  check "a peer's connection is not a listener" out_lacks "ALSO listening"
+
+  # Same box, same tool, wildcard bind: lsof has to surface it.
+  printf '100.100.100.100:22000\n0.0.0.0:22000\n100.100.100.100:8384\n' > "$STATE_DIR/listeners"
+  run_deploy_path "$SANDBOX/noss"
+  check "wildcard: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "  flags the foreign address"    out_has "ALSO listening on: 0.0.0.0:22000"
+  check "  says it is off the tailnet"   out_has "off the tailnet"
   teardown
 }
 
@@ -572,6 +718,13 @@ listener_hosts() {  # listener_hosts PORT
   printf '%s\n' "$addrs" | awk 'NF' | sed 's/:[0-9]*$//' | tr -d '[]' | sort -u
 }
 
+# Nothing at all should be bound to Syncthing's LAN-discovery multicast port:
+# localAnnounceEnabled is false. This needs to be a predicate of its own —
+# written inline as `sh -c "[ -z \"\$(listener_hosts 21027)\" ]"` it called a
+# bash function the child `sh` does not have, so the substitution came back
+# empty no matter what was listening and the check could never fail.
+nothing_listening_on() { [ -z "$(listener_hosts "$1")" ]; }
+
 # Every listener on $port must be loopback or this node's tailnet address.
 # (The GUI is published on the SAME number it binds, so tailscaled itself
 # legitimately listens on the tailnet IP:8384 — that is the Serve frontend.)
@@ -632,7 +785,7 @@ test_live() {
   live_check "local health responds OK"           sh -c "curl -fsS --max-time 30 'http://127.0.0.1:$port/rest/noauth/health' | grep -q '\"OK\"'"
   live_check "GUI not on non-local ifaces"        no_external_listener "$port"
   live_check "sync :$sync_port on the tailnet IP ONLY (tcp+udp)" sync_port_tailnet_only "$sync_port"
-  live_check "no local-discovery multicast on :21027" sh -c "[ -z \"\$(listener_hosts 21027)\" ]"
+  live_check "no local-discovery multicast on :21027" nothing_listening_on 21027
   live_check "tailscale serve maps :$https_port"  sh -c "'$(ts_cli)' serve status | grep -A2 ':$https_port' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS health responds"      sh -c "curl -fsS --max-time 60 '$want/rest/noauth/health' | grep -q '\"OK\"'"
   live_check "GUI root is 200 through Serve (host check)" sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 '$want/')\" = 200 ]"
@@ -682,11 +835,15 @@ test_port_override
 test_exposure_drift_repaired
 test_preference_drift_only_warns
 test_gui_drift_repaired
+test_gui_repair_restart_refused
+test_gui_repair_not_on_the_wire
 test_repair_that_does_not_take_dies
 test_tailnet_ip_changed
+test_stale_listen_ip_without_config
 test_hostcheck_403
 test_wildcard_socket
 test_nothing_listening_yet
+test_socket_check_without_ss
 test_operator_escalation
 test_serve_approval_prompt
 
