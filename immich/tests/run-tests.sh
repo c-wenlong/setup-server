@@ -284,6 +284,39 @@ test_operator_escalation() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (2283) next to a LOCAL_PORT
+  # override silently published :2283 -> 127.0.0.1:2284, i.e. the wrong port.
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=2284
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=2284"  grep -qx 'LOCAL_PORT=2284' "$SVC/.env"
+  check "served :2284 -> 127.0.0.1:2284" calls_have "tailscale serve --bg --https=2284 http://127.0.0.1:2284"
+  check "  and never :2283"             no_call "tailscale serve --bg --https=2283"
+  check "prints the :2284 URL"          out_has "https://test-host.tailfake.ts.net:2284"
+  # Re-run with no override at all: .env says 2284, and the HTTPS default has
+  # to follow what .env settled on rather than snap back to 2283.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"             [ "$CODE" -eq 0 ]
+  check "re-run kept :2284 -> 127.0.0.1:2284" calls_have "tailscale serve --bg --https=2284 http://127.0.0.1:2284"
+  check "  and never :2283"             no_call "tailscale serve --bg --https=2283"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=2284 HTTPS_PORT=8443
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:2284" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:2284"
+  check "prints the :8443 URL"          out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_serve_approval_prompt() {
   echo "• serve needs tailnet approval: retries after Enter"
   setup
@@ -366,7 +399,7 @@ test_live() {
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
-  https_port="${HTTPS_PORT:-2283}"
+  https_port="${HTTPS_PORT:-$port}"
   url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
 
   live_check "server container running"    sh -c "docker inspect -f '{{.State.Status}}' immich_server | grep -qx running"
@@ -402,6 +435,7 @@ test_resume_after_partial_failure
 test_hand_edited_profiles
 test_password_drift
 test_operator_escalation
+test_https_port_follows_local_port
 test_serve_approval_prompt
 
 if [ "${1:-}" = "--live" ]; then
