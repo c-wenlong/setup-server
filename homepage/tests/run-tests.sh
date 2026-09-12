@@ -75,11 +75,12 @@ red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
 # What the tailscale stub reports. Deliberately NOT this box's real tailnet
-# name or address: an assertion that passed only because it matched the live
-# tailnet would be testing nothing, and these values have to be *resolved*
-# into the allowlist rather than assumed.
+# name: an assertion that passed only because it matched the live tailnet
+# would be testing nothing, and the name has to be *resolved* into the
+# allowlist rather than assumed. (The stub's tailnet address, 100.77.77.77,
+# matters only between the tailscale and ss stubs, which share it via
+# $STATE_DIR/ts_ip; no assertion here needs it.)
 FAKE_TS_HOST=test-host.tailfake.ts.net
-FAKE_TS_IP=100.77.77.77
 
 # --------------------------------------------------------------- harness
 setup() {

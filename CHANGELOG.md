@@ -22,6 +22,23 @@ first, dated by merge.
   `:2283 -> 127.0.0.1:2284`. The default now follows the local port, on the
   first run and on a re-run where `.env` holds the port, while an explicit
   `HTTPS_PORT` is honoured as given. New mocked test covers all three cases.
+- **beszel/setup.sh could not run on macOS and skipped the preflight
+  convention.** It was the one script with no `uname -s` branch, no root
+  refusal, no Tailscale-running check, and a bare `tailscale` call that the
+  macOS app bundle never satisfies. It now follows the code-server (native)
+  and forgejo (Docker) references: OS branch, root refusal, resolved Tailscale
+  CLI, daemon and Compose v2 checks, the agent tarball picked by OS and
+  architecture, a launchd LaunchAgent on macOS, lingering and the Serve
+  operator grant as the two one-time Linux sudos, and a final URL resolved
+  from the tailnet rather than hardcoded. `.env` is now the source of truth
+  for the port on a re-run. The static suite gained ten checks for the
+  contract; verified by a live re-run on the box.
+- **Three suites declared `FAKE_TS_IP` and never used it.** firefly-iii now
+  asserts the listener audit accepted tailscaled's Serve proxy on the stub's
+  tailnet address for both ports (and resolved it via `tailscale ip -4`),
+  remote-desktop's two literal `100.77.77.77` assertions use the variable,
+  and homepage drops it (its audit never names the address; the ss and
+  tailscale stubs share it between themselves).
 - **Stale comments and dead code left over from the docs audit.**
   code-server's suite header named a script that never existed; seafile's
   header and SETUP.md still said `~/seafile/` (it is

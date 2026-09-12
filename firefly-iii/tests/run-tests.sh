@@ -678,6 +678,14 @@ test_publish_is_loopback_only() {
   check "  and is not on the host at all" sh -c "! sed 's/#.*//' '$SVC/docker-compose.yml' | grep -q '127\\.0\\.0\\.1:5432'"
   check "served :8097 -> 127.0.0.1:8097"  calls_have "tailscale serve --bg --https=8097 http://127.0.0.1:8097"
   check "served :8099 -> 127.0.0.1:8099"  calls_have "tailscale serve --bg --https=8099 http://127.0.0.1:8099"
+  # HTTPS port == local port here, so tailscaled's own Serve proxy holds the
+  # tailnet address on both numbers. The audit must ACCEPT that listener and
+  # name it, resolving the address from `tailscale ip -4` rather than
+  # assuming one — the stub's address is not this box's, so a literal in
+  # setup.sh would make these fail.
+  check "resolved the tailnet address (tailscale ip -4)" calls_have "^tailscale ip -4"
+  check "audit accepted Serve's proxy on :8097"          out_has "tailnet address: 127.0.0.1:8097 $FAKE_TS_IP:8097"
+  check "  and on the importer's :8099"                  out_has "tailnet address: 127.0.0.1:8099 $FAKE_TS_IP:8099"
   teardown
 }
 

@@ -13,10 +13,12 @@ Two parts:
   docker-compose.yml), published tailnet-only via `tailscale serve :8092`.
   Data in `~/services/beszel/hub`.
 - **Agent** (native Go binary, `~/.local/bin/beszel-agent`, systemd **user**
-  unit `beszel-agent.service`): reads /proc, hwmon temps, `nvidia-smi` (GPU
-  stats — needs no container toolkit precisely because it is NOT in Docker),
-  and the docker socket for per-container stats. Listens `127.0.0.1:45876`;
-  the hub connects to it over SSH protocol using a hub-generated keypair.
+  unit `beszel-agent.service` on Linux, launchd LaunchAgent
+  `com.henrygd.beszel-agent` on macOS): reads /proc, hwmon temps,
+  `nvidia-smi` (GPU stats — needs no container toolkit precisely because it
+  is NOT in Docker), and the docker socket for per-container stats. Listens
+  `127.0.0.1:45876`; the hub connects to it over SSH protocol using a
+  hub-generated keypair.
 
 Host networking on the hub is load-bearing: on the bridge network the hub's
 `127.0.0.1` is its own namespace and it can never reach the agent.
@@ -39,9 +41,34 @@ setup.sh does everything via the hub's API — superuser, UI user, agent key
 fetch, agent install + unit, system registration, tailscale serve — and
 fails loudly if the agent doesn't report within 60s. No manual UI steps.
 
+Preflight follows the repo convention: Linux or macOS (dies on anything
+else), refuses root, needs curl + python3 + Docker with Compose v2 and a
+reachable daemon, and resolves the Tailscale CLI from PATH or the macOS app
+bundle and requires it to be Running. Sudo is used at most twice, on Linux,
+on the first run only: `loginctl enable-linger` (so the agent unit starts at
+boot) and `tailscale set --operator` (if Serve is refused). A re-run against
+a working deploy asks for nothing. An existing `.env` is the source of
+truth for the port: a different `BESZEL_PORT` on a re-run is warned about
+and ignored.
+
+### macOS
+
+Portable by construction, not yet verified on a real Mac. The agent tarball
+is picked by `uname -s`/`uname -m` (`darwin_arm64` or `darwin_amd64`), the
+agent runs as a LaunchAgent with logs in `~/Library/Logs/beszel-agent.log`,
+and `GPU=true` is left out (that flag is nvidia-smi). Two things to know:
+
+- The hub's `network_mode: host` needs host networking switched on in
+  Docker Desktop (4.34+, Settings > Resources > Network); OrbStack supports
+  it out of the box. Without it the hub starts but the system stays "down".
+- Docker Desktop's socket lives at `~/.docker/run/docker.sock`; setup.sh
+  points the agent at it via `DOCKER_HOST` when `/var/run/docker.sock` is
+  absent, so per-container stats still work.
+
 ## Ops
 
-- Status: `systemctl --user status beszel-agent`, `docker logs beszel`
+- Status: `systemctl --user status beszel-agent` (macOS:
+  `tail -f ~/Library/Logs/beszel-agent.log`), `docker logs beszel`
 - Upgrade: `docker compose --project-directory . pull && ./setup.sh`;
   agent: delete `~/.local/bin/beszel-agent`, rerun setup.sh
 - Alerts: configure per-metric thresholds in the UI (user icon → Notifications

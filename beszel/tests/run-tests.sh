@@ -27,7 +27,38 @@ check() {
 echo "  static checks"
 check "setup.sh parses (bash -n)" bash -n "$SETUP"
 check "strict mode set" grep -q 'set -euo pipefail' "$SETUP"
-check "no sudo anywhere" bash -c "! grep -q 'sudo ' '$SETUP'"
+# Portability contract (AGENTS.md): OS branch, root refusal, resolved Tailscale
+# CLI, Tailscale-running preflight, gated Linux-only concepts.
+check "branches on uname -s (Linux|Darwin, dies otherwise)" \
+      grep -q 'case "\$OS" in Linux|Darwin) ;; \*) die' "$SETUP"
+check "refuses to run as root" grep -q '\[ "\$(id -u)" -ne 0 \] || die' "$SETUP"
+check "requires Tailscale to be Running before deploying" \
+      grep -q 'BackendState' "$SETUP"
+check "resolves the Tailscale CLI from the macOS app bundle" \
+      grep -q '/Applications/Tailscale.app/Contents/MacOS/Tailscale' "$SETUP"
+# Every real invocation goes through the resolved path. Comment lines and
+# the management hints echoed at the end are the only places the bare word
+# may appear next to a subcommand.
+check "no bare 'tailscale serve|status|ip' invocations" \
+      bash -c "! grep -vE '^[[:space:]]*(#|echo )' '$SETUP' | grep -qE '(^|[^A-Za-z_\"\$/-])tailscale +(serve|status|ip)\b'"
+check "agent tarball picks OS + arch (not linux_amd64 literal)" \
+      grep -q 'beszel-agent_\${OS_LC}_\${ARCH}\.tar\.gz' "$SETUP"
+check "macOS agent runs as a launchd LaunchAgent" \
+      grep -q 'Library/LaunchAgents/com.henrygd.beszel-agent.plist' "$SETUP"
+check "lingering is Linux-gated" \
+      bash -c "grep -B6 'loginctl enable-linger' '$SETUP' | grep -q 'OS\" = \"Linux'"
+check "operator grant is Linux-gated and only on a denied serve" \
+      bash -c "grep -B2 'set --operator=' '$SETUP' | grep -q 'OS\" = \"Linux\" \] && printf .%s. .\$serve_out. | grep -q .denied.'"
+check "serve retries only on an approval link, dies otherwise" \
+      bash -c "grep -q '\*login.tailscale.com\*) ;;' '$SETUP' && grep -A1 '\*login.tailscale.com\*) ;;' '$SETUP' | grep -q 'die'"
+check "port from .env is re-validated" \
+      grep -q 'BESZEL_PORT in \$ENV_FILE must be numeric' "$SETUP"
+check "final URL is resolved, not hardcoded" \
+      bash -c "! grep -q 'kai-home-server\.taild6a23f' '$SETUP'"
+# Sudo is surgical: exactly the two one-time Linux grants the reference
+# implementation (code-server) makes, and nothing else.
+check "sudo only for lingering + tailscale operator" \
+      bash -c "[ \"\$(grep -c '^ *sudo ' '$SETUP')\" -eq 2 ] && grep -q '^ *sudo loginctl enable-linger' '$SETUP' && grep -q '^ *sudo \"\$TAILSCALE\" set --operator=' '$SETUP'"
 check "hub bound to loopback" grep -q 'serve --http "127.0.0.1' "$COMPOSE"
 check "hub uses host networking (reaches agent loopback)" \
       grep -q 'network_mode: host' "$COMPOSE"
@@ -39,8 +70,9 @@ check "agent unit always restarted after rewrite" \
 check ".env created mode 600" grep -q 'chmod 600 "\$ENV_FILE"' "$SETUP"
 check ".env is gitignored" git -C "$SERVICE_DIR" check-ignore -q "$SERVICE_DIR/.env"
 check "idempotency guard on .env (never clobbered)" \
-      grep -q '\[ ! -f "\$ENV_FILE" \]' "$SETUP"
-check "tailscale serve published" grep -q 'tailscale serve --bg --https=' "$SETUP"
+      grep -q 'if \[ -f "\$ENV_FILE" \]; then' "$SETUP"
+check "tailscale serve published via the resolved CLI" \
+      grep -q '"\$TAILSCALE" serve --bg --https="\$PORT" "http://127.0.0.1:\$PORT"' "$SETUP"
 check "GPU stats enabled" grep -q 'GPU=true' "$SETUP"
 check "Kuma monitor row exists" \
       grep -q 'beszel' "$SERVICE_DIR/../monitoring/seed_kuma.py"
