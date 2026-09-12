@@ -3950,6 +3950,29 @@ class TouchTest(SandboxTest):
         self.assertEqual(server.usage_entry({"alpha": stored}, "alpha")
                          ["last_used"], stored["last_opened"])
 
+    def test_the_stamp_is_taken_inside_the_lock(self):
+        # Two near-simultaneous clicks. Whichever request WINS the lock has
+        # to be the one whose stamp lands: taken at entry instead, the loser
+        # overwrites the winner, last_launched moves backwards, and the 200
+        # the first caller already rendered reports a stamp the server threw
+        # away. Held here by hand so the race is decided, not raced.
+        import threading
+        got = {}
+
+        def touch():
+            got["usage"] = server.record_touch(
+                "alpha", {"event": "launched"})["usage"]
+
+        server._usage_lock.acquire()
+        worker = threading.Thread(target=touch)
+        worker.start()
+        time.sleep(0.05)
+        released = time.time()
+        server._usage_lock.release()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertGreaterEqual(got["usage"]["last_launched"], released)
+
     def test_a_second_touch_overwrites_only_its_own_field(self):
         first = server.record_touch("alpha", {"event": "opened"})["usage"]
         time.sleep(0.01)
@@ -4120,6 +4143,28 @@ class DeployedAtTest(SandboxTest):
     def test_no_marker_configured_is_null(self):
         self.assertIsNone(server.deployed_at(None))
         self.assertIsNone(server.deployed_at(""))
+
+    def test_a_marker_that_is_not_a_path_is_null_not_a_500(self):
+        # services.json is hand-edited, so `marker` is whatever JSON allowed.
+        # A number raises TypeError out of expanduser and a NUL inside the
+        # string raises ValueError. Either one uncaught is not one bad field:
+        # deployed_at runs for every tile on every list request, so it takes
+        # the entire grid down.
+        self.assertIsNone(server.deployed_at(1757550470))
+        self.assertIsNone(server.deployed_at(["~/services"]))
+        self.assertIsNone(server.deployed_at("~/serv\x00ices"))
+
+    def test_a_bad_marker_still_renders_the_grid(self):
+        # The claim that actually matters, asserted end to end rather than on
+        # the helper: `installed` reads the same field through marker_exists.
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": 1757550470,
+             "setup": None}]})
+        tiles = server.services_payload()["services"]
+        self.assertEqual(len(tiles), 1)
+        self.assertIsNone(tiles[0]["deployed_at"])
+        self.assertFalse(tiles[0]["installed"])
 
     def test_tilde_is_expanded_like_everywhere_else(self):
         # Registry markers are written "~/services/immich"; this must read
@@ -4532,6 +4577,25 @@ class ResourceCacheTest(ResourceTestBase):
         server.service_resources(other)
         self.assertEqual(len(self.reads), 2)
 
+    def test_the_sample_clock_is_taken_after_the_docker_call(self):
+        # `docker ps` runs OUTSIDE the lock and can block for up to
+        # DOCKER_MAP_TIMEOUT against a wedged daemon. Stamping the sample
+        # with the time the request ARRIVED shrinks the wall delta that
+        # _cpu_percent divides by, so a service at 40% reads 100%, and it
+        # stamps the cache entry already-expired once the block outlasts
+        # RESOURCE_TTL, making every later request re-measure.
+        self.write_cgroup(self.container_dir(), rss=4096, usage_usec=1)
+        svc = self.registry_with({"parts": [{"container": "c"}]}, key="cs")
+
+        def slow_map():
+            time.sleep(0.05)
+            return {"c": CID}
+
+        server.docker_name_map = slow_map
+        entered = time.time()
+        out = server.service_resources(svc)
+        self.assertGreaterEqual(out["sampled_at"], entered + 0.05)
+
     def test_sampled_at_is_when_the_sample_was_taken(self):
         before = time.time()
         out = server.service_resources(self.svc)
@@ -4542,8 +4606,8 @@ class ResourceCacheTest(ResourceTestBase):
 
     def test_a_broken_measurement_is_nulls_not_a_500(self):
         boom = server._measure_resources
-        server._measure_resources = lambda svc, now: (_ for _ in ()).throw(
-            RuntimeError("sysfs on fire"))
+        server._measure_resources = lambda svc, now, docker_map: (
+            _ for _ in ()).throw(RuntimeError("sysfs on fire"))
         self.addCleanup(setattr, server, "_measure_resources", boom)
         out = server.service_resources(self.svc)
         self.assertEqual(sorted(out),
