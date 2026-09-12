@@ -1,5 +1,7 @@
 # Bootstrap plan — firefly-iii SG finance automation
 
+_Shipped note (2026-09-12): Phase 1 (setup.sh, docker-compose.yml, SETUP.md, TROUBLESHOOT.md) shipped even though docs/verification-log.md still shows 0.1 and 0.3 as unanswered, which this plan says must be answered before Phase 1 starts._
+
 **Audience:** the agent picking this up. Read
 [COMPETITIVE-ANALYSIS.md](COMPETITIVE-ANALYSIS.md) first — it explains *why*
 each decision below is what it is, and lists dead ends not to re-explore.

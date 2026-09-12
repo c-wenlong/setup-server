@@ -1,5 +1,7 @@
 # Competitive analysis — browser-based remote desktop for kai-home-server
 
+_Shipped note (2026-09-12): shipped with gnome-remote-desktop as the RDP backend instead of the xrdp verdict below (see PLAN.md decision D2)._
+
 Surveyed 2026-09-11 for this box (Ryzen 5 2600, 7.7 GB RAM, GTX 1070,
 Ubuntu 24.04, tailnet-only). Written for the agent that will build
 `remote-desktop/setup.sh` — read this before PLAN.md so the *why* behind

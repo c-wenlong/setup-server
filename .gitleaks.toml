@@ -1,0 +1,39 @@
+title = "setup-server gitleaks config"
+
+# Start from the bundled ruleset and narrow it, rather than replacing it.
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Allowlists
+#
+# Every entry below is scoped by BOTH a path and the literal string it is
+# forgiving (condition = "AND"), so a real secret landing in the same file is
+# still caught. There is deliberately no path-wide allowlist for tests/stubs/:
+# the stubs are ordinary shell scripts and a genuine credential pasted into one
+# must still fail the scan.
+# ---------------------------------------------------------------------------
+
+[[allowlists]]
+description = """
+Home Assistant's curl stub replays the /auth/token response the real HA emits, \
+and gitleaks' generic-api-key rule reads the fake bearer token as a JWT. The \
+value is a header-only JWT whose payload is the literal word "stub"; it has no \
+signature, decodes to nothing, and is never sent anywhere but the mocked suite.
+"""
+targetRules = ["generic-api-key", "jwt", "jwt-base64"]
+condition = "AND"
+paths = ['''^home-assistant/tests/stubs/curl$''']
+regexes = ['''eyJhbGciOiJIUzI1NiJ9\.stub''']
+
+# ---------------------------------------------------------------------------
+# Note on */.env
+#
+# A deployed box has real credentials in <service>/.env (setup.sh generates
+# them). Those files are gitignored and never tracked, so `gitleaks git` and
+# the pre-commit hook (staged content only) do not see them. `gitleaks dir .`
+# run on a deployed box WILL report them, and that is correct behaviour, not a
+# false positive. They are not allowlisted here on purpose: if a .env ever gets
+# staged, the scan must fail loudly. scripts/check-structure.sh independently
+# asserts that no .env is tracked.
+# ---------------------------------------------------------------------------

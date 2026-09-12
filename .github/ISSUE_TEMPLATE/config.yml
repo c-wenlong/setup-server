@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / discussion
+    url: https://github.com/c-wenlong/setup-server/discussions
+    about: Ask questions or share ideas that aren't bugs or feature requests
+  - name: Security issue
+    url: https://github.com/c-wenlong/setup-server/security/advisories/new
+    about: Report a vulnerability privately, never as a public issue

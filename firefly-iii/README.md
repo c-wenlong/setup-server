@@ -37,6 +37,7 @@ current process, and the ledger becomes queryable.
 
 ## Status
 
-Nothing built yet. `PLAN.md` Phase 0 is the next action, and it is a
-**verification gate** — one Wise API finding needs confirming before the
-architecture is committed to.
+Phase 1 (the deploy: Firefly III + Postgres + Data Importer) is built and
+running (see [SETUP.md](SETUP.md)). `PLAN.md` Phase 0 (the pullers'
+verification gate) is still open; one Wise API finding needs confirming
+before Phase 2 begins.

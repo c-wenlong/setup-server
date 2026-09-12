@@ -207,12 +207,13 @@ Every container carries a `mem_limit`. Measured idle RSS on this box, from
 |---|---|---|
 | `firefly-iii` | 768m | `FIREFLY_MEM_LIMIT` |
 | `firefly-iii-db` | 512m | `FIREFLY_DB_MEM_LIMIT` |
-| `firefly-iii-importer` | 384m | `FIREFLY_IMPORTER_MEM_LIMIT` |
+| `firefly-iii-importer` | 512m | `FIREFLY_IMPORTER_MEM_LIMIT` |
 
 The limits are caps, not reservations — measured idle for the whole stack is
-roughly **500–600 MB**, well under the 1.6 GB the caps would allow, and the
-caps exist so a runaway import or a stuck php-fpm cannot take the rest of the
-box down with it. Record the real number for your deploy:
+roughly **175–200 MB** (app ~66 MB, db ~29 MB, importer ~80 MB), well under the
+~1.75 GB the caps would allow, and the caps exist so a runaway import or a
+stuck php-fpm cannot take the rest of the box down with it. Record the real
+number for your deploy:
 
 ```bash
 docker stats --no-stream firefly-iii firefly-iii-db firefly-iii-importer
@@ -246,12 +247,12 @@ Step by step:
    password lives.
 3. **State dirs** — `~/services/firefly-iii/{db,upload,importer}`.
 4. **Compose up** — pulls on first run. First boot runs the database
-   migrations; the app answers HTTP in roughly **13 seconds** with a cold
+   migrations; the app answers HTTP in roughly **25 seconds** with a cold
    Postgres.
-5. **Wait for readiness** — poll `GET /` on the loopback port until it answers.
-   A cold container is not listening at all: `curl` exits 7 and reports HTTP
-   `000`. That is a refused connection, not a 503, and the loop is written to
-   survive it rather than to treat the first failure as fatal.
+5. **Wait for readiness** — poll `GET /login` on the loopback port until it
+   answers. A cold container is not listening at all: `curl` exits 7 and
+   reports HTTP `000`. That is a refused connection, not a 503, and the loop
+   is written to survive it rather than to treat the first failure as fatal.
 6. **Register the admin** — `GET /register`, scrape the CSRF `_token`, `POST
    /register` with the same cookie jar, then **verify the user exists** rather
    than trusting the redirect. Details below; this step has two sharp edges.

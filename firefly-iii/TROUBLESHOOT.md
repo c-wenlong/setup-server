@@ -285,8 +285,8 @@ docker compose --project-directory . logs --tail=50 app
 docker compose --project-directory . logs --tail=50 db
 ```
 
-**Give it 15 seconds first.** A cold start with an empty database runs the full
-migration set and takes roughly **13 seconds** on this box before the first
+**Give it 30 seconds first.** A cold start with an empty database runs the full
+migration set and takes roughly **25 seconds** on this box before the first
 HTTP answer. `curl` exiting 7 with HTTP `000` during that window is normal, not
 a fault — that is a refused connection, because nothing is listening yet.
 
@@ -446,7 +446,7 @@ docker stats --no-stream firefly-iii firefly-iii-db firefly-iii-importer
 free -m
 ```
 
-Expect roughly 350–400 MB total at idle. A container sitting exactly at its
+Expect roughly 175–200 MB total at idle. A container sitting exactly at its
 `mem_limit` is being throttled, not merely busy — raise the limit in
 `docker-compose.yml` and `./setup.sh`.
 

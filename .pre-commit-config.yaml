@@ -1,0 +1,68 @@
+# Local mirror of the CI gates. Install with:
+#
+#   pipx install pre-commit   # or: uv tool install pre-commit
+#   pre-commit install
+#
+# Every rev is pinned to a real tag. `pre-commit autoupdate` bumps them; run
+# `pre-commit run --all-files` afterwards before committing the bump.
+
+# .claude/ holds per-machine harness state and agent worktrees (a full second
+# copy of the repo), so linting it would double every finding. It is gitignored
+# too; this keeps `pre-commit run --all-files` honest as well.
+exclude: '^\.claude/'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      # Every setup.sh, run-tests.sh and PATH stub is executed directly, so the
+      # two halves of that contract (shebang present, bit set) both matter.
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+        # Two files carry a shell or python shebang without being executable,
+        # both on purpose:
+        #   syncthing.tmpl is a template. The curl stub packages it into a fake
+        #     release tarball, and setup.sh's own install step sets the mode.
+        #   server.py is launched by its systemd unit as
+        #     `/usr/bin/env python3 .../server.py`, so the bit is never used.
+        exclude: |
+          (?x)^(
+            syncthing/tests/stubs/syncthing\.tmpl|
+            launcher/server\.py
+          )$
+      - id: detect-private-key
+        # The syncthing stub prints what `syncthing generate` writes, so the
+        # sandbox gets a key.pem shaped like the real one. Its body is the
+        # literal word STUB between PEM markers, with no key material at all.
+        exclude: '^syncthing/tests/stubs/syncthing\.tmpl$'
+      - id: check-merge-conflict
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        # Same gate as CI and `make lint`. Exclusions, with a reason each, are
+        # in .shellcheckrc at the repo root.
+        args: [-S, warning]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      # Scans staged content only, which is exactly the boundary that matters
+      # here: setup.sh writes live credentials into <service>/.env, and this is
+      # the last gate before one of them could be committed by accident.
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: check-structure
+        name: per-service contract (AGENTS.md)
+        entry: scripts/check-structure.sh
+        language: script
+        # It inspects the whole tree and asks git what is tracked, so it runs
+        # once per commit rather than once per changed file.
+        pass_filenames: false
+        always_run: true

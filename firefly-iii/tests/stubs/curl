@@ -91,8 +91,8 @@ while [ $# -gt 0 ]; do
       _form=data
       case "$piece" in
         @*) _form=file_only ;;
-        *=*@*) [ "${#_eq}" -lt "${#_at}" ] && _form=data || _form=file ;;
-        *@*)   _form=file ;;
+        *=*@*) [ "${#_eq}" -lt "${#_at}" ] && _form=data || _form="file" ;;
+        *@*)   _form="file" ;;
       esac
       case "$_form" in
         file_only)

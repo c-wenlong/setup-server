@@ -15,12 +15,14 @@ without restarting the listener. On startup (and on each reload) it logs which
 file won:
 
 ```
-control registry: 11 services from /home/kaichen/dev/setup-server/launcher/services.json
+control registry: 19 services from /home/kaichen/dev/setup-server/launcher/services.json
 ```
 
-Trust that line over this one — controllable as of 2026-09-11 (11, up from
-the original 6): `beszel`, `code-server`, `forgejo`, `immich`, `jellyfin`,
-`kaichenpedia`, `manimkc`, `n8n`, `open-webui`, `seafile`, `uptime-kuma`.
+Trust that line over this one — controllable as of 2026-09-12 (19, up from
+the original 6): `adguard`, `beszel`, `code-server`, `firefly-iii`, `forgejo`,
+`home-assistant`, `homepage`, `immich`, `jellyfin`, `kaichenpedia`, `manimkc`,
+`n8n`, `open-webui`, `paperless-ngx`, `remote-desktop`, `seafile`,
+`syncthing`, `uptime-kuma`, `vaultwarden`.
 Send `panel` for the button menu, or `pick stop` for a picker.
 
 `ntfy`, `ollama` and `launcher` are **locked out in code** (`HARD_LOCKED` in

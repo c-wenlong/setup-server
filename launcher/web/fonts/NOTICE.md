@@ -7,8 +7,7 @@ punctuation), fetched from Google Fonts (`fonts.gstatic.com`, Inter v20).
 
 Vendored rather than linked because the launcher must render with no
 internet: it is the page you open when something else on the box is broken,
-and a webfont fetched from a CDN would be blocked by the artifact CSP and
-would simply not load on an offline tailnet.
+and a webfont fetched from a CDN would simply not load on an offline tailnet.
 
 **Licence:** SIL Open Font License 1.1 — free to use, embed and
 redistribute, including in this repo. Copyright (c) 2016 The Inter Project

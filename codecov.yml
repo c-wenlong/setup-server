@@ -1,0 +1,19 @@
+coverage:
+  status:
+    project:
+      default:
+        # "auto" compares against the base commit, so the gate is "do not make
+        # it worse" rather than a fixed number that has to be edited by hand.
+        # .coveragerc's fail_under is the absolute floor underneath it.
+        target: auto
+        threshold: 0.5%
+    patch:
+      default:
+        # New Python in a PR should arrive tested, but a modest target keeps a
+        # one-line fix from needing a test of its own to merge.
+        target: 75%
+        threshold: 0%
+
+comment:
+  layout: "diff, flags, files"
+  require_changes: true

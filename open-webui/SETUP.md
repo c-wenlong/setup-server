@@ -22,7 +22,7 @@ Tailscale Serve (:10000) ──▶ open-webui container ──▶ host ollama (:
 - Ports on this box: :443 code-server, :8443 Seafile, :10000 this,
   :3002/:3003 monitoring (modern Tailscale allows any HTTPS serve port).
 - Boot-persistent via Docker's `restart: unless-stopped` — no systemd unit.
-- Chat history, accounts, and uploaded docs live in `~/open-webui/data`.
+- Chat history, accounts, and uploaded docs live in `~/services/open-webui/data`.
 
 ## Dependencies
 

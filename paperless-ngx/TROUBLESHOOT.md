@@ -212,7 +212,7 @@ and HTTP `000`, not a polite 503.
 docker compose --project-directory . logs -f webserver
 ```
 
-Watch for the migrations to finish and gunicorn to come up. If it is still
+Watch for the migrations to finish and granian to come up. If it is still
 refusing after a couple of minutes, it is not the readiness race:
 
 ```bash
@@ -281,7 +281,7 @@ chown $(id -u):$(id -g) ~/services/paperless-ngx/consume/*
 chmod 644 ~/services/paperless-ngx/consume/*
 ```
 
-The durable fix is `PAPERLESS_USERMAP_UID` / `PAPERLESS_USERMAP_GID` in `.env`
+The durable fix is `PAPERLESS_UID` / `PAPERLESS_GID` in `.env`
 set to your `id -u` / `id -g` (which is what `setup.sh` does) so the container
 runs as you and everything it writes back is yours too. Without that the
 official image runs as its own user and every archived document ends up owned
@@ -483,7 +483,6 @@ Things that are safe to delete:
 - `~/services/paperless-ngx/export/` — regenerate it whenever you like. If it
   is large, it is an old export you already copied elsewhere (you did copy it
   elsewhere?).
-- `~/services/paperless-ngx/redis/` — broker scratch, nothing durable.
 
 Things that are **not** safe to delete: `media/` (the documents) and `data/`
 (the metadata). "Clearing the cache" is not a thing here.
@@ -536,8 +535,7 @@ docker compose --project-directory . down -v
 # 4. Delete the state. Only the paths you confirmed exist in step 2.
 rm -rf ~/services/paperless-ngx/data \
        ~/services/paperless-ngx/media \
-       ~/services/paperless-ngx/consume \
-       ~/services/paperless-ngx/redis
+       ~/services/paperless-ngx/consume
 #    NOTE: export/ is deliberately not in that list — it is your escape hatch.
 
 # 5. New credentials and a new secret key on the next deploy.
@@ -556,7 +554,7 @@ Two things make this recipe safe rather than superstitious:
   `.Mounts` is what the running container is genuinely using, which beats both
   `.env` and this document if they ever disagree. Delete what it names.
 - **`rm -rf` here does not need `sudo`** *if* the container ran as your uid
-  (`PAPERLESS_USERMAP_UID`, which is what `setup.sh` sets). If it did not, the
+  (`PAPERLESS_UID`, which is what `setup.sh` sets). If it did not, the
   files are owned by the image's user and a plain `rm -rf` fails partway
   through, leaving a half-deleted data directory — which is worse than either
   extreme, because Paperless will start on it and behave strangely. Check
@@ -572,7 +570,7 @@ Two things make this recipe safe rather than superstitious:
 
   ```bash
   docker run --rm -v ~/services/paperless-ngx:/x --entrypoint rm alpine \
-    -rf /x/data /x/media /x/consume /x/redis
+    -rf /x/data /x/media /x/consume
   ```
 
 ### The much smaller hammer you probably want

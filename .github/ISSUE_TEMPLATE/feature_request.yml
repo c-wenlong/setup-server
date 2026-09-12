@@ -1,0 +1,57 @@
+name: Feature request
+description: Suggest a new service, or a change to an existing one
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome, especially services that install without root, bind
+        loopback, and publish cleanly over Tailscale Serve. Current ideas are
+        collected in EXPLORATION.md.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - New service
+        - Existing service
+        - Launcher
+        - Monitoring (Uptime Kuma, ntfy, ntfy-control)
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: service
+    attributes:
+      label: Service
+      description: The directory name for an existing service, or the project name for a new one.
+      placeholder: jellyfin
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What does this solve? What are you trying to do on the box today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: |
+        How should it behave? For a new service, say roughly what it needs: Docker or
+        a native binary, how much RAM, which port, and whether anything about it
+        resists binding to 127.0.0.1.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other projects you looked at, or workarounds you've tried.
