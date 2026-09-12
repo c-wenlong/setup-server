@@ -33,6 +33,12 @@ first, dated by merge.
   from the tailnet rather than hardcoded. `.env` is now the source of truth
   for the port on a re-run. The static suite gained ten checks for the
   contract; verified by a live re-run on the box.
+- **Three suites declared `FAKE_TS_IP` and never used it.** firefly-iii now
+  asserts the listener audit accepted tailscaled's Serve proxy on the stub's
+  tailnet address for both ports (and resolved it via `tailscale ip -4`),
+  remote-desktop's two literal `100.77.77.77` assertions use the variable,
+  and homepage drops it (its audit never names the address; the ss and
+  tailscale stubs share it between themselves).
 
 ## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
 
