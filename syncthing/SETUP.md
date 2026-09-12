@@ -187,7 +187,12 @@ No Docker, no root. Sudo is asked at most twice on Linux, once each, for
    discovery, NAT traversal, the GUI address and the host-check bypass are
    put back through `PATCH /rest/config/…`, the same call the GUI makes,
    so every other setting in `config.xml` is left as you made it; a GUI
-   repair restarts the service. **Preference drift** (usage or crash
+   repair restarts the service — and then **checks the socket table**, not
+   the API, before it says the GUI is back on loopback. The API would only
+   read back the change just written to it, and health passing proves
+   nothing (a wildcard bind answers on `127.0.0.1` too), so if the restart
+   is refused, or `:8384` is still on `0.0.0.0` afterwards, the run dies
+   rather than claim a repair. **Preference drift** (usage or crash
    reporting turned on, self-upgrade interval) is reported and left alone:
    it is your choice, and self-upgrade is inert under `--no-upgrade` anyway.
 8. **Default folder**, first run only: `POST /rest/config/folders` creates
@@ -198,12 +203,20 @@ No Docker, no root. Sudo is asked at most twice on Linux, once each, for
 11. **End-to-end**: health over the tailnet URL, then the GUI root (the
     request a browser makes, with the Host header Serve actually forwards —
     a 403 here is the host check and is reported with the fix). Then the
-    socket table: `:22000` must be bound to the tailnet IP and nothing else.
+    socket table: `:22000` must be bound to the tailnet IP and nothing else,
+    and `:8384` must answer only on loopback plus this node's tailnet
+    addresses (that row is tailscaled's Serve frontend, on the same port
+    number the GUI binds).
 12. Prints the Device ID, the sync address, and how to add a device.
 
-Exit status is non-zero only if step 11 still finds a listener off the
-tailnet or a GUI that 403s after the repairs above, or a repair itself was
-refused by the API — the deploy is up in those cases, but not as designed.
+Exit status is non-zero only if step 11 still finds a sync listener off the
+tailnet, a GUI answering off loopback, or a GUI that 403s after the repairs
+above; if a repair itself was refused by the API; or if the box has neither
+`ss` nor `lsof`, so the GUI's bind could not be checked at all — the deploy
+is up in those cases, but not as designed, or not shown to be. (A socket
+tool that runs and simply sees nothing bound yet is a warning, not a
+failure: that is the normal, self-healing state while `tailscale0` comes
+up.)
 
 ## Adding your devices
 
@@ -300,7 +313,11 @@ aligns the publish.
 **Tailnet IP changed** (re-joined the tailnet, new node key). The listener is
 bound to the old address and fails to bind. Set `SYNCTHING_LISTEN_IP` in
 `.env` to the new address and `./setup.sh` — it repoints the listener over
-REST. Peers using the MagicDNS name need no change.
+REST. Peers using the MagicDNS name need no change. If `config.xml` does not
+exist yet (restored `.env`, wiped config directory) the run **refuses** to
+generate one instead: a fresh config pinned to an address this host does not
+hold could never bind, and every later check in the script would agree with
+itself and miss it.
 
 **Turn it off.** `systemctl --user disable --now syncthing` and
 `tailscale serve --https=8384 off`. The files stay where they are.

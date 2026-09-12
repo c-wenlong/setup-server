@@ -18,6 +18,8 @@
 #                          health (exit 7, code 000): a cold start
 #      hostcheck_403     — GET / through the tailnet URL answers 403, i.e.
 #                          insecureSkipHostcheck is not in effect
+#      restart_fails     — POST /rest/system/restart answers 500, i.e. the
+#                          config change is written but never takes effect
 #      folders.json      — the folder list; POST appends and touches
 #                          folder_post
 echo "curl $*" >> "$CALLS_LOG"
@@ -158,7 +160,12 @@ case "$url" in
     fi
     ;;
   */rest/system/restart)
-    touch "$STATE_DIR/restart_posted"; emit 200 '{"ok":"restarting"}' ;;
+    touch "$STATE_DIR/restart_posted"
+    # A refused restart leaves the GUI's OLD listener in place while every
+    # config read-back reports the new address. The deploy must not treat
+    # that as repaired.
+    [ -f "$STATE_DIR/restart_fails" ] && emit 500 'restart not permitted'
+    emit 200 '{"ok":"restarting"}' ;;
 esac
 
 case "$url" in

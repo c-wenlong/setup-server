@@ -4,11 +4,20 @@
 # only so the "python3 missing" preflight can be driven:
 #   $STATE_DIR/python3_missing — every invocation fails like a missing
 #                                interpreter
+#
+# $REAL_PYTHON3 — where the real interpreter lives. The harness exports it
+#                 before it ever narrows PATH, because the minimal-PATH runs
+#                 (the "no ss on this box" / macOS socket-check test) leave
+#                 this stub as the ONLY python3 on PATH, and a pass-through
+#                 that cannot find its target would fail the whole deploy for
+#                 a reason that has nothing to do with what is being tested.
 [ -f "$STATE_DIR/python3_missing" ] && { echo "python3: command not found" >&2; exit 127; }
 here="$(cd "$(dirname "$0")" && pwd)"
-real=""
-for p in $(type -aP python3 2>/dev/null); do
-  case "$p" in "$here"/*) continue ;; *) real="$p"; break ;; esac
-done
+real="${REAL_PYTHON3:-}"
+if [ -z "$real" ]; then
+  for p in $(type -aP python3 2>/dev/null); do
+    case "$p" in "$here"/*) continue ;; *) real="$p"; break ;; esac
+  done
+fi
 [ -n "$real" ] || { echo "python3 stub: no real python3 on PATH" >&2; exit 127; }
 exec "$real" "$@"

@@ -61,6 +61,13 @@
 # same API (which is how Syncthing itself edits config.xml) — every other
 # setting in the file is left exactly as you made it. Preference drift
 # (reporting, self-upgrade) is reported, not reverted.
+#
+# Where the security model depends on the answer — where the GUI and the sync
+# port are ACTUALLY bound — the REST API is not the authority and is not
+# trusted as one: it reports the config, so asking it right after writing
+# that config just reads the write back. Those two facts are settled in the
+# socket table (ss, or lsof on macOS), and a repair that cannot be confirmed
+# there fails the run rather than being reported as done.
 
 set -euo pipefail
 
@@ -75,6 +82,20 @@ STATE="$HOME/services/syncthing"
 BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/syncthing"
 OS="$(uname -s)"
+
+# A recovery instruction is only useful if it names the service manager this
+# box actually has. This script already branches on $OS in eight places and
+# prints the launchd form in its closing "Manage it with" block; these two
+# strings are so that the hints buried inside error messages cannot quietly
+# drift back to being Linux-only. `\$(id -u)` stays literal on purpose — it
+# is printed for the user to run, not expanded here.
+if [ "$OS" = "Linux" ]; then
+  RESTART_HINT="systemctl --user restart syncthing"
+  LOGS_HINT="journalctl --user -u syncthing -n 50"
+else
+  RESTART_HINT="launchctl kickstart -k gui/\$(id -u)/net.syncthing.syncthing"
+  LOGS_HINT="tail -n 50 ~/Library/Logs/syncthing.log"
+fi
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
@@ -133,6 +154,13 @@ case "$TS_IP" in
   [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;;
   *) die "Could not determine this node's tailnet IPv4 from '$TAILSCALE ip -4' (got: '${TS_IP:-nothing}'). The sync port binds to it." ;;
 esac
+# Not fatal — nothing here binds IPv6, and not every tailnet hands one out.
+# It is needed only so the socket-level check below can tell tailscaled's own
+# Serve frontend apart from a GUI that has escaped loopback: Serve listens on
+# this node's tailnet addresses (v4 AND v6) on the SAME port number the GUI
+# binds, so both of them are legitimate rows in the socket table for
+# :LOCAL_PORT, and 0.0.0.0 is not.
+TS_IP6="$("$TAILSCALE" ip -6 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
 ok "$OS + curl + python3 + Tailscale (running)   name: $TS_HOST   ip: $TS_IP"
 
 # ---------------------------------------------------------------- .env
@@ -193,6 +221,20 @@ case "$VERSION" in v[0-9]*) ;; *) die "SYNCTHING_VERSION in .env must look like 
 CONFIG_FILE="$CONFIG_DIR/config.xml"
 
 if [ "$LISTEN_IP" != "$TS_IP" ]; then
+  # A config.xml that already exists is never rewritten (see below), so the
+  # stale address only affects a listener that is already live: warn, and let
+  # the exposure check further down report the listen addresses it finds.
+  #
+  # With NO config.xml the same warning would be a lie by omission. The run
+  # would go on to GENERATE a fresh config pinned to $LISTEN_IP — an address
+  # this host does not hold — and every later check would then agree with
+  # itself: the exposure check compares the running config against the same
+  # dead address, so it passes, and an empty socket table is only a warning.
+  # The deploy would print "Done." over a listener that can never bind.
+  # Refuse instead, and say exactly which line to edit.
+  if [ ! -f "$CONFIG_FILE" ]; then
+    die "SYNCTHING_LISTEN_IP in $ENV_FILE is $LISTEN_IP but this node's tailnet IP is $TS_IP, and there is no $CONFIG_FILE yet. Generating one would pin the sync listener to an address this host does not hold — it could never bind, and the checks in this script would not catch it. Fix: set SYNCTHING_LISTEN_IP=$TS_IP in $ENV_FILE and re-run."
+  fi
   warn "SYNCTHING_LISTEN_IP in .env is $LISTEN_IP but this node's tailnet IP is now $TS_IP."
   warn "  The sync listener will fail to bind until they match. Fix: set SYNCTHING_LISTEN_IP=$TS_IP in $ENV_FILE, then repoint the listener (see the drift warning below) and re-run."
 fi
@@ -434,6 +476,67 @@ wait_health() {  # wait_health BASE_URL ATTEMPTS
 }
 jpy() { python3 - "$WORK/resp" "$@"; }   # run a python snippet on the last response
 
+# ------------------------------------------------------ socket-level checks
+# The only thing in this deploy that can tell a real bind from a config file's
+# opinion of one. Every other check here talks to the REST API, and the API
+# reports the CONFIG: ask it where the GUI listens right after PATCHing that
+# very setting and it will read the PATCH back to you whether or not the
+# process ever rebound. Same for the sync port — config.xml can name the right
+# address while the bind failed (tailnet IP not held yet) or a stale process
+# still holds the old one.
+#
+# Knowing we have NO such tool is itself a finding, not a free pass: the
+# GUI-repair path below refuses to claim success it cannot verify.
+if command -v ss >/dev/null; then SOCKET_TOOL="ss"
+elif command -v lsof >/dev/null; then SOCKET_TOOL="lsof"
+else SOCKET_TOOL=""; fi
+[ -n "$SOCKET_TOOL" ] || warn "Neither ss nor lsof is installed, so this run cannot check on the wire what is actually listening. On Ubuntu: sudo apt-get install -y iproute2"
+
+listener_addrs() {  # listener_addrs PORT -> one "addr:port" per line, tcp + udp
+  local port="$1"
+  case "$SOCKET_TOOL" in
+    ss)
+      { ss -ltnH "sport = :$port"; ss -lunH "sport = :$port"; } 2>/dev/null \
+        | awk '{print $4}' | sort -u || true ;;
+    lsof)
+      # Listening sockets only. A bare `-i:PORT` also returns ESTABLISHED
+      # connections (local:22000->peer:port), which are not listeners:
+      # -sTCP:LISTEN for TCP, and for UDP (stateless) drop anything with a
+      # peer half. Both `lsof` and the pipeline exit non-zero when nothing
+      # matches, which under pipefail would abort the caller's assignment.
+      { lsof -nP -iTCP:"$port" -sTCP:LISTEN; lsof -nP -iUDP:"$port"; } 2>/dev/null \
+        | awk '$1 != "COMMAND" && $9 !~ /->/ {print $9}' | sort -u || true ;;
+  esac
+}
+
+foreign_listeners() {  # foreign_listeners PORT ALLOWED_HOST... -> " a b" (empty = clean)
+  # Every listener on PORT whose address is not one of the allowed hosts,
+  # space-prefixed for dropping straight into a message. Empty output means
+  # either "all where we want them" or "nothing bound at all", so callers
+  # check listener_addrs first when that distinction matters.
+  local port="$1"; shift
+  local a host want allowed out=""
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    # "127.0.0.1:8384" -> 127.0.0.1, "[::1]:8384" -> ::1
+    host="${a%:*}"; host="$(printf '%s' "$host" | tr -d '[]')"
+    allowed=0
+    for want in "$@"; do
+      if [ -n "$want" ] && [ "$host" = "$want" ]; then allowed=1; break; fi
+    done
+    [ "$allowed" = "1" ] || out="$out $a"
+  done <<EOF
+$(listener_addrs "$port")
+EOF
+  printf '%s' "$out"
+}
+
+# Addresses that may legitimately answer on the GUI port. Loopback is the GUI
+# itself; the tailnet addresses are tailscaled's Serve frontend, which is
+# published on the SAME port number the GUI binds. 0.0.0.0, :: or a LAN
+# address is none of those, and the GUI has no password.
+gui_foreign() { foreign_listeners "$LOCAL_PORT" 127.0.0.1 ::1 localhost "$TS_IP" "$TS_IP6"; }
+
 info "Waiting for Syncthing on 127.0.0.1:$LOCAL_PORT"
 wait_health "http://127.0.0.1:$LOCAL_PORT" 30 \
   || { [ "$OS" = "Linux" ] && die "Syncthing did not answer /rest/noauth/health (last HTTP $ST_CODE). Logs: journalctl --user -u syncthing -n 50"
@@ -542,17 +645,32 @@ case "$GUI_STATE" in
     # the unit brings it back.
     api PATCH /rest/config/gui "{\"address\":\"127.0.0.1:$LOCAL_PORT\",\"insecureSkipHostcheck\":true}"
     [ "$ST_CODE" = "200" ] || die "PATCH /rest/config/gui returned HTTP $ST_CODE: $(head -c 200 "$WORK/resp")"
-    api POST /rest/system/restart
     info "Restarting Syncthing so the GUI change takes effect"
+    api POST /rest/system/restart
+    # An unchecked restart is how this repair used to lie. The PATCH above
+    # only edits the config; the address is read when the API service starts,
+    # so a restart that never happened leaves the OLD listener in place —
+    # while every read-back below happily echoes the config we just wrote.
+    [ "$ST_CODE" = "200" ] || die "POST /rest/system/restart returned HTTP $ST_CODE: $(head -c 200 "$WORK/resp"). The GUI address was changed in the config but the running process still holds the old bind — it may still be reachable off loopback. Restart by hand ($RESTART_HINT) and re-run."
     sleep 2
-    wait_health "http://127.0.0.1:$LOCAL_PORT" 30 || die "Syncthing did not come back after the GUI repair (last HTTP $ST_CODE). Logs: journalctl --user -u syncthing -n 50"
+    wait_health "http://127.0.0.1:$LOCAL_PORT" 30 || die "Syncthing did not come back after the GUI repair (last HTTP $ST_CODE). Logs: $LOGS_HINT"
     api GET /rest/config/gui
     [ "$ST_CODE" = "200" ] || die "GET /rest/config/gui returned HTTP $ST_CODE after the repair"
     GUI_STATE="$(check_gui)"
     case "$GUI_STATE" in
       *BAD_ADDRESS*|*HOSTCHECK*) die "Repaired the GUI config over REST but it still disagrees after restart: $GUI_STATE. Fix by hand in $CONFIG_FILE (<gui><address>127.0.0.1:$LOCAL_PORT</address><insecureSkipHostcheck>true</insecureSkipHostcheck>) and restart." ;;
     esac
-    ok "Repaired: GUI on 127.0.0.1:$LOCAL_PORT with the host check relaxed for Serve"
+    # Neither of the two checks above proves anything about the wire. The GET
+    # reads back the config this script just PATCHed, and wait_health passing
+    # proves nothing either: a wildcard bind answers on 127.0.0.1 too. The
+    # thing being repaired is an unauthenticated GUI listening on 0.0.0.0 and
+    # reachable from the LAN, so confirm on the socket table or do not claim
+    # the repair at all — fail closed, in both directions.
+    [ -n "$SOCKET_TOOL" ] || die "Repaired the GUI config over REST, but this box has neither ss nor lsof, so where the GUI is actually bound cannot be checked. Refusing to report it as loopback-only while it may still be on 0.0.0.0:$LOCAL_PORT. Install iproute2 (Linux), or verify by hand, then re-run."
+    [ -n "$(listener_addrs "$LOCAL_PORT")" ] || die "Repaired the GUI config over REST and Syncthing answered on 127.0.0.1:$LOCAL_PORT, but $SOCKET_TOOL shows nothing listening on :$LOCAL_PORT — the new bind cannot be confirmed, so the repair is not proven. Check by hand and re-run."
+    gui_off_loopback="$(gui_foreign)"
+    [ -z "$gui_off_loopback" ] || die "The GUI repair did NOT take: :$LOCAL_PORT is still listening on$gui_off_loopback — off loopback and off this node's tailnet addresses, i.e. reachable from the LAN, with no GUI password. The config now says 127.0.0.1:$LOCAL_PORT, so the process never rebound. Restart it ($RESTART_HINT) and re-run; if it comes back on the same address, something other than Syncthing holds :$LOCAL_PORT."
+    ok "Repaired: GUI on 127.0.0.1:$LOCAL_PORT with the host check relaxed for Serve (confirmed on the wire, not just in the config)"
     ;;
 esac
 gui_user="$(printf '%s\n' "$GUI_STATE" | sed -n 's/^user=//p' | head -1)"
@@ -623,42 +741,55 @@ if [ "$ST_CODE" = "200" ] || wait_health "$url" 15; then
   http "$url/"
   case "$ST_CODE" in
     200) ok "GUI answers through Serve (host check passed)" ;;
-    403) PROBLEMS=1; warn "GUI root is a 403 through Serve — Syncthing's host check is rejecting the tailnet Host header even though the running config says insecureSkipHostcheck=true. Restart the service (systemctl --user restart syncthing) and re-run; if it persists, check <gui> in $CONFIG_FILE." ;;
+    403) PROBLEMS=1; warn "GUI root is a 403 through Serve — Syncthing's host check is rejecting the tailnet Host header even though the running config says insecureSkipHostcheck=true. Restart the service ($RESTART_HINT) and re-run; if it persists, check <gui> in $CONFIG_FILE." ;;
     *)   warn "GUI root returned HTTP $ST_CODE through Serve (expected 200)." ;;
   esac
 else
   warn "No answer on $url/rest/noauth/health yet (HTTP $ST_CODE) — the cert may still be minting. Retry in a minute: curl $url/rest/noauth/health"
 fi
 
-# The sync listener, checked on the wire. config.xml can say the right thing
-# while the bind failed (tailnet IP not held yet) or a stale process holds
-# the old address; only the socket table settles it.
-sync_addrs=""
-if command -v ss >/dev/null; then
-  sync_addrs="$( { ss -ltnH "sport = :$SYNC_PORT"; ss -lunH "sport = :$SYNC_PORT"; } 2>/dev/null | awk '{print $4}' | sort -u || true)"
-elif command -v lsof >/dev/null; then
-  # Listening sockets only. A bare `-i:PORT` also returns ESTABLISHED
-  # connections (local:22000->peer:port), which are not listeners: -sTCP:LISTEN
-  # for TCP, and for UDP (stateless) drop anything with a peer half.
-  sync_addrs="$( { lsof -nP -iTCP:"$SYNC_PORT" -sTCP:LISTEN; lsof -nP -iUDP:"$SYNC_PORT"; } 2>/dev/null \
-    | awk '$1 != "COMMAND" && $9 !~ /->/ {print $9}' | sort -u || true)"
-fi
+# The sync listener, checked on the wire (see the helpers above for why the
+# REST API cannot answer this question).
+sync_addrs="$(listener_addrs "$SYNC_PORT")"
 if [ -z "$sync_addrs" ]; then
   warn "Nothing is listening on :$SYNC_PORT yet. Syncthing retries the bind on its own; if this persists, is $LISTEN_IP still this node's tailnet IP? (tailscale ip -4)"
 else
-  foreign=""
-  while IFS= read -r a; do
-    [ -n "$a" ] || continue
-    host="${a%:*}"; host="$(printf '%s' "$host" | tr -d '[]')"
-    [ "$host" = "$LISTEN_IP" ] || foreign="$foreign $a"
-  done <<EOF
-$sync_addrs
-EOF
+  foreign="$(foreign_listeners "$SYNC_PORT" "$LISTEN_IP")"
   if [ -z "$foreign" ]; then
     ok "Sync port :$SYNC_PORT is bound to $LISTEN_IP only (tcp + udp/quic)"
   else
     PROBLEMS=1
     warn "Sync port :$SYNC_PORT is ALSO listening on:$foreign — that is off the tailnet. Fix the listen addresses (see above) or stop whatever else holds that port."
+  fi
+fi
+
+# And the GUI port, on the wire too — every run, not only the repair path.
+# The GUI has no password: the tailnet IS the auth layer, so a GUI that
+# answers on 0.0.0.0 or a LAN address is the whole security model gone, and
+# nothing that reads config.xml or the REST API can see that happen.
+gui_addrs="$(listener_addrs "$LOCAL_PORT")"
+if [ -z "$SOCKET_TOOL" ]; then
+  # No ss and no lsof: where the GUI is bound — the single fact the
+  # tailnet-as-the-auth-layer model rests on — cannot be established on this
+  # box by any means. That is not "probably fine". The deploy stays up (it
+  # may well be correct) but the run carries the finding out in its exit
+  # status, the same way every other unverifiable security fact in this repo
+  # does. Distinct from the case below on purpose: "the tool looked and saw
+  # nothing" is evidence, "there is no tool" is the absence of evidence.
+  PROBLEMS=1
+  warn "Could not verify where the GUI is bound: this box has neither ss nor lsof. The GUI has no password, so a bind that escaped loopback would be reachable from the LAN and nothing in this run would see it. Install iproute2 (Linux) or use a box with lsof (macOS ships it), then re-run."
+elif [ -z "$gui_addrs" ]; then
+  # The tool ran and found no rows. Same treatment the sync port gets a few
+  # lines up: a bind that has not appeared yet is a normal, self-healing
+  # state, not a finding.
+  warn "$SOCKET_TOOL showed nothing listening on :$LOCAL_PORT even though Syncthing answered there — this run could not confirm on the wire that the GUI is loopback-only."
+else
+  gui_off_loopback="$(gui_foreign)"
+  if [ -z "$gui_off_loopback" ]; then
+    ok "GUI port :$LOCAL_PORT answers on loopback and this node's tailnet address (Serve) only"
+  else
+    PROBLEMS=1
+    warn "GUI port :$LOCAL_PORT is listening on$gui_off_loopback — off loopback and off the tailnet, and the GUI has no password. Expected 127.0.0.1:$LOCAL_PORT (plus tailscaled's Serve frontend on $TS_IP). Check <gui><address> in $CONFIG_FILE and restart, or stop whatever else holds that port."
   fi
 fi
 
@@ -702,7 +833,7 @@ echo "Backup:  $CONFIG_DIR is the identity — copy it somewhere off this box."
 
 if [ "$PROBLEMS" = "1" ]; then
   echo
-  printf '\033[1;31m ✗ \033[0m %s\n' "Exiting non-zero: the deploy is up, but at least one warning above is a security-model or usability break (a listener off the tailnet, or a GUI that 403s through Serve). Fix it and re-run."
+  printf '\033[1;31m ✗ \033[0m %s\n' "Exiting non-zero: the deploy is up, but at least one warning above is a security-model or usability break (a sync listener off the tailnet, a GUI answering off loopback, or a GUI that 403s through Serve). Fix it and re-run."
   exit 1
 fi
 exit 0
