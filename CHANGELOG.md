@@ -22,7 +22,7 @@ first, dated by merge.
   `:2283 -> 127.0.0.1:2284`. The default now follows the local port, on the
   first run and on a re-run where `.env` holds the port, while an explicit
   `HTTPS_PORT` is honoured as given. New mocked test covers all three cases.
-\n- **The structure check could fail CI on a branch whose README was identical
+- **The structure check could fail CI on a branch whose README was identical
   to main's.** `links_to` piped `grep` into `grep -q` under `pipefail`; when
   the reader exited on its first match the writer took SIGPIPE and the row
   was reported missing. One grep now, no pipe.

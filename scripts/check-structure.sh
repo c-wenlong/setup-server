@@ -54,7 +54,10 @@ links_to() {
   # has finished: the writer takes SIGPIPE ("write error: Broken pipe"), its
   # status is 2, and a row that is present gets reported as missing. Seen in
   # CI on a branch whose README was byte-identical to main's.
-  grep -q -- "^|.*\[$name\]($name/)" "$file"
+  # The link is matched as a fixed string (index, not a regex), so a service
+  # name with a dot or a bracket in it cannot match anything but itself.
+  awk -v link="[$name]($name/)" \
+    '/^\|/ && index($0, link) { found = 1; exit } END { exit !found }' "$file"
 }
 
 # ------------------------------------------------------------- per service
