@@ -55,8 +55,12 @@
 #
 # Idempotent: safe to re-run. It repairs the unit and the publish, upgrades
 # the binary when SYNCTHING_VERSION in .env changes, and never rewrites an
-# existing config.xml or .env — it reads the live config back and WARNS when
-# it has drifted from the house rules above.
+# existing .env. config.xml is written once; after that the RUNNING config is
+# read back over REST and, if the network-exposure rules above or the GUI
+# binding have drifted, those specific settings are put back through the
+# same API (which is how Syncthing itself edits config.xml) — every other
+# setting in the file is left exactly as you made it. Preference drift
+# (reporting, self-upgrade) is reported, not reverted.
 
 set -euo pipefail
 
@@ -409,9 +413,9 @@ http() {  # http URL [extra curl args...] -> body in $WORK/resp, code in $ST_COD
   ST_CODE="$(curl -sS -o "$WORK/resp" -w '%{http_code}' --max-time "${ST_TIMEOUT:-15}" "$@" "$url" 2>/dev/null)" || true
   case "$ST_CODE" in [0-9][0-9][0-9]) ;; *) ST_CODE=000 ;; esac
 }
-api() {  # api GET|POST /rest/path [json-body]
-  if [ "$1" = "POST" ]; then
-    http "http://127.0.0.1:$LOCAL_PORT$2" -H "X-API-Key: $API_KEY" -X POST -H 'Content-Type: application/json' --data-binary "$3"
+api() {  # api GET|POST|PATCH /rest/path [json-body]
+  if [ "$1" = "POST" ] || [ "$1" = "PATCH" ]; then
+    http "http://127.0.0.1:$LOCAL_PORT$2" -H "X-API-Key: $API_KEY" -X "$1" -H 'Content-Type: application/json' --data-binary "${3:-}"
   else
     http "http://127.0.0.1:$LOCAL_PORT$2" -H "X-API-Key: $API_KEY"
   fi
@@ -451,60 +455,107 @@ PY
 [ -n "$DEVICE_ID" ] || die "Could not read this device's ID from /rest/system/status"
 ok "Device ID: $DEVICE_ID"
 
-api GET /rest/config/options
-[ "$ST_CODE" = "200" ] || die "GET /rest/config/options returned HTTP $ST_CODE"
-DRIFT="$(jpy "tcp://$LISTEN_IP:$SYNC_PORT" "quic://$LISTEN_IP:$SYNC_PORT" <<'PY'
+# Two tiers of house rule. EXPOSURE (what the box listens on and which
+# third parties it registers with) is the security model: drift there is put
+# back, through the same REST API the GUI uses, so nothing else in config.xml
+# is touched. PREFERENCE (reporting, self-upgrade — inert anyway under
+# --no-upgrade) is the deploy's opinion: drift there is reported, not
+# reverted. Syncthing persists the API change to config.xml itself.
+WANT_LISTEN_TCP="tcp://$LISTEN_IP:$SYNC_PORT"
+WANT_LISTEN_QUIC="quic://$LISTEN_IP:$SYNC_PORT"
+check_options() {  # -> exposure problems on stdout, preference problems on stderr
+  jpy "$WANT_LISTEN_TCP" "$WANT_LISTEN_QUIC" <<'PY'
 import json, sys
 o = json.load(open(sys.argv[1]))
 want_listen = sorted(sys.argv[2:4])
-probs = []
 have = sorted(o.get("listenAddresses") or [])
 if have != want_listen:
-    probs.append("listenAddresses=%s (want %s)" % (have, want_listen))
-for k, v in (("globalAnnounceEnabled", False), ("localAnnounceEnabled", False),
-             ("relaysEnabled", False), ("natEnabled", False),
-             ("crashReportingEnabled", False), ("autoUpgradeIntervalH", 0)):
-    if o.get(k) != v:
-        probs.append("%s=%s (want %s)" % (k, json.dumps(o.get(k)), json.dumps(v)))
+    print("listenAddresses=%s (want %s)" % (have, want_listen))
+for k in ("globalAnnounceEnabled", "localAnnounceEnabled", "relaysEnabled",
+          "natEnabled", "announceLANAddresses"):
+    if o.get(k) is not False:
+        print("%s=%s (want false)" % (k, json.dumps(o.get(k))))
+if o.get("crashReportingEnabled") is not False:
+    print("crashReportingEnabled=%s (want false)" % json.dumps(o.get("crashReportingEnabled")), file=sys.stderr)
+if o.get("autoUpgradeIntervalH") != 0:
+    print("autoUpgradeIntervalH=%s (want 0; inert under --no-upgrade)" % json.dumps(o.get("autoUpgradeIntervalH")), file=sys.stderr)
 if o.get("urAccepted", 0) >= 0:
-    probs.append("urAccepted=%s (want -1: usage reporting declined)" % o.get("urAccepted"))
-print("\n".join(probs))
+    print("urAccepted=%s (want -1: usage reporting declined)" % o.get("urAccepted"), file=sys.stderr)
 PY
-)"
-if [ -z "$DRIFT" ]; then
-  ok "Running config matches the house rules: listens ONLY on $LISTEN_IP:$SYNC_PORT (tcp+quic); relays, global + local discovery, NAT traversal, reporting and self-upgrade all off"
-elif [ "$FRESH" = "1" ]; then
-  printf '%s\n' "$DRIFT" >&2
+}
+
+api GET /rest/config/options
+[ "$ST_CODE" = "200" ] || die "GET /rest/config/options returned HTTP $ST_CODE"
+EXPOSURE="$(check_options 2>"$WORK/prefs")"
+PREFS="$(cat "$WORK/prefs")"
+if [ -n "$EXPOSURE" ] && [ "$FRESH" = "1" ]; then
+  printf '%s\n' "$EXPOSURE" >&2
   die "Fresh config.xml was patched but the running instance disagrees (above). Check $CONFIG_FILE and the service log."
+elif [ -n "$EXPOSURE" ]; then
+  warn "The running config has drifted from the exposure rules — repairing these settings (nothing else in config.xml is touched):"
+  printf '%s\n' "$EXPOSURE" | sed 's/^/      /'
+  body="$(python3 -c 'import json,sys; print(json.dumps({"listenAddresses":[sys.argv[1],sys.argv[2]],"globalAnnounceEnabled":False,"localAnnounceEnabled":False,"relaysEnabled":False,"natEnabled":False,"announceLANAddresses":False}))' "$WANT_LISTEN_TCP" "$WANT_LISTEN_QUIC")"
+  api PATCH /rest/config/options "$body"
+  [ "$ST_CODE" = "200" ] || die "PATCH /rest/config/options returned HTTP $ST_CODE: $(head -c 200 "$WORK/resp")"
+  api GET /rest/config/options
+  [ "$ST_CODE" = "200" ] || die "GET /rest/config/options returned HTTP $ST_CODE after the repair"
+  still="$(check_options 2>/dev/null)"
+  [ -z "$still" ] || { printf '%s\n' "$still" >&2; die "Repaired the options over REST but the running instance still disagrees (above). Fix by hand: Settings -> Connections, listen addresses $WANT_LISTEN_TCP, $WANT_LISTEN_QUIC; relays, discovery and NAT off."; }
+  ok "Repaired: listens ONLY on $LISTEN_IP:$SYNC_PORT (tcp+quic); relays, global + local discovery, NAT traversal off. Syncthing rebinds live; the socket check below confirms."
 else
-  PROBLEMS=1
-  warn "The running config has drifted from the house rules (not reverted — config.xml is yours):"
-  printf '%s\n' "$DRIFT" | sed 's/^/      /'
-  warn "  If a listenAddress is 0.0.0.0 or 'default', the sync port is reachable from the LAN and this box is registering with public relays. To repoint:"
-  warn "    GUI: Actions -> Settings -> Connections -> Sync Protocol Listen Addresses = tcp://$LISTEN_IP:$SYNC_PORT, quic://$LISTEN_IP:$SYNC_PORT; untick relays, global + local discovery, NAT traversal."
-  warn "    or:  curl -X PATCH -H 'X-API-Key: <apikey from $CONFIG_FILE>' -H 'Content-Type: application/json' -d '{\"listenAddresses\":[\"tcp://$LISTEN_IP:$SYNC_PORT\",\"quic://$LISTEN_IP:$SYNC_PORT\"],\"relaysEnabled\":false,\"globalAnnounceEnabled\":false,\"localAnnounceEnabled\":false,\"natEnabled\":false}' http://127.0.0.1:$LOCAL_PORT/rest/config/options"
+  ok "Running config matches the exposure rules: listens ONLY on $LISTEN_IP:$SYNC_PORT (tcp+quic); relays, global + local discovery, NAT traversal off"
+fi
+if [ -n "$PREFS" ]; then
+  warn "Preference drift (left as you set it): $(printf '%s' "$PREFS" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
+else
+  ok "Reporting declined and self-upgrade off, as deployed"
 fi
 
 api GET /rest/config/gui
 [ "$ST_CODE" = "200" ] || die "GET /rest/config/gui returned HTTP $ST_CODE"
-GUI_STATE="$(jpy "127.0.0.1:$LOCAL_PORT" <<'PY'
+check_gui() {  # -> "BAD_ADDRESS <addr>" / "HOSTCHECK" lines, plus "user=<name|->"
+  jpy "127.0.0.1:$LOCAL_PORT" <<'PY'
 import json, sys
 g = json.load(open(sys.argv[1]))
-print("address=%s hostcheck=%s user=%s" % (
-    g.get("address"), "skip" if g.get("insecureSkipHostcheck") else "ENFORCED", g.get("user") or "-"))
+print("user=%s" % (g.get("user") or "-"))
 if g.get("address") != sys.argv[2]:
-    print("BAD_ADDRESS")
+    print("BAD_ADDRESS %s" % g.get("address"))
 if not g.get("insecureSkipHostcheck"):
     print("HOSTCHECK")
 PY
-)"
+}
+GUI_STATE="$(check_gui)"
 case "$GUI_STATE" in
-  *BAD_ADDRESS*) PROBLEMS=1; warn "GUI is bound to $(printf '%s' "$GUI_STATE" | sed -n 's/^address=\([^ ]*\).*/\1/p'), not 127.0.0.1:$LOCAL_PORT. If that is a non-loopback address the GUI is reachable off the tailnet — fix it in Settings -> GUI -> Listen Address." ;;
+  *BAD_ADDRESS*|*HOSTCHECK*)
+    if [ "$FRESH" = "1" ]; then
+      printf '%s\n' "$GUI_STATE" >&2
+      die "Fresh config.xml was patched but the running GUI config disagrees (above). Check $CONFIG_FILE."
+    fi
+    case "$GUI_STATE" in
+      *BAD_ADDRESS*) warn "GUI is bound to $(printf '%s\n' "$GUI_STATE" | sed -n 's/^BAD_ADDRESS //p'), not 127.0.0.1:$LOCAL_PORT — a non-loopback address is reachable off the tailnet. Repairing." ;;
+    esac
+    case "$GUI_STATE" in
+      *HOSTCHECK*) warn "insecureSkipHostcheck is off — every page through Tailscale Serve would be a 403 'Host check error'. Repairing." ;;
+    esac
+    # Address and host check are read when the API service starts, so a
+    # restart is required for either. --no-restart makes that exit 3, and
+    # the unit brings it back.
+    api PATCH /rest/config/gui "{\"address\":\"127.0.0.1:$LOCAL_PORT\",\"insecureSkipHostcheck\":true}"
+    [ "$ST_CODE" = "200" ] || die "PATCH /rest/config/gui returned HTTP $ST_CODE: $(head -c 200 "$WORK/resp")"
+    api POST /rest/system/restart
+    info "Restarting Syncthing so the GUI change takes effect"
+    sleep 2
+    wait_health "http://127.0.0.1:$LOCAL_PORT" 30 || die "Syncthing did not come back after the GUI repair (last HTTP $ST_CODE). Logs: journalctl --user -u syncthing -n 50"
+    api GET /rest/config/gui
+    [ "$ST_CODE" = "200" ] || die "GET /rest/config/gui returned HTTP $ST_CODE after the repair"
+    GUI_STATE="$(check_gui)"
+    case "$GUI_STATE" in
+      *BAD_ADDRESS*|*HOSTCHECK*) die "Repaired the GUI config over REST but it still disagrees after restart: $GUI_STATE. Fix by hand in $CONFIG_FILE (<gui><address>127.0.0.1:$LOCAL_PORT</address><insecureSkipHostcheck>true</insecureSkipHostcheck>) and restart." ;;
+    esac
+    ok "Repaired: GUI on 127.0.0.1:$LOCAL_PORT with the host check relaxed for Serve"
+    ;;
 esac
-case "$GUI_STATE" in
-  *HOSTCHECK*) PROBLEMS=1; warn "insecureSkipHostcheck is off: every page through Tailscale Serve will be a 403 'Host check error'. Set <insecureSkipHostcheck>true</insecureSkipHostcheck> inside <gui> in $CONFIG_FILE and restart." ;;
-esac
-gui_user="$(printf '%s' "$GUI_STATE" | sed -n 's/.*user=\([^ ]*\).*/\1/p' | head -1)"
+gui_user="$(printf '%s\n' "$GUI_STATE" | sed -n 's/^user=//p' | head -1)"
 if [ "$gui_user" = "-" ]; then
   ok "GUI: 127.0.0.1:$LOCAL_PORT, no GUI password (the tailnet is the auth layer); REST API key-gated"
 else
@@ -572,7 +623,7 @@ if [ "$ST_CODE" = "200" ] || wait_health "$url" 15; then
   http "$url/"
   case "$ST_CODE" in
     200) ok "GUI answers through Serve (host check passed)" ;;
-    403) PROBLEMS=1; warn "GUI root is a 403 through Serve — Syncthing's host check is rejecting the tailnet Host header. Set <insecureSkipHostcheck>true</insecureSkipHostcheck> inside <gui> in $CONFIG_FILE and restart the service." ;;
+    403) PROBLEMS=1; warn "GUI root is a 403 through Serve — Syncthing's host check is rejecting the tailnet Host header even though the running config says insecureSkipHostcheck=true. Restart the service (systemctl --user restart syncthing) and re-run; if it persists, check <gui> in $CONFIG_FILE." ;;
     *)   warn "GUI root returned HTTP $ST_CODE through Serve (expected 200)." ;;
   esac
 else
@@ -586,7 +637,11 @@ sync_addrs=""
 if command -v ss >/dev/null; then
   sync_addrs="$( { ss -ltnH "sport = :$SYNC_PORT"; ss -lunH "sport = :$SYNC_PORT"; } 2>/dev/null | awk '{print $4}' | sort -u || true)"
 elif command -v lsof >/dev/null; then
-  sync_addrs="$(lsof -nP -i:"$SYNC_PORT" 2>/dev/null | awk 'NR>1{print $9}' | sed 's/ (LISTEN)//' | sort -u || true)"
+  # Listening sockets only. A bare `-i:PORT` also returns ESTABLISHED
+  # connections (local:22000->peer:port), which are not listeners: -sTCP:LISTEN
+  # for TCP, and for UDP (stateless) drop anything with a peer half.
+  sync_addrs="$( { lsof -nP -iTCP:"$SYNC_PORT" -sTCP:LISTEN; lsof -nP -iUDP:"$SYNC_PORT"; } 2>/dev/null \
+    | awk '$1 != "COMMAND" && $9 !~ /->/ {print $9}' | sort -u || true)"
 fi
 if [ -z "$sync_addrs" ]; then
   warn "Nothing is listening on :$SYNC_PORT yet. Syncthing retries the bind on its own; if this persists, is $LISTEN_IP still this node's tailnet IP? (tailscale ip -4)"

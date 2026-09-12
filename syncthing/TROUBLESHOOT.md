@@ -39,8 +39,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: kai-home-server.taild6a23f.ts
 |---|---|---|
 | health refuses the connection but the unit is active | still starting (db open, folder scan) | wait 10 s; if it persists check the log for a GUI bind error |
 | health OK, API calls 403 `Not Authorized` | wrong or regenerated API key | read it fresh from `config.xml` (above); the GUI can also show it under Settings → GUI |
-| the third command prints **403** (body: *Host check error*) | `insecureSkipHostcheck` is off — the GUI rejects the tailnet Host header that Serve forwards | in `config.xml`, inside `<gui>`: `<insecureSkipHostcheck>true</insecureSkipHostcheck>`, then `systemctl --user restart syncthing`. `./setup.sh` reports this exact case |
-| GUI bound somewhere other than `127.0.0.1:8384` | changed in Settings → GUI | change it back there, or in `config.xml` → `<gui><address>`, and restart; anything non-loopback is reachable off the tailnet |
+| the third command prints **403** (body: *Host check error*) | `insecureSkipHostcheck` is off — the GUI rejects the tailnet Host header that Serve forwards | `./setup.sh` repairs it over REST and restarts the service. By hand: in `config.xml`, inside `<gui>`: `<insecureSkipHostcheck>true</insecureSkipHostcheck>`, then `systemctl --user restart syncthing` |
+| GUI bound somewhere other than `127.0.0.1:8384` | changed in Settings → GUI | `./setup.sh` puts it back on loopback and restarts; anything non-loopback is reachable off the tailnet |
 
 ## Layer 3 — is it published?
 
@@ -73,9 +73,9 @@ curl -s -H "X-API-Key: $KEY" http://127.0.0.1:8384/rest/system/connections
 |---|---|---|
 | peer shows this box as *Disconnected* forever; this box's GUI never showed a "new device" banner | the peer's entry for this box says `dynamic` | on the **peer**, edit this device → Advanced → Addresses → `tcp://kai-home-server.taild6a23f.ts.net:22000` |
 | banner appeared, you clicked Add Device, still not syncing | folder not shared to that device, or the peer has not accepted the folder | on this box, edit the device → Sharing; on the peer, accept the folder offer |
-| `connectionServiceStatus` shows `"error": "… cannot assign requested address"` | the tailnet IP changed; the listener still names the old one | Settings → Connections → Sync Protocol Listen Addresses → `tcp://<new ip>:22000, quic://<new ip>:22000`; set `SYNCTHING_LISTEN_IP` in `.env`; `./setup.sh` |
+| `connectionServiceStatus` shows `"error": "… cannot assign requested address"` | the tailnet IP changed; the listener still names the old one | set `SYNCTHING_LISTEN_IP` in `.env` to `tailscale ip -4`, then `./setup.sh` — it repoints the listener over REST |
 | `ss` shows nothing on `:22000` | same as above, or tailscaled not up | `tailscale status`; Syncthing retries the bind by itself once the address exists |
-| `ss` shows `0.0.0.0:22000` or a LAN address | listen address changed to `default`/`0.0.0.0` in the GUI | put the tailnet address back (above). `./setup.sh` flags this and exits 1 |
+| `ss` shows `0.0.0.0:22000` or a LAN address | listen address changed to `default`/`0.0.0.0` in the GUI (or relays/discovery re-enabled) | `./setup.sh` — it repairs exactly those settings over REST and leaves the rest of `config.xml` alone; it only exits 1 if the socket is still wrong afterwards |
 | peer connects, then drops with a TLS / certificate error | clock skew on one side, or the peer holds a stale Device ID for a rebuilt box | fix the clock; or remove and re-add the device on the peer with the new ID |
 | connects over TCP only, never QUIC (or vice versa) | one protocol blocked by the peer's network | harmless; either one syncs fully. `connections` shows which |
 | MagicDNS name does not resolve on the peer | MagicDNS off for that device, or a corporate DNS override | use `tcp://100.85.87.87:22000` instead — it is also stable unless the node re-joins the tailnet |

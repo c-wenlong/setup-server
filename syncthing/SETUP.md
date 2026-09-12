@@ -182,8 +182,14 @@ No Docker, no root. Sudo is asked at most twice on Linux, once each, for
    "not yet", not failure.
 7. **Verifies the running instance over REST**, not the file: device ID,
    the options above, the GUI address and host-check setting. On a fresh
-   deploy a mismatch is fatal; on a re-run it is your edit, so it is
-   reported with the fix and the run exits non-zero without reverting it.
+   deploy a mismatch is fatal (the patch did not take). On a re-run,
+   **exposure drift is repaired** — listeners, relays, global and local
+   discovery, NAT traversal, the GUI address and the host-check bypass are
+   put back through `PATCH /rest/config/…`, the same call the GUI makes,
+   so every other setting in `config.xml` is left as you made it; a GUI
+   repair restarts the service. **Preference drift** (usage or crash
+   reporting turned on, self-upgrade interval) is reported and left alone:
+   it is your choice, and self-upgrade is inert under `--no-upgrade` anyway.
 8. **Default folder**, first run only: `POST /rest/config/folders` creates
    `default` at `SYNCTHING_DATA/default`, shared with nobody.
 9. **Lingering** (Linux) so the service starts at boot.
@@ -195,8 +201,9 @@ No Docker, no root. Sudo is asked at most twice on Linux, once each, for
     socket table: `:22000` must be bound to the tailnet IP and nothing else.
 12. Prints the Device ID, the sync address, and how to add a device.
 
-Exit status is non-zero if anything in 7 or 11 found a listener off the
-tailnet or a GUI that 403s, even though the deploy is otherwise up.
+Exit status is non-zero only if step 11 still finds a listener off the
+tailnet or a GUI that 403s after the repairs above, or a repair itself was
+refused by the API — the deploy is up in those cases, but not as designed.
 
 ## Adding your devices
 
@@ -285,16 +292,15 @@ means editing each folder's path in the GUI (or `config.xml`, service
 stopped). `SYNCTHING_DATA` in `.env` only sets where `setup.sh` created
 `default`.
 
-**Change a port.** Edit `.env`, then the corresponding setting in the GUI
-(Settings → Connections for the sync listener, Settings → GUI for the GUI
-address), then `./setup.sh` to re-publish. `setup.sh` does not rewrite
-`config.xml` for you and will warn until the two agree.
+**Change a port.** Edit `.env`, then `./setup.sh`: it sees the running
+listener (or GUI address) disagree with `.env`, repairs it over REST, and
+re-publishes. You can equally change it in the GUI first; the next run
+aligns the publish.
 
 **Tailnet IP changed** (re-joined the tailnet, new node key). The listener is
-bound to the old address and fails to bind; `setup.sh` warns and prints the
-`PATCH /rest/config/options` one-liner to repoint it, then update
-`SYNCTHING_LISTEN_IP` in `.env`. Peers using the MagicDNS name need no
-change.
+bound to the old address and fails to bind. Set `SYNCTHING_LISTEN_IP` in
+`.env` to the new address and `./setup.sh` — it repoints the listener over
+REST. Peers using the MagicDNS name need no change.
 
 **Turn it off.** `systemctl --user disable --now syncthing` and
 `tailscale serve --https=8384 off`. The files stay where they are.

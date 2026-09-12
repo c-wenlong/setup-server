@@ -112,6 +112,55 @@ listen_json() {
 }
 skip_hostcheck() { case "$(gval insecureSkipHostcheck)" in true) echo true;; *) echo false;; esac; }
 
+# PATCH /rest/config/{options,gui}: apply the body to the sandbox config.xml
+# the way the real server persists it, so the next GET reflects the repair.
+apply_patch() {  # apply_patch options|gui BODY
+  [ -f "$cfg" ] || exit 1
+  python3 - "$cfg" "$1" "$2" <<'PYS'
+import sys, json
+import xml.etree.ElementTree as ET
+path, which, body = sys.argv[1:4]
+d = json.loads(body); t = ET.parse(path); r = t.getroot()
+if which == "options":
+    o = r.find("options")
+    if "listenAddresses" in d:
+        for el in o.findall("listenAddress"): o.remove(el)
+        for i, u in enumerate(d["listenAddresses"]):
+            el = ET.Element("listenAddress"); el.text = u; o.insert(i, el)
+    for k, v in d.items():
+        if k == "listenAddresses": continue
+        el = o.find(k)
+        if el is None: el = ET.SubElement(o, k)
+        el.text = json.dumps(v) if not isinstance(v, bool) else ("true" if v else "false")
+else:
+    g = r.find("gui")
+    for k, v in d.items():
+        el = g.find(k)
+        if el is None: el = ET.SubElement(g, k)
+        el.text = ("true" if v else "false") if isinstance(v, bool) else str(v)
+ET.indent(t, space="    ")   # one element per line: the stub's sed views read line-wise
+t.write(path)
+PYS
+}
+
+case "$url" in
+  */rest/config/options)
+    if [ "$method" = "PATCH" ]; then
+      touch "$STATE_DIR/options_patched"; printf '%s' "$body" >> "$STATE_DIR/options_patch_bodies"
+      [ -f "$STATE_DIR/patch_fails" ] && emit 500 'nope'
+      apply_patch options "$body"; emit 200 ''
+    fi
+    ;;
+  */rest/config/gui)
+    if [ "$method" = "PATCH" ]; then
+      touch "$STATE_DIR/gui_patched"; printf '%s' "$body" >> "$STATE_DIR/gui_patch_bodies"
+      apply_patch gui "$body"; emit 200 ''
+    fi
+    ;;
+  */rest/system/restart)
+    touch "$STATE_DIR/restart_posted"; emit 200 '{"ok":"restarting"}' ;;
+esac
+
 case "$url" in
   https://*/rest/noauth/health)
     emit 200 '{"status":"OK"}' ;;

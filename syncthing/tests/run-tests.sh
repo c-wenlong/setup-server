@@ -26,7 +26,10 @@
 # The property this service's suite exists to protect: :22000 on the tailnet
 # address ONLY, with relays, global discovery and LAN multicast off. Every
 # one of those defaults to ON upstream, and each one is a way for this box to
-# be reachable from, or to talk to, somewhere other than the tailnet.
+# be reachable from, or to talk to, somewhere other than the tailnet. A
+# re-run that finds those drifted REPAIRS them over REST (the exposure tests
+# below); it never rewrites config.xml wholesale, and preference drift
+# (reporting, self-upgrade) is reported and left alone.
 
 set -u
 
@@ -231,7 +234,7 @@ test_fresh_deploy() {
   check "read the device ID"                calls_have "127.0.0.1:8384/rest/system/status"
   check "  and printed it"                  out_has "Device ID: STUBDEV-AAAAAAA"
   check "checked the running options"       calls_have "127.0.0.1:8384/rest/config/options"
-  check "  house rules confirmed"           out_has "matches the house rules"
+  check "  house rules confirmed"           out_has "matches the exposure rules"
   check "checked the GUI config"            calls_have "127.0.0.1:8384/rest/config/gui"
   check "  reports no GUI password"         out_has "no GUI password"
   check "created the default folder"        [ -f "$STATE_DIR/folder_post" ]
@@ -322,7 +325,7 @@ test_rerun_idempotent() {
   check "no folder re-created"          [ ! -f "$STATE_DIR/folder_post" ]
   check "  reports 1 folder"            out_has "1 folder(s) configured"
   check "never invoked sudo"            no_call "^sudo "
-  check "house rules re-verified"       out_has "matches the house rules"
+  check "house rules re-verified"       out_has "matches the exposure rules"
   check "service restarted (repair)"    sh -c "grep -qE 'systemctl --user restart syncthing|launchctl bootstrap' '$CALLS_LOG'"
   check "re-applied serve config"       calls_have "tailscale serve --bg --https=8384 http://127.0.0.1:8384"
   teardown
@@ -373,34 +376,103 @@ test_port_override() {
   teardown
 }
 
-test_drift_warns_not_reverts() {
-  echo "• running config drifted back to wildcard/relays: warned, exit non-zero, NOT rewritten"
-  # config.xml is the user's file after the first run. But a listener on
-  # 0.0.0.0 with relays on is exactly the exposure this deploy exists to
-  # prevent, so silence is not an option either: report it, give the fix,
-  # exit non-zero.
+test_exposure_drift_repaired() {
+  echo "• running config drifted back to wildcard/relays: repaired over REST, rest of config.xml untouched"
+  # A listener on 0.0.0.0 with relays on is exactly the exposure this deploy
+  # exists to prevent, and the repo contract is that a re-run REPAIRS. The
+  # repair goes through the same REST API the GUI uses, so it is a settings
+  # change, not a file overwrite: everything else in config.xml survives.
   setup
   touch "$STATE_DIR/operator"
   run_deploy
   cfg="$(cfg_path)"
   sed -e 's#<listenAddress>tcp://100.100.100.100:22000</listenAddress>#<listenAddress>default</listenAddress>#' \
       -e 's#<listenAddress>quic://100.100.100.100:22000</listenAddress>##' \
-      -e 's#<relaysEnabled>false</relaysEnabled>#<relaysEnabled>true</relaysEnabled>#' "$cfg" > "$cfg.new" \
+      -e 's#<relaysEnabled>false</relaysEnabled>#<relaysEnabled>true</relaysEnabled>#' \
+      -e 's#<natEnabled>false</natEnabled>#<natEnabled>false</natEnabled><maxSendKbps>123</maxSendKbps>#' "$cfg" > "$cfg.new" \
+    && cat "$cfg.new" > "$cfg" && rm "$cfg.new"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero (repaired, not just flagged)" [ "$CODE" -eq 0 ]
+  check "warned about the drift"        out_has "drifted from the exposure rules"
+  check "  named the listener"          out_has "listenAddresses="
+  check "  named relays"                out_has "relaysEnabled=true"
+  check "PATCHed /rest/config/options"  [ -f "$STATE_DIR/options_patched" ]
+  check "  with the tailnet listeners"  sh -c "grep -q 'tcp://100.100.100.100:22000' '$STATE_DIR/options_patch_bodies' && grep -q 'quic://100.100.100.100:22000' '$STATE_DIR/options_patch_bodies'"
+  check "  and relays/discovery/NAT off" sh -c "grep -q '\"relaysEnabled\": false' '$STATE_DIR/options_patch_bodies' && grep -q '\"globalAnnounceEnabled\": false' '$STATE_DIR/options_patch_bodies' && grep -q '\"natEnabled\": false' '$STATE_DIR/options_patch_bodies'"
+  check "  re-read and confirmed"       out_has "Repaired: listens ONLY on 100.100.100.100:22000"
+  check "config.xml now tailnet-only"   cfg_has '<listenAddress>tcp://100.100.100.100:22000</listenAddress>'
+  check "  relays off again"            cfg_has '<relaysEnabled>false</relaysEnabled>'
+  check "  the user's other setting survived" cfg_has '<maxSendKbps>123</maxSendKbps>'
+  check "  API key untouched"           cfg_has '<apikey>STUBAPIKEY'
+  check "no GUI patch (GUI was fine)"   [ ! -f "$STATE_DIR/gui_patched" ]
+  check "  and no restart"              [ ! -f "$STATE_DIR/restart_posted" ]
+  check "still published"               calls_have "tailscale serve --bg --https=8384"
+  check "no non-zero exit banner"       out_lacks "Exiting non-zero"
+  # And the fresh-deploy path must still refuse rather than repair: a patch
+  # that did not take on a brand-new config is a bug, not drift.
+  teardown
+}
+
+test_preference_drift_only_warns() {
+  echo "• reporting / self-upgrade prefs changed by the user: reported, left alone, exit zero"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  cfg="$(cfg_path)"
+  sed -e 's#<urAccepted>-1</urAccepted>#<urAccepted>3</urAccepted>#' \
+      -e 's#<crashReportingEnabled>false</crashReportingEnabled>#<crashReportingEnabled>true</crashReportingEnabled>#' "$cfg" > "$cfg.new" \
     && cat "$cfg.new" > "$cfg" && rm "$cfg.new"
   cfg_before="$(cat "$cfg")"
   : > "$CALLS_LOG"
   run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "reports preference drift"      out_has "Preference drift"
+  check "  names urAccepted"            out_has "urAccepted=3"
+  check "  names crash reporting"       out_has "crashReportingEnabled=true"
+  check "exposure rules still hold"     out_has "matches the exposure rules"
+  check "did NOT patch anything"        [ ! -f "$STATE_DIR/options_patched" ]
+  check "config.xml byte-identical"     [ "$(cat "$cfg")" = "$cfg_before" ]
+  teardown
+}
+
+test_gui_drift_repaired() {
+  echo "• GUI moved off loopback and host check re-enabled: repaired over REST + restart"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  cfg="$(cfg_path)"
+  sed -e 's#<address>127.0.0.1:8384</address>#<address>0.0.0.0:8384</address>#' \
+      -e '/<insecureSkipHostcheck>true<\/insecureSkipHostcheck>/d' "$cfg" > "$cfg.new" \
+    && cat "$cfg.new" > "$cfg" && rm "$cfg.new"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "warned about the GUI address"  out_has "GUI is bound to 0.0.0.0:8384"
+  check "warned about the host check"   out_has "insecureSkipHostcheck is off"
+  check "PATCHed /rest/config/gui"      [ -f "$STATE_DIR/gui_patched" ]
+  check "  loopback + host check in the body" sh -c "grep -q '\"address\":\"127.0.0.1:8384\"' '$STATE_DIR/gui_patch_bodies' && grep -q '\"insecureSkipHostcheck\":true' '$STATE_DIR/gui_patch_bodies'"
+  check "posted a restart"              [ -f "$STATE_DIR/restart_posted" ]
+  check "  waited for health again"     [ "$(call_count '127.0.0.1:8384/rest/noauth/health')" -ge 2 ]
+  check "  re-read and confirmed"       out_has "Repaired: GUI on 127.0.0.1:8384"
+  check "config.xml back on loopback"   cfg_has '<address>127.0.0.1:8384</address>'
+  check "  host check relaxed again"    cfg_has '<insecureSkipHostcheck>true</insecureSkipHostcheck>'
+  check "no options patch (they were fine)" [ ! -f "$STATE_DIR/options_patched" ]
+  teardown
+}
+
+test_repair_that_does_not_take_dies() {
+  echo "• the REST repair is refused: dies with the manual fix, never claims repaired"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  cfg="$(cfg_path)"
+  sed 's#<relaysEnabled>false</relaysEnabled>#<relaysEnabled>true</relaysEnabled>#' "$cfg" > "$cfg.new" && cat "$cfg.new" > "$cfg" && rm "$cfg.new"
+  touch "$STATE_DIR/patch_fails"
+  run_deploy
   check "exits non-zero"                [ "$CODE" -ne 0 ]
-  check "warns about drift"             out_has "drifted from the house rules"
-  check "  names the listener"          out_has "listenAddresses="
-  check "  names relays"                out_has "relaysEnabled=true"
-  check "  explains the exposure"       out_has "reachable from the LAN"
-  check "  gives the GUI fix"           out_has "Sync Protocol Listen Addresses"
-  check "  and the API fix"             out_has "PATCH"
-  check "config.xml NOT rewritten"      [ "$(cat "$cfg")" = "$cfg_before" ]
-  check "did not claim the rules hold"  out_lacks "matches the house rules"
-  check "still published"               calls_have "tailscale serve --bg --https=8384"
-  check "final line says why non-zero"  out_has "Exiting non-zero"
+  check "names the failed PATCH"        out_has "PATCH /rest/config/options returned HTTP 500"
+  check "never claimed repaired"        out_lacks "Repaired:"
   teardown
 }
 
@@ -425,7 +497,7 @@ test_hostcheck_403() {
   run_deploy
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "names the host check"          out_has "host check"
-  check "  gives the config fix"        out_has "insecureSkipHostcheck"
+  check "  gives the fix"               out_has "Restart the service"
   check "health still passed"           out_has "End-to-end HTTPS check passed"
   check "did not claim GUI works"       out_lacks "GUI answers through Serve"
   teardown
@@ -494,9 +566,10 @@ listener_hosts() {  # listener_hosts PORT
   if command -v ss >/dev/null; then
     addrs="$( { ss -ltnH "sport = :$port"; ss -lunH "sport = :$port"; } 2>/dev/null | awk '{print $4}')"
   else
-    addrs="$(lsof -nP -i:"$port" 2>/dev/null | awk 'NR>1{print $9}')"
+    # Listening sockets only — a bare -i:PORT also lists ESTABLISHED peers.
+    addrs="$( { lsof -nP -iTCP:"$port" -sTCP:LISTEN; lsof -nP -iUDP:"$port"; } 2>/dev/null | awk '$1 != "COMMAND" && $9 !~ /->/ {print $9}')"
   fi
-  printf '%s\n' "$addrs" | sed 's/ (LISTEN)//' | awk 'NF' | sed 's/:[0-9]*$//' | tr -d '[]' | sort -u
+  printf '%s\n' "$addrs" | awk 'NF' | sed 's/:[0-9]*$//' | tr -d '[]' | sort -u
 }
 
 # Every listener on $port must be loopback or this node's tailnet address.
@@ -606,7 +679,10 @@ test_readiness_retry
 test_rerun_idempotent
 test_version_bump
 test_port_override
-test_drift_warns_not_reverts
+test_exposure_drift_repaired
+test_preference_drift_only_warns
+test_gui_drift_repaired
+test_repair_that_does_not_take_dies
 test_tailnet_ip_changed
 test_hostcheck_403
 test_wildcard_socket

@@ -24,7 +24,14 @@ home servers. One directory per service; each is self-contained.
 - **Security model**: services bind to `127.0.0.1` only and are published
   tailnet-only via `tailscale serve`. Do not bind to `0.0.0.0` or LAN
   interfaces, do not open firewall ports, do not add password auth as a
-  substitute for the tailnet boundary without being asked.
+  substitute for the tailnet boundary without being asked. The one
+  sanctioned exception: a protocol Serve cannot carry (UDP, or one where
+  peers must dial the node directly) may bind **this node's tailnet IP**
+  (`tailscale ip -4`) and nothing wider — AdGuard's DNS on `:53` and
+  Syncthing's sync listener on `:22000` do this. Such a listener must be
+  resolved at deploy time (never hardcoded), documented as an exception in
+  the service's SETUP.md and DIRECTORY.md row, and asserted by the live
+  suite to be on the tailnet address only.
 - **Sudo is surgical**: escalate per-command (`sudo loginctl ...`), announce
   why before prompting, and design so sudo is needed at most on first run.
 - **Long-running services** use systemd *user* units in
