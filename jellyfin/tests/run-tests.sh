@@ -459,6 +459,39 @@ test_port_override() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (8096) next to a LOCAL_PORT
+  # override silently published :8096 -> 127.0.0.1:8097, i.e. the wrong port.
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=8097
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=8097"   grep -qx 'LOCAL_PORT=8097' "$SVC/.env"
+  check "served :8097 -> 127.0.0.1:8097" calls_have "tailscale serve --bg --https=8097 http://127.0.0.1:8097"
+  check "  and never :8096"              no_call "tailscale serve --bg --https=8096"
+  check "prints the :8097 URL"           out_has "https://test-host.tailfake.ts.net:8097"
+  # Re-run with no override at all: .env says 8097, and the HTTPS default has
+  # to follow what .env settled on rather than snap back to 8096.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"                   [ "$CODE" -eq 0 ]
+  check "re-run kept :8097 -> 127.0.0.1:8097" calls_have "tailscale serve --bg --https=8097 http://127.0.0.1:8097"
+  check "  and never :8096"                   no_call "tailscale serve --bg --https=8096"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=8097 HTTPS_PORT=8443
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:8097" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8097"
+  check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_published_url_drift() {
   echo "• the tailnet URL moved: warns, does not silently rewrite .env"
   setup
@@ -737,7 +770,7 @@ test_live() {
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
-  https_port="${HTTPS_PORT:-8096}"
+  https_port="${HTTPS_PORT:-$port}"
   user="$(sed -n 's/^JELLYFIN_ADMIN_USERNAME=//p' "$SERVICE_DIR/.env")"
   pass="$(sed -n 's/^JELLYFIN_ADMIN_PASSWORD=//p' "$SERVICE_DIR/.env")"
   url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
@@ -808,6 +841,7 @@ test_password_drift
 test_not_an_admin
 test_wrong_published_url
 test_port_override
+test_https_port_follows_local_port
 test_published_url_drift
 test_media_dir_override
 test_media_present

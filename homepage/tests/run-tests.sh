@@ -831,6 +831,41 @@ test_port_override() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (8100) next to a LOCAL_PORT
+  # override silently published :8100 -> 127.0.0.1:9100, i.e. the wrong port.
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=9100
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=9100"  grep -qx 'LOCAL_PORT=9100' "$SVC/.env"
+  check "served :9100 -> 127.0.0.1:9100" calls_have "tailscale serve --bg --https=9100 http://127.0.0.1:9100"
+  check "  and never :8100"             no_call "tailscale serve --bg --https=8100"
+  check "prints the :9100 URL"          out_hasF "https://$FAKE_TS_HOST:9100"
+  # Re-run with no override at all: .env says 9100, and the HTTPS default has
+  # to follow what .env settled on rather than snap back to 8100.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero" [ "$CODE" -eq 0 ]
+  check "re-run kept :9100 -> 127.0.0.1:9100" \
+    calls_have "tailscale serve --bg --https=9100 http://127.0.0.1:9100"
+  check "  and never :8100" no_call "tailscale serve --bg --https=8100"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=9100 HTTPS_PORT=9443
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "served :9443 -> 127.0.0.1:9100" calls_have "tailscale serve --bg --https=9443 http://127.0.0.1:9100"
+  check "prints the :9443 URL"           out_hasF "https://$FAKE_TS_HOST:9443"
+  unset LOCAL_PORT HTTPS_PORT
+  teardown
+}
+
 test_allowlist_drift_warns_without_rewriting() {
   echo "• HTTPS_PORT moved but .env's allowlist did not: warns, does not rewrite"
   setup
@@ -1199,6 +1234,7 @@ test_up_fails
 test_pull_failure_is_soft
 test_https_front_door_slow
 test_port_override
+test_https_port_follows_local_port
 test_allowlist_drift_warns_without_rewriting
 test_operator_escalation
 test_serve_approval_prompt

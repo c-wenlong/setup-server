@@ -15,6 +15,7 @@
 #
 # Usage:
 #   ./setup.sh                                   # local 8100, HTTPS 8100
+#   LOCAL_PORT=8101 ./setup.sh                   # HTTPS follows LOCAL_PORT (8101 -> 8101)
 #   LOCAL_PORT=8100 HTTPS_PORT=8100 ./setup.sh
 #
 # ---------------------------------------------------------------------------
@@ -53,7 +54,11 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8100}"
-HTTPS_PORT="${HTTPS_PORT:-8100}"
+# The HTTPS port follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. Whether it was explicit is remembered for the .env read-back below.
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 CONTAINER="homepage"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -195,6 +200,9 @@ ALLOWED="${HOMEPAGE_ALLOWED_HOSTS:?HOMEPAGE_ALLOWED_HOSTS missing from $ENV_FILE
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
+# .env holds no HTTPS_PORT, so a default HTTPS port keeps following the local
+# port .env settled on; an explicit HTTPS_PORT is honoured as given.
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
 
 # Drift check, not a rewrite: .env is the user's file. But a stale allowlist
 # is the single failure this service has, and it does not announce itself —

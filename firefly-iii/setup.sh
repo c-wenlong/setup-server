@@ -19,6 +19,7 @@
 #
 # Usage:
 #   ./setup.sh                                       # 8097 web, 8099 importer
+#   LOCAL_PORT=8100 ./setup.sh                       # HTTPS follows LOCAL_PORT (8100 -> 8100)
 #   LOCAL_PORT=8097 HTTPS_PORT=8097 ./setup.sh
 #   FIREFLY_ADMIN_EMAIL=me@example.com ./setup.sh    # first run only; .env wins after
 #
@@ -69,8 +70,13 @@ set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8097}"
 IMPORTER_PORT="${IMPORTER_PORT:-8099}"
-HTTPS_PORT="${HTTPS_PORT:-8097}"
-IMPORTER_HTTPS_PORT="${IMPORTER_HTTPS_PORT:-8099}"
+# HTTPS follows the matching local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT or IMPORTER_PORT
+# cannot split a pair. Unlike immich, .env stores both HTTPS ports and they
+# are read back below, so a re-run needs no HTTPS_PORT_EXPLICIT bookkeeping ,
+# it lands back on whatever .env already settled on.
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
+IMPORTER_HTTPS_PORT="${IMPORTER_HTTPS_PORT:-$IMPORTER_PORT}"
 ADMIN_EMAIL="${FIREFLY_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
 
 APP_CONTAINER="firefly-iii"

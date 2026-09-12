@@ -762,6 +762,41 @@ test_port_override() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (3080) next to a LOCAL_PORT
+  # override silently published :3080 -> 127.0.0.1:3084, i.e. the wrong port.
+  setup
+  touch "$STATE_DIR/operator"
+  echo 3084 > "$STATE_DIR/web_port"
+  export LOCAL_PORT=3084
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=3084"  grep -qx 'LOCAL_PORT=3084' "$SVC/.env"
+  check "served :3084 -> 127.0.0.1:3084" calls_have "tailscale serve --bg --https=3084 http://127.0.0.1:3084"
+  check "  and never :3080"             no_call "tailscale serve --bg --https=3080"
+  check "prints the :3084 URL"          out_hasF "https://test-host.tailfake.ts.net:3084"
+  # Re-run with no override at all: .env says 3084, and the HTTPS default has
+  # to follow what .env settled on rather than snap back to 3080.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"             [ "$CODE" -eq 0 ]
+  check "re-run kept :3084 -> 127.0.0.1:3084" calls_have "tailscale serve --bg --https=3084 http://127.0.0.1:3084"
+  check "  and never :3080"             no_call "tailscale serve --bg --https=3080"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  echo 3084 > "$STATE_DIR/web_port"
+  export LOCAL_PORT=3084 HTTPS_PORT=8443
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:3084" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:3084"
+  check "prints the :8443 URL"          out_hasF "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_admin_username_override() {
   echo "• ADGUARD_ADMIN_USERNAME: honoured on the first run, .env wins after"
   setup
@@ -1149,6 +1184,7 @@ test_https_front_door_slow
 test_ratelimit_option
 test_ratelimit_failure_is_soft
 test_port_override
+test_https_port_follows_local_port
 test_admin_username_override
 test_python3_dns_fallback
 test_operator_escalation

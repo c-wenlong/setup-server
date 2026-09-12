@@ -13,7 +13,8 @@
 #
 # Usage:
 #   ./setup.sh                            # local 8222, HTTPS 8222
-#   LOCAL_PORT=8222 HTTPS_PORT=8222 ./setup.sh
+#   LOCAL_PORT=8223 ./setup.sh            # HTTPS follows LOCAL_PORT (8223 -> 8223)
+#   LOCAL_PORT=8223 HTTPS_PORT=8222 ./setup.sh
 #
 # Version: pinned to 1.37.2 (web-vault 2026.7.0). Not `latest`. A vault that
 # migrates its schema unattended is a vault you may not be able to roll back.
@@ -58,7 +59,11 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8222}"
-HTTPS_PORT="${HTTPS_PORT:-8222}"
+# The HTTPS port follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. Whether it was explicit is remembered for the .env read-back below.
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 CONTAINER="vaultwarden"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -186,6 +191,10 @@ SIGNUPS="${VAULTWARDEN_SIGNUPS_ALLOWED:-false}"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
+# .env holds no HTTPS_PORT of its own (only the derived VAULTWARDEN_DOMAIN), so
+# a default HTTPS port keeps following the local port .env settled on; an
+# explicit HTTPS_PORT is honoured as given.
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
 
 # Drift check, not a rewrite: .env is the user's file. But a DOMAIN that no
 # longer matches this machine silently breaks WebAuthn/passkey 2FA — the

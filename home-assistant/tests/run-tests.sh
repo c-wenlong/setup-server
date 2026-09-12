@@ -823,6 +823,42 @@ test_port_override() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (8123) next to a LOCAL_PORT
+  # override silently published :8123 -> 127.0.0.1:8124, i.e. the wrong port.
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=8124
+  echo 8124 > "$STATE_DIR/listen_port"
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check ".env records HTTPS_PORT=8124"   [ "$(env_val HTTPS_PORT)" = "8124" ]
+  check "served :8124 -> 127.0.0.1:8124" calls_have "tailscale serve --bg --https=8124 http://127.0.0.1:8124"
+  check "  and never :8123"              no_call "tailscale serve --bg --https=8123"
+  check "prints the :8124 URL"           out_has "https://test-host.tailfake.ts.net:8124"
+
+  # Re-run with no override at all: .env says 8124, and the HTTPS default has
+  # to follow what .env settled on rather than snap back to 8123.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"                  [ "$CODE" -eq 0 ]
+  check "re-run kept :8124 -> 127.0.0.1:8124" calls_have "tailscale serve --bg --https=8124 http://127.0.0.1:8124"
+  check "  and never :8123"                  no_call "tailscale serve --bg --https=8123"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=8124 HTTPS_PORT=8443
+  echo 8124 > "$STATE_DIR/listen_port"
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:8124" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8124"
+  check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_timezone_from_host() {
   echo "• the timezone comes from the host, not from a hardcoded default"
   setup
@@ -1192,6 +1228,7 @@ test_staged_pending_trial
 test_port_already_in_use
 test_wildcard_bind_is_caught
 test_port_override
+test_https_port_follows_local_port
 test_timezone_from_host
 test_operator_escalation
 test_serve_approval_prompt

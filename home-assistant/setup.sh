@@ -15,6 +15,7 @@
 #
 # Usage:
 #   ./setup.sh                             # local 8123, HTTPS 8123
+#   LOCAL_PORT=8124 ./setup.sh             # HTTPS follows LOCAL_PORT (8124 -> 8124)
 #   LOCAL_PORT=8124 HTTPS_PORT=8124 ./setup.sh
 #   HA_ADMIN_USER=kai ./setup.sh           # first run only; .env wins after
 #
@@ -64,7 +65,11 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8123}"
-HTTPS_PORT="${HTTPS_PORT:-8123}"
+# HTTPS follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. .env records the resolved value below, so a re-run with no overrides
+# keeps whatever port .env already settled on.
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 ADMIN_USER="${HA_ADMIN_USER:-kai}"
 CONTAINER="home-assistant"
 SERVICE="homeassistant"          # the compose service name

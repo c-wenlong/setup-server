@@ -226,6 +226,39 @@ test_port_override() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (3000) next to a LOCAL_PORT
+  # override would silently publish :3000 -> 127.0.0.1:3020, i.e. the wrong port.
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=3020
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=3020"   grep -qx 'LOCAL_PORT=3020' "$SVC/.env"
+  check "served :3020 -> 127.0.0.1:3020" calls_have "tailscale serve --bg --https=3020 http://127.0.0.1:3020"
+  check "  and never :3000"              no_call "tailscale serve --bg --https=3000"
+  check "prints the :3020 URL"           out_has "https://test-host.tailfake.ts.net:3020"
+  # Re-run with no override at all: .env says 3020, and the HTTPS default has
+  # to follow what .env settled on rather than snap back to 3000.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"                   [ "$CODE" -eq 0 ]
+  check "re-run kept :3020 -> 127.0.0.1:3020" calls_have "tailscale serve --bg --https=3020 http://127.0.0.1:3020"
+  check "  and never :3000"                   no_call "tailscale serve --bg --https=3000"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=3020 HTTPS_PORT=8443
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:3020" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:3020"
+  check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_slow_first_boot() {
   echo "• first boot is slow: the health loop waits instead of dying"
   setup
@@ -380,7 +413,7 @@ test_live() {
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
-  https_port="${HTTPS_PORT:-3000}"
+  https_port="${HTTPS_PORT:-$port}"
   user="$(sed -n 's/^FORGEJO_ADMIN_USERNAME=//p' "$SERVICE_DIR/.env")"
   pass="$(sed -n 's/^FORGEJO_ADMIN_PASSWORD=//p' "$SERVICE_DIR/.env")"
   url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
@@ -421,6 +454,7 @@ test_fresh_deploy
 test_password_drift
 test_wrong_root_url
 test_port_override
+test_https_port_follows_local_port
 test_slow_first_boot
 test_idempotent_rerun
 test_root_url_drift
