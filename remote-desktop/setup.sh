@@ -631,13 +631,38 @@ if [ -f "$UM" ]; then
   # touched — `tls` becomes `nla`; `any` or anything hand-chosen is left —
   # and disable-audio is only ADDED when absent, never flipped if you set
   # it. Truncate in place (`cat >`) so the file keeps its inode and 0600.
+  #
+  # Both repairs stop at the first </connection>, which is the one this script
+  # generated. The header above invites you to add your own, and a second
+  # connection pointing at a Windows host legitimately wants security=tls:
+  # rewriting that to nla would break a connection setup.sh never wrote, to
+  # reach a server that never asked for NLA. Bounding by connection rather
+  # than by "first tls match" matters on the SECOND re-run, where the
+  # generated connection already says nla and the only remaining tls in the
+  # file is precisely the one that must not be touched.
+  #
+  # awk, not `sed 0,/re/s//`: that first-match idiom is GNU-only and this
+  # repo runs on macOS too.
   if grep -qF '<param name="security">tls</param>' "$UM"; then
-    sed 's#<param name="security">tls</param>#<param name="security">nla</param>#' "$UM" > "$WORK/um.new"
-    cat "$WORK/um.new" > "$UM"; UM_MIGRATED=1
-    ok "Repaired security=tls -> nla in $UM (gnome-remote-desktop accepts NLA only)"
+    awk 'BEGIN { old = "<param name=\"security\">tls</param>"
+                 new = "<param name=\"security\">nla</param>" }
+         !past && index($0, old) { sub(old, new) }
+         index($0, "</connection>")  { past = 1 }
+         { print }' "$UM" > "$WORK/um.new"
+    # The grep above is file-wide, so it also fires when the only tls left is
+    # in a connection you added -- which is every re-run once the generated
+    # one has been repaired. Claiming "Repaired" there would be a lie, and it
+    # would restart guacamole on every single run for a file nothing changed.
+    # Compare rather than assume: a repair is a repair only if bytes moved.
+    if ! cmp -s "$WORK/um.new" "$UM"; then
+      cat "$WORK/um.new" > "$UM"; UM_MIGRATED=1
+      ok "Repaired security=tls -> nla in the first connection of $UM (gnome-remote-desktop accepts NLA only)"
+    fi
   fi
   if ! grep -qF '<param name="disable-audio">' "$UM"; then
-    awk '{ print } !done && /<param name="ignore-cert">/ { print "            <param name=\"disable-audio\">true</param>"; done = 1 }' "$UM" > "$WORK/um.new"
+    awk '{ print }
+         !done && !past && index($0, "<param name=\"ignore-cert\">") { print "            <param name=\"disable-audio\">true</param>"; done = 1 }
+         index($0, "</connection>") { past = 1 }' "$UM" > "$WORK/um.new"
     if grep -qF '<param name="disable-audio">true</param>' "$WORK/um.new"; then
       cat "$WORK/um.new" > "$UM"; UM_MIGRATED=1
       ok "Added disable-audio=true to $UM (FreeRDP 2.x audio is rejected by the server mid-session)"

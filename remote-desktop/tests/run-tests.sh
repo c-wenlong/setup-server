@@ -229,6 +229,19 @@ compose_lacks() { ! compose_has "$1"; }
 mapping_file() { printf '%s/user-mapping.xml' "$(env_val GUAC_HOME)"; }
 mapping_has()  { grep -qF -- "$1" "$(mapping_file)" 2>/dev/null; }
 
+# Per-connection views. The repair is scoped to the connection setup.sh
+# generated (the first one), so "the file contains nla" is too weak an
+# assertion to tell a correct repair from one that reached into a connection
+# the user added. These are functions run in the PARENT shell on purpose: a
+# `sh -c "... $(helper) ..."` would call them in a child that has never heard
+# of them, which is exactly how the syncthing suite grew a check that could
+# never fail.
+first_conn()  { awk '{ print } /<\/connection>/ { exit }' "$(mapping_file)" 2>/dev/null; }
+later_conns() { awk 'past { print } /<\/connection>/ { past = 1 }' "$(mapping_file)" 2>/dev/null; }
+first_conn_has()   { first_conn  | grep -qF -- "$1"; }
+later_conns_have() { later_conns | grep -qF -- "$1"; }
+later_conns_lack() { ! later_conns | grep -qF -- "$1"; }
+
 # XML comments stripped. The file explains at length what it deliberately does
 # NOT do — "Session recording is off on purpose", "NOT enabled: drive
 # redirection" — so a naive grep for `recording` or `drive` matches the prose
@@ -643,6 +656,41 @@ test_mapping_migration() {
   sed 's#<param name="security">nla</param>#<param name="security">any</param>#' "$m" > "$m.new" && cat "$m.new" > "$m" && rm -f "$m.new"
   run_deploy
   check "security=any (hand-chosen) untouched" mapping_has '<param name="security">any</param>'
+
+  # A connection YOU added is not this script's to repair. The file's own
+  # header invites extra connections, and one pointing at a Windows host
+  # legitimately wants security=tls -- rewriting it to nla would break a
+  # connection setup.sh never wrote, to reach a server that never asked for
+  # NLA. Put the generated connection back on tls, strip its disable-audio,
+  # and append a second connection that wants tls.
+  sed -e 's#<param name="security">any</param>#<param name="security">tls</param>#' \
+      -e '/<param name="disable-audio">/d' "$m" > "$m.new" && cat "$m.new" > "$m" && rm -f "$m.new"
+  awk '/<\/authorize>/ && !ins {
+         print "        <connection name=\"windows box\">"
+         print "            <protocol>rdp</protocol>"
+         print "            <param name=\"security\">tls</param>"
+         print "            <param name=\"ignore-cert\">true</param>"
+         print "        </connection>"
+         ins = 1
+       }
+       { print }' "$m" > "$m.new" && cat "$m.new" > "$m" && rm -f "$m.new"
+
+  run_deploy
+  check "second run repairs only the generated connection" [ "$CODE" -eq 0 ]
+  check "  generated connection is nla"   first_conn_has '<param name="security">nla</param>'
+  check "  and got disable-audio"         first_conn_has '<param name="disable-audio">true</param>'
+  check "  my own connection keeps tls"   later_conns_have '<param name="security">tls</param>'
+  check "  and was NOT given nla"         later_conns_lack '<param name="security">nla</param>'
+  check "  and got no disable-audio"      later_conns_lack '<param name="disable-audio">true</param>'
+  check "  it is still there at all"      mapping_has '<connection name="windows box">'
+
+  # And the run after that must not come back for it: with the generated
+  # connection already on nla, the only tls left in the file is the user's.
+  local settled; settled="$(cksum < "$m")"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "third run leaves the file alone" [ "$(cksum < "$m")" = "$settled" ]
+  check "  and says nothing about tls"    no_repair_msg
   teardown
 }
 
