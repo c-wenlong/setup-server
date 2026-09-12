@@ -9,8 +9,8 @@
 #   - setup.sh, SETUP.md, TROUBLESHOOT.md and tests/run-tests.sh all exist
 #   - setup.sh and tests/run-tests.sh are executable
 #   - tests/stubs/ exists and is non-empty (see STUBS_EXEMPT below)
-#   - README.md's Services table links the directory as [<name>](<name>/)
-#   - DIRECTORY.md links the directory as [<name>](<name>/)
+#   - README.md's Services table has a row linking [<name>](<name>/)
+#   - DIRECTORY.md has a table row linking [<name>](<name>/)
 #
 # Plus one repo-wide rule: no .env may ever be tracked by git.
 #
@@ -43,11 +43,13 @@ exempt_from_stubs() {
   return 1
 }
 
-# A literal, not a regex: the service name may contain a dash, which is fine,
-# but a dot in a future name must not become a wildcard.
+# The link must sit in a table row (a line starting with `|`), because the
+# contract is a row in the Services or Deployment table, and prose elsewhere in
+# the file mentions services too. The name is matched as a literal, not a regex:
+# a dash is fine, and a dot in a future name must not become a wildcard.
 links_to() {
   local file="$1" name="$2"
-  grep -qF -- "[$name]($name/)" "$file"
+  grep -- '^|' "$file" | grep -qF -- "[$name]($name/)"
 }
 
 # ------------------------------------------------------------- per service
@@ -83,7 +85,7 @@ for svc in $SERVICES; do
   links_to README.md "$svc" \
     || fail "README.md has no Services row linking [$svc]($svc/)"
   links_to DIRECTORY.md "$svc" \
-    || fail "DIRECTORY.md has no [$svc]($svc/) link"
+    || fail "DIRECTORY.md has no table row linking [$svc]($svc/)"
 done
 
 # ------------------------------------------------------------- repo wide

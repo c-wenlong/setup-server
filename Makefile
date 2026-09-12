@@ -104,7 +104,7 @@ shellcheck:
 	      case "$$line" in '#!'*sh|'#!'*sh' '*) printf '%s\n' "$$f" ;; esac; \
 	    done > "$$list"; \
 	echo "linting $$(wc -l < "$$list") shell files"; \
-	xargs -r -a "$$list" shellcheck -S warning; \
+	xargs shellcheck -S warning < "$$list"; \
 	echo "shellcheck: clean"
 
 structure:
