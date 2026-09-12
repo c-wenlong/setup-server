@@ -1,5 +1,7 @@
 # setup-server
 
+![setup-server banner](banner.png)
+
 One-shot, repeatable setup scripts for self-hosted services on private
 (Tailscale) home servers. Each service lives in its own directory and can be
 deployed independently by copying that directory to the target server and
