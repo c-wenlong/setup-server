@@ -22,6 +22,17 @@ first, dated by merge.
   `:2283 -> 127.0.0.1:2284`. The default now follows the local port, on the
   first run and on a re-run where `.env` holds the port, while an explicit
   `HTTPS_PORT` is honoured as given. New mocked test covers all three cases.
+- **beszel/setup.sh could not run on macOS and skipped the preflight
+  convention.** It was the one script with no `uname -s` branch, no root
+  refusal, no Tailscale-running check, and a bare `tailscale` call that the
+  macOS app bundle never satisfies. It now follows the code-server (native)
+  and forgejo (Docker) references: OS branch, root refusal, resolved Tailscale
+  CLI, daemon and Compose v2 checks, the agent tarball picked by OS and
+  architecture, a launchd LaunchAgent on macOS, lingering and the Serve
+  operator grant as the two one-time Linux sudos, and a final URL resolved
+  from the tailnet rather than hardcoded. `.env` is now the source of truth
+  for the port on a re-run. The static suite gained ten checks for the
+  contract; verified by a live re-run on the box.
 
 ## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
 
