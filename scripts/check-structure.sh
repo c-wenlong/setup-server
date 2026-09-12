@@ -49,7 +49,15 @@ exempt_from_stubs() {
 # a dash is fine, and a dot in a future name must not become a wildcard.
 links_to() {
   local file="$1" name="$2"
-  grep -- '^|' "$file" | grep -qF -- "[$name]($name/)"
+  # One grep, no pipe. Under `set -o pipefail`, `grep | grep -q` fails
+  # spuriously whenever the reader exits on its first match before the writer
+  # has finished: the writer takes SIGPIPE ("write error: Broken pipe"), its
+  # status is 2, and a row that is present gets reported as missing. Seen in
+  # CI on a branch whose README was byte-identical to main's.
+  # The link is matched as a fixed string (index, not a regex), so a service
+  # name with a dot or a bracket in it cannot match anything but itself.
+  awk -v link="[$name]($name/)" \
+    '/^\|/ && index($0, link) { found = 1; exit } END { exit !found }' "$file"
 }
 
 # ------------------------------------------------------------- per service
