@@ -751,7 +751,20 @@ fi
 # The sync listener, checked on the wire (see the helpers above for why the
 # REST API cannot answer this question).
 sync_addrs="$(listener_addrs "$SYNC_PORT")"
-if [ -z "$sync_addrs" ]; then
+if [ -z "$SOCKET_TOOL" ]; then
+  # The same split the GUI check below makes, for the same reason: with no ss
+  # and no lsof, `sync_addrs` is empty because nothing ever looked, not
+  # because nothing is bound. Reporting that as "not listening yet, Syncthing
+  # retries" is a confident, specific diagnosis of a table that was never
+  # read, and it points the reader at a self-healing state when the truth may
+  # be a listener sitting on an address it should not be on.
+  #
+  # PROBLEMS is set here rather than left to the GUI check: today both fire on
+  # exactly this condition, but that is a coincidence of ordering, and a check
+  # that depends on another one's side effect breaks quietly when either moves.
+  PROBLEMS=1
+  warn "Could not check what is listening on :$SYNC_PORT: this box has neither ss nor lsof, so whether the sync port is on $LISTEN_IP only is unverified. Install iproute2 (Linux) or use a box with lsof (macOS ships it), then re-run."
+elif [ -z "$sync_addrs" ]; then
   warn "Nothing is listening on :$SYNC_PORT yet. Syncthing retries the bind on its own; if this persists, is $LISTEN_IP still this node's tailnet IP? (tailscale ip -4)"
 else
   foreign="$(foreign_listeners "$SYNC_PORT" "$LISTEN_IP")"

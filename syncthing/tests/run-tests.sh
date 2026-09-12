@@ -666,7 +666,7 @@ test_ipv6_listener_rows() {
 }
 
 test_no_socket_tool_at_all() {
-  echo "• neither ss nor lsof on the box: the GUI bind cannot be verified, so the run exits non-zero"
+  echo "• neither ss nor lsof on the box: neither bind can be verified, so the run exits non-zero"
   # Fail closed on the absence of evidence. The GUI has no password — the
   # tailnet IS the auth layer — so "where is :8384 bound" is a security fact,
   # and a deploy that cannot check one does not get to report it as fine. The
@@ -685,6 +685,13 @@ test_no_socket_tool_at_all() {
   check "  and the non-zero banner"      out_has "Exiting non-zero"
   check "called neither tool"            sh -c "! grep -qE '^(ss|lsof) ' '$CALLS_LOG'"
   check "never claimed the bind is fine" out_lacks "answers on loopback"
+  # The sync port gets the same treatment. Its empty listener table has the
+  # same two causes, and the old message picked the reassuring one out loud:
+  # "Syncthing retries the bind on its own" is a diagnosis of a table nothing
+  # ever read, and it is the wrong one when a listener is sitting off-tailnet.
+  check "  says the sync port is unchecked" out_has "Could not check what is listening on :22000"
+  check "  not that a bind is still coming" out_lacks "Nothing is listening on :22000 yet"
+  check "  never called it tailnet-only"    out_lacks "is bound to 100.100.100.100 only"
   check "the deploy still came up"       out_has "Device ID: STUBDEV-AAAAAAA"
   check "  and was published"            calls_have "tailscale serve --bg --https=8384"
   teardown
