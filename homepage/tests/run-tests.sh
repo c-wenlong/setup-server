@@ -327,7 +327,9 @@ test_fresh_deploy() {
   check "container got HOSTNAME=127.0.0.1" cenv_is HOSTNAME 127.0.0.1
   check "container got PORT=8100"          cenv_is PORT 8100
   check "container got the allowlist"      [ "$(cenv HOMEPAGE_ALLOWED_HOSTS)" = "$allowed" ]
-  check "container got PUID=$(id -u)"      cenv_is PUID "$(id -u)"
+  # The id stub reports uid 1000 unless FAKE_UID is set, whatever the real
+  # uid is (1001 on a GitHub runner), so compare against the stub's value.
+  check "container got PUID=1000"          cenv_is PUID 1000
   check "container got PGID=$(id -g)"      cenv_is PGID "$(id -g)"
   check "config bind is the only mount" \
     [ "$(grep -c . "$STATE_DIR/container_mounts")" -eq 1 ]
