@@ -1181,12 +1181,37 @@ h1, h2, p { margin: 0; }
   .env-btn:hover { color: var(--text); background: var(--surface-2); }
 }
 
+/* editing: the field swaps its value for an input and its buttons for
+   save / cancel; the border takes the accent so the live row is obvious. */
+.env-field.is-editing { border-color: var(--accent); }
+.env-field.is-editing:focus-within { box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.env-input {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  margin: 0;
+  padding: 9px 4px 9px 11px;
+  font-family: var(--mono);
+  font-size: 16px; /* 16px so iOS Safari does not zoom on focus */
+  line-height: 1.4;
+  color: var(--text);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+}
+.env-input[disabled] { opacity: .6; }
+
 .env-err {
   margin: 5px 0 0;
   font-size: 12px;
   line-height: 1.4;
   color: var(--bad);
 }
+.env-err.is-ok { color: var(--ok); }
 
 @media (max-width: 400px) {
   .env { grid-template-columns: minmax(0, 1fr); gap: 2px; }

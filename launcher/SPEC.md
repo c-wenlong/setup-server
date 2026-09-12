@@ -341,3 +341,64 @@ because that click navigates the tab away.
   `web/app.css`, `web/index.html`
 - readme agent: repo `README.md` only (service icons + links — unrelated to
   this feature, batched for the same push)
+
+---
+
+## v4 — editing env values (2026-09-12)
+
+Requested: edit any environment variable from the detail page. The case
+that matters is a password reset inside an app (Seafile, Kuma, Immich…):
+the `.env` copy goes stale and there was no way to fix it short of SSH.
+
+### Behaviour
+
+- Every env row gains a pencil. Tapping it reveals the current value (one
+  explicit POST, as before), puts it in an inline input with the text
+  selected, and swaps the row's buttons for **save** and **cancel**. Enter
+  saves, Escape cancels. A secret goes back behind its mask after saving.
+- Save rewrites **that variable's line only**. Comments, blank lines,
+  ordering, other variables, indentation, an `export ` prefix, CRLF endings
+  and a missing final newline all survive byte-for-byte; the file's mode
+  (0600) is copied onto the replacement.
+- Editing cannot **add** a variable: the name must already be assigned in
+  the file, otherwise 404 with the request never echoed back — the same
+  rule reveal uses. This is what keeps the request from introducing a name
+  the service's `setup.sh` never put there.
+- The saved note says the service reads the file again on its next
+  restart. That is the honest contract: services take `.env` at container
+  start, and a password changed inside an app is already live — the file
+  is the *record*.
+
+### Quoting — the part that was measured
+
+Every `.env` here is read by **three** things that must agree on a line:
+`set -a; . .env` in each `setup.sh` (a POSIX shell), Docker Compose
+(interpolation and `env_file`), and the launcher's own `parse_env`. The
+rules are the intersection, verified 2026-09-12 against dash, bash and a
+real container (`docker compose run … printenv`):
+
+| Value | Written as | Why |
+|---|---|---|
+| `[A-Za-z0-9_./:@%+=,-]*` | bare `NAME=value` | every reader takes it literally |
+| anything else without `'` | `NAME='value'` | shell and Compose both take single quotes literally, no interpolation |
+| contains `'`, no `$` or backtick | `NAME="value"` with `\\` and `\"` escaped | the only two escapes all three readers unescape identically |
+| contains `'` **and** `$` or backtick | **refused, 400** | the shell unescapes `\$` and `` \` ``; Compose does not — no spelling agrees |
+
+`parse_env` learned to unescape `\\` and `\"` inside double quotes for
+this. No existing file on the box had a backslash in a double-quoted value,
+so nothing already deployed reads differently. Before writing, the server
+parses the rewritten text back and refuses (500, file untouched) if it does
+not yield the value that was sent — the quoting rules and the parser can
+never silently drift apart.
+
+### API
+
+| Method | Path | Purpose |
+|---|---|---|
+| PATCH | `api/services/{key}/env/{var}` | `{"value": "…"}` → `{name, secret, value}`; 404 unknown service/variable/no file, 400 not a string / multi-line / over 4096 chars / unquotable, 403 env path outside the allowed roots |
+
+PATCH, not POST, so it can never be confused with `…/env/{var}/reveal`
+next to it. Same allowed-roots gate as reveal and deploy, same single lock
+plus temp-file-and-`os.replace` discipline as `overrides.json`. The value
+goes into the file and back to the caller; the log line carries the
+variable name only.

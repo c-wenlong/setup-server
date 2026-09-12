@@ -14,6 +14,7 @@ Serves web/ as static files and a small JSON API:
     GET    api/services/{key}      detail: identity, meta, env var NAMES
     PATCH  api/services/{key}      {name?, description?} -> overrides.json
     POST   api/services/{key}/env/{var}/reveal   one value, deliberately POST
+    PATCH  api/services/{key}/env/{var}   {"value"} -> rewrites that line in .env
     POST   api/services/{key}/touch  {"event": launched|opened} -> usage.json
     GET    api/services/{key}/notes            newest-first
     POST   api/services/{key}/notes            {title?, body} -> 201
@@ -24,7 +25,8 @@ Serves web/ as static files and a small JSON API:
 
 Env values are never in a list or detail payload, not even masked: the
 detail response carries names and a `secret` flag only, and revealing one
-is a separate explicit POST that is never logged.
+is a separate explicit POST that is never logged. Editing one rewrites
+exactly that line of the .env file, leaving every other byte alone.
 
 Paths arrive WITHOUT any mount prefix: `tailscale serve --set-path=/home`
 strips `/home` before proxying, so the backend sees `/` and `/api/services`
@@ -44,6 +46,7 @@ import re
 import shlex
 import socket
 import socketserver
+import stat
 import subprocess
 import sys
 import tempfile
@@ -128,6 +131,11 @@ MAX_BODY_BYTES = 64 * 1024   # nothing this API accepts is anywhere near this
 # A touch body is {"event": "launched"} and nothing else, so it is capped far
 # below the global limit rather than at it.
 MAX_TOUCH_BYTES = 1024
+
+# One env value. The longest line in any .env on this box is under 100
+# characters; a PEM key would be the only thing near this, and those are
+# multi-line, which .env cannot hold anyway.
+MAX_ENV_VALUE = 4096
 TOUCH_EVENTS = ("launched", "opened")
 
 # Notes. A title is one collapsed line because the UI shows notes collapsed to
@@ -415,6 +423,20 @@ SECRET_MARKERS = ("PASS", "SECRET", "TOKEN", "KEY", "CRED", "PRIVATE")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_EXPORT_RE = re.compile(r"^export\s+")
 
+# Inside a double-quoted value, exactly the escapes that a POSIX shell, Docker
+# Compose's .env reader and this parser all agree on: \\ -> \ and \" -> ".
+# `\$` and \` are deliberately NOT here — the shell unescapes both and Compose
+# (measured 2026-09-12 with `docker compose config`) unescapes neither — so
+# quote_env_value refuses to ever write one.
+_DQ_UNESCAPE_RE = re.compile(r'\\([\\"])')
+
+# A value that can sit bare after `NAME=` and mean the same thing to a shell
+# `source`, to Docker Compose and to parse_env. Deliberately narrow: no
+# whitespace, no quotes, no `#` (an inline comment to Compose after a space),
+# no `$` (interpolated by both), no `~` (tilde-expanded by the shell), and
+# none of the shell's other metacharacters. Anything outside it is quoted.
+_ENV_BARE_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,-]*$")
+
 
 def is_secret(name):
     upper = (name or "").upper()
@@ -437,21 +459,37 @@ def parse_env(text):
     """
     out = {}
     for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+        hit = _split_assignment(line)
+        if hit is None:
             continue
-        line = _ENV_EXPORT_RE.sub("", line, count=1)
-        if "=" not in line:
-            continue
-        name, value = line.split("=", 1)   # only the FIRST = splits
-        name = name.strip()
-        if not _ENV_NAME_RE.match(name):
-            continue
+        name, value = hit
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            quote = value[0]
             value = value[1:-1]
+            if quote == '"':
+                value = _DQ_UNESCAPE_RE.sub(r"\1", value)
         out[name] = value
     return out
+
+
+def _split_assignment(line):
+    """(name, raw value) for a line parse_env would take, else None.
+
+    Shared by the parser and the editor so that "which line sets X" has one
+    answer: the editor rewrites exactly the lines the parser would read.
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    line = _ENV_EXPORT_RE.sub("", line, count=1)
+    if "=" not in line:
+        return None
+    name, value = line.split("=", 1)   # only the FIRST = splits
+    name = name.strip()
+    if not _ENV_NAME_RE.match(name):
+        return None
+    return name, value
 
 
 def read_env(svc):
@@ -1083,6 +1121,151 @@ def reveal_env_var(key, var):
             log("revealed %s.%s" % (key, name))   # name only, never the value
             return {"name": name, "value": value}
     raise DeployError(404, "unknown variable")
+
+
+# ---- edit
+
+# The .env files this rewrites are read by THREE things that must all agree
+# on what a line means: `set -a; . .env` in every setup.sh (a POSIX shell),
+# Docker Compose (interpolation + env_file), and parse_env above. The quoting
+# rules below are the intersection of the three, verified against the
+# Compose .env syntax docs and dash/bash:
+#
+#   bare            only for _ENV_BARE_RE — every reader takes it literally
+#   'single quotes' the shell and Compose both take these literally, with no
+#                   interpolation, so this is the default for anything else
+#   "double quotes" only when the value itself contains an apostrophe; \\ and
+#                   \" are escaped, and a `$` or a backtick is REFUSED, because
+#                   the shell would unescape \$ and \` and Compose would not —
+#                   there is no spelling of that value all three readers agree
+#                   on (measured, see _DQ_UNESCAPE_RE).
+#
+# One lock for every env file. Edits are rare and tiny; the lock exists so
+# two saves cannot interleave a read-modify-write on the same file.
+_env_lock = threading.Lock()
+
+
+def quote_env_value(value):
+    """`value` rendered for the right-hand side of NAME=..., or raise 400."""
+    if _ENV_BARE_RE.match(value):
+        return value
+    if "'" not in value:
+        return "'" + value + "'"
+    if "$" in value or "`" in value:
+        raise DeployError(
+            400, "a value containing an apostrophe cannot also contain $ or `")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def render_env_edit(text, var, rendered):
+    """`text` with every line that assigns `var` rewritten; -> (text, count).
+
+    Every other byte survives untouched: comments, blank lines, ordering, the
+    other variables, a missing final newline, CRLF endings. On a rewritten
+    line the indentation and any `export ` prefix are kept too. *Every*
+    assignment is rewritten, not just the last, so a file with a stale
+    duplicate cannot read one way to the shell and another way here.
+    """
+    out = []
+    count = 0
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        hit = _split_assignment(body)
+        if hit is None or hit[0] != var:
+            out.append(line)
+            continue
+        ending = line[len(body):]
+        stripped = body.lstrip()
+        indent = body[:len(body) - len(stripped)]
+        prefix = _ENV_EXPORT_RE.match(stripped)
+        out.append(indent + (prefix.group(0) if prefix else "")
+                   + var + "=" + rendered + ending)
+        count += 1
+    return "".join(out), count
+
+
+def _write_env_atomically(path, text, st):
+    """Replace the env file with `text`; caller holds _env_lock.
+
+    Same discipline as the JSON stores (temp file beside the target, fsync,
+    one os.replace), plus: the original mode is copied onto the new file —
+    setup.sh made these 0600 for a reason — and the group is kept where the
+    process is allowed to. Bytes that were not valid UTF-8 round-trip via
+    surrogateescape rather than being silently replaced.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".env-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape",
+                       newline="") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        try:
+            os.chown(tmp, -1, st.st_gid)
+        except OSError:
+            pass   # not our group any more; the mode is what protects the file
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def update_env_var(key, var, body):
+    """Set one variable in one service's env file; -> {"name", "secret"}.
+
+    `var` must already be assigned in the file — this edits, it does not
+    add, so the request can never introduce a name the service's setup.sh
+    did not put there. Unknown names are a 404 that never echoes the request,
+    exactly like reveal. The value goes into the file and into the response
+    to the caller and nowhere else: never a log line.
+
+    A last check before writing: the rewritten text is parsed back and must
+    yield the value that was sent. If the quoting rules and the parser ever
+    disagree, the request fails and the file is left alone.
+    """
+    svc = find_service(key)
+    if svc is None:
+        raise DeployError(404, "unknown service")
+    if not isinstance(body, dict):
+        raise DeployError(400, "body must be a JSON object")
+    value = body.get("value")
+    if not isinstance(value, str):
+        raise DeployError(400, "value must be a string")
+    if len(value) > MAX_ENV_VALUE:
+        raise DeployError(400, "value is too long (max %d characters)" % MAX_ENV_VALUE)
+    if "\n" in value or "\r" in value or "\0" in value:
+        raise DeployError(400, "value must be a single line")
+
+    raw = svc.get("env")
+    if not raw:
+        raise DeployError(404, "service has no env file")
+    path = resolve_registry_path(raw, "env")   # allowed-roots gate: 403
+    rendered = quote_env_value(value)          # 400
+
+    with _env_lock:
+        try:
+            st = os.stat(path)
+            # newline="" both ways: a CRLF file stays a CRLF file.
+            with open(path, "r", encoding="utf-8", errors="surrogateescape",
+                      newline="") as fh:
+                text = fh.read()
+        except OSError:
+            raise DeployError(404, "env file not readable")
+        new_text, count = render_env_edit(text, var, rendered)
+        if count == 0:
+            raise DeployError(404, "unknown variable")
+        if parse_env(new_text).get(var) != value:
+            log("refusing to write %s.%s: quoting does not round-trip" % (key, var))
+            raise DeployError(500, "could not encode that value safely")
+        _write_env_atomically(path, new_text, st)
+    log("updated %s.%s" % (key, var))   # name only, never the value
+    return {"name": var, "secret": is_secret(var), "value": value}
 
 
 # ------------------------------------------------------------------ notes
@@ -2067,6 +2250,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[0] == "api" and parts[1] == "services" \
                 and parts[3] == "notes":
             self._json(200, update_note(parts[2], parts[4], body))
+            return
+        # Editing one env value. PATCH, not POST: the reveal endpoint next to
+        # it is a POST, and the two must never be confusable.
+        if len(parts) == 5 and parts[0] == "api" and parts[1] == "services" \
+                and parts[3] == "env":
+            self._json(200, update_env_var(parts[2], parts[4], body))
             return
         self._error(404, "unknown endpoint")
 

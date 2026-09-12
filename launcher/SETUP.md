@@ -23,6 +23,7 @@ Tailscale Serve ─┤                              ├─▶ 127.0.0.1:8093
                                                       ├── services.json the registry + deploy allowlist
                                                       ├── GET  api/services
                                                       ├── POST api/services/{key}/deploy  ──▶ <repo>/<service>/setup.sh
+                                                      ├── PATCH api/services/{key}/env/{var} ──▶ rewrites one line of <service>/.env
                                                       ├── GET  api/jobs/{id}
                                                       └── GET  healthz
 ```
@@ -101,6 +102,15 @@ surface on the box.** The design that makes that acceptable:
 
 Precedent: `ntfy-control` already does allowlisted start/stop from the phone.
 This is the same shape.
+
+**The env editor writes to secret files.** `PATCH api/services/{key}/env/{var}`
+rewrites one line of a service's `.env` — the same files the reveal endpoint
+reads, so the same rules: the path comes from the registry only and must
+resolve inside the repo or `~/dev`; the variable must already exist (it edits,
+it never adds); the value is single-line, capped at 4 KB, and quoted so that a
+shell `source`, Docker Compose and the launcher all read it back identically
+(see SPEC.md v4 for the measured rules); the file is replaced atomically with
+its mode copied over; the log line carries the variable name, never the value.
 
 ⚠️ Anyone on the tailnet can deploy any service in the registry. That is the
 intended blast radius (it is your tailnet), but it is the reason to keep the

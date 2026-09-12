@@ -226,6 +226,8 @@
     copy:     ['M9.5 9.5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2Z',
                'M15.5 7.5v-1a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h1'],
     check:    ['m5.5 12.5 4 4 9-9'],
+    pencil:   ['M4.5 19.5h3.6L18.6 9a2.5 2.5 0 0 0-3.6-3.6L4.5 15.9v3.6Z', 'm13.4 6.9 3.6 3.6'],
+    cross:    ['m6.5 6.5 11 11', 'm17.5 6.5-11 11'],
     lock:     ['M8 10.6V8.3a4 4 0 0 1 8 0v2.3',
                'M6.4 10.6h11.2a1.4 1.4 0 0 1 1.4 1.4v6.2a1.4 1.4 0 0 1-1.4 1.4H6.4A1.4 1.4 0 0 1 5 18.2V12a1.4 1.4 0 0 1 1.4-1.4Z']
   };
@@ -1485,7 +1487,11 @@
       val.className = 'env-value is-masked';
       text(val, MASK);
     }
-    function note(message) { text(err, message); err.hidden = false; }
+    function note(message, ok) {
+      text(err, message);
+      err.className = 'env-err' + (ok ? ' is-ok' : '');
+      err.hidden = false;
+    }
 
     field.appendChild(val);
 
@@ -1516,9 +1522,156 @@
     });
     field.appendChild(copy);
 
+    /* --- edit: the value becomes an input and the buttons become save /
+       cancel. The current value is fetched (revealed) first so the box
+       starts full — you are usually changing one character of a URL, or
+       pasting a password you just reset inside the app itself. */
+    var eye = null;
+    var editing = false;
+    var input = null, save = null, cancel = null;
+
+    var edit = make('button', 'env-btn');
+    edit.type = 'button';
+    edit.appendChild(glyph(GLYPHS.pencil, '1.5'));
+    edit.setAttribute('aria-label', 'Edit ' + name);
+    edit.setAttribute('title', 'Edit ' + name);
+
+    function setBusy(busy) {
+      if (input) input.disabled = busy;
+      if (save) save.disabled = busy;
+      if (cancel) cancel.disabled = busy;
+    }
+
+    function leaveEdit() {
+      editing = false;
+      if (input && input.parentNode) field.removeChild(input);
+      if (save && save.parentNode) field.removeChild(save);
+      if (cancel && cancel.parentNode) field.removeChild(cancel);
+      input = save = cancel = null;
+      val.hidden = false;
+      copy.hidden = false;
+      edit.hidden = false;
+      if (eye) eye.hidden = false;
+      field.className = 'env-field';
+    }
+
+    function restartHint() {
+      var who = (detailSvc && detailSvc.name) || 'the service';
+      return 'Saved to the env file. ' + who + ' reads it again on its next restart.';
+    }
+
+    function commitEdit() {
+      if (!input || input.disabled) return;
+      var value = input.value;
+      if (value === cached(name)) { leaveEdit(); edit.focus(); return; }
+      err.hidden = true;
+      setBusy(true);
+      request('api/services/' + encodeURIComponent(key) +
+              '/env/' + encodeURIComponent(name), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: value })
+      }).then(function (res) {
+        if (detailKey !== key) return;
+        if (!res.ok) {
+          setBusy(false);
+          if (input) input.focus();
+          note(res.status === 404
+            ? 'That variable is not in the env file any more.'
+            : msgFrom(res, res.status === 400
+                ? 'The server would not accept that value.'
+                : 'Could not save that (HTTP ' + res.status + ').'));
+          return;
+        }
+        revealed['=' + name] = value;
+        leaveEdit();
+        if (secret) { showMask(); if (eye) setEye(eye, false, name); }
+        else { showValue(value); }
+        note(restartHint(), true);
+        say(name + ' saved');
+        edit.focus();
+      }, function () {
+        if (detailKey !== key) return;
+        setBusy(false);
+        if (input) input.focus();
+        note('Could not reach the server to save that.');
+      });
+    }
+
+    function enterEdit(current) {
+      editing = true;
+      err.hidden = true;
+
+      input = make('input', 'env-input');
+      input.type = 'text';
+      input.value = current;
+      input.setAttribute('aria-label', name);
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('autocapitalize', 'off');
+      input.setAttribute('autocorrect', 'off');
+      input.setAttribute('spellcheck', 'false');
+      input.setAttribute('enterkeyhint', 'done');
+
+      save = make('button', 'env-btn is-on');
+      save.type = 'button';
+      save.appendChild(glyph(GLYPHS.check, '1.8'));
+      save.setAttribute('aria-label', 'Save ' + name);
+      save.setAttribute('title', 'Save (Enter)');
+
+      cancel = make('button', 'env-btn');
+      cancel.type = 'button';
+      cancel.appendChild(glyph(GLYPHS.cross, '1.6'));
+      cancel.setAttribute('aria-label', 'Cancel editing ' + name);
+      cancel.setAttribute('title', 'Cancel (Esc)');
+
+      val.hidden = true;
+      copy.hidden = true;
+      edit.hidden = true;
+      if (eye) eye.hidden = true;
+      field.className = 'env-field is-editing';
+      field.insertBefore(input, val);
+      field.appendChild(save);
+      field.appendChild(cancel);
+
+      save.addEventListener('click', commitEdit);
+      cancel.addEventListener('click', function () {
+        leaveEdit();
+        say('Edit cancelled');
+        edit.focus();
+      });
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
+        else if (e.key === 'Escape' || e.key === 'Esc') {
+          e.preventDefault();
+          leaveEdit();
+          say('Edit cancelled');
+          edit.focus();
+        }
+      });
+
+      input.focus();
+      input.select();     /* a replaced password is typed over, not appended to */
+    }
+
+    edit.addEventListener('click', function () {
+      if (editing) return;
+      err.hidden = true;
+      edit.disabled = true;
+      reveal(key, name).then(function (value) {
+        edit.disabled = false;
+        if (detailKey !== key) return;
+        enterEdit(value);
+      }, function (e) {
+        edit.disabled = false;
+        if (e && e.message === 'cancelled') return;
+        note((e && e.message) || 'Could not read the current value to edit it.');
+      });
+    });
+    field.appendChild(edit);
+
     if (secret) {
       showMask();
-      var eye = make('button', 'env-btn');
+      eye = make('button', 'env-btn');
       eye.type = 'button';
       setEye(eye, false, name);
       eye.addEventListener('click', function () {
