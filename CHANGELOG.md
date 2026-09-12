@@ -8,6 +8,23 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Changed
+
+- The README coverage badge carries Codecov's graphing token, which is what a
+  private repo needs for the badge to render a number instead of "unknown".
+  The token is read-only and badge-scoped, so it is safe in the README.
+
+### Fixed
+
+- **Three suites declared `FAKE_TS_IP` and never used it.** firefly-iii now
+  asserts the listener audit accepted tailscaled's Serve proxy on the stub's
+  tailnet address for both ports (and resolved it via `tailscale ip -4`),
+  remote-desktop's two literal `100.77.77.77` assertions use the variable,
+  and homepage drops it (its audit never names the address; the ss and
+  tailscale stubs share it between themselves).
+
+## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
+
 ### Added
 
 - **Open-source hygiene for the repo itself.** An MIT `LICENSE`, this
@@ -46,12 +63,8 @@ first, dated by merge.
 
 ### Fixed
 
-- **Three suites declared `FAKE_TS_IP` and never used it.** firefly-iii now
-  asserts the listener audit accepted tailscaled's Serve proxy on the stub's
-  tailnet address for both ports (and resolved it via `tailscale ip -4`),
-  remote-desktop's two literal `100.77.77.77` assertions use the variable,
-  and homepage drops it (its audit never names the address; the ss and
-  tailscale stubs share it between themselves).
+- The homepage mocked suite compared `PUID` against the real uid while the
+  `id` stub always reports 1000, so it failed on a GitHub runner (uid 1001).
 
 ## [PR #4](https://github.com/c-wenlong/setup-server/pull/4) - 2026-09-12
 
