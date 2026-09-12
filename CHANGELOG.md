@@ -8,6 +8,23 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Changed
+
+- The README coverage badge carries Codecov's graphing token, which is what a
+  private repo needs for the badge to render a number instead of "unknown".
+  The token is read-only and badge-scoped, so it is safe in the README.
+
+### Fixed
+
+- **immich: overriding only `LOCAL_PORT` split the two ports.** `HTTPS_PORT`
+  defaulted to a literal 2283 instead of following `LOCAL_PORT` the way n8n
+  and kaichenpedia do, so `LOCAL_PORT=2284 ./setup.sh` published
+  `:2283 -> 127.0.0.1:2284`. The default now follows the local port, on the
+  first run and on a re-run where `.env` holds the port, while an explicit
+  `HTTPS_PORT` is honoured as given. New mocked test covers all three cases.
+
+## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
+
 ### Added
 
 - **Open-source hygiene for the repo itself.** An MIT `LICENSE`, this
@@ -46,12 +63,8 @@ first, dated by merge.
 
 ### Fixed
 
-- **immich: overriding only `LOCAL_PORT` split the two ports.** `HTTPS_PORT`
-  defaulted to a literal 2283 instead of following `LOCAL_PORT` the way n8n
-  and kaichenpedia do, so `LOCAL_PORT=2284 ./setup.sh` published
-  `:2283 -> 127.0.0.1:2284`. The default now follows the local port, on the
-  first run and on a re-run where `.env` holds the port, while an explicit
-  `HTTPS_PORT` is honoured as given. New mocked test covers all three cases.
+- The homepage mocked suite compared `PUID` against the real uid while the
+  `id` stub always reports 1000, so it failed on a GitHub runner (uid 1001).
 
 ## [PR #4](https://github.com/c-wenlong/setup-server/pull/4) - 2026-09-12
 

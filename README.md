@@ -12,7 +12,7 @@ setup-server
 
 <p align="center">
   <a href="https://github.com/c-wenlong/setup-server/actions/workflows/ci.yml"><img src="https://github.com/c-wenlong/setup-server/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://app.codecov.io/gh/c-wenlong/setup-server"><img src="https://codecov.io/gh/c-wenlong/setup-server/graph/badge.svg?branch=main" alt="Coverage"></a>
+  <a href="https://app.codecov.io/gh/c-wenlong/setup-server"><img src="https://codecov.io/gh/c-wenlong/setup-server/graph/badge.svg?branch=main&token=CTf67DHDNB" alt="Coverage"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/shell-bash-89e051.svg" alt="Shell: bash">
   <img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+">
