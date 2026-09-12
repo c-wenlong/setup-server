@@ -631,20 +631,70 @@ if [ -f "$UM" ]; then
   # touched — `tls` becomes `nla`; `any` or anything hand-chosen is left —
   # and disable-audio is only ADDED when absent, never flipped if you set
   # it. Truncate in place (`cat >`) so the file keeps its inode and 0600.
-  if grep -qF '<param name="security">tls</param>' "$UM"; then
-    sed 's#<param name="security">tls</param>#<param name="security">nla</param>#' "$UM" > "$WORK/um.new"
+  #
+  # Both repairs apply ONLY to a connection that points at this box's backend:
+  # hostname == GUAC_RDP_HOST and port == RDP_PORT, the two values this script
+  # writes from .env. That is the connection it generated, found by what it
+  # dials rather than by where it sits in the file. The header above invites
+  # you to add your own connections, before or after the generated one, and
+  # a connection to a Windows host legitimately wants security=tls: rewriting
+  # that to nla would break a connection setup.sh never wrote, to reach a
+  # server that never asked for NLA. Keying on position instead would get
+  # exactly that wrong the moment a connection is added ABOVE the generated
+  # one -- the user's would be rewritten and the generated one left broken.
+  #
+  # One pass, per <connection> block: tls -> nla, and disable-audio inserted
+  # after ignore-cert when the block has neither. What was actually changed
+  # is recorded in $WORK/um.repairs so the messages below say only what
+  # happened. awk, not `sed 0,/re/s//`: that first-match idiom is GNU-only
+  # and this repo runs on macOS too.
+  rm -f "$WORK/um.repairs"
+  awk -v host="$GUAC_RDP_HOST" -v port="$RDP_PORT" -v flags="$WORK/um.repairs" '
+    BEGIN {
+      want_h = "<param name=\"hostname\">" host "</param>"
+      want_p = "<param name=\"port\">" port "</param>"
+      tls    = "<param name=\"security\">tls</param>"
+      nla    = "<param name=\"security\">nla</param>"
+      audio  = "<param name=\"disable-audio\">"
+      anchor = "<param name=\"ignore-cert\">"
+      ins    = "            <param name=\"disable-audio\">true</param>"
+    }
+    function flush(   i, line, hh, pp, ours, hasaudio, anchored) {
+      hh = pp = hasaudio = anchored = 0
+      for (i = 0; i < n; i++) {
+        if (index(buf[i], want_h)) hh = 1
+        if (index(buf[i], want_p)) pp = 1
+        if (index(buf[i], audio))  hasaudio = 1
+        if (index(buf[i], anchor)) anchored = 1
+      }
+      ours = hh && pp
+      for (i = 0; i < n; i++) {
+        line = buf[i]
+        if (ours && index(line, tls)) { sub(tls, nla, line); print "security" > flags }
+        print line
+        if (ours && !hasaudio && index(line, anchor)) { print ins; print "audio" > flags; hasaudio = 1 }
+      }
+      if (ours && !hasaudio && !anchored) print "noanchor" > flags
+      n = 0
+    }
+    index($0, "<connection")   { inblk = 1 }
+    inblk                      { buf[n++] = $0 }
+    !inblk                     { print }
+    index($0, "</connection>") { flush(); inblk = 0 }
+    END { if (inblk) flush() }
+  ' "$UM" > "$WORK/um.new"
+  # A repair is a repair only if bytes moved. Deciding from the grep instead
+  # would claim one -- and restart guacamole -- on every re-run in which the
+  # only tls left in the file belongs to a connection that is not ours.
+  if ! cmp -s "$WORK/um.new" "$UM"; then
     cat "$WORK/um.new" > "$UM"; UM_MIGRATED=1
-    ok "Repaired security=tls -> nla in $UM (gnome-remote-desktop accepts NLA only)"
+    grep -qx security "$WORK/um.repairs" 2>/dev/null \
+      && ok "Repaired security=tls -> nla in the connection to $GUAC_RDP_HOST:$RDP_PORT in $UM (gnome-remote-desktop accepts NLA only)"
+    grep -qx audio "$WORK/um.repairs" 2>/dev/null \
+      && ok "Added disable-audio=true to the connection to $GUAC_RDP_HOST:$RDP_PORT in $UM (FreeRDP 2.x audio is rejected by the server mid-session)"
   fi
-  if ! grep -qF '<param name="disable-audio">' "$UM"; then
-    awk '{ print } !done && /<param name="ignore-cert">/ { print "            <param name=\"disable-audio\">true</param>"; done = 1 }' "$UM" > "$WORK/um.new"
-    if grep -qF '<param name="disable-audio">true</param>' "$WORK/um.new"; then
-      cat "$WORK/um.new" > "$UM"; UM_MIGRATED=1
-      ok "Added disable-audio=true to $UM (FreeRDP 2.x audio is rejected by the server mid-session)"
-    else
-      warn "$UM has no disable-audio param and no ignore-cert line to anchor one on — add <param name=\"disable-audio\">true</param> to the connection yourself, or sessions may drop when audio starts."
-    fi
-  fi
+  grep -qx noanchor "$WORK/um.repairs" 2>/dev/null \
+    && warn "$UM has no disable-audio param and no ignore-cert line to anchor one on — add <param name=\"disable-audio\">true</param> to the connection to $GUAC_RDP_HOST:$RDP_PORT yourself, or sessions may drop when audio starts."
   chmod 600 "$UM"
 else
   info "Writing user-mapping.xml (file authentication — no database)"

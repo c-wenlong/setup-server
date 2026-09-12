@@ -229,6 +229,28 @@ compose_lacks() { ! compose_has "$1"; }
 mapping_file() { printf '%s/user-mapping.xml' "$(env_val GUAC_HOME)"; }
 mapping_has()  { grep -qF -- "$1" "$(mapping_file)" 2>/dev/null; }
 
+# Per-connection views. The repair is scoped to the connection setup.sh
+# generated, identified by the backend it dials, so "the file contains nla"
+# is too weak an assertion to tell a correct repair from one that reached
+# into a connection the user added. conn_block prints the one <connection>
+# whose body contains the literal (a hostname param, in practice), wherever
+# it sits in the file. These are functions run in the PARENT shell on
+# purpose: a `sh -c "... $(helper) ..."` would call them in a child that has
+# never heard of them, which is exactly how the syncthing suite grew a check
+# that could never fail.
+conn_block() {  # conn_block LITERAL -> the <connection>...</connection> containing it
+  awk -v want="$1" '
+    index($0, "<connection")   { n = 0; inb = 1 }
+    inb                        { buf[n++] = $0 }
+    index($0, "</connection>") { hit = 0
+                                 for (i = 0; i < n; i++) if (index(buf[i], want)) hit = 1
+                                 if (hit) for (i = 0; i < n; i++) print buf[i]
+                                 inb = 0 }' "$(mapping_file)" 2>/dev/null
+}
+conn_has()   { conn_block "$1" | grep -qF -- "$2"; }
+conn_lacks() { ! conn_block "$1" | grep -qF -- "$2"; }
+conn_exists() { [ -n "$(conn_block "$1")" ]; }
+
 # XML comments stripped. The file explains at length what it deliberately does
 # NOT do — "Session recording is off on purpose", "NOT enabled: drive
 # redirection" — so a naive grep for `recording` or `drive` matches the prose
@@ -643,6 +665,64 @@ test_mapping_migration() {
   sed 's#<param name="security">nla</param>#<param name="security">any</param>#' "$m" > "$m.new" && cat "$m.new" > "$m" && rm -f "$m.new"
   run_deploy
   check "security=any (hand-chosen) untouched" mapping_has '<param name="security">any</param>'
+
+  # A connection YOU added is not this script's to repair. The file's own
+  # header invites extra connections, and one pointing at a Windows host
+  # legitimately wants security=tls -- rewriting it to nla would break a
+  # connection setup.sh never wrote, to reach a server that never asked for
+  # NLA. Put the generated connection back on tls, strip its disable-audio,
+  # then add two connections that want tls: one ABOVE the generated one and
+  # one below. The one above is the case that breaks any repair keyed on
+  # position -- it would be rewritten while the generated one stayed broken.
+  local ours; ours="<param name=\"hostname\">$(env_val GUAC_RDP_HOST)</param>"
+  sed -e 's#<param name="security">any</param>#<param name="security">tls</param>#' \
+      -e '/<param name="disable-audio">/d' "$m" > "$m.new" && cat "$m.new" > "$m" && rm -f "$m.new"
+  awk '/<authorize / && !top {
+         print
+         print "        <connection name=\"prepended box\">"
+         print "            <protocol>rdp</protocol>"
+         print "            <param name=\"hostname\">10.0.0.5</param>"
+         print "            <param name=\"port\">3389</param>"
+         print "            <param name=\"security\">tls</param>"
+         print "            <param name=\"ignore-cert\">true</param>"
+         print "        </connection>"
+         top = 1; next
+       }
+       /<\/authorize>/ && !bottom {
+         print "        <connection name=\"windows box\">"
+         print "            <protocol>rdp</protocol>"
+         print "            <param name=\"hostname\">10.0.0.6</param>"
+         print "            <param name=\"port\">3389</param>"
+         print "            <param name=\"security\">tls</param>"
+         print "            <param name=\"ignore-cert\">true</param>"
+         print "        </connection>"
+         bottom = 1
+       }
+       { print }' "$m" > "$m.new" && cat "$m.new" > "$m" && rm -f "$m.new"
+  check "setup: a user connection sits above the generated one" \
+    sh -c "grep -n 'hostname\">10.0.0.5' '$m' | cut -d: -f1 | head -1 | xargs -I{} test {} -lt \$(grep -n 'hostname\">$(env_val GUAC_RDP_HOST)' '$m' | cut -d: -f1 | head -1)"
+
+  run_deploy
+  check "second run repairs only the generated connection" [ "$CODE" -eq 0 ]
+  check "  generated connection is nla"      conn_has "$ours" '<param name="security">nla</param>'
+  check "  and got disable-audio"            conn_has "$ours" '<param name="disable-audio">true</param>'
+  check "  the one ABOVE it keeps tls"       conn_has 'hostname">10.0.0.5' '<param name="security">tls</param>'
+  check "    and was NOT given nla"          conn_lacks 'hostname">10.0.0.5' '<param name="security">nla</param>'
+  check "    and got no disable-audio"       conn_lacks 'hostname">10.0.0.5' 'disable-audio'
+  check "  the one BELOW it keeps tls"       conn_has 'hostname">10.0.0.6' '<param name="security">tls</param>'
+  check "    and was NOT given nla"          conn_lacks 'hostname">10.0.0.6' '<param name="security">nla</param>'
+  check "    and got no disable-audio"       conn_lacks 'hostname">10.0.0.6' 'disable-audio'
+  check "  both are still there"             conn_exists 'name="prepended box"'
+  check "    (and the other)"                conn_exists 'name="windows box"'
+  check "  said which connection it fixed"   out_has "connection to $(env_val GUAC_RDP_HOST):3389"
+
+  # And the run after that must not come back for it: with the generated
+  # connection already on nla, the only tls left in the file is the user's.
+  local settled; settled="$(cksum < "$m")"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "third run leaves the file alone" [ "$(cksum < "$m")" = "$settled" ]
+  check "  and says nothing about tls"    no_repair_msg
   teardown
 }
 
