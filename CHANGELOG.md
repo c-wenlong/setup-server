@@ -16,6 +16,12 @@ first, dated by merge.
 
 ### Fixed
 
+- **immich: overriding only `LOCAL_PORT` split the two ports.** `HTTPS_PORT`
+  defaulted to a literal 2283 instead of following `LOCAL_PORT` the way n8n
+  and kaichenpedia do, so `LOCAL_PORT=2284 ./setup.sh` published
+  `:2283 -> 127.0.0.1:2284`. The default now follows the local port, on the
+  first run and on a re-run where `.env` holds the port, while an explicit
+  `HTTPS_PORT` is honoured as given. New mocked test covers all three cases.
 - **Stale comments and dead code left over from the docs audit.**
   code-server's suite header named a script that never existed; seafile's
   header and SETUP.md still said `~/seafile/` (it is
