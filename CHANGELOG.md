@@ -44,6 +44,15 @@ first, dated by merge.
 - Documentation audit across the root docs and the per-service pages, checking
   the claims in them against what the scripts actually do.
 
+### Fixed
+
+- **immich: overriding only `LOCAL_PORT` split the two ports.** `HTTPS_PORT`
+  defaulted to a literal 2283 instead of following `LOCAL_PORT` the way n8n
+  and kaichenpedia do, so `LOCAL_PORT=2284 ./setup.sh` published
+  `:2283 -> 127.0.0.1:2284`. The default now follows the local port, on the
+  first run and on a re-run where `.env` holds the port, while an explicit
+  `HTTPS_PORT` is honoured as given. New mocked test covers all three cases.
+
 ## [PR #4](https://github.com/c-wenlong/setup-server/pull/4) - 2026-09-12
 
 Follow-up review of the parts of PR #3 that had not been looked at. Four
