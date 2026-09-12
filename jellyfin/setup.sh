@@ -15,6 +15,7 @@
 #
 # Usage:
 #   ./setup.sh                              # local 8096, HTTPS 8096
+#   LOCAL_PORT=8097 ./setup.sh              # HTTPS follows LOCAL_PORT (8097 -> 8097)
 #   LOCAL_PORT=8097 HTTPS_PORT=8097 ./setup.sh
 #   MEDIA_DIR=/srv/media ./setup.sh         # first run only; .env wins after
 #   JELLYFIN_ADMIN_USERNAME=kai ./setup.sh  # first run only; .env wins after
@@ -39,7 +40,11 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8096}"
-HTTPS_PORT="${HTTPS_PORT:-8096}"
+# The HTTPS port follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. Whether it was explicit is remembered for the .env read-back below.
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 ADMIN_USERNAME="${JELLYFIN_ADMIN_USERNAME:-kai}"
 
 # Captured before .env is sourced, because sourcing overwrites MEDIA_DIR with
@@ -208,6 +213,9 @@ PUBLISHED_URL="${JELLYFIN_PUBLISHED_URL:?JELLYFIN_PUBLISHED_URL missing from $EN
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
+# .env holds no HTTPS_PORT, so a default HTTPS port keeps following the local
+# port .env settled on; an explicit HTTPS_PORT is honoured as given.
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
 if [ -n "$REQUESTED_MEDIA_DIR" ] && [ "$LIBRARY_DIR" != "$REQUESTED_MEDIA_DIR" ]; then
   warn "MEDIA_DIR=$REQUESTED_MEDIA_DIR ignored — the existing $ENV_FILE says $LIBRARY_DIR. Edit MEDIA_DIR in .env and re-run to move the library."
 fi

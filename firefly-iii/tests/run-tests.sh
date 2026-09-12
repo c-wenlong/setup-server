@@ -104,7 +104,7 @@ teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
   unset FAKE_UID LOCAL_PORT IMPORTER_PORT HTTPS_PORT IMPORTER_HTTPS_PORT \
-        FIREFLY_ADMIN_EMAIL STATE_DIR CALLS_LOG
+        FIREFLY_ADMIN_EMAIL STATE_DIR CALLS_LOG STUB_PORTS
 }
 
 run_deploy() {
@@ -662,6 +662,50 @@ test_ports_are_8097_8099_never_8098() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves its HTTPS port; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (8097) next to a LOCAL_PORT
+  # override would silently publish :8097 -> 127.0.0.1:2284, i.e. the wrong
+  # port. Same story for IMPORTER_PORT/IMPORTER_HTTPS_PORT, which must stay
+  # untouched by a LOCAL_PORT-only override.
+  #
+  # STUB_PORTS tells the ss stub which ports a correct deploy is listening on
+  # (it otherwise defaults to 8097/8099), so the listener audit genuinely
+  # passes against the moved port rather than merely not failing.
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=2284
+  export STUB_PORTS="2284 8099"
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=2284"   grep -qx 'LOCAL_PORT=2284' "$SVC/.env"
+  check ".env records HTTPS_PORT=2284"   grep -qx 'HTTPS_PORT=2284' "$SVC/.env"
+  check "served :2284 -> 127.0.0.1:2284" calls_have "tailscale serve --bg --https=2284 http://127.0.0.1:2284"
+  check "  and never :8097"              no_call "tailscale serve --bg --https=8097"
+  check "prints the :2284 URL"           out_has "https://test-host.tailfake.ts.net:2284"
+  check "the importer pair is untouched: still :8099 -> 127.0.0.1:8099" \
+    calls_have "tailscale serve --bg --https=8099 http://127.0.0.1:8099"
+  # Re-run with no override at all: .env says 2284, and the HTTPS default has
+  # to follow what .env settled on rather than snap back to 8097.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"                   [ "$CODE" -eq 0 ]
+  check "re-run kept :2284 -> 127.0.0.1:2284" calls_have "tailscale serve --bg --https=2284 http://127.0.0.1:2284"
+  check "  and never :8097"                   no_call "tailscale serve --bg --https=8097"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=2284 HTTPS_PORT=8443
+  export STUB_PORTS="2284 8099"
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:2284" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:2284"
+  check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_publish_is_loopback_only() {
   echo "• both ports publish on 127.0.0.1 only; postgres publishes nothing"
   setup
@@ -1030,6 +1074,7 @@ test_images_are_pinned
 test_mem_limit_on_every_container
 test_app_key_is_32_characters
 test_ports_are_8097_8099_never_8098
+test_https_port_follows_local_port
 test_publish_is_loopback_only
 test_readiness_race
 test_never_ready

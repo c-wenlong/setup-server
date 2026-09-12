@@ -776,6 +776,52 @@ test_port_override() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (8095) sitting next to a
+  # LOCAL_PORT override would write a mismatched .env on first deploy, HTTPS
+  # stuck at 8095 while LOCAL_PORT moved to 8096, so Tailscale Serve maps the
+  # wrong pair and PAPERLESS_URL (hence CSRF_TRUSTED_ORIGINS) points at the
+  # wrong port.
+  setup
+  touch "$STATE_DIR/operator"
+  echo 8096 > "$STATE_DIR/web_port"
+  export LOCAL_PORT=8096
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=8096"  [ "$(env_val LOCAL_PORT)" = "8096" ]
+  check "  and HTTPS_PORT=8096"         [ "$(env_val HTTPS_PORT)" = "8096" ]
+  check "served :8096 -> 127.0.0.1:8096" \
+    calls_have "tailscale serve --bg --https=8096 http://127.0.0.1:8096"
+  check "  and never :8095"           no_call "tailscale serve --bg --https=8095"
+  check "PAPERLESS_URL carries :8096" [ "$(penv_get PAPERLESS_URL)" = "$FAKE_URL:8096" ]
+  check "prints the :8096 URL"        out_hasF "$FAKE_URL:8096"
+
+  # Re-run with no override at all: .env already settled on 8096, and the
+  # read-back has to keep it rather than snapping HTTPS back to the 8095
+  # literal.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero" [ "$CODE" -eq 0 ]
+  check "re-run kept :8096 -> 127.0.0.1:8096" \
+    calls_have "tailscale serve --bg --https=8096 http://127.0.0.1:8096"
+  check "  and never :8095" no_call "tailscale serve --bg --https=8095"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  echo 8096 > "$STATE_DIR/web_port"
+  export LOCAL_PORT=8096 HTTPS_PORT=8443
+  run_deploy
+  check "exits zero" [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:8096" \
+    calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8096"
+  check "PAPERLESS_URL carries :8443" \
+    [ "$(penv_get PAPERLESS_URL)" = "$FAKE_URL:8443" ]
+  teardown
+}
+
 # ------------------------------------------------- sandbox integrity proof
 # Recorded before the mocked suite runs, checked after it. A mocked suite that
 # quietly wrote to ~/services/paperless-ngx or to the repo's real .env would be
@@ -1027,6 +1073,7 @@ test_operator_escalation
 test_serve_approval_prompt
 test_https_front_door_slow
 test_port_override
+test_https_port_follows_local_port
 test_sandbox_was_hermetic
 
 if [ "${1:-}" = "--live" ]; then

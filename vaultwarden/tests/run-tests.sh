@@ -542,6 +542,43 @@ test_port_override() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default (8222) next to a LOCAL_PORT
+  # override would silently publish :8222 -> 127.0.0.1:8223, i.e. the wrong
+  # port, and .env stores no HTTPS_PORT of its own to read back on a re-run.
+  setup
+  touch "$STATE_DIR/operator"
+  set_users 0
+  export LOCAL_PORT=8223
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=8223"   grep -qx 'LOCAL_PORT=8223' "$SVC/.env"
+  check "served :8223 -> 127.0.0.1:8223" calls_have "tailscale serve --bg --https=8223 http://127.0.0.1:8223"
+  check "  and never :8222"              no_call "tailscale serve --bg --https=8222"
+  check "prints the :8223 URL"           out_has "https://test-host.tailfake.ts.net:8223"
+  # Re-run with no override at all: .env says 8223, and the HTTPS default has
+  # to follow what .env settled on rather than snap back to 8222.
+  unset LOCAL_PORT
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/recreate_count"
+  run_deploy
+  check "re-run exits zero"                   [ "$CODE" -eq 0 ]
+  check "re-run kept :8223 -> 127.0.0.1:8223" calls_have "tailscale serve --bg --https=8223 http://127.0.0.1:8223"
+  check "  and never :8222"                   no_call "tailscale serve --bg --https=8222"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  set_users 0
+  export LOCAL_PORT=8223 HTTPS_PORT=8443
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:8223" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8223"
+  check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_operator_escalation() {
   echo "• serve denied: grants operator via sudo, then succeeds"
   setup
@@ -654,7 +691,7 @@ test_live() {
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
-  https_port="${HTTPS_PORT:-8222}"
+  https_port="${HTTPS_PORT:-$port}"
   url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
   want="$url:$https_port"
 
@@ -753,6 +790,7 @@ test_inspect_blind
 test_domain_drift
 test_server_reports_wrong_domain
 test_port_override
+test_https_port_follows_local_port
 test_operator_escalation
 test_serve_approval_prompt
 

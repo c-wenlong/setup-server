@@ -16,6 +16,7 @@
 #
 # Usage:
 #   ./setup.sh                                # local 8095, HTTPS 8095
+#   LOCAL_PORT=8096 ./setup.sh                # HTTPS follows LOCAL_PORT (8096 -> 8096)
 #   LOCAL_PORT=8095 HTTPS_PORT=8095 ./setup.sh
 #   PAPERLESS_ADMIN_USER=kai ./setup.sh       # first run only; .env wins after
 #   ./setup.sh --stop                         # stop it, keep the data
@@ -62,7 +63,12 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8095}"
-HTTPS_PORT="${HTTPS_PORT:-8095}"
+# The HTTPS port follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. Unlike immich, .env below stores HTTPS_PORT and the read-back further
+# down re-sources it unconditionally, so there is nothing left to track past
+# the first deploy, no HTTPS_PORT_EXPLICIT flag needed here.
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 ADMIN_USERNAME="${PAPERLESS_ADMIN_USER:-kai}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"

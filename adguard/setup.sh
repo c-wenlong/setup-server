@@ -15,6 +15,7 @@
 # Usage:
 #   ./setup.sh                                  # local 3080, HTTPS 3080
 #   LOCAL_PORT=3080 HTTPS_PORT=3080 ./setup.sh
+#   LOCAL_PORT=3084 ./setup.sh                  # HTTPS follows LOCAL_PORT
 #   ADGUARD_ADMIN_USERNAME=kai ./setup.sh       # first run only; .env wins after
 #
 # ---------------------------------------------------------------------------
@@ -50,7 +51,11 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-3080}"
-HTTPS_PORT="${HTTPS_PORT:-3080}"
+# HTTPS follows the local port unless set explicitly (the n8n/kaichenpedia
+# convention), so overriding only LOCAL_PORT cannot split the two. Whether it
+# was explicit is remembered for the .env read-back below.
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 ADMIN_USERNAME="${ADGUARD_ADMIN_USERNAME:-kai}"
 CONTAINER="adguard"
 
@@ -242,6 +247,9 @@ RATELIMIT="${ADGUARD_RATELIMIT:-0}"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
+# .env holds no HTTPS_PORT, so a default HTTPS port keeps following the local
+# port .env settled on; an explicit HTTPS_PORT is honoured as given.
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
 case "$RATELIMIT" in ''|*[!0-9]*) die "ADGUARD_RATELIMIT must be a non-negative integer (got: $RATELIMIT)";; esac
 
 # Drift check, not a rewrite: .env is the user's file. But a stale DNS_IP is

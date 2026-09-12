@@ -54,6 +54,13 @@ first, dated by merge.
   to main's.** `links_to` piped `grep` into `grep -q` under `pipefail`; when
   the reader exited on its first match the writer took SIGPIPE and the row
   was reported missing. One awk scan now, no pipe.
+- **Eight more services defaulted `HTTPS_PORT` to a literal instead of
+  `LOCAL_PORT`.** forgejo, jellyfin, vaultwarden, adguard, homepage,
+  paperless-ngx, firefly-iii (both port pairs) and home-assistant now follow
+  the same rule immich got: the published port follows the local port unless
+  set explicitly, on the first run and on re-runs. The five whose `.env` holds
+  no `HTTPS_PORT` carry the same read-back guard as immich; the three that
+  store it needed only the default line. One mocked test per service.
 
 ## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
 

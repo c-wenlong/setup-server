@@ -14,6 +14,7 @@
 #
 # Usage:
 #   ./setup.sh                            # local 3000, HTTPS 3000
+#   LOCAL_PORT=3010 ./setup.sh            # HTTPS follows LOCAL_PORT
 #   LOCAL_PORT=3010 HTTPS_PORT=3010 ./setup.sh
 #   FORGEJO_ADMIN_USERNAME=kai ./setup.sh # first run only; .env wins after
 #
@@ -34,7 +35,11 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-3000}"
-HTTPS_PORT="${HTTPS_PORT:-3000}"
+# The HTTPS port follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. Whether it was explicit is remembered for the .env read-back below.
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 ADMIN_USERNAME="${FORGEJO_ADMIN_USERNAME:-kai}"
 ADMIN_EMAIL="${FORGEJO_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
 CONTAINER="forgejo"
@@ -174,6 +179,9 @@ ROOT_URL="${FORGEJO_ROOT_URL:?FORGEJO_ROOT_URL missing from $ENV_FILE}"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
+# .env holds no HTTPS_PORT, so a default HTTPS port keeps following the local
+# port .env settled on; an explicit HTTPS_PORT is honoured as given.
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
 
 # Drift check, not a rewrite: .env is the user's file. But a ROOT_URL that no
 # longer matches this machine breaks clone URLs silently, so say so loudly.
