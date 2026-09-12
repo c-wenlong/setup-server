@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# ss stub (Linux listener check). Prints one LISTEN/UNCONN row per address in
+# $STATE_DIR/listeners (addr:port per line) that matches the requested port;
+# with no file, the tailnet address on whatever port was asked — the healthy
+# case. `-t` rows say LISTEN, `-u` rows say UNCONN, as real ss does.
+echo "ss $*" >> "$CALLS_LOG"
+port="$(printf '%s ' "$@" | sed -n 's/.*sport = :\([0-9]*\).*/\1/p')"
+state="LISTEN"; case " $* " in *u*) [[ "$*" == *-lun* ]] && state="UNCONN" ;; esac
+if [ -f "$STATE_DIR/listeners" ]; then
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    case "$a" in *:"$port") echo "$state 0 4096 $a 0.0.0.0:*" ;; esac
+  done < "$STATE_DIR/listeners"
+else
+  echo "$state 0 4096 100.100.100.100:$port 0.0.0.0:*"
+fi
+exit 0

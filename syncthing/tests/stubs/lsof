@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# lsof stub (macOS listener check). Same state file as the ss stub.
+echo "lsof $*" >> "$CALLS_LOG"
+port="$(printf '%s ' "$@" | sed -n 's/.*-i:\([0-9]*\).*/\1/p')"
+echo "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME"
+if [ -f "$STATE_DIR/listeners" ]; then
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    case "$a" in *:"$port") echo "syncthing 1 user 3u IPv4 0x0 0t0 TCP $a (LISTEN)"; echo "syncthing 1 user 4u IPv4 0x0 0t0 UDP $a" ;; esac
+  done < "$STATE_DIR/listeners"
+else
+  echo "syncthing 1 user 3u IPv4 0x0 0t0 TCP 100.100.100.100:$port (LISTEN)"
+  echo "syncthing 1 user 4u IPv4 0x0 0t0 UDP 100.100.100.100:$port"
+fi
+exit 0

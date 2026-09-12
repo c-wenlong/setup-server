@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Fake syncthing binary. NOT on PATH as a stub: the curl stub packages this
+# file into the release tarball, so setup.sh's download -> sha256 -> extract
+# -> install path runs for real and this ends up at $HOME/.local/bin/syncthing
+# in the sandbox. __VERSION__ is substituted at packaging time, so a bumped
+# SYNCTHING_VERSION in .env produces a binary that reports the new version.
+#
+# Models the three subcommands setup.sh uses: --version, generate, device-id.
+# `serve` is never reached in the mocked suite (systemctl is a stub).
+echo "syncthing $*" >> "$CALLS_LOG"
+case "${1:-}" in
+  --version)
+    echo 'syncthing __VERSION__ "Stub Stoat" (go1.27-stub linux-amd64) stub@localhost 2026-01-01 00:00:00 UTC'
+    ;;
+  generate)
+    dir=""
+    for a in "$@"; do case "$a" in --config=*) dir="${a#--config=}";; --home=*) dir="${a#--home=}";; esac; done
+    [ -n "$dir" ] || { echo "generate: no --config" >&2; exit 2; }
+    mkdir -p "$dir"
+    echo "$dir" > "$STATE_DIR/config_dir"
+    printf -- '-----BEGIN CERTIFICATE-----\nSTUB\n-----END CERTIFICATE-----\n' > "$dir/cert.pem"
+    ( umask 077; printf -- '-----BEGIN EC PRIVATE KEY-----\nSTUB\n-----END EC PRIVATE KEY-----\n' > "$dir/key.pem" )
+    # The real v2.1.5 output, trimmed to the elements setup.sh's patch and
+    # the curl stub's REST views depend on. Defaults are upstream's: wildcard
+    # listener, relays, both discoveries, NAT, reporting prompt, auto-upgrade.
+    ( umask 077; cat > "$dir/config.xml" <<'XML'
+<configuration version="52">
+    <device id="STUBDEV-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG" name="test-host" compression="metadata" introducer="false" skipIntroductionRemovals="false" introducedBy="">
+        <address>dynamic</address>
+        <paused>false</paused>
+        <autoAcceptFolders>false</autoAcceptFolders>
+    </device>
+    <gui enabled="true" tls="false" sendBasicAuthPrompt="false">
+        <address>127.0.0.1:8384</address>
+        <metricsWithoutAuth>false</metricsWithoutAuth>
+        <apikey>STUBAPIKEYSTUBAPIKEYSTUBAPIKEY12</apikey>
+        <theme>default</theme>
+    </gui>
+    <ldap></ldap>
+    <options>
+        <listenAddress>default</listenAddress>
+        <globalAnnounceServer>default</globalAnnounceServer>
+        <globalAnnounceEnabled>true</globalAnnounceEnabled>
+        <localAnnounceEnabled>true</localAnnounceEnabled>
+        <localAnnouncePort>21027</localAnnouncePort>
+        <relaysEnabled>true</relaysEnabled>
+        <startBrowser>true</startBrowser>
+        <natEnabled>true</natEnabled>
+        <urAccepted>0</urAccepted>
+        <urSeen>0</urSeen>
+        <autoUpgradeIntervalH>12</autoUpgradeIntervalH>
+        <unackedNotificationID>authenticationUserAndPassword</unackedNotificationID>
+        <crashReportingEnabled>true</crashReportingEnabled>
+        <announceLANAddresses>true</announceLANAddresses>
+    </options>
+    <defaults>
+        <folder id="" label="" path="" type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true">
+            <markerName>.stfolder</markerName>
+        </folder>
+    </defaults>
+</configuration>
+XML
+    )
+    echo "INF Generating key and certificate (cn=syncthing)"
+    echo "INF Calculated device ID (device=STUBDEV-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG)"
+    ;;
+  device-id)
+    echo "STUBDEV-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG"
+    ;;
+  serve)
+    touch "$STATE_DIR/serve_invoked_directly"
+    ;;
+esac
+exit 0

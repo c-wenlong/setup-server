@@ -32,6 +32,7 @@ else from that repo is included.
 |---|---|---|
 | `immich.svg` | `immich.svg` | Immich |
 | `seafile.svg` | `seafile.svg` | Seafile |
+| `syncthing.svg` | `syncthing.svg` | Syncthing (fetched 2026-09-12, same commit) |
 | `code-server.svg` | `vscode.svg` | code-server (no `code-server.svg` upstream; VS Code's mark is the recognisable one) |
 | `open-webui.svg` | `open-webui.svg` | Open WebUI |
 | `open-webui-dark.svg` | `open-webui-light.svg` | Open WebUI, dark theme |

@@ -26,6 +26,10 @@ PUBLISHED = [
     ("code-server", None, "/healthz"),
     ("seafile", 8443, "/api2/ping/"),  # trailing slash: /api2/ping 301s
     ("open-webui", 10000, "/health"),
+    # /rest/noauth/health ({"status":"OK"}) needs no API key; "/" is the GUI
+    # and would 403 without insecureSkipHostcheck, which is a separate failure
+    # this monitor should not conflate with "down". Says nothing about :22000.
+    ("syncthing", 8384, "/rest/noauth/health"),
     ("n8n", 5678, "/healthz"),
     ("manimkc", 8090, "/health"),
     ("kaichenpedia", 8091, "/"),
