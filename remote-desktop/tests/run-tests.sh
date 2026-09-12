@@ -848,7 +848,7 @@ test_rdp_leaks_despite_filter() {
   check "says RDP is REACHABLE"       out_has "REACHABLE"
   check "  names a LAN address"       out_hasF "192.168.88.11"
   check "  names the other one too"   out_hasF "192.168.88.13"
-  check "  and the tailnet address"   out_hasF "100.77.77.77"
+  check "  and the tailnet address"   out_hasF "$FAKE_TS_IP"
   check "  blames the filter"         out_has "packet filter is not doing its job"
   check "  gives the diagnostic"      out_has "nft list table inet remote_desktop"
   check "summary reports failure"     out_has "Deploy finished with failures"
@@ -964,7 +964,7 @@ test_no_listener_audit_via_ss_at_all() {
   # ...and it really did ask the question, on every non-loopback address.
   check "probed 3389 on LAN (wired)"   calls_have "probe tcp 192.168.88.11 3389"
   check "probed 3389 on LAN (wifi)"    calls_have "probe tcp 192.168.88.13 3389"
-  check "probed 3389 on the tailnet"   calls_have "probe tcp 100.77.77.77 3389"
+  check "probed 3389 on the tailnet"   calls_have "probe tcp $FAKE_TS_IP 3389"
   check "probed the webapp port too"   calls_have "probe tcp 192.168.88.11 8094"
   check "probed guacd's 4822"          calls_have "probe tcp 127.0.0.1 4822"
   # A real RDP handshake, not merely an open socket: a TCP proxy to nowhere

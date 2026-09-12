@@ -44,6 +44,15 @@ first, dated by merge.
 - Documentation audit across the root docs and the per-service pages, checking
   the claims in them against what the scripts actually do.
 
+### Fixed
+
+- **Three suites declared `FAKE_TS_IP` and never used it.** firefly-iii now
+  asserts the listener audit accepted tailscaled's Serve proxy on the stub's
+  tailnet address for both ports (and resolved it via `tailscale ip -4`),
+  remote-desktop's two literal `100.77.77.77` assertions use the variable,
+  and homepage drops it (its audit never names the address; the ss and
+  tailscale stubs share it between themselves).
+
 ## [PR #4](https://github.com/c-wenlong/setup-server/pull/4) - 2026-09-12
 
 Follow-up review of the parts of PR #3 that had not been looked at. Four
