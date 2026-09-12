@@ -376,7 +376,6 @@ fi
 # it therefore goes through the pinned image itself — which runs as root and
 # ships python3 — rather than through sudo.
 HTTP_STORE="$CONFIG_DIR/.storage/http"
-HTTP_STORE_ACTION=""
 
 # The exact shape HA expects: STORAGE_VERSION 2 / STORAGE_MINOR_VERSION 2, and
 # a data dict with all three of stable/pending/yaml_migration_done. All three
@@ -407,7 +406,6 @@ if [ ! -f "$HTTP_STORE" ] && [ ! -d "$CONFIG_DIR/.storage" ]; then
   mkdir -p "$CONFIG_DIR/.storage"
   write_http_store "$HTTP_STORE"
   chmod 644 "$HTTP_STORE"
-  HTTP_STORE_ACTION="seeded"
   ok "Wrote $HTTP_STORE (server_host 127.0.0.1, port $LOCAL_PORT, Serve trusted as a proxy)"
 else
   # .storage exists, so HA has booted here. Ask the image to read the store as
@@ -516,7 +514,6 @@ PY
 )"
       [ "$repaired" = "repaired" ] \
         || die "Could not repair $HTTP_STORE. The container is stopped. Fix it by hand — set data.stable.server_host to [\"127.0.0.1\"], data.stable.use_x_forwarded_for to true, data.stable.trusted_proxies to [\"127.0.0.1/32\",\"::1/128\"] and data.pending to null — then re-run ./setup.sh. Read it with: sudo cat $HTTP_STORE"
-      HTTP_STORE_ACTION="repaired"
       ok "Repaired $HTTP_STORE — server_host is 127.0.0.1 and any pending trial is cleared"
       ;;
   esac

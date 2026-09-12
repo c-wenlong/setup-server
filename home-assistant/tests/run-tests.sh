@@ -97,8 +97,9 @@ green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 #                 without go2rtc: -> 127.0.0.1:8123 and nothing else
 #               `stream:` stays, so cameras still work over HLS.
 #
-# So 19 of 21. Note this contradicts HA-DERISK.md §5, which listed 20 — that
-# measurement only ran `ss -ltn | grep 8123` and so could not have seen 18555.
+# So 19 of 21. Note this contradicts the pre-deploy de-risking notes (not kept
+# in this repo), which listed 20 — that measurement only ran
+# `ss -ltn | grep 8123` and so could not have seen 18555.
 WANT_COMPONENTS="assist_pipeline cloud conversation dhcp energy file history homeassistant_alerts logbook media_source mobile_app my ssdp stream sun usage_prediction usb webhook zeroconf"
 WANT_COMPONENT_COUNT=19
 

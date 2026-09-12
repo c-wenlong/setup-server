@@ -241,7 +241,8 @@ options are to add `go2rtc:` back and accept that 18555 is open on the LAN, or
 to move the container to bridge networking and give up discovery. There is no
 third.
 
-⚠️ This contradicts HA-DERISK.md §5, which listed 20 components including
+⚠️ This contradicts the pre-deploy de-risking notes (not kept in this repo),
+which listed 20 components including
 `go2rtc`. That measurement checked `ss -ltn | grep 8123` and so could not have
 seen 18555. The finding was reproduced independently by both agents working on
 this service before the list was changed.
@@ -303,7 +304,7 @@ back to `stable`: the built-in defaults, meaning a **wildcard bind and no
 reverse-proxy trust**. Both guarantees vanish one boot after a deploy that
 reported success.
 
-This is also why HA-DERISK.md §3's loopback measurement was real but not
+This is also why the de-risking notes' loopback measurement was real but not
 durable: it was taken inside the first-boot trial window, before the revert.
 
 `setup.sh` therefore writes `.storage/http` itself, **before the first boot**,

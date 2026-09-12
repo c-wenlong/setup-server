@@ -62,11 +62,11 @@
     'home-assistant': { file: 'home-assistant' },
     'firefly-iii':   { file: 'firefly-iii' },
     /* Guacamole is the engine; the service key is what it does. */
-    'remote-desktop': { file: 'guacamole' }
-    /* No entry for 'homepage': the icon set has no mark for gethomepage.dev,
-       and the only near-miss there ("homarr") is a DIFFERENT dashboard, so
-       shipping it would label the tile with a competitor's logo. It falls
-       back to a generic glyph until an official mark is vendored. */
+    'remote-desktop': { file: 'guacamole' },
+    /* The icon set has no mark for gethomepage.dev (its "homarr" is a
+       DIFFERENT dashboard), so this is the project's own 512px PNG from the
+       gethomepage/homepage repo. Raster because no vector original exists. */
+    'homepage':      { file: 'homepage',     ext: 'png' }
   };
 
   /* Spellings the registry might plausibly use for the same service. */
