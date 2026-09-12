@@ -103,8 +103,9 @@ test_fresh_deploy() {
   check ".env points at local ollama"   env_has "OLLAMA_BASE_URL=http://127.0.0.1:11434"
   check "compose up invoked"            [ -f "$STATE_DIR/compose_up" ]
   check "data dir created under HOME"   [ -d "$HOME/services/open-webui/data" ]
-  check "served on tailscale :10000"    calls_have "tailscale serve --bg --https=10000 http://127.0.0.1:3001"
-  check "prints final URL"              out_has "https://test-host.tailfake.ts.net:10000"
+  check "served on tailscale :3001"     calls_have "tailscale serve --bg --https=3001 http://127.0.0.1:3001"
+  check "  and never the old :10000"    no_call "tailscale serve --bg --https=10000"
+  check "prints final URL"              out_has "https://test-host.tailfake.ts.net:3001"
   check "warns about first signup"      out_has "first account registered becomes the admin"
   teardown
 }
@@ -122,13 +123,38 @@ test_idempotent_rerun() {
   teardown
 }
 
+test_https_port_follows_local_port() {
+  echo "• LOCAL_PORT alone moves both ports; an explicit HTTPS_PORT still wins"
+  # The bug this guards: a literal HTTPS default next to a LOCAL_PORT override
+  # publishes :<literal> -> 127.0.0.1:<moved>, i.e. the wrong backend.
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=3005
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check ".env records LOCAL_PORT=3005"   grep -qx 'LOCAL_PORT=3005' "$SVC/.env"
+  check "served :3005 -> 127.0.0.1:3005" calls_have "tailscale serve --bg --https=3005 http://127.0.0.1:3005"
+  check "  and never :3001"              no_call "tailscale serve --bg --https=3001"
+  check "prints the :3005 URL"           out_has "https://test-host.tailfake.ts.net:3005"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=3005 HTTPS_PORT=8443
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "served :8443 -> 127.0.0.1:3005" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:3005"
+  check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_operator_escalation() {
   echo "• serve denied: grants operator via sudo, then succeeds"
   setup
   run_deploy
   check "exits zero" [ "$CODE" -eq 0 ]
   [ "$OS" = "Linux" ] && check "granted operator" calls_have "sudo tailscale set --operator="
-  check "eventually published" calls_have "tailscale serve --bg --https=10000"
+  check "eventually published" calls_have "tailscale serve --bg --https=3001"
   teardown
 }
 
@@ -142,28 +168,69 @@ live_check() {
   fi
 }
 
+# Every listener on $port must be loopback or Tailscale's own tailnet
+# address, never a wildcard or a LAN interface.
+#
+# The tailnet allowance became load-bearing here on 2026-09-13, when the
+# published port stopped being 10000 and started following the local port:
+# with 3001 -> 3001, tailscaled's own Serve proxy legitimately holds the
+# tailnet address on the same number the container binds on loopback. The
+# previous "anything that is not 127.0.0.1 is a leak" reading flagged that
+# proxy and failed a correct deploy. Host networking makes the check matter
+# more, not less: HOST=127.0.0.1 in docker-compose.yml is the only thing
+# keeping the UI off the LAN, since there is no Docker publish spec.
+#
+# The function body below is the canonical implementation, byte-identical to
+# immich's, vaultwarden's, jellyfin's, adguard's and homepage's.
 no_external_listener() {
-  local port="$1"
+  local port="$1" addrs addr host ts ts4 ts6
+  ts="tailscale"
+  command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+  ts4="$("$ts" ip -4 2>/dev/null || true)"
+  ts6="$("$ts" ip -6 2>/dev/null || true)"
+
   if command -v ss >/dev/null; then
-    ! (ss -ltn | grep ":$port" | grep -v 127.0.0.1 | grep -q LISTEN)
+    addrs="$(ss -ltnH "sport = :$port" 2>/dev/null | awk '{print $4}')"
   else
-    ! (lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}' | grep -v '^127\.0\.0\.1' | grep -q .)
+    addrs="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}')"
   fi
+  [ -n "$addrs" ] || return 0
+
+  # read loop, not `for addr in $addrs`: that relies on word-splitting,
+  # which zsh does not do for unquoted expansions.
+  while IFS= read -r addr; do
+    [ -n "$addr" ] || continue
+    host="${addr%:*}"                            # strip :port
+    host="$(printf '%s' "$host" | tr -d '[]')"   # unwrap [v6]: tr, not a
+                                                 # glob, because '[' is an
+                                                 # invalid pattern under zsh
+    case "$host" in
+      127.0.0.1|::1|localhost) ;;
+      *) [ -n "$ts4" ] && [ "$host" = "$ts4" ] && continue
+         [ -n "$ts6" ] && [ "$host" = "$ts6" ] && continue
+         return 1 ;;
+    esac
+  done <<EOF
+$addrs
+EOF
+  return 0
 }
 
 test_live() {
   echo "• live: verify the real deployment on this machine"
-  local ts port url
+  local ts port https_port url
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
+  https_port="${HTTPS_PORT:-$port}"
   url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
   live_check "container running"              sh -c "docker inspect -f '{{.State.Status}}' open-webui | grep -qx running"
   live_check "local health responds"          curl -fsS "http://127.0.0.1:$port/health"
   live_check "not listening on non-local ifaces" no_external_listener "$port"
   live_check "ollama reachable from host"     curl -fsS --max-time 3 "http://127.0.0.1:11434/api/version"
-  live_check "tailscale serve maps :10000"    sh -c "'$ts' serve status | grep -A2 ':10000' | grep -q 'proxy http://127.0.0.1:$port'"
-  live_check "tailnet HTTPS responds"         curl -fsS -o /dev/null --max-time 30 "$url:10000/health"
+  live_check "tailscale serve maps :$https_port" sh -c "'$ts' serve status | grep -A2 ':$https_port' | grep -q 'proxy http://127.0.0.1:$port'"
+  live_check "the old :10000 mapping is gone"  sh -c "! '$ts' serve status | grep -q ':10000'"
+  live_check "tailnet HTTPS responds"         curl -fsS -o /dev/null --max-time 30 "$url:$https_port/health"
 }
 
 # ------------------------------------------------------------------ main
@@ -173,6 +240,7 @@ test_preflight_tailscale_down
 test_preflight_bad_https_port
 test_fresh_deploy
 test_idempotent_rerun
+test_https_port_follows_local_port
 test_operator_escalation
 
 if [ "${1:-}" = "--live" ]; then

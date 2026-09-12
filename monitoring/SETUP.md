@@ -11,7 +11,7 @@ your phone when something goes down (and when it recovers).
 ```
 Uptime Kuma ──probe──▶ https://<tailnet host>/healthz          (code-server)
  (127.0.0.1:3002)      https://<tailnet host>:8443/api2/ping/  (seafile)
-      │                https://<tailnet host>:10000/health     (open-webui)
+      │                https://<tailnet host>:3001/health      (open-webui)
       │                https://<tailnet host>:2283/api/...     (immich)
       │ on failure     http://127.0.0.1:11434/api/version      (ollama*)
       ▼

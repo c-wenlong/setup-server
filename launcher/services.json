@@ -178,7 +178,7 @@
       "name": "Open WebUI",
       "tagline": "Chat",
       "icon": "chat",
-      "url": "https://HOST:10000/",
+      "url": "https://HOST:3001/",
       "health": "http://127.0.0.1:3001/health",
       "marker": "~/services/open-webui",
       "setup": "open-webui/setup.sh",

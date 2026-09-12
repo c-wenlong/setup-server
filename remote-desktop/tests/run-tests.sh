@@ -1227,7 +1227,8 @@ live_check() {
 # ⚠️ The Tailscale allowance is load-bearing here for a boring reason: this
 # service publishes HTTPS on the SAME number as the local port (8094 -> 8094),
 # so tailscaled itself legitimately listens on the tailnet IP for :8094. The
-# services that map across numbers (e.g. immich 2283, open-webui 10000 -> 3001)
+# services that map across numbers (e.g. seafile 8443 -> 8081, code-server
+# 443 -> 8080)
 # never hit that overlap, which is why their simpler "anything not 127.0.0.1"
 # reading of this function would false-positive here.
 #

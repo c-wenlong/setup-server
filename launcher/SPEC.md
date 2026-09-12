@@ -119,7 +119,8 @@ concurrently, and cached ~5s so a page refresh can't stampede.
 
 Deployed today — immich (Photos, 2283), seafile (Files, 8443, health
 `http://127.0.0.1:8081/api2/ping/`), code-server (Code, :443, health
-`http://127.0.0.1:8080/healthz`), open-webui (Chat, 10000, health :3001),
+`http://127.0.0.1:8080/healthz`), open-webui (Chat, 10000, health :3001; shipped on :10000, moved to
+:3001 on 2026-09-13 so the published and local ports match),
 kaichenpedia (Wiki, 8091), n8n (Automation, 5678), beszel (Metrics, 8092),
 uptime-kuma (Status, 3002), ntfy (Alerts, 3003), manimkc (Video, 8090),
 ollama (Models, no URL, health :11434/api/version).

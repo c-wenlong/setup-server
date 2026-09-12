@@ -3,7 +3,7 @@
 ChatGPT-style web interface (conversations, model switching, RAG on uploaded
 docs, phone-friendly PWA) backed by the ollama instance already running on
 the host. Reachable only from your Tailscale devices at
-`https://<host>.<tailnet>.ts.net:10000`.
+`https://<host>.<tailnet>.ts.net:3001`.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ the host. Reachable only from your Tailscale devices at
 Clients (browser / iOS PWA)
         │ HTTPS (tailnet only)
         ▼
-Tailscale Serve (:10000) ──▶ open-webui container ──▶ host ollama (:11434)
+Tailscale Serve (:3001) ───▶ open-webui container ──▶ host ollama (:11434)
                              (host network, binds
                               127.0.0.1:3001 only)
 ```
@@ -19,8 +19,10 @@ Tailscale Serve (:10000) ──▶ open-webui container ──▶ host ollama (:
 - **Host network mode**: ollama runs on the host, so the container shares the
   host network namespace to reach it at `127.0.0.1:11434`. `HOST=127.0.0.1`
   keeps the UI itself loopback-only — nothing new is exposed to LAN.
-- Ports on this box: :443 code-server, :8443 Seafile, :10000 this,
-  :3002/:3003 monitoring (modern Tailscale allows any HTTPS serve port).
+- The published port equals the local port (:3001 both sides), the
+  convention for services here. It was :10000 until 2026-09-13, a number
+  chosen when Tailscale Serve only allowed 443/8443/10000; modern Tailscale
+  allows any HTTPS serve port, so the indirection bought nothing.
 - Boot-persistent via Docker's `restart: unless-stopped` — no systemd unit.
 - Chat history, accounts, and uploaded docs live in `~/services/open-webui/data`.
 
@@ -36,7 +38,7 @@ Tailscale Serve (:10000) ──▶ open-webui container ──▶ host ollama (:
 ## Deploy
 
 ```sh
-./setup.sh                                  # local 3001, HTTPS 10000
+./setup.sh                                  # local 3001, HTTPS 3001
 LOCAL_PORT=3005 HTTPS_PORT=8443 ./setup.sh  # overrides
 OLLAMA_BASE_URL=http://... ./setup.sh       # non-default ollama location
 ```

@@ -10,7 +10,8 @@
 #   - boot-persistent via Docker's restart policy (no systemd/launchd needed)
 #
 # Usage:
-#   ./setup.sh                                  # local 3001, HTTPS 10000
+#   ./setup.sh                                  # local 3001, HTTPS 3001
+#   LOCAL_PORT=3005 ./setup.sh                  # HTTPS follows LOCAL_PORT
 #   LOCAL_PORT=3005 HTTPS_PORT=8443 ./setup.sh
 #
 # Requirements: Linux or macOS, curl, Docker + Compose v2, Tailscale logged
@@ -21,7 +22,12 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-3001}"
-HTTPS_PORT="${HTTPS_PORT:-10000}"
+# HTTPS follows the local port unless set explicitly (the n8n and
+# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# two. Until 2026-09-13 this defaulted to a literal 10000, chosen back when
+# Tailscale Serve only allowed 443/8443/10000; that limit is long gone.
+# This script never sources .env, so there is no read-back to guard.
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
