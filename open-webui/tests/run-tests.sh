@@ -148,6 +148,42 @@ test_https_port_follows_local_port() {
   teardown
 }
 
+test_legacy_10000_mapping_is_withdrawn() {
+  echo "• re-run on a box published on :10000: the old mapping is withdrawn"
+  # Serve keeps every mapping it is given, so moving the published port only
+  # ADDS one. Without the migration a re-run leaves two URLs for one service,
+  # the retired one still answering.
+  setup
+  touch "$STATE_DIR/operator"
+  printf '10000 http://127.0.0.1:3001\n' > "$STATE_DIR/served"
+  run_deploy
+  check "exits zero"                      [ "$CODE" -eq 0 ]
+  check "published the new :3001"         calls_have "tailscale serve --bg --https=3001 http://127.0.0.1:3001"
+  check "withdrew the legacy port"        calls_have "tailscale serve --https=10000 off"
+  check "  and said so"                   out_has "Withdrawing the legacy :10000 mapping"
+  check "  it is really gone from Serve"  bash -c "! grep -q '^10000 ' '$STATE_DIR/served'"
+  check "  while :3001 remains"           grep -q '^3001 ' "$STATE_DIR/served"
+  teardown
+
+  echo "• a :10000 that belongs to something else is left alone"
+  setup
+  touch "$STATE_DIR/operator"
+  printf '10000 http://127.0.0.1:9999\n' > "$STATE_DIR/served"
+  run_deploy
+  check "exits zero"                      [ "$CODE" -eq 0 ]
+  check "never touched the other :10000"  no_call "tailscale serve --https=10000 off"
+  check "  it is still published"         grep -q '^10000 http://127.0.0.1:9999$' "$STATE_DIR/served"
+  teardown
+
+  echo "• nothing to withdraw on a fresh box: no off call at all"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "exits zero"                      [ "$CODE" -eq 0 ]
+  check "no withdrawal attempted"         no_call "serve --https=10000 off"
+  teardown
+}
+
 test_operator_escalation() {
   echo "• serve denied: grants operator via sudo, then succeeds"
   setup
@@ -222,7 +258,16 @@ test_live() {
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
-  https_port="${HTTPS_PORT:-$port}"
+  # Ask Serve which HTTPS port actually fronts this backend rather than
+  # assuming it equals LOCAL_PORT. .env stores no HTTPS_PORT, so after a
+  # deploy that passed one explicitly (HTTPS_PORT=8443 ./setup.sh) a fresh
+  # shell has no other way to know, and guessing would fail a correct
+  # deployment. A header with no port is :443.
+  https_port="$("$ts" serve status 2>/dev/null | awk -v want="proxy http://127.0.0.1:$port" '
+    /^https:\/\// { p = 443; if (match($1, /:[0-9]+$/)) p = substr($1, RSTART + 1) }
+    p && index($0, want) { print p; exit }
+  ')"
+  [ -n "$https_port" ] || https_port="${HTTPS_PORT:-$port}"
   url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
   live_check "container running"              sh -c "docker inspect -f '{{.State.Status}}' open-webui | grep -qx running"
   live_check "local health responds"          curl -fsS "http://127.0.0.1:$port/health"
@@ -241,6 +286,7 @@ test_preflight_bad_https_port
 test_fresh_deploy
 test_idempotent_rerun
 test_https_port_follows_local_port
+test_legacy_10000_mapping_is_withdrawn
 test_operator_escalation
 
 if [ "${1:-}" = "--live" ]; then

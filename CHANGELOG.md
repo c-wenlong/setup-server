@@ -69,7 +69,9 @@ first, dated by merge.
   with both ports on 3001, tailscaled's own Serve proxy holds the tailnet
   address on that number, and the old "anything but 127.0.0.1 is a leak"
   reading failed a correct deploy. DIRECTORY.md, the README of the service,
-  the Kuma seed, the Homepage tile and the launcher registry follow.
+  the Kuma seed, the Homepage tile and the launcher registry follow. A re-run
+  on a box still published on :10000 withdraws that mapping, but only when it
+  points at this service, since Serve otherwise keeps both ports alive.
 
 ## [PR #6](https://github.com/c-wenlong/setup-server/pull/6) - 2026-09-12
 
