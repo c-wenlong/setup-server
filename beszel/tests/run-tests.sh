@@ -47,8 +47,8 @@ check "macOS agent runs as a launchd LaunchAgent" \
       grep -q 'Library/LaunchAgents/com.henrygd.beszel-agent.plist' "$SETUP"
 check "lingering is Linux-gated" \
       bash -c "grep -B6 'loginctl enable-linger' '$SETUP' | grep -q 'OS\" = \"Linux'"
-check "operator grant is Linux-gated" \
-      bash -c "grep -B2 'set --operator=' '$SETUP' | grep -q 'OS\" = \"Linux'"
+check "operator grant is Linux-gated and only on a denied serve" \
+      bash -c "grep -B2 'set --operator=' '$SETUP' | grep -q 'OS\" = \"Linux\" \] && printf .%s. .\$serve_out. | grep -q .denied.'"
 check "serve retries only on an approval link, dies otherwise" \
       bash -c "grep -q '\*login.tailscale.com\*) ;;' '$SETUP' && grep -A1 '\*login.tailscale.com\*) ;;' '$SETUP' | grep -q 'die'"
 check "port from .env is re-validated" \

@@ -280,8 +280,11 @@ if [ "$OS" = "Linux" ]; then
 fi
 
 # ------------------------------------------------------- tailscale serve
-if ! "$TAILSCALE" serve --bg --https="$PORT" "http://127.0.0.1:$PORT" >/dev/null 2>&1; then
-  if [ "$OS" = "Linux" ]; then
+if ! serve_out="$("$TAILSCALE" serve --bg --https="$PORT" "http://127.0.0.1:$PORT" 2>&1)"; then
+  # The operator grant is for exactly one failure, "Access denied: serve
+  # config denied" (Linux tailscaled without an operator). Anything else
+  # falls through to the loop below, which never escalates.
+  if [ "$OS" = "Linux" ] && printf '%s' "$serve_out" | grep -q 'denied'; then
     info "Granting Tailscale operator rights to $USER (needs sudo, one time)"
     sudo "$TAILSCALE" set --operator="$USER"
   fi
