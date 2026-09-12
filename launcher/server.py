@@ -401,8 +401,12 @@ def record_touch(key, body):
     if event not in TOUCH_EVENTS:
         raise DeployError(400, "event must be one of: %s"
                           % ", ".join(TOUCH_EVENTS))
-    now = time.time()
     with _usage_lock:
+        # Stamped by whichever request actually writes, not at entry: two
+        # near-simultaneous clicks that take the lock in the opposite order
+        # would otherwise persist the earlier stamp last, moving last_launched
+        # backwards and contradicting the 200 the first caller already got.
+        now = time.time()
         data = load_usage()
         entry = dict(data.get(key) or {})
         entry["last_" + event] = now
@@ -640,7 +644,12 @@ def probe_all(urls):
 
 
 def marker_exists(marker):
-    return bool(marker) and os.path.exists(os.path.expanduser(marker))
+    # A registry is hand-edited, so `marker` is whatever JSON allowed. A
+    # non-string raises TypeError out of expanduser -- uncaught, that takes
+    # the whole grid down instead of nulling one tile's field. os.path.exists
+    # already shrugs off a NUL inside a string; this covers the other half.
+    return (isinstance(marker, str) and bool(marker)
+            and os.path.exists(os.path.expanduser(marker)))
 
 
 def derive_state(setup, installed, active):
@@ -918,6 +927,13 @@ def service_resources(svc):
             if hit and now - hit[0] < RESOURCE_TTL:
                 return hit[1]
         docker_map = docker_name_map() if _has_container_part(svc) else {}
+        # That call may have blocked for seconds against a wedged daemon. The
+        # sample's clock is the moment the cgroups are actually read, never
+        # the moment the request arrived: a stale stamp shrinks the wall delta
+        # _cpu_percent divides by, which inflates every percentage (a service
+        # at 40% reads 100% after a 2s block), and it would stamp the cache
+        # entry already-expired whenever the block outlasts RESOURCE_TTL.
+        now = time.time()
         with _resources_lock:
             # Re-check: another request may have sampled this service while
             # this one was waiting on docker.
@@ -945,7 +961,12 @@ def deployed_at(marker):
         return None
     try:
         return os.path.getmtime(os.path.expanduser(marker))
-    except OSError:
+    except (OSError, TypeError, ValueError):
+        # A registry is hand-edited, so `marker` is whatever JSON allowed: a
+        # number raises TypeError out of expanduser and a string with a NUL
+        # raises ValueError, and either one uncaught here 500s the whole grid
+        # rather than nulling one field. marker_exists() already shrugs both
+        # off via genericpath; this is the same shrug.
         return None
 
 

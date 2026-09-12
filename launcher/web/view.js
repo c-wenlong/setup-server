@@ -262,9 +262,21 @@
     planned:   { label: 'Planned',      dot: 'dot-off'  }
   };
 
+  /* app.js owns these same four verbs, and this file deliberately never
+     reaches into it, so the table keeps its own copy. Spelling them out is
+     the point: appending "ing" to the verb turns `stop` into "Stoping", and
+     a fifth verb added server-side would concatenate just as badly, which is
+     why an unknown one falls back to a word rather than to arithmetic. */
+  var GERUNDS = {
+    deploy:  'Deploying',
+    start:   'Starting',
+    stop:    'Stopping',
+    restart: 'Restarting'
+  };
+
   function stateLabel(svc) {
     var job = liveJob(svc);
-    if (job) return job.charAt(0).toUpperCase() + job.slice(1) + 'ing…';
+    if (job) return (GERUNDS[job] || 'Working') + '…';
     var def = STATES[svc && svc.state] || STATES.planned;
     return def.label;
   }
@@ -719,6 +731,16 @@
     }
     resRefs.wrap.hidden = !parts.length;
     resRefs.none.hidden = !!parts.length;
+    /* An empty list has two causes that read identically in the payload but
+       not to a reader: this service really has no parts to measure, or the
+       server never sent a `resources` key at all (the pre-v3 case this whole
+       file is null-safe for). Claiming the first when it is the second tells
+       the reader a service is unmeasurable when the server is simply old. */
+    if (!parts.length) {
+      text(resRefs.none, resources(svc)
+        ? 'No parts are registered for this service.'
+        : 'Resource use is not available from this server.');
+    }
   }
 
   /* app.js feeds this from three places — the grid's list entry when the page
