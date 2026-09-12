@@ -44,6 +44,20 @@ first, dated by merge.
 - Documentation audit across the root docs and the per-service pages, checking
   the claims in them against what the scripts actually do.
 
+### Fixed
+
+- **beszel/setup.sh could not run on macOS and skipped the preflight
+  convention.** It was the one script with no `uname -s` branch, no root
+  refusal, no Tailscale-running check, and a bare `tailscale` call that the
+  macOS app bundle never satisfies. It now follows the code-server (native)
+  and forgejo (Docker) references: OS branch, root refusal, resolved Tailscale
+  CLI, daemon and Compose v2 checks, the agent tarball picked by OS and
+  architecture, a launchd LaunchAgent on macOS, lingering and the Serve
+  operator grant as the two one-time Linux sudos, and a final URL resolved
+  from the tailnet rather than hardcoded. `.env` is now the source of truth
+  for the port on a re-run. The static suite gained ten checks for the
+  contract; verified by a live re-run on the box.
+
 ## [PR #4](https://github.com/c-wenlong/setup-server/pull/4) - 2026-09-12
 
 Follow-up review of the parts of PR #3 that had not been looked at. Four

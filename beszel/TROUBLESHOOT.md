@@ -43,7 +43,12 @@ opened the shell.
 ## 3. System shows "down" / no data points
 
 - Agent alive? `systemctl --user status beszel-agent`;
-  `journalctl --user -u beszel-agent -n 30`.
+  `journalctl --user -u beszel-agent -n 30`. macOS:
+  `launchctl print gui/$(id -u)/com.henrygd.beszel-agent` and
+  `tail -n 30 ~/Library/Logs/beszel-agent.log`.
+- macOS only, hub up but system never "up": the hub cannot reach
+  `127.0.0.1:45876` unless Docker Desktop has host networking enabled
+  (Settings > Resources > Network, 4.34+). OrbStack needs nothing.
 - Crash loop with a key error → the unit's `Environment="KEY=..."` lost its
   quoting (the key contains a space — must stay quoted). Rerun setup.sh,
   which rewrites the unit and always restarts the agent.
