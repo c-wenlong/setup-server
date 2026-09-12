@@ -1,0 +1,25 @@
+# Normalise line endings in the repo. Everything git decides is text is stored
+# with LF; the working copy follows the platform. The tree is LF-clean today,
+# so this changes nothing now and only stops a CRLF file arriving later.
+* text=auto
+
+# The two things that are executed rather than read. A CRLF here is not a
+# cosmetic problem: the kernel passes the \r to the interpreter and the shebang
+# line fails with "bad interpreter", so pin them to LF on every platform.
+*.sh text eol=lf
+*.py text eol=lf
+
+# Every PATH stub under tests/stubs/ is a shell script named after the command
+# it fakes, so it has no extension for the rules above to match.
+*/tests/stubs/* text eol=lf
+
+# The launcher's icons are SVG, which is text: diff them, do not treat them as
+# a blob.
+*.svg text
+
+# Raster assets and the web font are binary: never munge, never diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.woff2 binary

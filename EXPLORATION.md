@@ -2,7 +2,9 @@
 
 Ideas surveyed 2026-09-07, ranked by bang-for-effort for this box
 (Ryzen 5 2600, 7.7 GB RAM, ~150 GB free disk, tailnet-only philosophy).
-Already running: code-server, Seafile (Drive), ollama (local LLM).
+Only three services were running when the survey was written (code-server,
+Seafile, ollama). Shipped items are marked ✅ inline and kept for the reasoning;
+`DIRECTORY.md` is the authority on what is actually deployed today.
 
 ## Network-level wins (near-zero resources, biggest daily impact)
 
@@ -43,10 +45,12 @@ Already running: code-server, Seafile (Drive), ollama (local LLM).
   is on-device, true E2EE — the better pick *if* E2EE outranks polish, at the
   cost of MinIO/CORS setup and a smaller community).
 - **Jellyfin** — Netflix for your own media library. ✅ done (jellyfin/),
-  deployed 2026-09-11 on :8096. CPU transcoding does handle 1080p, and it is
-  the only option: the box has a GTX 1070 but no `nvidia-container-toolkit`,
-  so Docker has no GPU runtime — installing it is the upgrade path. Took two
-  attempts, not one: Jellyfin answers /Startup/* several seconds before it
+  deployed 2026-09-11 on :8096. CPU transcoding does handle 1080p, and it was
+  the only option at survey time: the box has a GTX 1070 but had no
+  `nvidia-container-toolkit`, so Docker had no GPU runtime. That upgrade path
+  was taken the same day: `jellyfin/enable-nvenc.sh` installed the toolkit and
+  NVENC hardware transcoding is on (`JELLYFIN_NVENC=on`), Pascal so no AV1.
+  Took two attempts, not one: Jellyfin answers /Startup/* several seconds before it
   accepts connections, so the first run completed the wizard with no admin
   account. The library is still empty — MEDIA_DIR in jellyfin/.env points at
   ~/services/jellyfin/media and nothing shows up until media lands there.
@@ -142,7 +146,7 @@ than item 10 alone.
 | 1 | **Backup job** (their PBS + ZFS replication + a DB backup UI) | restic/borg of `~/services` + `pg_dump`/`mysqldump` of Immich and Seafile, pushed off-box | ~0 RAM, half a day | Not a nicety any more. Vaultwarden holds every password and Immich holds photos, both on one unbacked disk — see the Vaultwarden note above. Their whole storage story is snapshot + replicate; this box has neither. Everything below is worthless if this disk dies. |
 | 2 | **Uptime Robot** (external) | Off-site check against the tailnet edge or a public canary | 10 min, free tier | Fixes the blind spot they call out explicitly: Kuma runs *on* the box it monitors, so if kai-home-server dies, nothing tells anyone. Pairs with the existing ntfy topic. |
 | 3 | **Dozzle** | Live tail + search of all container logs in a browser | ~10 MB | Highest bang-per-megabyte on the list. ~15 containers here, currently read with `docker logs` over SSH. One container, no config. |
-| 4 | **Paperless-ngx** + Tika + Gotenberg + Paperless-AI | OCR'd searchable archive of receipts, contracts, tax docs | ~800 MB–1.2 GB | Already listed under "Knowledge & documents" above; this survey independently put it top of the life-admin tier. Paperless-AI does the extraction the built-in OCR does poorly, and it points at the ollama already running. Watch RAM against ollama. |
+| 4 | **Paperless-ngx** + Tika + Gotenberg + Paperless-AI | OCR'd searchable archive of receipts, contracts, tax docs | ~800 MB–1.2 GB | ✅ base shipped (paperless-ngx/, 2026-09-11); Tika, Gotenberg and Paperless-AI are still unbuilt, left as a commented opt-in. Already listed under "Knowledge & documents" above; this survey independently put it top of the life-admin tier. Paperless-AI does the extraction the built-in OCR does poorly, and it points at the ollama already running. Watch RAM against ollama. |
 | 5 | **Scrutiny** | SMART health and failure trending per disk | ~50 MB | Beszel reports disk *usage*, not disk *dying*. Cheap early warning, and it makes #1 actionable before a drive goes rather than after. |
 | 6 | **IT Tools** | JWT decode, base64, hashes, cron parsing, ~80 more | ~30 MB | Trivial deploy; replaces pasting secrets into whatever site ranks first. |
 | 7 | **Excalidraw** and/or **Draw.io** | Self-hosted diagramming | ~50 MB each | Architecture here lives in markdown. Excalidraw for thinking out loud, Draw.io when the diagram has real structure (network maps). |
@@ -162,7 +166,8 @@ than item 10 alone.
 Already covered by something running: Pi-hole + Unbound (→ AdGuard),
 Uptime Kuma, Jellyfin and Plex (→ Jellyfin), Home Assistant, code-server,
 n8n, ollama + Open WebUI, GitLab/Forgejo (→ Forgejo), Jekyll (→ Quartz),
-Homepage and Little Link Server (→ launcher), Postgres/MariaDB/Valkey
+Homepage (→ homepage/, ✅ shipped on :8100) and Little Link Server
+(→ launcher), Postgres/MariaDB/Valkey
 (embedded in Immich and Seafile), nvtop and parts of Scrutiny/Grafana
 (→ Beszel).
 
@@ -230,13 +235,15 @@ service-level `AGENTS.md`.
 
 **Verdict for this box.** Nothing here is urgent, and RAM says do at most one.
 Measured 2026-09-11: **2.1 GB available of 7.7 GB with 2.0 GB of swap already in
-use** — the box is under pressure before Firefly III (queued, see
-`firefly-iii/PLAN.md`) or any of these. AdventureLog wants 2 GB at *first boot*
+use** — the box was already under pressure before Firefly III, which has since
+shipped (firefly-iii/), so re-measure before adding any of these. AdventureLog
+wants 2 GB at *first boot*
 (the world-geodata import is the spike, and OOM there is its most commonly
 reported failure) settling to ~1 GB; Dawarich is the heaviest of the three at
 four moving parts; wanderer is the lightest and the most on-point if trails
 rather than travel narrative are the real interest. Each also brings another
-PostGIS Postgres — with Immich and a proposed Firefly III that would be a third.
+PostGIS Postgres — with Immich and the now-deployed Firefly III that would be a
+third.
 
 Ranked, if picking one: **wanderer** for trails, **Dawarich** for automatic
 history, **AdventureLog** last — it is the most featureful and the least useful

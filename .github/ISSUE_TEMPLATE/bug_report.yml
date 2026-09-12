@@ -1,0 +1,87 @@
+name: Bug report
+description: A setup.sh, a test suite, or a deployed service isn't behaving as documented
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please fill in as much as you can.
+
+        **Security issues do not belong here.** Report those privately at
+        https://github.com/c-wenlong/setup-server/security/advisories/new
+
+        **Redact secrets before pasting anything.** `.env` files hold generated
+        passwords, database credentials, API tokens and device identities.
+
+  - type: input
+    id: service
+    attributes:
+      label: Which service?
+      description: The directory name, or "repo-wide" if it isn't specific to one.
+      placeholder: syncthing
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the failure.
+      placeholder: I ran ./setup.sh a second time and it overwrote ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran, in order, including any environment overrides.
+      placeholder: |
+        1. cd syncthing
+        2. PORT=9000 ./setup.sh
+        3. ./setup.sh
+        4. See error ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS and version, Tailscale version (`tailscale version`), Docker version if the service uses it.
+      placeholder: |
+        - OS: Ubuntu 24.04 (or macOS 15.3)
+        - Tailscale: 1.90.2
+        - Docker: 27.3.1
+        - Deployed from commit: abc1234
+    validations:
+      required: true
+
+  - type: textarea
+    id: live-tests
+    attributes:
+      label: Output of the live suite
+      description: |
+        From the service directory, `./tests/run-tests.sh --live` if the service is
+        deployed on this machine, otherwise `./tests/run-tests.sh` (the mocked suite).
+        Paste the failing checks and the summary line.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / logs
+      description: |
+        Script output, `systemctl --user status <service>`, `docker logs <container>`,
+        `tailscale serve status`. Redact tokens, passwords, hashes and device IDs.
+      render: shell

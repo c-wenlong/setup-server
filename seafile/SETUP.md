@@ -61,8 +61,8 @@ login.
 
 State lives in:
 - `.env` (this directory) — **all secrets**; gitignored, mode 600
-- `~/seafile/data` — Seafile's storage (chunked libraries, config, logs)
-- `~/seafile/mysql` — MariaDB data
+- `~/services/seafile/data` — Seafile's storage (chunked libraries, config, logs)
+- `~/services/seafile/mysql` — MariaDB data
 
 ## Clients
 
@@ -83,7 +83,7 @@ D="--project-directory <this dir>"
 docker compose $D ps                # status
 docker compose $D logs -f seafile  # logs
 docker compose $D restart          # restart stack
-docker compose $D down             # stop (data persists in ~/seafile)
+docker compose $D down             # stop (data persists in ~/services/seafile)
 docker compose $D pull && docker compose $D up -d   # upgrade minor versions
 ```
 
@@ -93,9 +93,10 @@ bump `SEAFILE_IMAGE` in `.env` and `up -d`.
 ## Backups — important, read once
 
 Seafile stores file data in a chunked content-addressed format under
-`~/seafile/data/seafile-data/storage/`. A raw copy of `~/seafile/` **is** a
-valid backup, but it is only restorable *through Seafile* (same version) —
-you cannot pluck individual files out of it by hand.
+`~/services/seafile/data/seafile-data/storage/`. A raw copy of
+`~/services/seafile/` **is** a valid backup, but it is only restorable
+*through Seafile* (same version) — you cannot pluck individual files out of
+it by hand.
 
 Sound procedure (in order):
 1. `docker exec seafile-mysql mysqldump -uroot -p"$INIT_SEAFILE_MYSQL_ROOT_PASSWORD" --all-databases > seafile-db.sql`

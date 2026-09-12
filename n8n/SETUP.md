@@ -16,7 +16,7 @@ Clients (browser) ──HTTPS──▶ Tailscale Serve (:5678) ──▶ n8n (12
 - **Host network mode** so workflows can hit localhost-bound services
   directly; `N8N_LISTEN_ADDRESS=127.0.0.1` keeps the UI loopback-only.
 - SQLite storage (fine for single-user); data + **encryption key** in
-  `~/n8n/data`. The key also lives in `.env` — it encrypts every credential
+  `~/services/n8n/data`. The key also lives in `.env` — it encrypts every credential
   you save in workflows, so back up `.env` with the data.
 - `WEBHOOK_URL`/`N8N_EDITOR_BASE_URL` are set to the tailnet URL, so
   webhook nodes display URLs that actually work from tailnet devices.
@@ -52,7 +52,7 @@ docker compose $D ps|logs -f|restart|down
 docker compose $D pull && docker compose $D up -d   # upgrade
 ```
 
-Kuma monitors `/healthz` (monitoring/seed_kuma.py). Backup = `~/n8n/data`
+Kuma monitors `/healthz` (monitoring/seed_kuma.py). Backup = `~/services/n8n/data`
 plus this directory's `.env` (encryption key!).
 
 ## Tests

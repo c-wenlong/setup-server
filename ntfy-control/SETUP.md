@@ -42,8 +42,13 @@ control_listener.py  (systemd user unit / launchd, Restart=always)
 | Command target | What it maps to |
 |---|---|
 | `seafile` | containers `seafile`, `seafile-mysql`, `seafile-redis` (stop: app first; start: deps first) |
-| `open-webui`, `n8n`, `kaichenpedia`, `uptime-kuma` | their containers |
-| `code-server` | `systemctl --user` unit |
+| `immich` | containers `immich_server`, `immich_machine_learning`, `immich_redis`, `immich_postgres` (stop: server/ML first; start: datastores first) |
+| `paperless-ngx` | containers `paperless-ngx`, `paperless-redis` |
+| `firefly-iii` | containers `firefly-iii-importer`, `firefly-iii`, `firefly-iii-db` |
+| `remote-desktop` | containers `guacamole`, `guacd` |
+| `open-webui`, `n8n`, `kaichenpedia`, `uptime-kuma`, `jellyfin`, `vaultwarden`, `adguard`, `homepage`, `home-assistant`, `forgejo` | their containers |
+| `code-server`, `syncthing`, `manimkc` | `systemctl --user` unit |
+| `beszel` | `beszel-agent.service` (systemd) + `beszel` container, moved together in order |
 
 Stopping/starting also pauses/resumes the matching Kuma monitor (skipped
 with a note in the reply if Kuma is unreachable — e.g. after

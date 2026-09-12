@@ -60,8 +60,14 @@ convention (`<key>.svg` = light theme, `<key>-dark.svg` = dark theme) they
 trade places. Upstream's `-dark`/`-light` suffixes are not consistent about
 whether they name the ink or the background; each file was checked by eye.
 
-No upstream mark exists for `kaichenpedia`, `manimkc`, or the launcher itself
-— those keep the hand-drawn glyphs in `../icons.js`.
+No upstream mark exists for `kaichenpedia` or `manimkc`. `kaichenpedia.png` and
+`manimkc.png` in this directory are bespoke raster icons (not from the
+vendored collection above, so the licence table does not cover them):
+`kaichenpedia.png` is cropped from the kaichenpedia repo's own artwork, and
+`manimkc.png` is that service's own logo. `favicon.png`, `apple-touch-icon.png`
+and `launcher.png` are raster forms of the launcher's own icon, also original
+to this repo. The launcher tile itself has no registry entry and so falls
+back to the hand-drawn glyphs in `../icons.js`.
 
 ## Modifications
 

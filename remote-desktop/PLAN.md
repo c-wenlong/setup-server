@@ -1,5 +1,7 @@
 # Bootstrap plan — remote-desktop (Apache Guacamole + xrdp)
 
+_Shipped note (2026-09-12): shipped with gnome-remote-desktop as the RDP backend instead of xrdp (D2), has no drive redirection/file transfer despite step 6's `enable-drive`, and has no session recording or `drive/`/`recordings/` state dirs._
+
 Build spec for the agent implementing this service. Read
 `COMPETITIVE-ANALYSIS.md` first (why Guacamole, why xrdp, what it costs),
 then the repo's `AGENTS.md` (non-negotiable conventions), then

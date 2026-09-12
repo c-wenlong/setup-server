@@ -1,0 +1,20 @@
+version: 2
+
+# Only the GitHub Actions ecosystem is enabled.
+#
+# The docker ecosystem is deliberately left out: almost every image line in the
+# compose files is an interpolation with a default (`image: foo/bar:${FOO_VERSION:-1.2.3}`),
+# which Dependabot cannot parse into a version it can bump, and the handful of
+# literal tags left are rolling ones (`nginx:stable-alpine`, `redis:7-alpine`,
+# `:latest`) that never produce an update. Pinned versions are bumped by hand,
+# with the service's mocked and live suites run against the new tag.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - ci

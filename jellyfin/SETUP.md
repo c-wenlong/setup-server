@@ -52,8 +52,8 @@ State lives under `~/services/jellyfin`:
     config/*.xml           #   server settings, encoding options
     log/                   #   server logs (also via docker logs)
     metadata/              #   fetched posters, fanart
-    transcodes/            #   in-flight transcode segments
-  cache/                   # image + subtitle caches — disposable
+  cache/                   # image + subtitle caches, plus transcode scratch
+                           #   (transcodes/) — all disposable
   media/                   # MEDIA_DIR — mounted READ-ONLY into the container
   .wizard-complete         # marker: the first-run wizard already ran
                            #   (contains the admin username)

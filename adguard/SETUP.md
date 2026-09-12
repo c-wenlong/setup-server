@@ -286,7 +286,7 @@ Read out of the generated `AdGuardHome.yaml` on v0.107.79 (schema 34):
 | Blocklists | "AdGuard DNS filter" **enabled**; "AdAway Default Blocklist" disabled | one list is a sane start. Add more in the UI once you know what breaks |
 | `dhcp.enabled` | `false` | the router does DHCP |
 | `querylog.interval` | `90d` | shipped default — see Privacy above |
-| `dns.ratelimit` | `20` qps per client subnet | shipped default. See below |
+| `dns.ratelimit` | `0` (unlimited) | deliberate deviation from AdGuard's shipped default of 20. See below |
 
 **On `ratelimit`:** 20 queries/sec per client subnet is aimed at a resolver
 exposed to strangers. On a fully-trusted tailnet it can throttle a browser

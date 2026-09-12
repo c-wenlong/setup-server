@@ -3,6 +3,12 @@
 Repo of one-shot deploy scripts for self-hosted services on Tailscale-private
 home servers. One directory per service; each is self-contained.
 
+Human-facing contribution rules (branch naming, PR expectations, how to run a
+service's suite) live in `CONTRIBUTING.md`; this file is the agent-facing
+version and wins where the two overlap on conventions. CI is defined in
+`.github/workflows/ci.yml`; read it before assuming a local pass is enough, and
+keep it in step when you add a service.
+
 ## Non-negotiable conventions
 
 - **Entrypoint is always `<service>/setup.sh`**, runnable as a regular user.
@@ -49,10 +55,18 @@ home servers. One directory per service; each is self-contained.
 | `SETUP.md` | Architecture diagram, security model, dependency table, what the script does step-by-step, client-side setup, ops commands. |
 | `TROUBLESHOOT.md` | Layered triage (service → local health → publish → client), symptom-keyed fixes, nuke-and-pave recipe. |
 | `tests/run-tests.sh` | See below. |
+| `docker-compose.yml` | Docker-based services only (most of them). Ports published to `127.0.0.1` only, restart policy set, so no systemd unit is needed. Jellyfin adds a second overlay file, `docker-compose.gpu.yml`, for its opt-in NVENC path. |
+
+Planning documents (`PLAN.md`, `SPEC.md`, `COMPETITIVE-ANALYSIS.md`, a `docs/`
+folder) are optional and kept after a service ships; when the shipped service
+diverges from one, note the divergence in that document rather than deleting it.
 
 ## Testing requirements
 
-Every service ships tests in `tests/run-tests.sh` with two layers:
+Every service ships tests in `tests/run-tests.sh` with two layers (the one
+exception is `beszel`, whose default layer is static analysis of `setup.sh` and
+`docker-compose.yml` rather than a PATH-stub sandbox, so it has no
+`tests/stubs/`; the rationale is in `beszel/SETUP.md`):
 
 1. **Mocked suite (default)** — runs the real `setup.sh` in a sandbox: temp
    `$HOME`, and PATH stubs (in `tests/stubs/`) for every external command the
@@ -74,12 +88,17 @@ service is deployed on this machine, run `--live` too.
 
 ## Adding a new service (checklist)
 
-1. `mkdir <service>/tests/stubs`; start `setup.sh` from `code-server/setup.sh`
-   as the reference implementation (preflight/info/ok/die helpers, ordering).
+1. `mkdir <service>/tests/stubs`; start `setup.sh` from a reference
+   implementation (preflight/info/ok/warn/die helpers, section ordering):
+   `code-server/setup.sh` for a native binary under a systemd user unit or a
+   launchd LaunchAgent, `forgejo/setup.sh` for the Docker shape (gitignored
+   `.env`, `LOCAL_PORT`/`HTTPS_PORT`, Compose restart policy instead of a unit).
 2. Write stubs for every external command the script calls; wire the mocked
    suite; get it green before ever running on a real box.
 3. Write `SETUP.md` + `TROUBLESHOOT.md` (mirror code-server's structure).
-4. Add the service row to the root `README.md` table.
+4. Add the service row to the root `README.md` table and to `DIRECTORY.md`
+   (services table plus any loose end it introduces), and add a monitor line in
+   `monitoring/seed_kuma.py`.
 5. Real-machine test: deploy, then `./tests/run-tests.sh --live`.
 
 Only add a service-level `AGENTS.md` if the service has quirks that genuinely

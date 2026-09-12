@@ -372,10 +372,11 @@ Steady-state should be a few ms from cache. If everything is slow:
 docker compose --project-directory . logs --tail=50 adguard | grep -i upstream
 ```
 
-Also consider `dns.ratelimit` (default `20` qps per client subnet) — a browser
+Also consider `dns.ratelimit`, which this deploy sets to `0` (unlimited) by
+default, a deliberate deviation from AdGuard's own shipped default of `20`
+qps per client subnet. If it was changed back to a nonzero value, a browser
 opening many tabs can hit it, and the symptom is intermittent timeouts rather
-than an error. SETUP.md → Configuration decisions covers setting it to `0` on
-a trusted tailnet.
+than an error. SETUP.md → Configuration decisions has the detail.
 
 ## `tailscale serve` errors
 

@@ -267,5 +267,5 @@ code-server still owns `:443 /`, both HTTPS URLs answer, and the backend's own
   concurrent, cached ~5s so a page refresh cannot stampede the box.
 - `ollama` has no web UI, so its tile has `url: null` — it reports status and
   never navigates. That is intentional, not a broken tile.
-- Out of scope on purpose: auth, editing the registry from the UI, stop/uninstall
+- Out of scope on purpose: auth, editing the registry from the UI, uninstall
   actions, log history beyond the current job, a PWA manifest, tile reordering.

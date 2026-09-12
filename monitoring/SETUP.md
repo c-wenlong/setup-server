@@ -92,8 +92,8 @@ docker compose $D ps|logs -f|restart|down
 docker compose $D pull && docker compose $D up -d   # upgrade ntfy (Kuma: see pin note)
 ```
 
-Kuma state (monitors, history, admin account): `~/monitoring/kuma`.
-ntfy cache: `~/monitoring/ntfy`. Back both up if you care about history.
+Kuma state (monitors, history, admin account): `~/services/monitoring/kuma`.
+ntfy cache: `~/services/monitoring/ntfy`. Back both up if you care about history.
 
 ## Tests
 

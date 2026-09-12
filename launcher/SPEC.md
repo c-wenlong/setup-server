@@ -1,5 +1,13 @@
 # launcher — spec (first draft)
 
+_Shipped note (2026-09-12): the launcher also ships a lifecycle control API
+(`POST api/services/{key}/action` for start/stop/restart, with `launcher`,
+`ntfy` and `ollama` hard-locked against it) and a per-service notes API
+(`GET/POST api/services/{key}/notes`, `PATCH`/`DELETE .../notes/{id}`),
+neither of which is described anywhere in this document, and the "Out of
+scope" lists below (which say stop actions are not built) are stale as a
+result._
+
 A single-page app launcher for kai-home-server: every service as a tile,
 tap to open. Tiles for services that are **not deployed yet** are dimmed and
 carry a Deploy action that runs that service's `setup.sh` on the box — so

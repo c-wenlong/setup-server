@@ -32,7 +32,7 @@ requires:
    │ container: paperless-ngx                     │
    │   ghcr.io/paperless-ngx/paperless-ngx:<pin>  │
    │                                              │
-   │   gunicorn / Django 5.2      :8000           │
+   │   granian / Django 5.2       :8000           │
    │   celery workers   ─ OCR, thumbnails, index  │
    │   OCRmyPDF + Tesseract       (CPU only)      │
    │   SQLite                     (in-process)    │
@@ -70,7 +70,6 @@ Everything lives under `~/services/paperless-ngx`:
   media/       # THE DOCUMENTS — originals + generated archive PDFs + thumbnails
   consume/     # DROP FOLDER — anything landing here gets ingested and deleted
   export/      # destination for `document_exporter` (empty until you run one)
-  redis/       # broker scratch; disposable by design
 ```
 
 Two of these matter and they matter differently:

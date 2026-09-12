@@ -280,7 +280,7 @@ test_fresh_deploy() {
 
   # --- the tailnet name is RESOLVED, never assumed ------------------------
   check "asked tailscale for its name"   calls_have "^tailscale status --json"
-  check ".env names no literal from this box" file_lacks "$SVC/.env" 'kai-home-server' 
+  check ".env names no literal from this box" file_lacks "$SVC/.env" 'kai-home-server'
 
   # --- .env
   check ".env generated"                 [ -f "$SVC/.env" ]
@@ -327,7 +327,9 @@ test_fresh_deploy() {
   check "container got HOSTNAME=127.0.0.1" cenv_is HOSTNAME 127.0.0.1
   check "container got PORT=8100"          cenv_is PORT 8100
   check "container got the allowlist"      [ "$(cenv HOMEPAGE_ALLOWED_HOSTS)" = "$allowed" ]
-  check "container got PUID=$(id -u)"      cenv_is PUID "$(id -u)"
+  # The id stub reports uid 1000 unless FAKE_UID is set, whatever the real
+  # uid is (1001 on a GitHub runner), so compare against the stub's value.
+  check "container got PUID=1000"          cenv_is PUID 1000
   check "container got PGID=$(id -g)"      cenv_is PGID "$(id -g)"
   check "config bind is the only mount" \
     [ "$(grep -c . "$STATE_DIR/container_mounts")" -eq 1 ]
@@ -350,7 +352,7 @@ test_fresh_deploy() {
   # actually happen — an unsubstituted href is a dead tile on every device.
   check "__TS_HOST__ substituted"        [ -z "$(grep -l '__TS_HOST__' "$CFG"/*.yaml 2>/dev/null)" ]
   check "  with the resolved name"       grep -q "$FAKE_TS_HOST" "$CFG/services.yaml"
-  check "  and no literal from this box" file_lacks "$CFG/services.yaml" 'kai-home-server' 
+  check "  and no literal from this box" file_lacks "$CFG/services.yaml" 'kai-home-server'
   check "no config file mentions 8098"   [ -z "$(grep -l '8098' "$CFG"/*.yaml 2>/dev/null)" ]
   # Kai edits these by hand; root-owned config would need sudo for that.
   check "config files are writable by us" [ -w "$CFG/services.yaml" ]
