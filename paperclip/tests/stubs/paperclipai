@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# paperclipai stub. Honours --data-dir the way the real CLI does.
+# State in $STATE_DIR:
+#   onboard_fail        — onboard exits 1
+#   ceo_exists          — bootstrap-ceo reports an admin already exists
+#   existing_trusted    — first onboard writes local_trusted + loopback
+echo "paperclipai $*" >> "$CALLS_LOG"
+
+data_dir="${PAPERCLIP_HOME:-$HOME/.paperclip}"
+args=("$@")
+i=0
+while [ $i -lt ${#args[@]} ]; do
+  case "${args[$i]}" in
+    --data-dir)
+      i=$((i + 1))
+      data_dir="${args[$i]}"
+      ;;
+    --data-dir=*)
+      data_dir="${args[$i]#--data-dir=}"
+      ;;
+  esac
+  i=$((i + 1))
+done
+
+cfg="$data_dir/instances/default/config.json"
+mkdir -p "$(dirname "$cfg")" "$data_dir/instances/default/secrets"
+
+# Drop global flags so the subcommand is $1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --data-dir) shift 2 ;;
+    --data-dir=*) shift ;;
+    --instance|-i) shift 2 ;;
+    --yes|-y|--json|--force|--repair|--no-repair|--no-install-service|--install-service|--enable-linger|--run|--no-start-now) shift ;;
+    --bind|--base-url|--company-id|--payload-json|--config|-c) shift 2 ;;
+    *) break ;;
+  esac
+done
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  onboard)
+    if [ -f "$STATE_DIR/onboard_fail" ]; then
+      echo "onboard failed" >&2
+      exit 1
+    fi
+    if [ -f "$cfg" ]; then
+      echo "existing config preserved at $cfg"
+      exit 0
+    fi
+    mkdir -p "$(dirname "$cfg")"
+    if [ -f "$STATE_DIR/existing_trusted" ]; then
+      cat > "$cfg" <<'EOF'
+{
+  "server": {
+    "deploymentMode": "local_trusted",
+    "exposure": "private",
+    "bind": "loopback",
+    "host": "127.0.0.1",
+    "port": 3100,
+    "allowedHostnames": []
+  }
+}
+EOF
+    else
+      cat > "$cfg" <<'EOF'
+{
+  "server": {
+    "deploymentMode": "authenticated",
+    "exposure": "private",
+    "bind": "tailnet",
+    "host": "100.85.87.87",
+    "port": 3100,
+    "allowedHostnames": []
+  }
+}
+EOF
+    fi
+    printf 'stub-jwt\n' > "$data_dir/instances/default/.env"
+    mkdir -p "$data_dir/instances/default/secrets"
+    printf 'stub-master-key\n' > "$data_dir/instances/default/secrets/master.key"
+    chmod 600 "$data_dir/instances/default/secrets/master.key"
+    touch "$STATE_DIR/onboarded"
+    echo "onboarded $cfg"
+    ;;
+  allowed-hostname)
+    echo "allowed-hostname $1"
+    touch "$STATE_DIR/allowed_hostname"
+    printf '%s\n' "$1" >> "$STATE_DIR/allowed_hostnames"
+    ;;
+  service)
+    sub="${1:-}"
+    echo "service $sub" >> "$STATE_DIR/service_calls"
+    case "$sub" in
+      install)
+        mkdir -p "$HOME/.config/systemd/user"
+        : > "$HOME/.config/systemd/user/paperclipai.service"
+        touch "$STATE_DIR/service_installed"
+        # Fake managed CLI tree so setup.sh can inject Profile email/password.
+        ui="$data_dir/cli/current/node_modules/@paperclipai/server/ui-dist"
+        mkdir -p "$ui" \
+          "$data_dir/cli/current/node_modules/@paperclipai/server/dist/auth" \
+          "$data_dir/cli/current/node_modules/better-auth/dist/api/routes"
+        cat > "$ui/index.html" <<'EOF'
+<!DOCTYPE html>
+<html><body>
+<div id="root"></div>
+</body></html>
+EOF
+        cat > "$data_dir/cli/current/node_modules/@paperclipai/server/dist/auth/better-auth.js" <<'EOF'
+        emailAndPassword: {
+            enabled: true,
+            requireEmailVerification: false,
+            disableSignUp: config.authDisableSignUp,
+        },
+        rateLimit: buildBetterAuthRateLimitOptions({
+EOF
+        cat > "$data_dir/cli/current/node_modules/better-auth/dist/api/routes/update-user.mjs" <<'EOF'
+const canUpdateWithoutVerification = ctx.context.session.user.emailVerified !== true && ctx.context.options.user.changeEmail.updateEmailWithoutVerification;
+const canSendVerification = ctx.context.options.emailVerification?.sendVerificationEmail;
+EOF
+        ;;
+      status) echo "active" ;;
+      logs) echo "stub log" ;;
+      restart|start|stop) echo "$sub ok" ;;
+    esac
+    ;;
+  auth)
+    sub="${1:-}"
+    if [ "$sub" = "bootstrap-ceo" ]; then
+      if [ -f "$STATE_DIR/ceo_exists" ]; then
+        echo "instance admin already exists" >&2
+        exit 1
+      fi
+      echo "https://test-host.tailfake.ts.net:3100/invite/stub-ceo"
+      touch "$STATE_DIR/ceo_bootstrapped"
+    fi
+    ;;
+  agent)
+    sub="${1:-}"
+    if [ "$sub" = "create" ]; then
+      printf '%s\n' "$*" >> "$STATE_DIR/agent_create"
+      echo '{"id":"agent-stub"}'
+    fi
+    ;;
+  doctor)
+    echo "✓ pass"
+    ;;
+  --version)
+    echo "2026.609.0-stub"
+    ;;
+  *)
+    echo "paperclipai stub: $cmd $*"
+    ;;
+esac
+exit 0

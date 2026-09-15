@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# pkill stub — setup.sh drops a leftover `paperclipai run` from `--yes`.
+echo "pkill $*" >> "$CALLS_LOG"
+exit 0

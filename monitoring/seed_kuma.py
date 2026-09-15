@@ -31,6 +31,9 @@ PUBLISHED = [
     # this monitor should not conflate with "down". Says nothing about :22000.
     ("syncthing", 8384, "/rest/noauth/health"),
     ("n8n", 5678, "/healthz"),
+    # /healthcheck, not / — the UI is a SPA and a 200 shell would stay
+    # green against a down API. Official webapp health endpoint.
+    ("trigger-dev", 8030, "/healthcheck"),
     ("manimkc", 8090, "/health"),
     ("kaichenpedia", 8091, "/"),
     ("beszel", 8092, "/api/health"),
@@ -65,10 +68,35 @@ PUBLISHED = [
     # static shell even when every API call is being rejected — a monitor on
     # "/" would stay green against a completely broken dashboard.
     ("homepage", 8100, "/api/healthcheck"),
+    # /api/health, not / — the UI is a SPA and a 200 shell would stay
+    # green against a down API. Official container healthcheck.
+    ("coolify", 8101, "/api/health"),
+    # /api/health, not / — the UI is a SPA and a 200 shell would stay
+    # green against a down API. Official cloud healthcheck.
+    ("appflowy", 8102, "/api/health"),
+    # /api/v1/info/status ({"status":"UP"}), not / — the UI is a SPA and a
+    # 200 shell would stay green against a down API. Official healthcheck.
+    # Login is off; this path is documented as always unauthenticated.
+    ("stirling-pdf", 8103, "/api/v1/info/status"),
+    # /api/health ({"status":"ok"}), not / — the UI is a SPA and a 200
+    # shell would stay green against a down API. Official healthcheck.
+    ("metabase", 8104, "/api/health"),
+    # /api/instances/, not / — the UI is a SPA. Community has no
+    # /api/ready; this is the documented unauthenticated instance probe.
+    ("plane", 8105, "/api/instances/"),
+    # /api/heartbeat, not / — the UI is a SPA. Official healthcheck.
+    ("umami", 8106, "/api/heartbeat"),
     # /login.html, not / — "/" is a 302 to it and Kuma scores a 302 as down.
     # This proves the web UI is up and says nothing about DNS; the resolver
     # gets its own monitor below, because those two fail independently.
     ("adguard", 3080, "/login.html"),
+    # /api/health ({"status":"ok"}), not / — the UI is a SPA and a 200
+    # shell would stay green against a down API.
+    ("paperclip", 3100, "/api/health"),
+    # "/" is the ingress; /canvas is an alternate path on some image
+    # builds. Kuma follows redirects, and a 200 here is the documented
+    # "it started" check. The API key is not required for the document.
+    ("openhands", 8000, "/"),
 ]
 
 MONITORS = [

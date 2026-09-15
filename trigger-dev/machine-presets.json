@@ -1,0 +1,8 @@
+{
+  "defaultMachine": "micro",
+  "machines": {
+    "micro": { "cpu": 0.25, "memory": 0.25 },
+    "small-1x": { "cpu": 0.5, "memory": 0.5 },
+    "small-2x": { "cpu": 0.5, "memory": 0.75 }
+  }
+}

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# curl stub — fakes Umami's HTTP surface. State in $STATE_DIR:
+#   health_fails_left  — countdown of 503s from /api/heartbeat
+#   password_rotated   — generated password already works; default umami does not
+#   rotate_fail        — POST /api/users/.../password returns 500
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; want_code=0; failonerr=0; data=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -u) shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -d|--data-binary) data="$2"; shift 2 ;;
+    -H|--max-time|--connect-timeout) shift 2 ;;
+    -L) shift ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */api/heartbeat|*/api/heartbeat/)
+    if [ -f "$STATE_DIR/health_fails_left" ]; then
+      left="$(cat "$STATE_DIR/health_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/health_fails_left"
+        emit 503 'error'
+      fi
+    fi
+    emit 200 'ok'
+    ;;
+  */api/auth/login|*/api/auth/login/)
+    if [ "$method" = "POST" ]; then
+      case "$data" in
+        *'"password": "umami"'*|*'\"password\":\"umami\"'*)
+          if [ -f "$STATE_DIR/password_rotated" ]; then
+            emit 401 '{"error":"Incorrect username or password."}'
+          fi
+          emit 200 '{"token":"fake-token","user":{"id":"user-1","username":"admin"}}'
+          ;;
+        *)
+          if [ -f "$STATE_DIR/password_rotated" ]; then
+            emit 200 '{"token":"fake-token","user":{"id":"user-1","username":"admin"}}'
+          fi
+          emit 401 '{"error":"Incorrect username or password."}'
+          ;;
+      esac
+    fi
+    emit 200 '{}'
+    ;;
+  */api/users/*/password|*/api/users/*/password/)
+    if [ "$method" = "POST" ]; then
+      if [ -f "$STATE_DIR/rotate_fail" ]; then
+        emit 500 '{"error":"rotate failed"}'
+      fi
+      touch "$STATE_DIR/password_rotated"
+      emit 200 '{"ok":true}'
+    fi
+    emit 200 '{}'
+    ;;
+  *)
+    emit 200 '{}'
+    ;;
+esac

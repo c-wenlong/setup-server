@@ -165,7 +165,7 @@ than item 10 alone.
 
 Already covered by something running: Pi-hole + Unbound (→ AdGuard),
 Uptime Kuma, Jellyfin and Plex (→ Jellyfin), Home Assistant, code-server,
-n8n, ollama + Open WebUI, GitLab/Forgejo (→ Forgejo), Jekyll (→ Quartz),
+n8n, Trigger.dev (→ trigger-dev/, ✅ shipped on :8030), ollama + Open WebUI, GitLab/Forgejo (→ Forgejo), Jekyll (→ Quartz),
 Homepage (→ homepage/, ✅ shipped on :8100) and Little Link Server
 (→ launcher), Postgres/MariaDB/Valkey
 (embedded in Immich and Seafile), nvtop and parts of Scrutiny/Grafana

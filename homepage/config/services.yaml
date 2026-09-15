@@ -55,6 +55,30 @@
         description: Code — full VS Code in the browser
         siteMonitor: http://127.0.0.1:8080/healthz
 
+    - Paperless-ngx:
+        icon: paperless-ngx.png
+        href: https://__TS_HOST__:8095/
+        description: Documents — OCR'd receipts, contracts and tax docs
+        siteMonitor: http://127.0.0.1:8095/accounts/login/
+
+    - Stirling PDF:
+        icon: stirling-pdf.png
+        href: https://__TS_HOST__:8103/
+        description: PDF — merge, split, compress, OCR, convert
+        siteMonitor: http://127.0.0.1:8103/api/v1/info/status
+
+    - Plane:
+        icon: plane.png
+        href: https://__TS_HOST__:8105/
+        description: Projects — issues, cycles and pages
+        siteMonitor: http://127.0.0.1:8105/api/instances/
+
+    - Firefly III:
+        icon: firefly-iii.png
+        href: https://__TS_HOST__:8097/
+        description: Finance — accounts, budgets, categories, reports
+        siteMonitor: http://127.0.0.1:8097/login/
+
 - AI & automation:
     - Open WebUI:
         icon: open-webui.png
@@ -62,11 +86,29 @@
         description: Chat over the local ollama models
         siteMonitor: http://127.0.0.1:3001/health
 
+    - Paperclip:
+        icon: https://cdn.jsdelivr.net/gh/selfhst/icons/png/paperclip-ai.png
+        href: https://__TS_HOST__:3100/
+        description: Agents — control plane for Claude Code and Codex
+        siteMonitor: http://127.0.0.1:3100/api/health
+
+    - OpenHands:
+        icon: https://cdn.jsdelivr.net/gh/selfhst/icons/png/openhands.png
+        href: https://__TS_HOST__:8000/
+        description: Canvas — browser UI for Claude Code and Codex
+        siteMonitor: http://127.0.0.1:8000/
+
     - n8n:
         icon: n8n.png
         href: https://__TS_HOST__:5678/
         description: Automation — visual workflows, schedules, webhooks
         siteMonitor: http://127.0.0.1:5678/healthz
+
+    - Trigger.dev:
+        icon: https://trigger.dev/assets/triggerdev-logo--light.svg
+        href: https://__TS_HOST__:8030/
+        description: Jobs — TypeScript cron and background tasks
+        siteMonitor: http://127.0.0.1:8030/healthcheck
 
     - ollama:
         icon: ollama.png
@@ -80,6 +122,18 @@
         siteMonitor: http://127.0.0.1:8090/health
 
 - Knowledge & media:
+    - AppFlowy:
+        icon: appflowy.png
+        href: https://__TS_HOST__:8102/
+        description: Notes — self-hosted Notion, docs and databases
+        siteMonitor: http://127.0.0.1:8102/api/health
+
+    - Metabase:
+        icon: metabase.png
+        href: https://__TS_HOST__:8104/
+        description: BI — dashboards and SQL over local databases
+        siteMonitor: http://127.0.0.1:8104/api/health
+
     - kaichenpedia:
         icon: mdi-book-open-variant
         href: https://__TS_HOST__:8091/
@@ -104,6 +158,18 @@
         href: https://__TS_HOST__/home/
         description: The box's own service registry — deploy, start and stop
         siteMonitor: http://127.0.0.1:8093/
+
+    - Coolify:
+        icon: coolify.png
+        href: https://__TS_HOST__:8101/
+        description: PaaS — deploy apps onto this box from a dashboard
+        siteMonitor: http://127.0.0.1:8101/api/health
+
+    - Umami:
+        icon: umami.png
+        href: https://__TS_HOST__:8106/
+        description: Analytics — privacy-respecting pageviews
+        siteMonitor: http://127.0.0.1:8106/api/heartbeat
 
     - AdGuard Home:
         icon: adguard-home.png
@@ -134,3 +200,9 @@
         href: https://__TS_HOST__:3003/
         description: Alerts — push notifications to the phone
         siteMonitor: http://127.0.0.1:3003/v1/health
+
+    - Remote Desktop:
+        icon: guacamole.png
+        href: https://__TS_HOST__:8094/
+        description: Desktop — this box's GNOME session in a browser tab
+        siteMonitor: http://127.0.0.1:8094/guacamole/

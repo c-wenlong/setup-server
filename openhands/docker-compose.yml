@@ -1,0 +1,44 @@
+# OpenHands Agent Canvas — official image, loopback only, tailnet via Serve.
+#
+# This is the current Agent Canvas stack (frontend + Agent Server +
+# Automation Server + ingress), not the legacy OpenHands 0.x app. Pin the
+# tag in .env (OPENHANDS_VERSION); `latest` is the documented channel.
+#
+# The agent can execute arbitrary shell commands *inside this container*
+# and see only the directories we mount. Do not add a `/` or `$HOME` mount.
+# Do not add `--privileged` — that would collapse the sandbox (official
+# docs are explicit that there is no safer middle ground).
+#
+# `--public` is required once Tailscale Serve makes the UI reachable from
+# other tailnet devices. LOCAL_BACKEND_API_KEY is the lock; it is generated
+# into .env and never committed.
+
+name: openhands
+
+services:
+  openhands:
+    container_name: openhands-agent-canvas
+    image: ghcr.io/openhands/agent-canvas:${OPENHANDS_VERSION:-latest}
+    restart: always
+    mem_limit: ${OPENHANDS_MEM_LIMIT:-2g}
+    environment:
+      PORT: "8000"
+      LOCAL_BACKEND_API_KEY: ${OPENHANDS_API_KEY:?OPENHANDS_API_KEY missing from .env}
+      OH_SECRET_KEY: ${OH_SECRET_KEY:?OH_SECRET_KEY missing from .env}
+      AGENT_CANVAS_DISABLE_TELEMETRY: "1"
+    command: ["--public"]
+    volumes:
+      # Settings, secrets, conversation history. The only OpenHands state
+      # worth backing up.
+      - ${OPENHANDS_DATA:?OPENHANDS_DATA missing from .env}:/home/openhands/.openhands
+      # Project root the agent is allowed to touch. Created by setup.sh as
+      # ~/agent-workspaces; never the whole host filesystem.
+      - ${AGENT_WORKSPACES:?AGENT_WORKSPACES missing from .env}:/projects
+    ports:
+      - '127.0.0.1:${OPENHANDS_PORT:-8000}:8000'
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5)\" || wget -q -O /dev/null http://127.0.0.1:8000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s

@@ -4,8 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<meta name="theme-color" content="#f6f6f7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0e0e11" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" id="theme-color" content="#f5f5f6">
+<script>
+/* Paint the chosen theme before CSS so the first frame is not the wrong
+   one. view.js owns the control and the same localStorage key. */
+(function () {
+  var t = 'system';
+  try { t = localStorage.getItem('launcher.theme') || 'system'; } catch (e) {}
+  if (t !== 'light' && t !== 'dark') t = 'system';
+  document.documentElement.setAttribute('data-theme', t);
+  var dark = t === 'dark' || (t === 'system' && window.matchMedia &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches);
+  var meta = document.getElementById('theme-color');
+  if (meta) meta.setAttribute('content', dark ? '#0e0e11' : '#f5f5f6');
+})();
+</script>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Launcher">
 <meta name="robots" content="noindex">
@@ -37,15 +50,33 @@
       </span>
     </div>
 
-    <div class="search" id="search">
-      <span class="search-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
-          <circle cx="11" cy="11" r="6.4"/><path d="m15.7 15.7 4.3 4.3"/>
-        </svg>
-      </span>
-      <label class="sr-only" for="filter">Filter services</label>
-      <input id="filter" type="search" placeholder="Filter" enterkeyhint="search" inputmode="search"
-             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <div class="searchrow" id="searchrow">
+      <div class="search" id="search">
+        <span class="search-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+            <circle cx="11" cy="11" r="6.4"/><path d="m15.7 15.7 4.3 4.3"/>
+          </svg>
+        </span>
+        <label class="sr-only" for="filter">Filter services</label>
+        <input id="filter" type="search" placeholder="Filter" enterkeyhint="search" inputmode="search"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </div>
+
+      <div class="gfilter" id="gfilter">
+        <button class="iconbtn gfilter-btn" id="gfilter-btn" type="button"
+                aria-haspopup="true" aria-expanded="false" aria-controls="gfilter-menu">
+          <span class="gfilter-label" id="gfilter-label">Categories</span>
+          <svg class="gfilter-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false">
+            <path d="m6 9.5 6 6 6-6"/>
+          </svg>
+        </button>
+        <div class="gfilter-menu" id="gfilter-menu" hidden role="group" aria-label="Categories"></div>
+      </div>
+
+      <button class="iconbtn theme-btn" id="theme-btn" type="button" aria-label="Theme: System">
+      </button>
     </div>
   </header>
 
@@ -81,17 +112,19 @@
       </button>
     </div>
 
-    <!-- Mount point for view.js's View/Sort controls. Empty until it loads;
-         if it never does, the grid below is exactly what it always was. -->
+    <!-- Mount point for view.js's View/Sort/Group-by controls. Empty until
+         it loads; if it never does, the grid below is exactly what it always
+         was. -->
     <div id="view-toolbar"></div>
     </div><!-- /.toolrow -->
 
     <div class="panel" id="panel" role="tabpanel" aria-labelledby="tab-all">
       <div class="grid" id="grid" role="list" aria-busy="true"></div>
 
-      <!-- Table view. view.js renders into this; app.js hides #grid when the
-           toolbar says Table. -->
+      <!-- Table and board. view.js renders into these; app.js hides #grid
+           when the toolbar says Table or Board. -->
       <div id="view-table"></div>
+      <div id="view-board"></div>
 
       <p class="empty" id="empty" hidden>No service matches that.</p>
     </div>

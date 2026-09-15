@@ -41,7 +41,16 @@
     "          Absent control entirely also means not controllable. Three keys",
     "          are additionally hard-locked in server.py so that editing this",
     "          file cannot re-enable them: launcher, ntfy, ollama.",
-    "Order here is the order the grid renders in: daily drivers first."
+    "group    - bucket id from the file-level `groups` list. The launcher",
+    "          paints a heading per bucket and sorts inside it. Unknown or",
+    "          missing ids fall through to Other at the end.",
+    "Order here is the order inside each bucket: daily drivers first."
+  ],
+  "groups": [
+    { "id": "daily", "label": "Daily" },
+    { "id": "ai", "label": "AI & automation" },
+    { "id": "knowledge", "label": "Knowledge & media" },
+    { "id": "infra", "label": "Infrastructure" }
   ],
   "control": {
     "_comment": [
@@ -58,6 +67,7 @@
       "key": "immich",
       "name": "Immich",
       "tagline": "Photos",
+      "group": "daily",
       "icon": "camera",
       "url": "https://HOST:2283/",
       "health": "http://127.0.0.1:2283/api/server/ping",
@@ -89,6 +99,7 @@
       "key": "seafile",
       "name": "Seafile",
       "tagline": "Files",
+      "group": "daily",
       "icon": "folder",
       "url": "https://HOST:8443/",
       "health": "http://127.0.0.1:8081/api2/ping/",
@@ -115,6 +126,7 @@
       "key": "syncthing",
       "name": "Syncthing",
       "tagline": "Sync",
+      "group": "daily",
       "icon": "syncthing",
       "url": "https://HOST:8384/",
       "health": "http://127.0.0.1:8384/rest/noauth/health",
@@ -136,6 +148,7 @@
       "key": "vaultwarden",
       "name": "Vaultwarden",
       "tagline": "Passwords",
+      "group": "daily",
       "icon": "lock",
       "url": "https://HOST:8222/",
       "health": "http://127.0.0.1:8222/alive",
@@ -157,6 +170,7 @@
       "key": "code-server",
       "name": "code-server",
       "tagline": "Code",
+      "group": "daily",
       "icon": "code",
       "url": "https://HOST/",
       "health": "http://127.0.0.1:8080/healthz",
@@ -177,6 +191,7 @@
       "key": "open-webui",
       "name": "Open WebUI",
       "tagline": "Chat",
+      "group": "ai",
       "icon": "chat",
       "url": "https://HOST:3001/",
       "health": "http://127.0.0.1:3001/health",
@@ -194,9 +209,52 @@
       "description": "ChatGPT-style chat over the ollama models already running on this box, with conversation history, model switching and document upload. Host-network container bound to 127.0.0.1:3001. The first account registered (Kai's) is the admin; nothing leaves the tailnet."
     },
     {
+      "key": "paperclip",
+      "name": "Paperclip",
+      "tagline": "Agents",
+      "group": "ai",
+      "icon": "workflow",
+      "url": "https://HOST:3100/",
+      "health": "http://127.0.0.1:3100/api/health",
+      "marker": "~/services/paperclip",
+      "setup": "paperclip/setup.sh",
+      "env": "paperclip/.env",
+      "control": {
+        "parts": [
+          {
+            "unit": "paperclipai.service"
+          }
+        ],
+        "kuma": "paperclip"
+      },
+      "description": "Agent control plane: task queue, heartbeats, run history. Official managed CLI under a systemd user unit, authenticated/private, loopback-only behind Serve on :3100. Hires claude_local / codex_local against ~/agent-workspaces/paperclip-test."
+    },
+    {
+      "key": "openhands",
+      "name": "OpenHands",
+      "tagline": "Canvas",
+      "group": "ai",
+      "icon": "terminal",
+      "url": "https://HOST:8000/",
+      "health": "http://127.0.0.1:8000/",
+      "marker": "~/services/openhands",
+      "setup": "openhands/setup.sh",
+      "env": "openhands/.env",
+      "control": {
+        "parts": [
+          {
+            "container": "openhands-agent-canvas"
+          }
+        ],
+        "kuma": "openhands"
+      },
+      "description": "OpenHands Agent Canvas: browser UI over Claude Code and Codex via ACP. Official image, --public plus OPENHANDS_API_KEY from .env, loopback-only behind Serve on :8000. The agent sees only ~/agent-workspaces (as /projects)."
+    },
+    {
       "key": "kaichenpedia",
       "name": "kaichenpedia",
       "tagline": "Wiki",
+      "group": "knowledge",
       "icon": "book",
       "url": "https://HOST:8091/",
       "health": "http://127.0.0.1:8091/",
@@ -214,9 +272,77 @@
       "description": "Personal wiki: a Quartz static build of the private kaichenpedia GitHub repo, served by nginx. A systemd user timer polls GitHub daily and redeploys on new commits, so pushing from any device is the publish step; ~/services/kaichenpedia/bin/deploy.sh --force does it now. The poller only runs while the container is up, so an amber tile means the wiki is frozen at its last build."
     },
     {
+      "key": "appflowy",
+      "name": "AppFlowy",
+      "tagline": "Notes",
+      "group": "knowledge",
+      "icon": "appflowy",
+      "url": "https://HOST:8102/",
+      "health": "http://127.0.0.1:8102/api/health",
+      "marker": "~/services/appflowy",
+      "setup": "appflowy/setup.sh",
+      "env": "appflowy/.env",
+      "description": "Self-hosted Notion: documents, databases and a wiki on this box. AppFlowy Cloud behind nginx on :8102, loopback-only behind Serve. First admin is seeded from .env and public sign-up is off. AI chat and the full-text search indexer are left out — AI wants an OpenAI key this box does not have, and search mmaps about 2 GB. Desktop and mobile apps point at the same HTTPS URL.",
+      "control": {
+        "parts": [
+          {
+            "container": "appflowy-nginx"
+          },
+          {
+            "container": "appflowy-web"
+          },
+          {
+            "container": "appflowy-admin"
+          },
+          {
+            "container": "appflowy-worker"
+          },
+          {
+            "container": "appflowy-cloud"
+          },
+          {
+            "container": "appflowy-gotrue"
+          },
+          {
+            "container": "appflowy-minio"
+          },
+          {
+            "container": "appflowy-redis"
+          },
+          {
+            "container": "appflowy-postgres"
+          }
+        ],
+        "kuma": "appflowy",
+        "_comment": "Stop order: nginx first, then the app tier, then GoTrue, then MinIO/Redis, then Postgres. Start is the reverse."
+      }
+    },
+    {
+      "key": "metabase",
+      "name": "Metabase",
+      "tagline": "BI",
+      "group": "knowledge",
+      "icon": "metabase",
+      "url": "https://HOST:8104/",
+      "health": "http://127.0.0.1:8104/api/health",
+      "marker": "~/services/metabase",
+      "setup": "metabase/setup.sh",
+      "env": "metabase/.env",
+      "description": "Self-hosted BI: dashboards and SQL over databases already on this box. OSS image v0.63.17.3 plus Postgres, loopback-only behind Serve on :8104 because forgejo already owns Metabase's upstream :3000. First admin is seeded from .env via POST /api/setup. Anonymous usage tracking is off. Health-check /api/health, never / — the UI is a SPA.",
+      "control": {
+        "parts": [
+          { "container": "metabase" },
+          { "container": "metabase-db" }
+        ],
+        "kuma": "metabase",
+        "_comment": "Stop order: the app first, then the database it talks to. Start is the reverse."
+      }
+    },
+    {
       "key": "n8n",
       "name": "n8n",
       "tagline": "Automation",
+      "group": "ai",
       "icon": "workflow",
       "url": "https://HOST:5678/",
       "health": "http://127.0.0.1:5678/healthz",
@@ -234,9 +360,57 @@
       "description": "Self-hosted Zapier: visual workflows wiring schedules, webhooks and APIs to everything else here — ollama, ntfy, Seafile, any loopback service. Host-network container on 127.0.0.1:5678 with SQLite storage. Often stopped on purpose; scheduled workflows do not run while it is down. Its .env holds the encryption key that every saved credential is encrypted with, so back that up with the data."
     },
     {
+      "key": "trigger-dev",
+      "name": "Trigger.dev",
+      "tagline": "Jobs",
+      "group": "ai",
+      "icon": "workflow",
+      "url": "https://HOST:8030/",
+      "health": "http://127.0.0.1:8030/healthcheck",
+      "marker": "~/services/trigger-dev",
+      "setup": "trigger-dev/setup.sh",
+      "env": "trigger-dev/.env",
+      "control": {
+        "parts": [
+          {
+            "container": "trigger-webapp"
+          },
+          {
+            "container": "trigger-supervisor"
+          },
+          {
+            "container": "trigger-electric"
+          },
+          {
+            "container": "trigger-minio"
+          },
+          {
+            "container": "trigger-registry"
+          },
+          {
+            "container": "trigger-docker-proxy"
+          },
+          {
+            "container": "trigger-redis"
+          },
+          {
+            "container": "trigger-clickhouse"
+          },
+          {
+            "container": "trigger-postgres"
+          }
+        ],
+        "primary": "trigger-webapp",
+        "kuma": "trigger-dev",
+        "_comment": "Stop order: dashboard first, then the supervisor that starts runners, then sidecars, redis, postgres last. Start is the reverse."
+      },
+      "description": "TypeScript background jobs and cron — the code-first counterpart to n8n. Trigger.dev v4 combined stack (webapp + supervisor), slimmed for this box: no ClickHouse, no s2-lite, 768 MiB Node heap. Dashboard on 127.0.0.1:8030 behind Serve; task images push to a loopback registry on :5000, not published on the tailnet. Magic-link login, links in docker logs trigger-webapp. ⚠️ Official wants 6+8 GB; this deploy caps idle around 2 GB and will OOM if ollama is loaded."
+    },
+    {
       "key": "beszel",
       "name": "Beszel",
       "tagline": "Metrics",
+      "group": "infra",
       "icon": "activity",
       "url": "https://HOST:8092/",
       "health": "http://127.0.0.1:8092/api/health",
@@ -262,6 +436,7 @@
       "key": "uptime-kuma",
       "name": "Uptime Kuma",
       "tagline": "Status",
+      "group": "infra",
       "icon": "heartbeat",
       "url": "https://HOST:3002/",
       "health": "http://127.0.0.1:3002/",
@@ -283,6 +458,7 @@
       "key": "ntfy",
       "name": "ntfy",
       "tagline": "Alerts",
+      "group": "infra",
       "icon": "bell",
       "url": "https://HOST:3003/",
       "health": "http://127.0.0.1:3003/v1/health",
@@ -298,6 +474,7 @@
       "key": "manimkc",
       "name": "manimkc",
       "tagline": "Video",
+      "group": "ai",
       "icon": "video",
       "url": "https://HOST:8090/docs",
       "health": "http://127.0.0.1:8090/health",
@@ -318,6 +495,7 @@
       "key": "ollama",
       "name": "ollama",
       "tagline": "Models",
+      "group": "ai",
       "icon": "cpu",
       "url": null,
       "health": "http://127.0.0.1:11434/api/version",
@@ -333,6 +511,7 @@
       "key": "adguard",
       "name": "AdGuard Home",
       "tagline": "DNS",
+      "group": "infra",
       "icon": "shield",
       "url": "https://HOST:3080/",
       "health": "http://127.0.0.1:3080/",
@@ -354,6 +533,7 @@
       "key": "remote-desktop",
       "name": "Remote Desktop",
       "tagline": "Desktop",
+      "group": "infra",
       "icon": "remote-desktop",
       "url": "https://HOST:8094/",
       "health": "http://127.0.0.1:8094/guacamole/",
@@ -378,6 +558,7 @@
       "key": "paperless-ngx",
       "name": "Paperless-ngx",
       "tagline": "Documents",
+      "group": "daily",
       "icon": "paperless-ngx",
       "url": "https://HOST:8095/",
       "health": "http://127.0.0.1:8095/accounts/login/",
@@ -399,9 +580,63 @@
       }
     },
     {
+      "key": "stirling-pdf",
+      "name": "Stirling PDF",
+      "tagline": "PDF",
+      "group": "daily",
+      "icon": "stirling-pdf",
+      "url": "https://HOST:8103/",
+      "health": "http://127.0.0.1:8103/api/v1/info/status",
+      "marker": "~/services/stirling-pdf",
+      "setup": "stirling-pdf/setup.sh",
+      "env": "stirling-pdf/.env",
+      "description": "Locally hosted PDF toolbox: merge, split, compress, OCR, convert, rotate, watermark. One container on :8103 because code-server already owns Stirling's upstream :8080. Loopback-only behind Serve. Login is off — upstream defaults to a well-known admin/stirling pair, and the tailnet is the access boundary. Standard 2.14.3 image, not the fat extra-fonts build.",
+      "control": {
+        "parts": [
+          {
+            "container": "stirling-pdf"
+          }
+        ],
+        "kuma": "stirling-pdf",
+        "_comment": "Single container; nothing to order."
+      }
+    },
+    {
+      "key": "plane",
+      "name": "Plane",
+      "tagline": "Projects",
+      "group": "daily",
+      "icon": "plane",
+      "url": "https://HOST:8105/",
+      "health": "http://127.0.0.1:8105/api/instances/",
+      "marker": "~/services/plane",
+      "setup": "plane/setup.sh",
+      "env": "plane/.env",
+      "description": "Self-hosted Linear/Jira: issues, cycles and pages. Plane Community v1.4.2 behind an HTTP-only proxy on :8105 (Serve terminates TLS; we do not publish :443). First instance admin is seeded from .env. Eleven long-running containers plus a one-shot migrator — RAM-heavy on this 7.7 GB box. MinIO comes from quay.io because Docker Hub froze minio/minio. This is our compose, not a wrap of Plane's interactive setup.sh.",
+      "control": {
+        "parts": [
+          { "container": "plane-proxy" },
+          { "container": "plane-web" },
+          { "container": "plane-space" },
+          { "container": "plane-admin" },
+          { "container": "plane-live" },
+          { "container": "plane-worker" },
+          { "container": "plane-beat-worker" },
+          { "container": "plane-api" },
+          { "container": "plane-minio" },
+          { "container": "plane-mq" },
+          { "container": "plane-redis" },
+          { "container": "plane-db" }
+        ],
+        "kuma": "plane",
+        "_comment": "Stop order: proxy first, then the UI/API tier, then MinIO/RabbitMQ/Valkey, then Postgres. Migrator is one-shot and is not in this list. Start is the reverse."
+      }
+    },
+    {
       "key": "firefly-iii",
       "name": "Firefly III",
       "tagline": "Finance",
+      "group": "daily",
       "icon": "firefly-iii",
       "url": "https://HOST:8097/",
       "health": "http://127.0.0.1:8097/login",
@@ -429,6 +664,7 @@
       "key": "homepage",
       "name": "Homepage",
       "tagline": "Dashboard",
+      "group": "infra",
       "icon": "web",
       "url": "https://HOST:8100/",
       "health": "http://127.0.0.1:8100/api/healthcheck",
@@ -447,9 +683,62 @@
       }
     },
     {
+      "key": "coolify",
+      "name": "Coolify",
+      "tagline": "PaaS",
+      "group": "infra",
+      "icon": "coolify",
+      "url": "https://HOST:8101/",
+      "health": "http://127.0.0.1:8101/api/health",
+      "marker": "~/services/coolify",
+      "setup": "coolify/setup.sh",
+      "env": "coolify/.env",
+      "description": "Self-hosted PaaS — push a repo, get a running app, from a dashboard on this box. Four containers (Coolify, Postgres, Redis, Soketi) with the dashboard on :8101 because OpenHands already owns Coolify's upstream :8000. Loopback-only behind Serve. The first admin is seeded from .env so /register is never an open 'whoever loads the page first is root' window. Coolify's Traefik proxy is off: upstream binds :80/:443 on every interface, which would put this box on the LAN. Apps you deploy through it should publish a loopback port and get their own tailscale serve. In-app auto-update is off too — it rewrites compose and would undo those binds. Upgrade by bumping COOLIFY_VERSION in .env and re-running setup.sh.",
+      "control": {
+        "parts": [
+          {
+            "container": "coolify"
+          },
+          {
+            "container": "coolify-realtime"
+          },
+          {
+            "container": "coolify-redis"
+          },
+          {
+            "container": "coolify-db"
+          }
+        ],
+        "kuma": "coolify",
+        "_comment": "Stop order: the dashboard first, then Soketi, then Redis, then Postgres. Start is the reverse."
+      }
+    },
+    {
+      "key": "umami",
+      "name": "Umami",
+      "tagline": "Analytics",
+      "group": "infra",
+      "icon": "umami",
+      "url": "https://HOST:8106/",
+      "health": "http://127.0.0.1:8106/api/heartbeat",
+      "marker": "~/services/umami",
+      "setup": "umami/setup.sh",
+      "env": "umami/.env",
+      "description": "Self-hosted web analytics: privacy-respecting pageviews without Google. Umami 3.3.1 plus Postgres, loopback-only behind Serve on :8106 because forgejo already owns Umami's upstream :3000. Upstream seeds admin/umami — a well-known pair — and setup.sh rotates that password on first boot. Tracker snippets on public sites cannot reach this URL; that is the tailnet boundary, not a bug. Health-check /api/heartbeat, never /.",
+      "control": {
+        "parts": [
+          { "container": "umami" },
+          { "container": "umami-db" }
+        ],
+        "kuma": "umami",
+        "_comment": "Stop order: the app first, then the database it talks to. Start is the reverse."
+      }
+    },
+    {
       "key": "home-assistant",
       "name": "Home Assistant",
       "tagline": "Home",
+      "group": "infra",
       "icon": "home",
       "url": "https://HOST:8123/",
       "health": "http://127.0.0.1:8123/manifest.json",
@@ -471,6 +760,7 @@
       "key": "jellyfin",
       "name": "Jellyfin",
       "tagline": "Media",
+      "group": "knowledge",
       "icon": "film",
       "url": "https://HOST:8096/",
       "health": "http://127.0.0.1:8096/health",
@@ -492,6 +782,7 @@
       "key": "karakeep",
       "name": "Karakeep",
       "tagline": "Bookmarks",
+      "group": "knowledge",
       "icon": "bookmark",
       "url": null,
       "health": null,
@@ -504,6 +795,7 @@
       "key": "forgejo",
       "name": "Forgejo",
       "tagline": "Git",
+      "group": "knowledge",
       "icon": "git",
       "url": "https://HOST:3000/",
       "health": "http://127.0.0.1:3000/api/healthz",

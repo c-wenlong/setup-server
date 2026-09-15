@@ -8,14 +8,110 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Added
+
+- **metabase: one-shot deploy of Metabase OSS v0.63.17.3** (self-hosted
+  BI). App + Postgres, loopback-only behind Serve on `:8104` (forgejo
+  already owns Metabase's upstream `:3000`). First admin seeded from
+  `.env` via `POST /api/setup`. Anonymous tracking off. Mocked suite
+  covers preflight, fresh install, port overrides, MB_SITE_URL drift,
+  setup-API failure, operator grant and serve approval.
+- **plane: one-shot deploy of Plane Community v1.4.2** (self-hosted
+  Linear/Jira). Our compose, not a wrap of Plane's interactive
+  setup.sh. HTTP-only proxy on `:8105`, no `:443`. First instance admin
+  seeded from `.env`. MinIO from quay.io. Mocked suite covers
+  preflight, fresh install, port overrides, WEB_URL drift, sign-up
+  failure, operator grant and serve approval.
+- **umami: one-shot deploy of Umami 3.3.1** (self-hosted web analytics).
+  App + Postgres, loopback-only behind Serve on `:8106` (forgejo already
+  owns Umami's upstream `:3000`). Default `admin`/`umami` password
+  rotated on first boot. Mocked suite covers preflight, fresh install,
+  port overrides, PUBLIC_URL drift, rotation failure, operator grant
+  and serve approval.
+- **Launcher theme: System, Light or Dark.** A button to the right of
+  the search box cycles the three; persisted per device. System (the
+  default) still follows the OS. Brand marks with a dark companion
+  follow the same choice.
+- **Launcher category filter.** A multi-select next to search filters
+  the grid by Daily / AI & automation / Knowledge & media /
+  Infrastructure.
+
 ### Changed
 
+- **Services are grouped into four buckets** — Daily, AI & automation,
+  Knowledge & media, Infrastructure — on the launcher grid/table (a
+  `group` field plus a file-level catalog in `services.json`) and in the
+  README. Homepage already used the same headings. Last-used / RAM /
+  deployed sort still applies, inside each bucket.
+- **Launcher and README brand marks for paperclip, openhands and
+  trigger-dev.** Those three were falling back to the generic glyphs.
+  Marks are vendored in `launcher/web/icons/` (selfh.st for Paperclip and
+  OpenHands; Trigger.dev's official lime triangle). README table rows now
+  show the same files.
+- **Paperclip and OpenHands are separate services.** Combined
+  `paperclip-openhands/` is gone. Deploy with `cd paperclip && ./setup.sh`
+  and `cd openhands && ./setup.sh`. Each directory's `setup.sh` deploys
+  exactly one service (now a convention in `AGENTS.md`). Existing
+  `paperclip-openhands/.env` is split on first run without rotating
+  secrets.
 - The README coverage badge carries Codecov's graphing token, which is what a
   private repo needs for the badge to render a number instead of "unknown".
   The token is read-only and badge-scoped, so it is safe in the README.
 
+### Added
+
+- **stirling-pdf: one-shot deploy of Stirling PDF 2.14.3** (self-hosted
+  PDF toolbox). Single container, loopback-only behind Serve on `:8103`
+  (code-server already owns Stirling's upstream `:8080`). Login off —
+  upstream defaults to a well-known `admin`/`stirling` pair. Mocked
+  suite covers preflight, fresh install, port overrides, FRONTENDURL
+  drift, leftover login form, operator grant and serve approval.
+- **appflowy: one-shot deploy of AppFlowy Cloud** (self-hosted Notion).
+  nginx + Postgres/pgvector + Redis + MinIO + GoTrue + cloud + admin +
+  worker + web, loopback-only behind Serve on `:8102`. HTTP-only nginx
+  (Serve terminates TLS). AI and the search indexer left out. Sign-up
+  locked; first admin seeded from `.env`. Mocked suite covers
+  preflight, fresh install, port overrides, BASE_URL drift, open
+  sign-up warning, operator grant and serve approval.
+- **coolify: one-shot deploy of Coolify 4.3.21** (self-hosted PaaS).
+  Dashboard + Postgres + Redis + Soketi, loopback-only behind Serve on
+  `:8101` (OpenHands already owns Coolify's upstream `:8000`). Traefik
+  proxy off. First admin seeded from `.env`. Mocked suite covers
+  preflight, fresh install, port overrides, APP_URL drift, open
+  registration warning, operator grant and serve approval.
+- **trigger-dev: one-shot deploy of Trigger.dev v4** for TypeScript
+  background jobs and cron. Combined webapp + supervisor, pinned to
+  `v4.6.0`, loopback-only behind Serve on `:8030`. Slimmed versus
+  upstream (no s2-lite, events in Postgres, 768 MiB Node heap, concurrency 2).
+  ClickHouse still runs — v4.6.0 Zod-requires `CLICKHOUSE_URL` at boot.
+  so it fits a 7.7 GB box. Local registry on `127.0.0.1:5000`. Mocked
+  suite covers preflight, fresh install, port overrides, origin drift,
+  magic-link-once, operator grant and serve approval.
+- **paperclip: one-shot deploy of the Paperclip control plane.** Official
+  managed CLI (`onboard --yes --bind tailnet`, then rewritten to
+  authenticated + loopback so Serve can front it — never `local_trusted`
+  on the tailnet). Existing Claude/Codex credentials are not written.
+  Mocked suite covers preflight, fresh install, the managed-CLI path,
+  local_trusted repair, idempotent re-run, port overrides, serve
+  approval, CEO-invite races and agent provisioning.
+- **openhands: one-shot deploy of OpenHands Agent Canvas.** Official
+  image on `:8000` (`--public`, generated API key, `~/agent-workspaces`
+  only). Existing Claude/Codex credentials are not written.
+- **paperclip: editable email and password on Profile.** Upstream leaves
+  those read-only / missing. `setup.sh` now enables Better Auth
+  `change-email` without SMTP and injects fields on Settings → Profile.
+- **paperclip: placeholder `PAPERCLIP_EMAIL` / `PAPERCLIP_PASSWORD` in
+  `.env`.** Written on first run and appended if missing; not applied to
+  the instance yet. Default `changeme@example.com` / `changeme`.
+
 ### Fixed
 
+- **openhands: Canvas 502 `ECONNREFUSED 127.0.0.1:18000`.**
+  `setup.sh` created `~/services/openhands/data` as `0700` for the host
+  user; the image runs as uid `10001`, so the agent server died on
+  `conversations/` and the ingress proxyed a 502. Grant uid 10001 write
+  via ACL (or `a+rwx` where `setfacl` is missing) on the data dir and
+  `~/agent-workspaces`.
 - **immich: overriding only `LOCAL_PORT` split the two ports.** `HTTPS_PORT`
   defaulted to a literal 2283 instead of following `LOCAL_PORT` the way n8n
   and kaichenpedia do, so `LOCAL_PORT=2284 ./setup.sh` published

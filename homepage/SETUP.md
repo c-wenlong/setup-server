@@ -352,7 +352,9 @@ The shape is: a list of groups, each group a list of services.
   `launcher/services.json` already has the researched ones.
 - **`icon`** — bare names like `immich.png` come from the dashboard-icons CDN
   and are fetched **by your browser**. `mdi-video-outline` and friends are
-  bundled locally. A missing icon renders as a letter tile, not an error.
+  bundled locally. Paperclip, OpenHands and Trigger.dev are not in that set,
+  so those three tiles use a full URL (selfh.st / the Trigger.dev brand kit).
+  A missing icon renders as a letter tile, not an error.
 - **A tile showing an error status is often correct.** Several services here
   are start-on-demand. Homepage is reporting, not complaining.
 

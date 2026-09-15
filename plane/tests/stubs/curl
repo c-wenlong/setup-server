@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# curl stub — fakes Plane Community's HTTP surface. State in $STATE_DIR:
+#   health_fails_left  — countdown of 503s from /api/instances/
+#   setup_done         — instance already has an admin
+#   signup_fail        — POST /api/instances/admins/sign-up/ returns 500
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; want_code=0; failonerr=0; cookie_out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -c) cookie_out="$2"; shift 2 ;;
+    -b) shift 2 ;;
+    -u) shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -H|--max-time|--connect-timeout|--data-urlencode|-d|--data-binary) shift 2 ;;
+    -L) shift ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+if [ -n "$cookie_out" ]; then
+  printf '# Netscape HTTP Cookie File\n127.0.0.1\tFALSE\t/\tFALSE\t0\tcsrftoken\tfake-csrf\n' > "$cookie_out"
+fi
+
+emit() {
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */api/instances/|*/api/instances)
+    if [ -f "$STATE_DIR/health_fails_left" ]; then
+      left="$(cat "$STATE_DIR/health_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/health_fails_left"
+        emit 503 '{"error":"starting"}'
+      fi
+    fi
+    if [ -f "$STATE_DIR/setup_done" ]; then
+      emit 200 '{"is_setup_done":true}'
+    fi
+    emit 200 '{"is_setup_done":false}'
+    ;;
+  */auth/get-csrf-token/|*/auth/get-csrf-token)
+    emit 200 '{"csrf_token":"fake-csrf"}'
+    ;;
+  */api/instances/admins/sign-up/|*/api/instances/admins/sign-up)
+    if [ "$method" = "POST" ]; then
+      if [ -f "$STATE_DIR/signup_fail" ]; then
+        emit 500 '{"error":"signup failed"}'
+      fi
+      touch "$STATE_DIR/setup_done"
+      emit 200 '{"ok":true}'
+    fi
+    emit 200 '{}'
+    ;;
+  *)
+    emit 200 '{}'
+    ;;
+esac

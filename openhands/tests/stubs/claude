@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+echo "claude $*" >> "$CALLS_LOG"
+case "${1:-}" in
+  --version) echo "2.1.246 (Claude Code)" ;;
+  auth)
+    echo '{"loggedIn":true,"authMethod":"claude.ai"}'
+    ;;
+esac
+exit 0

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+echo "launchctl $*" >> "$CALLS_LOG"
+exit 0

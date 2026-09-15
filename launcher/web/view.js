@@ -2,10 +2,12 @@
  *
  * A self-contained module, like notes.js and tooltip.js. It owns:
  *
- *   - the toolbar (View: Grid|Table, Sort: Last used|Deployed|RAM), persisted
+ *   - the toolbar (View, Sort) and the header theme-cycle button, persisted
  *     in localStorage per device, exactly like app.js's `launcher.tab`;
  *   - the sort order applied to whatever the active tab and filter yield;
  *   - the table view, rendered into `#view-table`;
+ *   - the board (kanban) view, rendered into `#view-board`, with a Group-by
+ *     control for Status or Category;
  *   - the "Resources" block on a detail page, rendered into `#view-res`;
  *   - the RAM figure that rides in a tile's corner;
  *   - the `POST api/services/<key>/touch` beacons.
@@ -34,16 +36,31 @@
 
   var VIEW_STORE = 'launcher.view';
   var SORT_STORE = 'launcher.sort';
+  var THEME_STORE = 'launcher.theme';
+  var GROUPBY_STORE = 'launcher.groupby';
+  var STAR_STORE = 'launcher.stars';
 
   var VIEWS = [
     { id: 'grid',  label: 'Grid'  },
-    { id: 'table', label: 'Table' }
+    { id: 'table', label: 'Table' },
+    { id: 'board', label: 'Board' }
+  ];
+
+  var GROUP_BYS = [
+    { id: 'state', label: 'Status'   },
+    { id: 'group', label: 'Category' }
   ];
 
   var SORTS = [
     { id: 'used',     label: 'Last used' },
     { id: 'deployed', label: 'Deployed'  },
     { id: 'ram',      label: 'RAM'       }
+  ];
+
+  var THEMES = [
+    { id: 'system', label: 'System' },
+    { id: 'light',  label: 'Light'  },
+    { id: 'dark',   label: 'Dark'   }
   ];
 
   var DASH = '—';     /* em dash: the one and only "we do not know" */
@@ -53,12 +70,20 @@
 
   var viewMode = 'grid';
   var sortMode = 'used';
+  var themeMode = 'system';
+  var groupByMode = 'state';
+  var stars = {};           /* key -> true; starred services pin to the top */
   var onChange = null;
 
   var bar = null;          /* the toolbar element, once built */
+  var groupCtl = null;     /* Group-by select; only visible on the board */
   var tableWrap = null;    /* the scroll container around the table */
   var tableBody = null;
   var rowCache = {};       /* key -> {tr, refs, shape} */
+
+  var boardWrap = null;
+  var colCache = {};       /* column id -> {col, title, count, list} */
+  var cardCache = {};      /* key -> {node, refs, shape} */
 
   var resSec = null;       /* the detail page's Resources section */
   var resRefs = null;
@@ -67,6 +92,7 @@
 
   var mountBar   = document.getElementById('view-toolbar');
   var mountTable = document.getElementById('view-table');
+  var mountBoard = document.getElementById('view-board');
   var mountRes   = document.getElementById('view-res');
 
   /* ---------- dom helpers ---------- */
@@ -108,6 +134,7 @@
 
   var CHEVRON_R = ['m9.5 5.5 6.5 6.5-6.5 6.5'];
   var CHEVRON_D = ['m6 9.5 6 6 6-6'];
+  var STAR_PATH = ['M12 3.4l2.15 5.05 5.45.48-4.15 3.55 1.28 5.32L12 15.3 7.27 17.8l1.28-5.32-4.15-3.55 5.45-.48z'];
 
   /* The icon module owns brand mark -> glyph -> fallback. If it has not
      loaded, hand back an empty box so the table still lays out. */
@@ -140,6 +167,67 @@
 
   function remember(store, value) {
     try { window.localStorage.setItem(store, value); } catch (e) { /* private mode */ }
+  }
+
+  /* Theme is a page-wide paint, not a list rearrange: it does not go
+     through onChange. The inline script in index.html already set
+     data-theme for the first frame; this keeps the attribute, the
+     theme-color meta and the brand icons in step after that. */
+  function resolvedDark() {
+    if (themeMode === 'dark') return true;
+    if (themeMode === 'light') return false;
+    try {
+      return !!(window.matchMedia &&
+                window.matchMedia('(prefers-color-scheme: dark)').matches);
+    } catch (e) { return false; }
+  }
+
+  function themeLabel(id) {
+    for (var i = 0; i < THEMES.length; i++) {
+      if (THEMES[i].id === id) return THEMES[i].label;
+    }
+    return 'System';
+  }
+
+  function nextTheme(id) {
+    if (id === 'system') return 'light';
+    if (id === 'light') return 'dark';
+    return 'system';
+  }
+
+  /* Stroke icons, same 24 grid as the rest of the page. System is a
+     half-filled circle (follows the OS); Light a sun; Dark a moon. */
+  var THEME_ICON = {
+    system: ['<circle cx="12" cy="12" r="8"/>',
+             '<path d="M12 4v16a8 8 0 0 0 0-16z" fill="currentColor" stroke="none"/>'],
+    light:  ['<circle cx="12" cy="12" r="4"/>',
+             '<path d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>'],
+    dark:   ['<path d="M16.6 14.3A7 7 0 0 1 9.7 7.4 6.2 6.2 0 1 0 16.6 14.3z"/>']
+  };
+
+  function paintThemeButton() {
+    var btn = document.getElementById('theme-btn');
+    if (!btn) return;
+    var next = nextTheme(themeMode);
+    var label = themeLabel(themeMode);
+    btn.setAttribute('aria-label', 'Theme: ' + label + '. Click for ' + themeLabel(next));
+    btn.title = label;
+    btn.setAttribute('data-theme-mode', themeMode);
+    var parts = THEME_ICON[themeMode] || THEME_ICON.system;
+    var svg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
+              parts.join('') + '</svg>';
+    if (btn.innerHTML !== svg) btn.innerHTML = svg;
+  }
+
+  function paintTheme() {
+    try { document.documentElement.setAttribute('data-theme', themeMode); }
+    catch (e) { /* nothing to paint onto */ }
+    var meta = document.getElementById('theme-color');
+    if (meta) meta.setAttribute('content', resolvedDark() ? '#0e0e11' : '#f5f5f6');
+    paintThemeButton();
+    if (window.ICONS && typeof window.ICONS.repaint === 'function') {
+      try { window.ICONS.repaint(); } catch (e) { /* icons stay as they are */ }
+    }
   }
 
   /* ---------- payload accessors ----------
@@ -310,6 +398,75 @@
     return function (svc) { return usageOf(svc, 'last_used'); };
   }
 
+  function isStarred(key) {
+    return !!(key && stars[key]);
+  }
+
+  function loadStars() {
+    var raw = null;
+    try { raw = window.localStorage.getItem(STAR_STORE); } catch (e) { raw = null; }
+    stars = {};
+    if (raw == null || raw === '') return;
+    try {
+      var parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      for (var i = 0; i < parsed.length; i++) {
+        if (typeof parsed[i] === 'string' && parsed[i]) stars[parsed[i]] = true;
+      }
+    } catch (e) { stars = {}; }
+  }
+
+  function rememberStars() {
+    var keys = [];
+    for (var k in stars) {
+      if (Object.prototype.hasOwnProperty.call(stars, k) && stars[k]) keys.push(k);
+    }
+    try {
+      if (!keys.length) window.localStorage.removeItem(STAR_STORE);
+      else window.localStorage.setItem(STAR_STORE, JSON.stringify(keys));
+    } catch (e) { /* private mode */ }
+  }
+
+  function toggleStar(key) {
+    if (!key) return;
+    if (stars[key]) delete stars[key];
+    else stars[key] = true;
+    rememberStars();
+    if (onChange) onChange();
+  }
+
+  function starGlyph(on) {
+    var svg = glyph(STAR_PATH, '1.5');
+    if (on) {
+      svg.setAttribute('fill', 'currentColor');
+      svg.setAttribute('stroke', 'none');
+    }
+    return svg;
+  }
+
+  function paintStar(btn, key) {
+    if (!btn || btn.nodeType !== 1) return;
+    var on = isStarred(key);
+    btn.className = on ? 'vw-star is-on' : 'vw-star';
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.setAttribute('aria-label', on ? 'Unstar' : 'Star');
+    btn.title = on ? 'Starred' : 'Star';
+    btn.textContent = '';
+    btn.appendChild(starGlyph(on));
+  }
+
+  function starButton(key) {
+    var btn = make('button', 'vw-star');
+    btn.type = 'button';
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleStar(key);
+    });
+    paintStar(btn, key);
+    return btn;
+  }
+
   function arrange(list) {
     if (!list || list.length < 2) return list || [];
     var get = keyFor(sortMode);
@@ -319,9 +476,13 @@
       deco.push({ svc: list[i], i: i, v: get(list[i]) });
     }
 
-    /* Decorated rather than relying on a stable Array#sort: the tie-break on
-       registry order has to be exact, not "whatever the engine does". */
+    /* Starred first, then the chosen sort. Decorated rather than relying on
+       a stable Array#sort: the tie-break on registry order has to be exact,
+       not "whatever the engine does". */
     deco.sort(function (a, b) {
+      var as = isStarred(a.svc && a.svc.key) ? 0 : 1;
+      var bs = isStarred(b.svc && b.svc.key) ? 0 : 1;
+      if (as !== bs) return as - bs;
       if (a.v === null && b.v === null) return a.i - b.i;
       if (a.v === null) return 1;
       if (b.v === null) return -1;
@@ -332,6 +493,75 @@
     var out = [];
     for (var j = 0; j < deco.length; j++) out.push(deco[j].svc);
     return out;
+  }
+
+  /* Partition `list` into the catalog's buckets, sort each with arrange(),
+     and emit {type:'h', id, label} / {type:'s', svc} so both views paint
+     the same headings. Services whose group is missing or not in the
+     catalog land in Other at the end. An empty catalog (old backend)
+     yields a flat list of service items — no headings. */
+  var groupRowCache = {};
+
+  function grouped(list, catalog) {
+    var items = list || [];
+    var cats = [];
+    var seen = {};
+    var i, j, gid;
+    if (catalog && catalog.length) {
+      for (i = 0; i < catalog.length; i++) {
+        gid = catalog[i] && catalog[i].id;
+        if (!gid || seen[gid]) continue;
+        seen[gid] = true;
+        cats.push({ id: gid, label: catalog[i].label || gid });
+      }
+    }
+
+    if (!cats.length) {
+      var flat = arrange(items);
+      var plain = [];
+      for (i = 0; i < flat.length; i++) plain.push({ type: 's', svc: flat[i] });
+      return plain;
+    }
+
+    var byId = {};
+    var other = [];
+    for (i = 0; i < items.length; i++) {
+      gid = items[i] && items[i].group;
+      if (gid && seen[gid]) {
+        if (!byId[gid]) byId[gid] = [];
+        byId[gid].push(items[i]);
+      } else {
+        other.push(items[i]);
+      }
+    }
+
+    var out = [];
+    for (i = 0; i < cats.length; i++) {
+      var chunk = byId[cats[i].id];
+      if (!chunk || !chunk.length) continue;
+      out.push({ type: 'h', id: cats[i].id, label: cats[i].label });
+      var sorted = arrange(chunk);
+      for (j = 0; j < sorted.length; j++) out.push({ type: 's', svc: sorted[j] });
+    }
+    if (other.length) {
+      out.push({ type: 'h', id: 'other', label: 'Other' });
+      var rest = arrange(other);
+      for (j = 0; j < rest.length; j++) out.push({ type: 's', svc: rest[j] });
+    }
+    return out;
+  }
+
+  function groupRow(id, label) {
+    var tr = groupRowCache[id];
+    if (!tr) {
+      tr = make('tr', 'vw-g');
+      var td = make('td', 'vw-g-cell');
+      td.colSpan = 7;
+      tr.appendChild(td);
+      groupRowCache[id] = tr;
+    }
+    text(tr.firstChild, label);
+    return tr;
   }
 
   /* ---------- toolbar ---------- */
@@ -388,6 +618,7 @@
       if (v === viewMode) return;
       viewMode = v;
       remember(VIEW_STORE, v);
+      paintGroupCtl();
       if (onChange) onChange();
     }));
 
@@ -398,7 +629,30 @@
       if (onChange) onChange();
     }));
 
+    groupCtl = select('vw-groupby', 'Group by', GROUP_BYS, groupByMode, function (v) {
+      if (v === groupByMode) return;
+      groupByMode = v;
+      remember(GROUPBY_STORE, v);
+      if (onChange) onChange();
+    });
+    paintGroupCtl();
+    bar.appendChild(groupCtl);
+
     mountBar.appendChild(bar);
+  }
+
+  function paintGroupCtl() {
+    if (groupCtl) groupCtl.hidden = viewMode !== 'board';
+  }
+
+  function bindThemeButton() {
+    var btn = document.getElementById('theme-btn');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      themeMode = nextTheme(themeMode);
+      remember(THEME_STORE, themeMode);
+      paintTheme();
+    });
   }
 
   /* ---------- table ---------- */
@@ -450,7 +704,7 @@
     tableBody.addEventListener('click', function (e) {
       var node = e.target;
       while (node && node !== tableBody) {
-        if (node.tagName === 'A') return;         /* a real link handles itself */
+        if (node.tagName === 'A' || node.tagName === 'BUTTON') return;
         node = node.parentNode;
       }
       var tr = e.target;
@@ -499,6 +753,8 @@
     stack.appendChild(refs.name);
     stack.appendChild(refs.tag);
     open.appendChild(stack);
+    refs.star = starButton(svc.key);
+    nameTd.appendChild(refs.star);
     nameTd.appendChild(open);
     tr.appendChild(nameTd);
 
@@ -564,6 +820,7 @@
 
     r.go.href = detailHref(svc.key);
     r.go.setAttribute('aria-label', 'Details for ' + name);
+    paintStar(r.star, svc.key);
   }
 
   function rowFor(svc) {
@@ -590,7 +847,12 @@
     if (!list.length) { tableWrap.hidden = true; return; }
 
     var nodes = [];
-    for (var i = 0; i < list.length; i++) nodes.push(rowFor(list[i]));
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (item && item.type === 'h') nodes.push(groupRow(item.id, item.label));
+      else if (item && item.type === 's') nodes.push(rowFor(item.svc));
+      else nodes.push(rowFor(item));
+    }
 
     /* Keyed reconcile, same discipline as app.js's syncGrid: only touch the
        DOM where it actually differs, so scroll and focus survive a poll. */
@@ -603,6 +865,283 @@
     }
 
     tableWrap.hidden = false;
+  }
+
+  /* ---------- board ----------
+   *
+   * Columns are the chosen categorical field (Status or Category). Cards
+   * stay the same services the grid and table would have shown; only the
+   * partition changes. Empty columns stay so the field's shape is visible
+   * (Other is the exception: it only appears when something lands there).
+   * Cards do not drag — Status is a live probe and Category is registry
+   * data, and neither is a thing a swipe should rewrite.
+   */
+
+  var STATE_COLS = [
+    { id: 'active',      label: 'Active' },
+    { id: 'stopped',     label: 'Paused' },
+    { id: 'uninstalled', label: 'Uninstalled' }
+  ];
+
+  function flattenBoard(list) {
+    var out = [];
+    if (!list) return out;
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (item && item.type === 'h') continue;
+      if (item && item.type === 's' && item.svc) out.push(item.svc);
+      else if (item && item.key) out.push(item);
+    }
+    return out;
+  }
+
+  function colDefs(catalog) {
+    if (groupByMode !== 'group') return STATE_COLS;
+    var defs = [];
+    var seen = {};
+    if (catalog) {
+      for (var i = 0; i < catalog.length; i++) {
+        var g = catalog[i];
+        if (!g || !g.id || seen[g.id]) continue;
+        seen[g.id] = true;
+        defs.push({ id: g.id, label: g.label || g.id });
+      }
+    }
+    defs.push({ id: 'other', label: 'Other' });
+    return defs;
+  }
+
+  function catalogIdsOf(defs) {
+    var ids = {};
+    for (var i = 0; i < defs.length; i++) ids[defs[i].id] = true;
+    return ids;
+  }
+
+  function bucketOf(svc, known) {
+    if (groupByMode === 'group') {
+      var gid = svc && svc.group;
+      return (gid && known[gid]) ? gid : 'other';
+    }
+    var st = svc && svc.state;
+    if (st === 'active') return 'active';
+    if (st === 'stopped') return 'stopped';
+    return 'uninstalled';
+  }
+
+  function buildBoard() {
+    if (boardWrap || !mountBoard) return;
+    boardWrap = make('div', 'vw-board');
+    boardWrap.setAttribute('role', 'region');
+    boardWrap.setAttribute('aria-label', 'Board');
+    boardWrap.tabIndex = 0;
+
+    boardWrap.addEventListener('click', function (e) {
+      var node = e.target;
+      while (node && node !== boardWrap) {
+        if (node.tagName === 'A' || node.tagName === 'BUTTON') return;
+        node = node.parentNode;
+      }
+      var card = e.target;
+      while (card && card !== boardWrap &&
+             !(card.getAttribute && card.getAttribute('data-key'))) {
+        card = card.parentNode;
+      }
+      if (!card || card === boardWrap) return;
+      var key = card.getAttribute('data-key');
+      if (!key) return;
+      try {
+        var sel = window.getSelection();
+        if (sel && String(sel).length && !sel.isCollapsed) return;
+      } catch (err) { /* no selection API */ }
+      location.hash = detailHref(key);
+    });
+
+    mountBoard.appendChild(boardWrap);
+  }
+
+  function colFor(def) {
+    var hit = colCache[def.id];
+    if (!hit) {
+      var col = make('section', 'vw-col');
+      col.setAttribute('data-col', def.id);
+
+      var head = make('header', 'vw-col-h');
+      var title = make('h3', 'vw-col-title');
+      title.id = 'vw-col-h-' + def.id;
+      var count = make('span', 'vw-col-n');
+      count.setAttribute('aria-hidden', 'true');
+      head.appendChild(title);
+      head.appendChild(count);
+
+      var list = make('div', 'vw-col-list');
+      list.setAttribute('role', 'list');
+      list.setAttribute('aria-labelledby', title.id);
+
+      col.setAttribute('aria-labelledby', title.id);
+      var empty = make('p', 'vw-col-empty');
+      text(empty, 'None');
+      col.appendChild(head);
+      col.appendChild(list);
+      hit = { col: col, title: title, count: count, list: list, empty: empty };
+      colCache[def.id] = hit;
+    }
+    text(hit.title, def.label);
+    return hit;
+  }
+
+  function buildCard(svc) {
+    var art = make('article', 'vw-card');
+    art.setAttribute('data-key', svc.key);
+    art.setAttribute('role', 'listitem');
+
+    var refs = {};
+    var top = make('div', 'vw-card-top');
+    var open;
+    if (launchable(svc)) {
+      open = make('a', 'vw-open');
+      open.target = '_blank';
+      open.rel = 'noopener noreferrer';
+      open.addEventListener('click', function () { touch(svc.key, 'launched'); });
+    } else {
+      open = make('span', 'vw-open vw-open-flat');
+    }
+    refs.open = open;
+
+    refs.icon = make('span', 'vw-icon');
+    open.appendChild(refs.icon);
+
+    var stack = make('span', 'vw-stack');
+    refs.name = make('span', 'vw-name');
+    refs.tag = make('span', 'vw-tag');
+    stack.appendChild(refs.name);
+    stack.appendChild(refs.tag);
+    open.appendChild(stack);
+    top.appendChild(open);
+    refs.star = starButton(svc.key);
+    top.appendChild(refs.star);
+    art.appendChild(top);
+
+    refs.meta = make('div', 'vw-card-meta');
+    refs.dot = make('i', 'dot');
+    refs.stateText = make('span', 'vw-card-state');
+    refs.ram = make('span', 'vw-card-ram');
+    refs.meta.appendChild(refs.dot);
+    refs.meta.appendChild(refs.stateText);
+    refs.meta.appendChild(refs.ram);
+    art.appendChild(refs.meta);
+
+    return { node: art, refs: refs, shape: launchable(svc) };
+  }
+
+  function fillCard(entry, svc, catalog) {
+    var r = entry.refs;
+    var name = svc.name || svc.key;
+
+    if (r.icon.firstChild === null || r.iconKey !== (svc.key + '|' + svc.icon)) {
+      r.icon.textContent = '';
+      r.icon.appendChild(iconNode(svc));
+      r.iconKey = svc.key + '|' + svc.icon;
+    }
+
+    text(r.name, name);
+    text(r.tag, svc.tagline || '');
+    r.tag.hidden = !svc.tagline;
+
+    if (entry.shape) {
+      r.open.href = svc.url;
+      r.open.setAttribute('aria-label', 'Open ' + name + ' in a new tab');
+    }
+
+    r.dot.className = 'dot ' + stateDot(svc);
+    text(r.stateText, stateLabel(svc));
+
+    var mem = ram(svc);
+    text(r.ram, mem);
+    r.ram.hidden = !mem;
+
+    paintStar(r.star, svc.key);
+
+    entry.node.className = isStarred(svc.key) ? 'vw-card is-starred' : 'vw-card';
+    entry.node.setAttribute('aria-label',
+      name + ', ' + stateLabel(svc) + (isStarred(svc.key) ? ', starred' : ''));
+  }
+
+  function cardFor(svc, catalog) {
+    var hit = cardCache[svc.key];
+    if (!hit || hit.shape !== launchable(svc)) {
+      hit = buildCard(svc);
+      cardCache[svc.key] = hit;
+    }
+    fillCard(hit, svc, catalog);
+    return hit.node;
+  }
+
+  function board(list, catalog) {
+    if (list === null || list === undefined) {
+      if (boardWrap) boardWrap.hidden = true;
+      return;
+    }
+    buildBoard();
+    if (!boardWrap) return;
+
+    var items = flattenBoard(list);
+    if (!items.length) { boardWrap.hidden = true; return; }
+
+    var defs = colDefs(catalog);
+    var known = catalogIdsOf(defs);
+    var byId = {};
+    var i, id;
+    for (i = 0; i < defs.length; i++) byId[defs[i].id] = [];
+    for (i = 0; i < items.length; i++) {
+      id = bucketOf(items[i], known);
+      if (!byId[id]) byId[id] = [];
+      byId[id].push(items[i]);
+    }
+
+    var cols = [];
+    var live = {};
+    for (i = 0; i < defs.length; i++) {
+      var chunk = arrange(byId[defs[i].id] || []);
+      /* Status keeps empty lanes (that is the board). Category matches
+         the grid: a heading with nothing under it is omitted. */
+      if (!chunk.length && groupByMode === 'group') continue;
+      var hit = colFor(defs[i]);
+      text(hit.count, String(chunk.length));
+      var cards = [];
+      if (!chunk.length) {
+        cards.push(hit.empty);
+      } else {
+        for (var j = 0; j < chunk.length; j++) {
+          var node = cardFor(chunk[j], catalog);
+          live[chunk[j].key] = true;
+          cards.push(node);
+        }
+      }
+      for (var k = 0; k < cards.length; k++) {
+        var cur = hit.list.childNodes[k];
+        if (cur !== cards[k]) hit.list.insertBefore(cards[k], cur || null);
+      }
+      while (hit.list.childNodes.length > cards.length) {
+        hit.list.removeChild(hit.list.lastChild);
+      }
+      cols.push(hit.col);
+    }
+
+    for (var c = 0; c < cols.length; c++) {
+      var here = boardWrap.childNodes[c];
+      if (here !== cols[c]) boardWrap.insertBefore(cols[c], here || null);
+    }
+    while (boardWrap.childNodes.length > cols.length) {
+      boardWrap.removeChild(boardWrap.lastChild);
+    }
+
+    for (var key in cardCache) {
+      if (Object.prototype.hasOwnProperty.call(cardCache, key) && !live[key]) {
+        delete cardCache[key];
+      }
+    }
+
+    boardWrap.hidden = false;
   }
 
   /* ---------- the tile's RAM figure ----------
@@ -799,16 +1338,43 @@
 
   viewMode = stored(VIEW_STORE, VIEWS, 'grid');
   sortMode = stored(SORT_STORE, SORTS, 'used');
+  groupByMode = stored(GROUPBY_STORE, GROUP_BYS, 'state');
+  loadStars();
+  themeMode = stored(THEME_STORE, THEMES, 'system');
+  paintTheme();
+  bindThemeButton();
   buildBar();
 
+  /* System mode has to follow the OS after load, not only at first paint. */
+  if (window.matchMedia) {
+    var themeMq = null;
+    try { themeMq = window.matchMedia('(prefers-color-scheme: dark)'); }
+    catch (e) { themeMq = null; }
+    if (themeMq) {
+      var onScheme = function () { if (themeMode === 'system') paintTheme(); };
+      if (themeMq.addEventListener) themeMq.addEventListener('change', onScheme);
+      else if (themeMq.addListener) themeMq.addListener(onScheme);
+    }
+  }
+
   window.LauncherView = {
-    /* Table view needs its mount point. Without it the honest answer is Grid,
-       rather than telling app.js to hide the grid for a table that can never
-       be drawn. */
-    mode:    function () { return (viewMode === 'table' && !mountTable) ? 'grid' : viewMode; },
+    /* Table and board need their mount points. Without one the honest
+       answer is Grid, rather than telling app.js to hide the grid for a
+       view that can never be drawn. */
+    mode:    function () {
+      if ((viewMode === 'table' && !mountTable) ||
+          (viewMode === 'board' && !mountBoard)) return 'grid';
+      return viewMode;
+    },
     sort:    function () { return sortMode; },
+    groupBy: function () { return groupByMode; },
     arrange: arrange,
+    grouped: grouped,
     table:   table,
+    board:   board,
+    isStarred: isStarred,
+    starButton: starButton,
+    paintStar: paintStar,
     ram:     ram,
     ramTag:  ramTag,
     detail:  detail,
