@@ -187,14 +187,14 @@ test_fresh_deploy() {
   teardown
 }
 
-test_open_signup_warns() {
-  echo "• public sign-up still open: warned, not silently accepted"
+test_open_signup_fails() {
+  echo "• public sign-up still open: setup dies, does not publish"
   setup
   touch "$STATE_DIR/operator" "$STATE_DIR/signup_open"
   run_deploy
-  check "exits zero"                    [ "$CODE" -eq 0 ]
-  check "warns about open sign-up"      out_has "disable_signup=false"
-  check "still prints the URL"          out_has "https://test-host.tailfake.ts.net:8102"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "names the open lock"           out_has "disable_signup=false"
+  check "did not serve"                 no_call "tailscale serve --bg --https=8102"
   teardown
 }
 
@@ -406,7 +406,7 @@ test_preflight_tailscale_down
 test_preflight_bad_port
 test_preflight_missing_nginx
 test_fresh_deploy
-test_open_signup_warns
+test_open_signup_fails
 test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot

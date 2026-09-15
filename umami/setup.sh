@@ -202,8 +202,7 @@ done
 rotate_admin() {
   local login_body token user_id payload code
   if ! command -v python3 >/dev/null; then
-    warn "python3 is required to rotate the default admin/umami password. Change it in the UI immediately."
-    return 0
+    die "python3 is required to rotate the default admin/umami password. Not publishing while that well-known pair may still work."
   fi
   login_json() {
     UMAMI_USER="$1" UMAMI_PASS="$2" python3 -c 'import json,os; print(json.dumps({"username":os.environ["UMAMI_USER"],"password":os.environ["UMAMI_PASS"]}))'
@@ -227,8 +226,7 @@ rotate_admin() {
   token="$(printf '%s' "$login_body" | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p')"
   user_id="$(printf '%s' "$login_body" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p')"
   if [ -z "$token" ] || [ -z "$user_id" ]; then
-    warn "Login succeeded but the response had no token/id. Change the default password in the UI."
-    return 0
+    die "Login succeeded but the response had no token/id. The default admin/umami password may still be live. Not publishing."
   fi
   payload="$(UMAMI_PASS="$UMAMI_ADMIN_PASSWORD" python3 -c 'import json,os; print(json.dumps({"currentPassword":"umami","newPassword":os.environ["UMAMI_PASS"]}))')"
   code="$(curl -sS -o "$WORK/pw.json" -w '%{http_code}' --max-time 30 \
@@ -240,7 +238,7 @@ rotate_admin() {
       ok "Rotated the default admin/umami password"
       ;;
     *)
-      warn "POST /api/users/$user_id/password returned HTTP $code. The upstream default (admin/umami) is still live — change it in the UI immediately."
+      die "POST /api/users/$user_id/password returned HTTP $code. The upstream default (admin/umami) is still live. Not publishing."
       ;;
   esac
 }

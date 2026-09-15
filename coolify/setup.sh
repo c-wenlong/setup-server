@@ -105,8 +105,26 @@ grant_coolify_write() {
     if [ -d "$d" ]; then
       chmod a+rwx "$d" 2>/dev/null || true
     else
-      chmod a+rw "$d" 2>/dev/null || true
+      # Never world-open a private key. Directories above may fall
+      # back to a+rwx; files that Coolify must read (the SSH key)
+      # go through grant_coolify_key instead.
+      warn "setfacl failed for $d; skipped chmod fallback (will not world-open a file)"
     fi
+  done
+}
+
+# uid 9999 must read the unencrypted SSH private key. ACL only — a
+# chmod a+rw fallback would let any local account steal the key and
+# SSH in as this Docker-capable user.
+grant_coolify_key() {
+  local f uid=9999
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    if command -v setfacl >/dev/null 2>&1 \
+       && setfacl -m "u:${uid}:r" "$f" 2>/dev/null; then
+      continue
+    fi
+    warn "No ACL on $f — left owner-only (0600). Coolify (uid $uid) may not read this key; dashboard SSH to localhost will fail until setfacl is available. Will not world-open the private key."
   done
 }
 
@@ -324,7 +342,8 @@ else
   fi
 fi
 if [ -f "$KEY_BASE" ]; then
-  grant_coolify_write "$KEY_BASE" "${KEY_BASE}.pub"
+  grant_coolify_key "$KEY_BASE"
+  chmod 0644 "${KEY_BASE}.pub" 2>/dev/null || true
   mkdir -p "$HOME/.ssh"
   chmod 700 "$HOME/.ssh" 2>/dev/null || true
   auth="$HOME/.ssh/authorized_keys"
@@ -382,6 +401,26 @@ serve_https() {
   ok "Tailscale Serve: HTTPS :$https_port -> http://127.0.0.1:$local_port"
 }
 
+# Do not publish until the first-run admin form is gone. Whoever
+# submits /register owns the instance.
+assert_register_closed() {
+  local base="$1" code body
+  code="$(curl -sS -o "$WORK/register.html" -w '%{http_code}' --max-time 30 \
+    -L "$base/register" 2>/dev/null || echo 000)"
+  body="$(cat "$WORK/register.html" 2>/dev/null || true)"
+  case "$code" in
+    200)
+      case "$body" in
+        *[Cc]reate*[Aa]ccount*|*"Root User"*|*"root user"*)
+          die "GET $base/register still looks like the first-run admin form (HTTP $code). ROOT_USER_* in $ENV_FILE did not seed. Not publishing — whoever submits that form owns the instance."
+          ;;
+      esac
+      ;;
+  esac
+}
+
+assert_register_closed "http://127.0.0.1:$LOCAL_PORT"
+
 serve_https "$HTTPS_PORT" "$LOCAL_PORT" yes
 serve_https "$HTTPS_SOKETI_PORT" "$SOKETI_PORT" no
 
@@ -404,7 +443,7 @@ case "$reg_code" in
   200)
     case "$reg_body" in
       *[Cc]reate*[Aa]ccount*|*"Root User"*|*"root user"*)
-        warn "GET /register still looks like the first-run admin form (HTTP $reg_code). ROOT_USER_* in $ENV_FILE may not have seeded. Create the account yourself immediately — whoever submits that form owns the instance."
+        die "GET /register still looks like the first-run admin form after Serve (HTTP $reg_code). ROOT_USER_* in $ENV_FILE did not seed. Drop the mapping: tailscale serve --https=$HTTPS_PORT off"
         ;;
       *)
         ok "Registration page is not the open first-run form"

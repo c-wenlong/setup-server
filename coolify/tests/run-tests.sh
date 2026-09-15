@@ -165,14 +165,14 @@ test_fresh_deploy() {
   teardown
 }
 
-test_open_register_warns() {
-  echo "• first-run registration still open: warned, not silently accepted"
+test_open_register_fails() {
+  echo "• first-run registration still open: setup dies, does not publish"
   setup
   touch "$STATE_DIR/operator" "$STATE_DIR/register_open"
   run_deploy
-  check "exits zero"                 [ "$CODE" -eq 0 ]
-  check "warns about the open form"  out_has "first-run admin form"
-  check "still prints the URL"       out_has "https://test-host.tailfake.ts.net:8101"
+  check "exits non-zero"             [ "$CODE" -ne 0 ]
+  check "names the open form"        out_has "first-run admin form"
+  check "did not serve the dashboard" no_call "tailscale serve --bg --https=8101"
   teardown
 }
 
@@ -379,7 +379,7 @@ test_preflight_docker_perms
 test_preflight_tailscale_down
 test_preflight_bad_port
 test_fresh_deploy
-test_open_register_warns
+test_open_register_fails
 test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot

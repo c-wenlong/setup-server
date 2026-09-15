@@ -176,7 +176,7 @@ services:
 
   minio:
     container_name: trigger-minio
-    image: bitnamilegacy/minio:${MINIO_IMAGE_TAG:-latest}
+    image: bitnamilegacy/minio:${MINIO_IMAGE_TAG:-2025.7.23-debian-12-r5}
     restart: always
     logging: *logging-config
     mem_limit: ${MINIO_MEM_LIMIT:-384m}

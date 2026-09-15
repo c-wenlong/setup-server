@@ -148,14 +148,14 @@ test_fresh_deploy() {
   teardown
 }
 
-test_rotate_warns() {
-  echo "• password rotation fails: warned, not silently accepted"
+test_rotate_fails() {
+  echo "• password rotation fails: setup dies, does not publish"
   setup
   touch "$STATE_DIR/operator" "$STATE_DIR/rotate_fail"
   run_deploy
-  check "exits zero"            [ "$CODE" -eq 0 ]
-  check "warns about default"   out_has "upstream default"
-  check "still prints the URL"  out_has "https://test-host.tailfake.ts.net:8106"
+  check "exits non-zero"        [ "$CODE" -ne 0 ]
+  check "names the default"     out_has "upstream default"
+  check "did not serve"         no_call "tailscale serve --bg --https=8106"
   teardown
 }
 
@@ -355,7 +355,7 @@ test_preflight_docker_perms
 test_preflight_tailscale_down
 test_preflight_bad_port
 test_fresh_deploy
-test_rotate_warns
+test_rotate_fails
 test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot

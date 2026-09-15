@@ -259,6 +259,23 @@ for i in $(seq 1 120); do
   sleep 3
 done
 
+# Do not publish while public sign-up is on. Anyone on the tailnet
+# could create an account and own a workspace.
+assert_signup_locked() {
+  local base="$1" code body
+  code="$(curl -sS -o "$WORK/settings.json" -w '%{http_code}' --max-time 30 \
+    "$base/gotrue/settings" 2>/dev/null || echo 000)"
+  body="$(cat "$WORK/settings.json" 2>/dev/null || true)"
+  [ "$code" = "200" ] || return 0
+  case "$body" in
+    *'"disable_signup":false'*|*'\"disable_signup\":false'*)
+      die "GET $base/gotrue/settings says disable_signup=false. GOTRUE_DISABLE_SIGNUP in $ENV_FILE is not taking effect. Not publishing."
+      ;;
+  esac
+}
+
+assert_signup_locked "http://127.0.0.1:$LOCAL_PORT"
+
 # ------------------------------------------------------- tailscale serve
 info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT -> 127.0.0.1:$LOCAL_PORT)"
 if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
@@ -296,7 +313,7 @@ case "$settings_code" in
         ok "Public sign-up is disabled"
         ;;
       *'"disable_signup":false'*|*'\"disable_signup\":false'*)
-        warn "GET /gotrue/settings says disable_signup=false. GOTRUE_DISABLE_SIGNUP in $ENV_FILE is not taking effect. Anyone on the tailnet can create an account until you fix it."
+        die "GET /gotrue/settings says disable_signup=false after Serve. Drop the mapping: tailscale serve --https=$HTTPS_PORT off"
         ;;
       *)
         warn "Could not read disable_signup from /gotrue/settings. Confirm sign-up is off in the web UI: $url"
