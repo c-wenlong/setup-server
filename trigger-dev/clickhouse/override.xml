@@ -1,0 +1,34 @@
+<clickhouse>
+    <logger>
+        <level>warning</level>
+    </logger>
+    <!-- Official <16 GB recipe uses 500 MB mark cache; this box has 7.7 GB
+         and a 768m mem_limit, so keep the cache small. -->
+    <mark_cache_size>67108864</mark_cache_size>
+    <concurrent_threads_soft_limit_num>1</concurrent_threads_soft_limit_num>
+
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <trace_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <session_log remove="1"/>
+    <text_log remove="1"/>
+    <zookeeper_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <asynchronous_insert_log remove="1"/>
+    <backup_log remove="1"/>
+    <latency_log remove="1"/>
+    <query_metric_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+    <query_views_log remove="1"/>
+
+    <part_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </part_log>
+    <query_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_log>
+    <error_log>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </error_log>
+</clickhouse>

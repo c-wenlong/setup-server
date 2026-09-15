@@ -2,8 +2,9 @@
 
 Thanks for your interest. This repo is a collection of one-shot deploy scripts
 for self-hosted services on a Tailscale-private home server. One directory per
-service, each self-contained, each with its own tests. Bash is the default;
-Python (stdlib only) appears where a service needs a real program.
+service, each self-contained, each with its own tests. **Each `setup.sh`
+deploys one service** — do not put two products in the same folder. Bash is
+the default; Python (stdlib only) appears where a service needs a real program.
 
 ## Getting started
 

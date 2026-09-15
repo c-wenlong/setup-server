@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# curl stub — fakes Stirling PDF's HTTP surface. State in $STATE_DIR:
+#   health_fails_left  — countdown of 503s from /api/v1/info/status
+#   login_on           — exists => /login is a login form; / redirects to it
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; want_code=0; failonerr=0; dump_hdr=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -D) dump_hdr="$2"; shift 2 ;;
+    # -D - dumps headers to stdout (setup.sh login-redirect check)
+    -u) shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -H|--max-time|--connect-timeout|-d|--data-binary) shift 2 ;;
+    -L) shift ;;
+    -[a-zA-Z]*)
+      case "$1" in
+        *f*) failonerr=1 ;;
+        *I*) method="HEAD" ;;
+      esac
+      shift
+      ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <body> [location]
+  if [ -n "$dump_hdr" ]; then
+    hdr="$(printf 'HTTP/1.1 %s\n%s\n' "$1" "$( [ -n "${3:-}" ] && printf 'Location: %s\n' "$3" )")"
+    if [ "$dump_hdr" = "-" ]; then
+      printf '%s\n' "$hdr"
+    else
+      printf '%s\n' "$hdr" > "$dump_hdr"
+    fi
+  fi
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ] && [ -z "$dump_hdr" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */api/v1/info/status|*/api/v1/info/status/)
+    if [ -f "$STATE_DIR/health_fails_left" ]; then
+      left="$(cat "$STATE_DIR/health_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/health_fails_left"
+        emit 503 '{"status":"DOWN"}'
+      fi
+    fi
+    emit 200 '{"status":"UP","version":"2.14.3"}'
+    ;;
+  */login|*/login/)
+    if [ -f "$STATE_DIR/login_on" ]; then
+      emit 200 '<html><form>Username <input name="username"> Password <input name="password"> Sign in</form></html>'
+    fi
+    emit 404 ''
+    ;;
+  */)
+    if [ -f "$STATE_DIR/login_on" ]; then
+      emit 302 '' '/login'
+    fi
+    emit 200 '<html><title>Stirling PDF</title></html>'
+    ;;
+  *)
+    emit 200 '{}'
+    ;;
+esac

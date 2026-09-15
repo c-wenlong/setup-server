@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# curl stub — fakes Metabase's HTTP surface. State in $STATE_DIR:
+#   health_fails_left  — countdown of 503s from /api/health
+#   no_setup_token     — /api/session/properties has no setup-token
+#   setup_fail         — POST /api/setup returns 500
+#   setup_done         — has-user-setup is already true
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; want_code=0; failonerr=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -u) shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -H|--max-time|--connect-timeout|-d|--data-binary) shift 2 ;;
+    -L) shift ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */api/health|*/api/health/)
+    if [ -f "$STATE_DIR/health_fails_left" ]; then
+      left="$(cat "$STATE_DIR/health_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/health_fails_left"
+        emit 503 '{"status":"error"}'
+      fi
+    fi
+    emit 200 '{"status":"ok"}'
+    ;;
+  */api/session/properties|*/api/session/properties/)
+    if [ -f "$STATE_DIR/setup_done" ]; then
+      emit 200 '{"has-user-setup":true,"setup-token":null}'
+    fi
+    if [ -f "$STATE_DIR/no_setup_token" ]; then
+      emit 200 '{"has-user-setup":false,"setup-token":null}'
+    fi
+    emit 200 '{"has-user-setup":false,"setup-token":"fake-setup-token"}'
+    ;;
+  */api/setup|*/api/setup/)
+    if [ "$method" = "POST" ]; then
+      if [ -f "$STATE_DIR/setup_fail" ]; then
+        emit 500 '{"error":"setup failed"}'
+      fi
+      touch "$STATE_DIR/setup_done"
+      emit 200 '{"id":1}'
+    fi
+    emit 200 '{}'
+    ;;
+  *)
+    emit 200 '{}'
+    ;;
+esac

@@ -1,0 +1,132 @@
+# paperclip — Troubleshooting
+
+Triage in layers, outermost failure first:
+
+```
+service up? → local /api/health → serve :3100 → tailnet HTTPS
+```
+
+Quick triage:
+
+```bash
+cd ~/dev/setup-server/paperclip
+paperclipai service status
+curl -fsS http://127.0.0.1:3100/api/health          # {"status":"ok"}
+tailscale serve status
+./tests/run-tests.sh --live
+```
+
+## Service will not start
+
+```bash
+paperclipai service logs --lines 200
+paperclipai doctor
+```
+
+- **Node too old** — doctor fails below 24.11.0. This box's
+  `~/.local/bin/node` is fine (v26); a shell that does not have
+  `~/.local/bin` on `PATH` will pick up a distro 18/20 and look broken.
+  `export PATH="$HOME/.local/bin:$PATH"`.
+- **`local_trusted` after a hand edit** — if you re-onboarded with
+  `--yes` and no `--bind`, Paperclip falls back to trusted-local. Serve
+  would then expose an unauthenticated board. `setup.sh` patches this and
+  dies if the string is still in `config.json`. Do not "fix" the patch
+  away.
+- **Port busy** — something else on 3100. `ss -ltn | grep 3100`. Move
+  with `PAPERCLIP_PORT` in `.env` and a re-run. If you bounce the
+  service while Serve still owns `:3100` on the tailnet IP, Paperclip
+  treats that as busy and hops to **3101**. Drop Serve first:
+  `tailscale serve --https=3100 off`, then `paperclipai service restart`.
+- **Embedded Postgres** — first boot extracts a cluster under
+  `~/.paperclip`. A killed onboard can leave a half-written `db/`.
+  `doctor --repair --yes` is the official fix; do not delete the
+  directory unless you are ready to lose the instance.
+
+## `/api/health` fails but the unit is active
+
+The service can be `active` while the server is still migrating. Wait a
+minute and retry. If it stays dark:
+
+- Confirm the listen address: `ss -ltn | grep 3100` must show
+  `127.0.0.1:3100`. A tailnet-IP listener means the loopback rewrite did
+  not run — re-run `./setup.sh`. `0.0.0.0:3100` is a leak; take Serve
+  down (`tailscale serve --https=3100 off`) before debugging further.
+- Confirm mode: `grep deploymentMode ~/.paperclip/instances/default/config.json`
+  must be `authenticated`.
+
+## Login / redirect errors on the MagicDNS name
+
+```bash
+paperclipai allowed-hostname kai-home-server.taild6a23f.ts.net
+paperclipai service restart
+```
+
+`PAPERCLIP_PUBLIC_URL` in the instance `.env` must be the HTTPS Serve
+URL, including the port, no trailing slash.
+
+## Profile email is still read-only / no password field
+
+Paperclip's own Profile page does not let you edit login credentials.
+`setup.sh` injects `/pc-profile-credentials.js` into the managed UI and
+enables Better Auth change-email. A `paperclipai update` overwrites
+`ui-dist` and the Better Auth files; re-run `./setup.sh` to put them
+back. Confirm:
+
+```bash
+curl -fsS http://127.0.0.1:3100/pc-profile-credentials.js | head
+curl -fsS http://127.0.0.1:3100/ | grep pc-profile-credentials
+```
+
+Then hard-refresh Settings → Profile.
+
+## CEO invite expired or missing
+
+```bash
+paperclipai auth bootstrap-ceo \
+  --base-url https://kai-home-server.taild6a23f.ts.net:3100
+```
+
+`--force` if an admin already exists and you still need a fresh link.
+The last invite is also in `~/services/paperclip/ceo-invite.txt`
+(mode 600). If you still have the combined-service marker, the same
+file may exist at `~/services/paperclip-openhands/ceo-invite.txt`.
+
+## Agent will not start (Claude / Codex)
+
+- **Claude** — `claude --version` and `claude auth status` on the host.
+  Paperclip runs the host binary. setup.sh never copies `~/.claude`.
+- **Codex** — not installed on this box today. Hire the adapter after
+  `codex` is on `PATH`. Paperclip's per-agent `CODEX_HOME` will not
+  rewrite yours.
+- **cwd** — must be an absolute path the paperclip user can write.
+  `~/agent-workspaces/paperclip-test` is the one setup.sh created.
+- **Company / API key** — `agent create` only runs when
+  `PAPERCLIP_COMPANY_ID` and `PAPERCLIP_API_KEY` are in `.env`. Until
+  then, hire in the UI.
+
+## Serve / HTTPS
+
+```bash
+tailscale serve status
+# expect:
+#   :3100 -> http://127.0.0.1:3100
+```
+
+- Cert still minting: wait a minute, `curl -I` the HTTPS URL.
+- Operator denied: `sudo tailscale set --operator="$USER"` then re-run.
+- Never `tailscale serve reset` — it wipes every service on this box.
+- Never enable Funnel.
+
+## Nuke and pave
+
+Does **not** delete `~/.claude`, `~/.codex`, or `~/.paperclip/cli`:
+
+```bash
+paperclipai service uninstall || true
+rm -rf ~/services/paperclip
+# instance data, including the secrets master key:
+# rm -rf ~/.paperclip/instances/default
+# YOU WILL LOSE STORED CREDENTIALS. Copy master.key off the box first.
+# .env is yours; delete it only if you want a fresh port/path file
+tailscale serve --https=3100 off
+```

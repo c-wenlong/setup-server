@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+echo "codex $*" >> "$CALLS_LOG"
+case "${1:-}" in
+  --version) echo "codex-stub 0.0" ;;
+esac
+exit 0

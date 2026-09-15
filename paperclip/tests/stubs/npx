@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+echo "npx $*" >> "$CALLS_LOG"
+# Official managed install: writes ~/.local/bin/paperclipai
+case "$*" in
+  *"paperclipai install"*)
+    mkdir -p "$HOME/.local/bin"
+    here="$(cd "$(dirname "$0")" && pwd)"
+    src="$here/paperclipai"
+    if [ ! -f "$src" ]; then
+      real="$(readlink -f "$0" 2>/dev/null || true)"
+      [ -n "$real" ] && src="$(dirname "$real")/paperclipai"
+    fi
+    cp "$src" "$HOME/.local/bin/paperclipai"
+    chmod +x "$HOME/.local/bin/paperclipai"
+    touch "$STATE_DIR/paperclip_installed"
+    echo "installed paperclipai -> $HOME/.local/bin/paperclipai"
+    ;;
+esac
+exit 0

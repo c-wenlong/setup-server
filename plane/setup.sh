@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+#
+# setup.sh — one-shot deploy of Plane Community (self-hosted Linear/Jira
+# alternative) behind Tailscale. Linux + macOS.
+#
+# End state:
+#   - Community stack (web/space/admin/api/worker/beat/live/postgres/
+#     valkey/rabbitmq/minio/proxy) on a private compose network
+#   - proxy published on 127.0.0.1:LOCAL_PORT only (default 8105);
+#     no :443 — Serve terminates TLS
+#   - reachable tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
+#   - first instance admin seeded from PLANE_ADMIN_* in .env
+#   - boot-persistent via Docker's restart policy (no systemd/launchd)
+#
+# Usage:
+#   ./setup.sh
+#   LOCAL_PORT=8109 ./setup.sh            # HTTPS follows LOCAL_PORT
+#   LOCAL_PORT=8109 HTTPS_PORT=8109 ./setup.sh
+#   PLANE_ADMIN_EMAIL=you@example.com ./setup.sh   # first run only
+#
+# Version: pinned to v1.4.2. Bump APP_RELEASE in .env, then re-run.
+# This is our compose, not a wrap of Plane's interactive setup.sh.
+#
+# Requirements: Linux or macOS, curl, Docker + Compose v2, Tailscale logged in.
+#
+# Idempotent: safe to re-run; it upgrades the images and repairs the publish.
+# An existing .env is never overwritten.
+
+set -euo pipefail
+
+LOCAL_PORT="${LOCAL_PORT:-8105}"
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
+PLANE_ADMIN_EMAIL="${PLANE_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+
+SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SERVICE_DIR/.env"
+STATE="$HOME/services/plane"
+
+info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
+die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+randhex() {
+  local n="${1:-16}"
+  if command -v python3 >/dev/null; then
+    python3 -c "import secrets; print(secrets.token_hex($n))"
+  else
+    od -An -tx1 -N"$n" /dev/urandom | tr -d ' \n'
+    echo
+  fi
+}
+
+randpass() {
+  printf '%sAa1' "$(randhex 12)"
+}
+
+# ---------------------------------------------------------------- preflight
+OS="$(uname -s)"
+info "Preflight checks ($OS)"
+case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
+[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+command -v curl >/dev/null || die "curl is required."
+if ! command -v docker >/dev/null; then
+  [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
+  die "Docker is not installed. On macOS install Docker Desktop or OrbStack."
+fi
+
+if command -v tailscale >/dev/null; then
+  TAILSCALE="tailscale"
+elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+else
+  die "Tailscale is not installed: https://tailscale.com/download"
+fi
+
+if ! docker ps >/dev/null 2>&1; then
+  [ "$OS" = "Linux" ] && die "Cannot talk to the Docker daemon. Fix: sudo usermod -aG docker $USER, then log out/in (or run via: sg docker -c ./setup.sh)"
+  die "Cannot talk to the Docker daemon. Is Docker Desktop/OrbStack running?"
+fi
+docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)."
+
+state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+
+case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
+case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
+
+ok "$OS + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
+
+TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+[ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
+ok "Tailnet name: $TS_HOST"
+
+avail_mb=""
+if [ -r /proc/meminfo ]; then
+  avail_mb="$(sed -n 's/^MemAvailable: *\([0-9]*\) kB/\1/p' /proc/meminfo)"
+  avail_mb="$(( avail_mb / 1024 ))"
+fi
+if [ -n "${avail_mb:-}" ] && [ "$avail_mb" -lt 1500 ]; then
+  warn "Only ~${avail_mb} MB RAM available. Plane Community is eleven containers (web/api/worker/db/valkey/rabbitmq/minio/…). Unload ollama or Immich ML if it gets OOM-killed."
+fi
+
+# ---------------------------------------------------------------- .env
+if [ -f "$ENV_FILE" ]; then
+  ok "Config already exists, leaving untouched: $ENV_FILE"
+else
+  info "Writing .env"
+  tz="Etc/UTC"
+  if [ -L /etc/localtime ]; then
+    tz="$(readlink /etc/localtime | sed 's#.*/zoneinfo/##')"
+  elif [ -f /etc/timezone ]; then
+    tz="$(cat /etc/timezone)"
+  fi
+  pg_pass="$(randhex 16)"
+  mq_pass="$(randhex 16)"
+  secret="$(randhex 32)"
+  live_secret="$(randhex 32)"
+  s3_key="$(randhex 12)"
+  s3_secret="$(randhex 24)"
+  admin_pass="$(randpass)"
+  cat > "$ENV_FILE" <<EOF
+# Generated by setup.sh. Gitignored; mode 600.
+# Docker Compose interpolates this file from the project directory.
+
+# Pinned. Official floats \`stable\`. To upgrade: bump, then ./setup.sh.
+APP_RELEASE=v1.4.2
+POSTGRES_VERSION=15.7-alpine
+VALKEY_VERSION=7.2.11-alpine
+RABBITMQ_VERSION=3.13.6-alpine
+MINIO_VERSION=RELEASE.2024-12-18T13-15-44Z
+
+LOCAL_PORT=$LOCAL_PORT
+TZ=$tz
+
+# Marker dir (launcher "installed"). Live data is in named volumes
+# (pgdata / redisdata / uploads / rabbitmq_data).
+PLANE_DATA=$STATE
+
+APP_DOMAIN=$TS_HOST
+WEB_URL=https://$TS_HOST:$HTTPS_PORT
+CORS_ALLOWED_ORIGINS=https://$TS_HOST:$HTTPS_PORT
+SITE_ADDRESS=:80
+DEBUG=0
+USE_MINIO=1
+MINIO_ENDPOINT_SSL=0
+API_BASE_URL=http://api:8000
+
+PGHOST=plane-db
+PGDATABASE=plane
+POSTGRES_USER=plane
+POSTGRES_PASSWORD=$pg_pass
+POSTGRES_DB=plane
+POSTGRES_PORT=5432
+DATABASE_URL=postgresql://plane:$pg_pass@plane-db:5432/plane
+
+REDIS_HOST=plane-redis
+REDIS_PORT=6379
+REDIS_URL=redis://plane-redis:6379/
+
+RABBITMQ_HOST=plane-mq
+RABBITMQ_PORT=5672
+RABBITMQ_USER=plane
+RABBITMQ_PASSWORD=$mq_pass
+RABBITMQ_VHOST=plane
+AMQP_URL=amqp://plane:$mq_pass@plane-mq:5672/plane
+
+SECRET_KEY=$secret
+LIVE_SERVER_SECRET_KEY=$live_secret
+
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=$s3_key
+AWS_SECRET_ACCESS_KEY=$s3_secret
+AWS_S3_ENDPOINT_URL=http://plane-minio:9000
+AWS_S3_BUCKET_NAME=uploads
+FILE_SIZE_LIMIT=5242880
+
+# First instance admin, seeded via POST /api/instances/admins/sign-up/.
+# Changing this after first boot does not rotate the live password.
+PLANE_ADMIN_EMAIL=$PLANE_ADMIN_EMAIL
+PLANE_ADMIN_PASSWORD=$admin_pass
+PLANE_ADMIN_FIRST_NAME=Kai
+PLANE_ADMIN_LAST_NAME=Chen
+EOF
+  chmod 600 "$ENV_FILE"
+  ok "Wrote $ENV_FILE"
+fi
+
+REQUESTED_PORT="$LOCAL_PORT"
+set -a; . "$ENV_FILE"; set +a
+DATA_DIR="${PLANE_DATA:?PLANE_DATA missing from $ENV_FILE}"
+WEB_URL="${WEB_URL:?WEB_URL missing from $ENV_FILE}"
+PLANE_ADMIN_EMAIL="${PLANE_ADMIN_EMAIL:?PLANE_ADMIN_EMAIL missing from $ENV_FILE}"
+PLANE_ADMIN_PASSWORD="${PLANE_ADMIN_PASSWORD:?PLANE_ADMIN_PASSWORD missing from $ENV_FILE}"
+if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
+  warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
+fi
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
+
+WANT_URL="https://$TS_HOST:$HTTPS_PORT"
+if [ "$WEB_URL" != "$WANT_URL" ]; then
+  warn "WEB_URL in .env is $WEB_URL but this box now answers to $WANT_URL."
+  warn "  CORS and invite links will point at the old address. Fix: set WEB_URL=$WANT_URL and CORS_ALLOWED_ORIGINS=$WANT_URL in $ENV_FILE, then re-run."
+fi
+
+mkdir -p "$DATA_DIR"
+
+avail_kb="$(df -Pk "$DATA_DIR" | awk 'NR==2{print $4}')"
+if [ "${avail_kb:-0}" -lt 5242880 ]; then
+  warn "$(( avail_kb / 1048576 )) GB free at $DATA_DIR — Plane wants a few GB for Postgres + MinIO blobs."
+else
+  ok "$(( avail_kb / 1048576 )) GB free at $DATA_DIR"
+fi
+
+# ---------------------------------------------------------------- deploy
+COMPOSE=(docker compose --project-directory "$SERVICE_DIR")
+
+info "Starting Plane Community (docker compose up -d) — first run pulls ~2 GB of images and runs migrations"
+"${COMPOSE[@]}" up -d
+
+info "Waiting for Plane on 127.0.0.1:$LOCAL_PORT (migrator + first API boot can take several minutes)"
+for i in $(seq 1 180); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:$LOCAL_PORT/api/instances/" 2>/dev/null; then
+    ok "Plane is answering locally"
+    break
+  fi
+  [ "$i" -eq 180 ] && die "Plane did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs"
+  sleep 3
+done
+
+# Seed the first instance admin. Omit is_telemetry_enabled from the form
+# POST — a string "false" 500s and leaves is_setup_done unset
+# (makeplane/plane#9370). Re-runs skip once the instance reports setup done.
+seed_admin() {
+  local body code csrf
+  body="$(curl -fsS --max-time 30 "http://127.0.0.1:$LOCAL_PORT/api/instances/" 2>/dev/null || true)"
+  case "$body" in
+    *'"is_setup_done":true'*|*'\"is_setup_done\":true'*)
+      ok "Instance already has an admin — skipping sign-up"
+      return 0
+      ;;
+  esac
+  curl -sS -c "$WORK/cookies" -o /dev/null --max-time 15 \
+    "http://127.0.0.1:$LOCAL_PORT/auth/get-csrf-token/" >/dev/null 2>&1 || true
+  csrf="$(awk '$6 == "csrftoken" { print $7 }' "$WORK/cookies" 2>/dev/null | tail -1)"
+  code="$(curl -sS -b "$WORK/cookies" -c "$WORK/cookies" -o "$WORK/signup.json" -w '%{http_code}' --max-time 60 \
+    -X POST \
+    -H "X-CSRFToken: ${csrf:-none}" \
+    --data-urlencode "email=$PLANE_ADMIN_EMAIL" \
+    --data-urlencode "password=$PLANE_ADMIN_PASSWORD" \
+    --data-urlencode "first_name=${PLANE_ADMIN_FIRST_NAME:-Kai}" \
+    --data-urlencode "last_name=${PLANE_ADMIN_LAST_NAME:-Chen}" \
+    "http://127.0.0.1:$LOCAL_PORT/api/instances/admins/sign-up/" 2>/dev/null || echo 000)"
+  case "$code" in
+    200|201|302)
+      ok "First instance admin seeded ($PLANE_ADMIN_EMAIL)"
+      ;;
+    *)
+      warn "POST /api/instances/admins/sign-up/ returned HTTP $code. Complete God Mode sign-up at $WANT_URL/god-mode using $PLANE_ADMIN_EMAIL."
+      ;;
+  esac
+}
+seed_admin
+
+# ------------------------------------------------------- tailscale serve
+info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT -> 127.0.0.1:$LOCAL_PORT)"
+if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
+  if [ "$OS" = "Linux" ]; then
+    info "Direct serve failed — trying operator grant (needs sudo, one time)"
+    sudo tailscale set --operator="$USER"
+  fi
+  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
+    echo
+    info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
+    read -r
+  done
+fi
+ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
+
+url="https://$TS_HOST:$HTTPS_PORT"
+info "Verifying $url/api/instances/ (first request can take ~60s while the TLS cert is minted)"
+if curl -fsS -o /dev/null --max-time 90 "$url/api/instances/"; then
+  ok "End-to-end HTTPS check passed"
+else
+  warn "No answer on $url/api/instances/ yet — the cert may still be minting. Retry in a minute: curl $url/api/instances/"
+fi
+
+echo
+printf '\033[1;32mDone.\033[0m Plane is at \033[1m%s\033[0m (tailnet only).\n' "$url"
+echo
+echo "  Instance admin: $PLANE_ADMIN_EMAIL (password in $ENV_FILE)."
+echo "  God Mode: $url/god-mode"
+echo "  Upgrade: bump APP_RELEASE in $ENV_FILE then ./setup.sh"
+echo
+echo "Backups: nothing backs this box up. Dump Postgres with:"
+echo "    docker compose --project-directory $SERVICE_DIR exec -T plane-db pg_dump -U plane plane"
+echo
+echo "Manage:  docker compose --project-directory $SERVICE_DIR ps|logs|restart|down"
+echo "Upgrade: edit APP_RELEASE in .env, then ./setup.sh"
+exit 0

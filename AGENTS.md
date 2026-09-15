@@ -1,7 +1,11 @@
 # Agent instructions — setup-server
 
 Repo of one-shot deploy scripts for self-hosted services on Tailscale-private
-home servers. One directory per service; each is self-contained.
+home servers. One directory per service; each is self-contained. **One
+directory, one `setup.sh`, one service.** A folder must not deploy two
+products (Paperclip and OpenHands are `paperclip/` and `openhands/`, not
+a combined `paperclip-openhands/`). Complementary tools that share a
+workspace tree still get their own script, `.env`, tests, and docs.
 
 Human-facing contribution rules (branch naming, PR expectations, how to run a
 service's suite) live in `CONTRIBUTING.md`; this file is the agent-facing
@@ -12,7 +16,10 @@ keep it in step when you add a service.
 ## Non-negotiable conventions
 
 - **Entrypoint is always `<service>/setup.sh`**, runnable as a regular user.
-  Root refusal is a preflight check, not an afterthought.
+  Root refusal is a preflight check, not an afterthought. That script
+  deploys **exactly one** service. Do not combine two runtimes, compose
+  projects, or systemd units in one directory so they can share a
+  workspace or a Tailscale box — add a second directory instead.
 - **Linux + macOS portability.** Branch on `uname -s` (`Linux`/`Darwin`, die on
   anything else). Services: systemd user units + lingering on Linux, launchd
   LaunchAgents on macOS (Docker services need neither — dockerd/Docker Desktop
@@ -93,6 +100,7 @@ service is deployed on this machine, run `--live` too.
    `code-server/setup.sh` for a native binary under a systemd user unit or a
    launchd LaunchAgent, `forgejo/setup.sh` for the Docker shape (gitignored
    `.env`, `LOCAL_PORT`/`HTTPS_PORT`, Compose restart policy instead of a unit).
+   One directory deploys one service — never two products in the same folder.
 2. Write stubs for every external command the script calls; wire the mocked
    suite; get it green before ever running on a real box.
 3. Write `SETUP.md` + `TROUBLESHOOT.md` (mirror code-server's structure).

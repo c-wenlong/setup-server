@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   compose_up      — touched by `compose ... up`
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    echo "openhands-agent-canvas"
+    ;;
+  inspect)
+    echo running
+    ;;
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        for a in "$@"; do
+          case "$a" in
+            up)   touch "$STATE_DIR/compose_up" ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0

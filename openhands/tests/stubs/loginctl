@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+echo "loginctl $*" >> "$CALLS_LOG"
+
+case "$1" in
+  show-user)
+    if [ -f "$STATE_DIR/linger" ]; then echo "yes"; else echo "no"; fi
+    ;;
+  enable-linger)
+    touch "$STATE_DIR/linger"
+    ;;
+esac

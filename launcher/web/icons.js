@@ -22,8 +22,9 @@
  *
  * Dark mode: several brand marks are near-black or near-white and vanish
  * against one of the two tile backgrounds (#ffffff / #171719). Those ship a
- * `-dark.svg` companion; the choice is made from prefers-color-scheme and
- * re-made, in place, when the scheme changes.
+ * `-dark.svg` companion. The choice follows the page theme (`data-theme` on
+ * <html>: light, dark, or system → prefers-color-scheme) and is remade in
+ * place when either the control or the OS scheme changes.
  */
 (function (global) {
   'use strict';
@@ -34,7 +35,7 @@
   /* ---------------------------------------------------------------- brands */
 
   /* service key -> vendored file basename. `dark: true` means a companion
-     "<base>-dark.<ext>" exists and is used under prefers-color-scheme: dark.
+     "<base>-dark.<ext>" exists and is used when the page theme is dark.
      `ext` defaults to 'svg'.
      Provenance and licence: web/icons/NOTICE.md */
   var BRANDS = {
@@ -49,6 +50,9 @@
     'code-server':   { file: 'code-server' },
     'open-webui':    { file: 'open-webui',    dark: true },  /* black disc  */
     'n8n':           { file: 'n8n' },
+    'paperclip':     { file: 'paperclip',     dark: true },  /* #18181b    */
+    'openhands':     { file: 'openhands' },                  /* #ffe165    */
+    'trigger-dev':   { file: 'trigger-dev' },                /* lime mark  */
     'beszel':        { file: 'beszel' },
     'uptime-kuma':   { file: 'uptime-kuma' },
     'ntfy':          { file: 'ntfy' },
@@ -66,7 +70,13 @@
     /* The icon set has no mark for gethomepage.dev (its "homarr" is a
        DIFFERENT dashboard), so this is the project's own 512px PNG from the
        gethomepage/homepage repo. Raster because no vector original exists. */
-    'homepage':      { file: 'homepage',     ext: 'png' }
+    'homepage':      { file: 'homepage',     ext: 'png' },
+    'coolify':       { file: 'coolify' },                    /* #8c52ff    */
+    'appflowy':      { file: 'appflowy' },                   /* #9327ff    */
+    'stirling-pdf':  { file: 'stirling-pdf' },                /* #8e3131    */
+    'metabase':      { file: 'metabase' },                    /* #509ee3    */
+    'plane':         { file: 'plane' },                       /* #5275fc    */
+    'umami':         { file: 'umami', dark: true }            /* black ink  */
   };
 
   /* Spellings the registry might plausibly use for the same service. */
@@ -80,7 +90,21 @@
     'kuma': 'uptime-kuma',
     'uptimekuma': 'uptime-kuma',
     'paperless': 'paperless-ngx',
-    'paperlessngx': 'paperless-ngx'
+    'paperlessngx': 'paperless-ngx',
+    'paperclipai': 'paperclip',
+    'paperclip-ai': 'paperclip',
+    'open-hands': 'openhands',
+    'agent-canvas': 'openhands',
+    'triggerdev': 'trigger-dev',
+    'trigger.dev': 'trigger-dev',
+    'coollabs': 'coolify',
+    'appflowy-cloud': 'appflowy',
+    'appflowyio': 'appflowy',
+    'stirling': 'stirling-pdf',
+    'stirlingpdf': 'stirling-pdf',
+    'makeplane': 'plane',
+    'plane-so': 'plane',
+    'umami-software': 'umami'
   };
 
   /* --------------------------------------------------------------- glyphs */
@@ -298,7 +322,14 @@
     try { mq = global.matchMedia('(prefers-color-scheme: dark)'); } catch (e) { mq = null; }
   }
 
-  function prefersDark() { return !!(mq && mq.matches); }
+  function prefersDark() {
+    var t = '';
+    try { t = document.documentElement.getAttribute('data-theme') || ''; }
+    catch (e) { t = ''; }
+    if (t === 'dark') return true;
+    if (t === 'light') return false;
+    return !!(mq && mq.matches);
+  }
 
   /* Live <img>s that have a per-theme variant, so a scheme flip can be
      applied in place rather than needing a re-render. Detached nodes are
@@ -376,6 +407,8 @@
     names: function () { return Object.keys(GLYPHS); },
     aliases: function () { return Object.keys(ALIAS); },
     brands: function () { return Object.keys(BRANDS); },
+    /* Remake live brand <img>s after a theme change. view.js calls this. */
+    repaint: repaint,
     /* Relative path of the file iconFor() would use, or null. Test hook. */
     brandFile: function (key) {
       var entry = brandEntry(key);

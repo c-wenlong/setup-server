@@ -496,8 +496,8 @@ class ServiceJobFieldTest(SandboxTest):
 
     # The identity fields, in payload order. `description` joined them so the
     # grid's hover tooltip does not have to fetch each service individually.
-    EIGHT = ["key", "name", "tagline", "description", "icon", "url", "state",
-             "installed", "active"]
+    EIGHT = ["key", "name", "tagline", "group", "description", "icon", "url",
+             "state", "installed", "active"]
 
     def setUp(self):
         super().setUp()
@@ -747,9 +747,10 @@ class HttpTest(SandboxTest):
         self.assertEqual(doc["host"], "box.ts.net")
         svc = doc["services"][0]
         self.assertEqual(sorted(svc), ["active", "control", "deployed_at",
-                                       "description", "icon", "installed",
-                                       "job", "key", "name", "resources",
-                                       "state", "tagline", "url", "usage"])
+                                       "description", "group", "icon",
+                                       "installed", "job", "key", "name",
+                                       "resources", "state", "tagline",
+                                       "url", "usage"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
         self.assertIsNone(svc["job"])
 
@@ -759,9 +760,39 @@ class HttpTest(SandboxTest):
         # not only on the detail page); `job` and `control` stay appended last.
         doc = json.loads(self.get("/api/services")[1])
         self.assertEqual(list(doc["services"][0]),
-                         ["key", "name", "tagline", "description", "icon",
-                          "url", "state", "installed", "active", "job",
-                          "control", "usage", "deployed_at", "resources"])
+                         ["key", "name", "tagline", "group", "description",
+                          "icon", "url", "state", "installed", "active",
+                          "job", "control", "usage", "deployed_at",
+                          "resources"])
+
+    def test_groups_empty_when_the_registry_has_none(self):
+        # An older services.json without a catalog still paints a flat grid.
+        doc = json.loads(self.get("/api/services")[1])
+        self.assertEqual(doc["groups"], [])
+        self.assertIsNone(doc["services"][0]["group"])
+
+    def test_groups_catalog_and_service_id_round_trip(self):
+        self.write_registry({
+            "groups": [
+                {"id": "daily", "label": "Daily"},
+                {"id": "ai", "label": "  AI & automation  "},
+                {"id": "", "label": "skip"},
+                {"id": "daily", "label": "duplicate"},
+                "not-a-dict",
+            ],
+            "services": [
+                {"key": "alpha", "name": "Alpha", "tagline": "t",
+                 "group": "daily", "icon": "code", "url": "https://HOST:1/",
+                 "health": None, "marker": None, "setup": "alpha/setup.sh"},
+            ],
+        })
+        doc = json.loads(self.get("/api/services")[1])
+        self.assertEqual(doc["groups"], [
+            {"id": "daily", "label": "Daily"},
+            {"id": "ai", "label": "AI & automation"},
+        ])
+        self.assertEqual(doc["services"][0]["group"], "daily")
+        self.assertEqual(server.service_detail("alpha")["group"], "daily")
 
     def test_services_list_carries_the_effective_description(self):
         # Without this the hover tooltip has to fetch every service one by
@@ -1022,9 +1053,9 @@ class DetailTest(SandboxTest):
     def test_shape(self):
         detail = server.service_detail("alpha")
         self.assertEqual(sorted(detail), [
-            "active", "control", "deployed_at", "description", "env", "icon",
-            "installed", "job", "key", "meta", "name", "resources", "state",
-            "tagline", "url", "usage"])
+            "active", "control", "deployed_at", "description", "env", "group",
+            "icon", "installed", "job", "key", "meta", "name", "resources",
+            "state", "tagline", "url", "usage"])
         self.assertEqual(detail["key"], "alpha")
         self.assertEqual(detail["name"], "Alpha")
         self.assertEqual(detail["description"], "Shipped description.")
@@ -1034,9 +1065,9 @@ class DetailTest(SandboxTest):
     def test_includes_the_nine_list_fields_verbatim(self):
         detail = server.service_detail("alpha")
         tile = {s["key"]: s for s in server.services_payload()["services"]}["alpha"]
-        for field in ("key", "name", "tagline", "icon", "url", "state",
-                      "installed", "active", "job", "control", "usage",
-                      "deployed_at", "resources"):
+        for field in ("key", "name", "tagline", "group", "icon", "url",
+                      "state", "installed", "active", "job", "control",
+                      "usage", "deployed_at", "resources"):
             self.assertEqual(detail[field], tile[field], field)
 
     def test_meta(self):

@@ -203,7 +203,10 @@ be connected on the phone — the URL does not resolve off-tailnet, by design.
 
 **Desktop.** Same URL. The filter box is focused on load, so you can type two
 letters and hit Enter. It is deliberately *not* autofocused on touch devices,
-because that pops the keyboard over the grid.
+because that pops the keyboard over the grid. Categories (to the right of
+the filter) is a multi-select of Daily / AI & automation / Knowledge &
+media / Infrastructure. The theme button next to it cycles System → Light
+→ Dark; System follows the OS. Both are remembered on that device.
 
 **Deploying from the phone.** A dimmed tile with a ↓ is a service in the repo
 that is not installed here. Tap it, confirm, and the job runs on the box with

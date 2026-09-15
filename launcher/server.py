@@ -192,6 +192,32 @@ def load_registry():
     return services if isinstance(services, list) else []
 
 
+def load_groups():
+    """The file-level `groups` catalog: bucket id + label, in paint order.
+
+    Missing, malformed or empty is fine — the frontend then has no headings
+    and the grid is the flat list it always was. Each service's `group` is
+    an id from this list; unknown ids are Other.
+    """
+    raw = load_document().get("groups")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        gid = item.get("id")
+        label = item.get("label")
+        if not isinstance(gid, str) or not gid or gid in seen:
+            continue
+        if not isinstance(label, str) or not label.strip():
+            continue
+        seen.add(gid)
+        out.append({"id": gid, "label": label.strip()})
+    return out
+
+
 def load_control_config():
     """The file-level `control` block: where the Kuma helper and its env live.
 
@@ -993,10 +1019,15 @@ def services_payload():
         active = bool(health) and probes.get(health, False)
         installed = active or marker_exists(svc.get("marker"))
         name, description = effective(svc, overrides)
+        gid = svc.get("group")
         services.append({
             "key": svc.get("key"),
             "name": name,
             "tagline": svc.get("tagline"),
+            # Bucket id from the file-level `groups` list. Always present,
+            # null when the registry row has none — same null-safety as the
+            # v3 keys, so an older services.json still paints a flat grid.
+            "group": gid if isinstance(gid, str) and gid else None,
             # Carried on the list too, not just the detail page: the grid's
             # hover tooltip needs it, and without it here that module had to
             # fetch every service individually just to show one bubble.
@@ -1020,7 +1051,7 @@ def services_payload():
             "deployed_at": deployed_at(svc.get("marker")),
             "resources": service_resources(svc),
         })
-    return {"host": host, "services": services}
+    return {"host": host, "groups": load_groups(), "services": services}
 
 
 # ------------------------------------------------------------------ detail
@@ -1057,6 +1088,8 @@ def service_detail(key):
         "key": svc.get("key"),
         "name": name,
         "tagline": svc.get("tagline"),
+        "group": (svc.get("group") if isinstance(svc.get("group"), str)
+                  and svc.get("group") else None),
         "icon": svc.get("icon"),
         "url": substitute_host(svc.get("url"), host),
         "state": derive_state(svc.get("setup"), installed, active),

@@ -17,6 +17,7 @@
   var FETCH_TIMEOUT = 8000;
   var MAX_POLL_FAILS = 6;
   var TAB_STORE     = 'launcher.tab';
+  var GROUP_STORE   = 'launcher.groups';
 
   /* Tabs. `state` comes straight from the API:
        active   -> running
@@ -61,7 +62,19 @@
   var VIEW = window.LauncherView || {
     mode:     function () { return 'grid'; },
     arrange:  function (list) { return list; },
+    grouped:  function (list) {
+      var out = [];
+      for (var i = 0; i < (list || []).length; i++) {
+        out.push({ type: 's', svc: list[i] });
+      }
+      return out;
+    },
     table:    function () {},
+    board:    function () {},
+    groupBy:  function () { return 'state'; },
+    isStarred: function () { return false; },
+    starButton: function () { return document.createElement('button'); },
+    paintStar: function () {},
     ram:      function () { return ''; },
     ramTag:   function () {},
     detail:   function () {},
@@ -72,9 +85,24 @@
 
   /* ---------- state ---------- */
 
+  /* Same ids/labels as services.json. Used until the API catalog arrives, and
+     kept if an older launcher process has not been restarted yet — otherwise
+     the Categories menu opens as an empty box. */
+  var DEFAULT_GROUPS = [
+    { id: 'daily',     label: 'Daily' },
+    { id: 'ai',        label: 'AI & automation' },
+    { id: 'knowledge', label: 'Knowledge & media' },
+    { id: 'infra',     label: 'Infrastructure' }
+  ];
+
   var services = [];
+  var groups = DEFAULT_GROUPS.slice();
   var host = '';
   var filterText = '';
+  /* null = no category restriction (every box checked). An array is the
+     ids that are on; empty array means the user unchecked everything. */
+  var groupFilter = null;
+  var headingCache = {};   // group id -> h2, so a refresh does not rebuild headings
   var activeTab = 'all';
   var tileCache = {};   // key -> {sig, node}, so a refresh reuses unchanged tiles
   var loaded = false;
@@ -118,7 +146,12 @@
   var elFilter  = $('filter');
   var elLive    = $('live');
 
-  var elSearch  = $('search');
+  var elSearch    = $('search');
+  var elSearchRow = $('searchrow');
+  var elGFilter   = $('gfilter');
+  var elGBtn      = $('gfilter-btn');
+  var elGLabel    = $('gfilter-label');
+  var elGMenu     = $('gfilter-menu');
   /* The whole site header (brand mark, title, hostname, filter) belongs to
      the grid only. On a detail page the breadcrumb is the top of the page —
      repeating the brand above it just pushes the content down. */
@@ -428,6 +461,7 @@
     if (left) {
       tile.appendChild(fillTile(left, svc));
       tile.appendChild(cornerFor(svc, job));
+      if (typeof VIEW.starButton === 'function') tile.appendChild(VIEW.starButton(svc.key));
 
       var more = make('a', 'tile-more');
       more.href = detailHref(svc.key);
@@ -442,6 +476,7 @@
       solo.setAttribute('data-more', svc.key);
       tile.appendChild(fillTile(solo, svc));
       tile.appendChild(cornerFor(svc, job));
+      if (typeof VIEW.starButton === 'function') tile.appendChild(VIEW.starButton(svc.key));
     }
 
     return tile;
@@ -469,6 +504,151 @@
 
   /* ---------- rendering ---------- */
 
+  function groupLabel(id) {
+    if (!id) return '';
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i].id === id) return groups[i].label || '';
+    }
+    return '';
+  }
+
+  function groupsFromServices(list) {
+    var seen = {};
+    var out = [];
+    var i, id, label;
+    for (i = 0; i < DEFAULT_GROUPS.length; i++) {
+      seen[DEFAULT_GROUPS[i].id] = true;
+    }
+    if (list) {
+      for (i = 0; i < list.length; i++) {
+        id = list[i] && list[i].group;
+        if (!id || seen[id]) continue;
+        seen[id] = true;
+        label = (list[i].group_label || id);
+        out.push({ id: id, label: label });
+      }
+    }
+    return DEFAULT_GROUPS.concat(out);
+  }
+
+  function resolveGroups(data) {
+    if (data && Array.isArray(data.groups) && data.groups.length) {
+      return data.groups;
+    }
+    return groupsFromServices(data && data.services);
+  }
+
+  function loadGroupFilter() {
+    var raw = null;
+    try { raw = window.localStorage.getItem(GROUP_STORE); } catch (e) { raw = null; }
+    if (raw == null || raw === '') { groupFilter = null; return; }
+    try {
+      var parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) { groupFilter = null; return; }
+      var out = [];
+      for (var i = 0; i < parsed.length; i++) {
+        if (typeof parsed[i] === 'string' && parsed[i]) out.push(parsed[i]);
+      }
+      groupFilter = out;
+    } catch (e) { groupFilter = null; }
+  }
+
+  function rememberGroups() {
+    try {
+      if (groupFilter === null) window.localStorage.removeItem(GROUP_STORE);
+      else window.localStorage.setItem(GROUP_STORE, JSON.stringify(groupFilter));
+    } catch (e) { /* private mode */ }
+  }
+
+  function groupIsOn(id) {
+    if (groupFilter === null) return true;
+    for (var i = 0; i < groupFilter.length; i++) {
+      if (groupFilter[i] === id) return true;
+    }
+    return false;
+  }
+
+  function inSelectedGroup(svc) {
+    if (groupFilter === null) return true;
+    return groupIsOn(svc.group);
+  }
+
+  function groupFilterActive() {
+    if (groupFilter === null || !groups.length) return false;
+    var on = 0;
+    for (var i = 0; i < groups.length; i++) {
+      if (groupIsOn(groups[i].id)) on++;
+    }
+    return on !== groups.length;
+  }
+
+  function paintGroupBtn() {
+    if (!elGBtn || !elGLabel) return;
+    var active = groupFilterActive();
+    elGBtn.className = active ? 'iconbtn gfilter-btn is-on' : 'iconbtn gfilter-btn';
+    if (!active) {
+      text(elGLabel, 'Categories');
+      return;
+    }
+    if (groupFilter && groupFilter.length === 1) {
+      text(elGLabel, groupLabel(groupFilter[0]) || groupFilter[0]);
+      return;
+    }
+    text(elGLabel, (groupFilter ? groupFilter.length : 0) + ' categories');
+  }
+
+  function pruneGroupFilter() {
+    if (groupFilter === null || !groups.length) return;
+    var keep = [];
+    for (var i = 0; i < groupFilter.length; i++) {
+      if (groupLabel(groupFilter[i])) keep.push(groupFilter[i]);
+    }
+    groupFilter = (keep.length === groups.length) ? null : keep;
+  }
+
+  function paintGroupMenu() {
+    if (!elGMenu) return;
+    pruneGroupFilter();
+    elGMenu.textContent = '';
+    if (!groups.length) {
+      paintGroupBtn();
+      return;
+    }
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i];
+      var lab = document.createElement('label');
+      lab.className = 'gfilter-opt';
+      var box = document.createElement('input');
+      box.type = 'checkbox';
+      box.value = g.id;
+      box.checked = groupIsOn(g.id);
+      lab.appendChild(box);
+      lab.appendChild(document.createTextNode(g.label));
+      elGMenu.appendChild(lab);
+    }
+    paintGroupBtn();
+  }
+
+  function setGroupOpen(open) {
+    if (!elGBtn || !elGMenu) return;
+    elGMenu.hidden = !open;
+    elGBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  function applyGroupChecks() {
+    if (!elGMenu) return;
+    var boxes = elGMenu.querySelectorAll('input[type="checkbox"]');
+    var on = [];
+    for (var i = 0; i < boxes.length; i++) {
+      if (boxes[i].checked) on.push(boxes[i].value);
+    }
+    if (on.length === boxes.length) groupFilter = null;
+    else groupFilter = on;
+    rememberGroups();
+    paintGroupBtn();
+    if (loaded) render();
+  }
+
   function find(key) {
     for (var i = 0; i < services.length; i++) {
       if (services[i].key === key) return services[i];
@@ -478,7 +658,8 @@
 
   function matches(svc, q) {
     if (!q) return true;
-    var hay = [svc.name, svc.tagline, svc.key].join(' ').toLowerCase();
+    var hay = [svc.name, svc.tagline, svc.key, svc.group,
+               groupLabel(svc.group)].join(' ').toLowerCase();
     var words = q.split(/\s+/);
     for (var i = 0; i < words.length; i++) {
       if (words[i] && hay.indexOf(words[i]) === -1) return false;
@@ -505,6 +686,20 @@
        signature: it is rewritten in place instead, and a 30s refresh still
        never rebuilds the tile you happen to be hovering. */
     VIEW.ramTag(node.querySelector('.tile-corner'), svc);
+    if (typeof VIEW.paintStar === 'function') {
+      VIEW.paintStar(node.querySelector('.vw-star'), svc.key);
+    }
+    return node;
+  }
+
+  function headingFor(id, label) {
+    var node = headingCache[id];
+    if (!node) {
+      node = document.createElement('h2');
+      node.className = 'grid-h';
+      headingCache[id] = node;
+    }
+    if (node.textContent !== label) node.textContent = label;
     return node;
   }
 
@@ -521,12 +716,15 @@
 
   function render() {
     if (!loaded) {
-      /* Skeleton tiles are the grid's loading state. In table view they would
-         be a flash of the wrong thing, so that view simply waits. */
-      var pending = VIEW.mode() === 'table';
+      /* Skeleton tiles are the grid's loading state. Table and board would
+         be a flash of the wrong thing, so those views simply wait. */
+      var pending = VIEW.mode() === 'table' || VIEW.mode() === 'board';
       elGrid.textContent = '';
       elGrid.hidden = pending;
-      VIEW.table(pending ? [] : null);
+      VIEW.table(VIEW.mode() === 'table' ? [] : null);
+      if (typeof VIEW.board === 'function') {
+        VIEW.board(VIEW.mode() === 'board' ? [] : null, groups);
+      }
       if (!pending) {
         var frag = document.createDocumentFragment();
         for (var s = 0; s < 8; s++) frag.appendChild(skeleton());
@@ -534,14 +732,22 @@
       }
       elGrid.setAttribute('aria-busy', 'true');
       elEmpty.hidden = true;
-      elTabs.hidden = false;
+      setBoardChrome(VIEW.mode() === 'board');
+      elTabs.hidden = VIEW.mode() === 'board' &&
+                      typeof VIEW.groupBy === 'function' &&
+                      VIEW.groupBy() === 'state';
       VIEW.toolbar(true);
       paintTabs(null);
       return;
     }
 
     var q = filterText.trim().toLowerCase();
-    var tab = tabDef(activeTab);
+    /* Board grouped by Status already has a column per state, so the tab
+       strip would collapse the board to a single column. Treat that as All. */
+    var boardByState = VIEW.mode() === 'board' &&
+                       typeof VIEW.groupBy === 'function' &&
+                       VIEW.groupBy() === 'state';
+    var tab = tabDef(boardByState ? 'all' : activeTab);
 
     /* Counts are per tab and honour the type-to-filter, so the tab strip
        tells you where a search term lives. */
@@ -551,32 +757,39 @@
     var shown = [];
     for (var i = 0; i < services.length; i++) {
       var svc = services[i];
-      if (!matches(svc, q)) continue;
+      if (!matches(svc, q) || !inSelectedGroup(svc)) continue;
       for (var c = 0; c < TABS.length; c++) {
         if (TABS[c].match(svc)) counts[TABS[c].id]++;
       }
       if (tab.match(svc)) shown.push(svc);
     }
 
-    /* Sort order and grid-vs-table both live in view.js. It gets the list this
-       tab and filter already yielded, in registry order, and hands back the
-       order to paint — so the two views can never disagree about either. */
-    shown = VIEW.arrange(shown);
+    /* Sort (and starring) live in view.js. Grouping is board-only — grid
+       and table stay a flat list so a heading never appears in those views. */
+    var ordered = VIEW.arrange(shown);
 
     if (VIEW.mode() === 'table') {
       elGrid.hidden = true;
       syncGrid([]);
-      VIEW.table(shown);
+      VIEW.table(ordered);
+      if (typeof VIEW.board === 'function') VIEW.board(null);
+    } else if (VIEW.mode() === 'board') {
+      elGrid.hidden = true;
+      syncGrid([]);
+      VIEW.table(null);
+      if (typeof VIEW.board === 'function') VIEW.board(shown, groups);
     } else {
       VIEW.table(null);
+      if (typeof VIEW.board === 'function') VIEW.board(null);
       elGrid.hidden = false;
       var nodes = [];
-      for (var n = 0; n < shown.length; n++) nodes.push(tileFor(shown[n]));
+      for (var n = 0; n < ordered.length; n++) nodes.push(tileFor(ordered[n]));
       syncGrid(nodes);
     }
     elGrid.setAttribute('aria-busy', 'false');
+    setBoardChrome(VIEW.mode() === 'board' && detailKey === null);
 
-    elTabs.hidden = services.length === 0;
+    elTabs.hidden = services.length === 0 || boardByState;
     VIEW.toolbar(services.length !== 0);
     paintTabs(counts);
 
@@ -588,10 +801,19 @@
         ? (tab.id === 'all'
             ? 'No service matches “' + filterText.trim() + '”.'
             : 'Nothing in ' + tab.label + ' matches “' + filterText.trim() + '”.')
-        : tab.empty);
+        : (groupFilterActive()
+            ? (tab.id === 'all'
+                ? 'No service in those categories.'
+                : 'Nothing in ' + tab.label + ' is in those categories.')
+            : tab.empty));
       elEmpty.hidden = false;
       elPanel.setAttribute('tabindex', '0');   // the panel has no focusable child
     }
+  }
+
+  function setBoardChrome(on) {
+    try { document.body.classList.toggle('is-board', !!on); }
+    catch (e) { /* nothing to paint onto */ }
   }
 
   function showNotice(title, message) {
@@ -692,6 +914,8 @@
 
       host = res.data.host || '';
       services = res.data.services;
+      groups = resolveGroups(res.data);
+      paintGroupMenu();
       loaded = true;
       hideNotice();
       text(elHost, host || ' ');
@@ -724,6 +948,8 @@
     if (!loaded) {
       loaded = true;      // stop the skeletons; the notice explains why
       services = [];
+      groups = DEFAULT_GROUPS.slice();
+      paintGroupMenu();
       render();
     }
   }
@@ -1953,8 +2179,10 @@
     revealed = {};
     var token = ++detailReq;
 
+    setBoardChrome(false);
     elVGrid.hidden = true;
     elSearch.hidden = true;
+    if (elSearchRow) elSearchRow.hidden = true;
     elHead.hidden = true;
     elVDetail.hidden = false;
     resetDetail();
@@ -1996,7 +2224,9 @@
 
     elVDetail.hidden = true;
     elVGrid.hidden = false;
+    setBoardChrome(VIEW.mode() === 'board');
     elSearch.hidden = false;
+    if (elSearchRow) elSearchRow.hidden = false;
     elHead.hidden = false;
 
     var target = null;
@@ -2040,6 +2270,19 @@
     filterText = elFilter.value;
     if (loaded) render();
   });
+
+  if (elGBtn && elGMenu) {
+    elGBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      setGroupOpen(elGMenu.hidden);
+    });
+    elGMenu.addEventListener('click', function (e) { e.stopPropagation(); });
+    elGMenu.addEventListener('change', applyGroupChecks);
+    document.addEventListener('click', function () { setGroupOpen(false); });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' || e.key === 'Esc') setGroupOpen(false);
+    });
+  }
 
   elFilter.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' || e.key === 'Esc') {
@@ -2112,6 +2355,8 @@
   }
 
   activeTab = storedTab();   // survives a reload
+  loadGroupFilter();
+  paintGroupMenu();
   VIEW.onChange(render);     // the View/Sort selects repaint through here
   render();
   route();                   // a deep link to #/service/<key> opens straight there

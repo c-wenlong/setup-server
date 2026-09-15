@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
+#   compose_up         — touched by `compose ... up`
+#   docker_login       — touched by `docker login`
+#   htpasswd_count     — how many times `httpd … htpasswd` ran
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    ;;
+
+  inspect)
+    echo running
+    ;;
+
+  login)
+    touch "$STATE_DIR/docker_login"
+    echo "Login Succeeded"
+    ;;
+
+  logs)
+    echo "Trigger.dev Bootstrap - Worker Token"
+    echo "Token: tr_wgt_testtoken"
+    echo "Magic link: https://test-host.tailfake.ts.net:8030/magic?token=stub"
+    ;;
+
+  run)
+    # setup.sh: docker run --rm httpd:2 htpasswd -Bbn USER PASS
+    case "$*" in
+      *htpasswd*)
+        n=0
+        [ -f "$STATE_DIR/htpasswd_count" ] && n="$(cat "$STATE_DIR/htpasswd_count")"
+        echo $((n + 1)) > "$STATE_DIR/htpasswd_count"
+        echo "registry-user:\$2y\$05\$stubhashfortriggerdevregistryauth"
+        ;;
+    esac
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        for a in "$@"; do
+          case "$a" in
+            up)
+              touch "$STATE_DIR/compose_up"
+              # Bootstrap writes the worker token onto the shared volume.
+              home_shared="${HOME}/services/trigger-dev/shared"
+              mkdir -p "$home_shared"
+              [ -s "$home_shared/worker_token" ] || echo "tr_wgt_testtoken" > "$home_shared/worker_token"
+              ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0

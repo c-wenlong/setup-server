@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+#
+# setup.sh — one-shot deploy of Metabase OSS (self-hosted BI) behind
+# Tailscale. Linux + macOS.
+#
+# End state:
+#   - metabase + postgres containers
+#   - published on 127.0.0.1:LOCAL_PORT only (default 8104 — forgejo
+#     already owns host :3000, Metabase's upstream default)
+#   - reachable tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
+#   - first admin seeded from MB_ADMIN_* in .env via POST /api/setup
+#   - boot-persistent via Docker's restart policy (no systemd/launchd)
+#
+# Usage:
+#   ./setup.sh
+#   LOCAL_PORT=8107 ./setup.sh            # HTTPS follows LOCAL_PORT
+#   LOCAL_PORT=8107 HTTPS_PORT=8107 ./setup.sh
+#   MB_ADMIN_EMAIL=you@example.com ./setup.sh   # first run only
+#
+# Version: pinned to v0.63.17.3. Bump METABASE_VERSION in .env, then re-run.
+#
+# Requirements: Linux or macOS, curl, Docker + Compose v2, Tailscale logged in.
+#
+# Idempotent: safe to re-run; it upgrades the image and repairs the publish.
+# An existing .env is never overwritten.
+
+set -euo pipefail
+
+LOCAL_PORT="${LOCAL_PORT:-8104}"
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
+MB_ADMIN_EMAIL="${MB_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+
+SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SERVICE_DIR/.env"
+STATE="$HOME/services/metabase"
+
+info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
+die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# Hex is URL-safe and survives .env + postgres URLs without quoting.
+randhex() {
+  local n="${1:-16}"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import secrets; print(secrets.token_hex($n))"
+  else
+    od -An -tx1 -N"$n" /dev/urandom | tr -d ' \n'
+    echo
+  fi
+}
+
+# Metabase rejects passwords without mixed case + a digit. Hex is lowercase;
+# suffix a mixed token so the setup API accepts it.
+randpass() {
+  printf '%sAa1' "$(randhex 12)"
+}
+
+# ---------------------------------------------------------------- preflight
+OS="$(uname -s)"
+info "Preflight checks ($OS)"
+case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
+[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+command -v curl >/dev/null || die "curl is required."
+if ! command -v docker >/dev/null; then
+  [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
+  die "Docker is not installed. On macOS install Docker Desktop or OrbStack."
+fi
+
+if command -v tailscale >/dev/null; then
+  TAILSCALE="tailscale"
+elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+else
+  die "Tailscale is not installed: https://tailscale.com/download"
+fi
+
+if ! docker ps >/dev/null 2>&1; then
+  [ "$OS" = "Linux" ] && die "Cannot talk to the Docker daemon. Fix: sudo usermod -aG docker $USER, then log out/in (or run via: sg docker -c ./setup.sh)"
+  die "Cannot talk to the Docker daemon. Is Docker Desktop/OrbStack running?"
+fi
+docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)."
+
+state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+
+case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
+case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
+
+ok "$OS + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
+
+TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+[ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
+ok "Tailnet name: $TS_HOST"
+
+avail_mb=""
+if [ -r /proc/meminfo ]; then
+  avail_mb="$(sed -n 's/^MemAvailable: *\([0-9]*\) kB/\1/p' /proc/meminfo)"
+  avail_mb="$(( avail_mb / 1024 ))"
+fi
+if [ -n "${avail_mb:-}" ] && [ "$avail_mb" -lt 800 ]; then
+  warn "Only ~${avail_mb} MB RAM available. Metabase is a JVM (cap ${METABASE_MEM_LIMIT:-1536m}); unload ollama if it gets OOM-killed."
+fi
+
+# ---------------------------------------------------------------- .env
+if [ -f "$ENV_FILE" ]; then
+  ok "Config already exists, leaving untouched: $ENV_FILE"
+else
+  info "Writing .env"
+  tz="Etc/UTC"
+  if [ -L /etc/localtime ]; then
+    tz="$(readlink /etc/localtime | sed 's#.*/zoneinfo/##')"
+  elif [ -f /etc/timezone ]; then
+    tz="$(cat /etc/timezone)"
+  fi
+  db_pass="$(randhex 16)"
+  admin_pass="$(randpass)"
+  cat > "$ENV_FILE" <<EOF
+# Generated by setup.sh. Gitignored; mode 600.
+# Docker Compose interpolates this file from the project directory.
+
+# Pinned. Official floats \`latest\`. To upgrade: bump, then ./setup.sh.
+METABASE_VERSION=v0.63.17.3
+POSTGRES_VERSION=16-alpine
+
+LOCAL_PORT=$LOCAL_PORT
+TZ=$tz
+
+# Marker dir (launcher "installed"). Live Postgres is the named volume
+# metabase-postgres — Postgres cannot write a host-owned bind mount.
+METABASE_DATA=$STATE
+
+MB_SITE_URL=https://$TS_HOST:$HTTPS_PORT
+MB_SITE_NAME=kai-home-server
+
+METABASE_DB_NAME=metabase
+METABASE_DB_USER=metabase
+METABASE_DB_PASSWORD=$db_pass
+
+# First admin, seeded via POST /api/setup. Changing this after first boot
+# does not rotate the live password — do that in the UI.
+MB_ADMIN_EMAIL=$MB_ADMIN_EMAIL
+MB_ADMIN_PASSWORD=$admin_pass
+MB_ADMIN_FIRST_NAME=Kai
+MB_ADMIN_LAST_NAME=Chen
+
+METABASE_MEM_LIMIT=1536m
+METABASE_DB_MEM_LIMIT=256m
+METABASE_JAVA_OPTS=-Xmx1g
+EOF
+  chmod 600 "$ENV_FILE"
+  ok "Wrote $ENV_FILE"
+fi
+
+# Read back: an existing .env is the source of truth for ports, paths and
+# credentials, so a re-run can never silently move a live deployment.
+REQUESTED_PORT="$LOCAL_PORT"
+set -a; . "$ENV_FILE"; set +a
+DATA_DIR="${METABASE_DATA:?METABASE_DATA missing from $ENV_FILE}"
+MB_SITE_URL="${MB_SITE_URL:?MB_SITE_URL missing from $ENV_FILE}"
+MB_ADMIN_EMAIL="${MB_ADMIN_EMAIL:?MB_ADMIN_EMAIL missing from $ENV_FILE}"
+MB_ADMIN_PASSWORD="${MB_ADMIN_PASSWORD:?MB_ADMIN_PASSWORD missing from $ENV_FILE}"
+if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
+  warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
+fi
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
+
+WANT_URL="https://$TS_HOST:$HTTPS_PORT"
+if [ "$MB_SITE_URL" != "$WANT_URL" ]; then
+  warn "MB_SITE_URL in .env is $MB_SITE_URL but this box now answers to $WANT_URL."
+  warn "  Password-reset and embed links will point at the old address. Fix: set MB_SITE_URL=$WANT_URL in $ENV_FILE, then re-run."
+fi
+
+mkdir -p "$DATA_DIR"
+
+avail_kb="$(df -Pk "$DATA_DIR" | awk 'NR==2{print $4}')"
+if [ "${avail_kb:-0}" -lt 1048576 ]; then
+  warn "$(( avail_kb / 1048576 )) GB free at $DATA_DIR — Metabase's app DB grows with questions and caches."
+else
+  ok "$(( avail_kb / 1048576 )) GB free at $DATA_DIR"
+fi
+
+# ---------------------------------------------------------------- deploy
+COMPOSE=(docker compose --project-directory "$SERVICE_DIR")
+
+info "Starting Metabase (docker compose up -d) — first run pulls the image and runs migrations"
+"${COMPOSE[@]}" up -d
+
+info "Waiting for Metabase on 127.0.0.1:$LOCAL_PORT (first boot can take a few minutes)"
+for i in $(seq 1 120); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:$LOCAL_PORT/api/health" 2>/dev/null; then
+    ok "Metabase is answering locally"
+    break
+  fi
+  [ "$i" -eq 120 ] && die "Metabase did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs metabase"
+  sleep 3
+done
+
+# Seed the first admin through the documented setup API. Re-runs skip this
+# once has-user-setup is true (or the marker file exists).
+seed_admin() {
+  local props token payload code
+  props="$(curl -fsS --max-time 30 "http://127.0.0.1:$LOCAL_PORT/api/session/properties" 2>/dev/null || true)"
+  case "$props" in
+    *'"has-user-setup":true'*|*'\"has-user-setup\":true'*)
+      ok "Metabase already has a user — skipping setup API"
+      return 0
+      ;;
+  esac
+  token="$(printf '%s' "$props" | sed -n 's/.*"setup-token": *"\([^"]*\)".*/\1/p')"
+  [ -n "$token" ] || { warn "No setup-token from /api/session/properties. Complete the first-run wizard at the URL below using $MB_ADMIN_EMAIL."; return 0; }
+  if ! command -v python3 >/dev/null; then
+    warn "python3 is required to POST /api/setup. Complete the wizard at the URL below using $MB_ADMIN_EMAIL."
+    return 0
+  fi
+  payload="$(MB_TOKEN="$token" MB_EMAIL="$MB_ADMIN_EMAIL" MB_PASS="$MB_ADMIN_PASSWORD" \
+    MB_FIRST="${MB_ADMIN_FIRST_NAME:-Kai}" MB_LAST="${MB_ADMIN_LAST_NAME:-Chen}" \
+    MB_SITE="${MB_SITE_NAME:-kai-home-server}" python3 -c '
+import json, os
+print(json.dumps({
+  "token": os.environ["MB_TOKEN"],
+  "user": {
+    "email": os.environ["MB_EMAIL"],
+    "password": os.environ["MB_PASS"],
+    "first_name": os.environ["MB_FIRST"],
+    "last_name": os.environ["MB_LAST"],
+    "site_name": os.environ["MB_SITE"],
+  },
+  "prefs": {
+    "site_name": os.environ["MB_SITE"],
+    "site_locale": "en",
+    "allow_tracking": False,
+  },
+}))')"
+  code="$(curl -sS -o "$WORK/setup.json" -w '%{http_code}' --max-time 60 \
+    -X POST -H 'Content-Type: application/json' --data-binary "$payload" \
+    "http://127.0.0.1:$LOCAL_PORT/api/setup" 2>/dev/null || echo 000)"
+  case "$code" in
+    200)
+      ok "First admin seeded ($MB_ADMIN_EMAIL)"
+      ;;
+    *)
+      warn "POST /api/setup returned HTTP $code. Complete the first-run wizard at the URL below using $MB_ADMIN_EMAIL."
+      ;;
+  esac
+}
+seed_admin
+
+# ------------------------------------------------------- tailscale serve
+info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT -> 127.0.0.1:$LOCAL_PORT)"
+if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
+  if [ "$OS" = "Linux" ]; then
+    info "Direct serve failed — trying operator grant (needs sudo, one time)"
+    sudo tailscale set --operator="$USER"
+  fi
+  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
+    echo
+    info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
+    read -r
+  done
+fi
+ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
+
+# ------------------------------------------------------------ final check
+url="https://$TS_HOST:$HTTPS_PORT"
+info "Verifying $url/api/health (first request can take ~60s while the TLS cert is minted)"
+if curl -fsS -o /dev/null --max-time 90 "$url/api/health"; then
+  ok "End-to-end HTTPS check passed"
+else
+  warn "No answer on $url/api/health yet — the cert may still be minting. Retry in a minute: curl $url/api/health"
+fi
+
+echo
+printf '\033[1;32mDone.\033[0m Metabase is at \033[1m%s\033[0m (tailnet only).\n' "$url"
+echo
+echo "  Sign in as $MB_ADMIN_EMAIL (password in $ENV_FILE)."
+echo "  Upgrade: bump METABASE_VERSION in $ENV_FILE then ./setup.sh"
+echo
+echo "Backups: nothing backs this box up. Dump Postgres with:"
+echo "    docker compose --project-directory $SERVICE_DIR exec -T db pg_dump -U metabase metabase"
+echo
+echo "Manage:  docker compose --project-directory $SERVICE_DIR ps|logs|restart|down"
+echo "Upgrade: edit METABASE_VERSION in .env, then ./setup.sh"
+exit 0

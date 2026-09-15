@@ -77,6 +77,30 @@ unmodified at commit `541b2fe9f13de9b4efbbc4d1e5fbc4c8d637734b` (2026-09-12).
 That repository is GPL-3.0; the logo remains the Homepage project's brand mark
 and is used here only to identify the service.
 
+dashboard-icons also has no marks for Paperclip, OpenHands or Trigger.dev.
+Those three are vendored from the sources below (same light minification as
+the dashboard-icons set; geometry and colour unchanged).
+
+| File here | Upstream | Service |
+|---|---|---|
+| `paperclip.svg` | [selfhst/icons](https://github.com/selfhst/icons) `svg/paperclip-ai.svg` (`#18181b`) | Paperclip |
+| `paperclip-dark.svg` | same repo, `svg/paperclip-ai-light.svg` (`#fff`) | Paperclip, dark theme |
+| `openhands.svg` | same repo, `svg/openhands.svg` (`#ffe165`) | OpenHands |
+| `trigger-dev.svg` | [Trigger.dev brand kit](https://trigger.dev/brand) `triggerdev-logo--light.svg` (lime gradient) | Trigger.dev |
+| `coolify.svg` | [selfhst/icons](https://github.com/selfhst/icons) `svg/coolify.svg` (`#8c52ff`) | Coolify |
+| `appflowy.svg` | [homarr-labs/dashboard-icons](https://github.com/homarr-labs/dashboard-icons) `svg/appflowy.svg` (`#9327ff`) | AppFlowy |
+| `stirling-pdf.svg` | same repo, `svg/stirling-pdf.svg` (`#8e3131`) | Stirling PDF |
+| `metabase.svg` | same repo, `svg/metabase.svg` (`#509ee3`) | Metabase |
+| `plane.svg` | same repo, `svg/plane.svg` (`#5275fc`) | Plane |
+| `umami.svg` | same repo, `svg/umami.svg` (black stroke) | Umami |
+| `umami-dark.svg` | derived: stroke lifted `#000` → `#fff` so it reads on `#171719` | Umami, dark theme |
+
+selfh.st/icons fetched at commit `14d558ec3d62848ec428113bcc46bd636f3cb47c`
+(2026-09-15). The collection is CC-BY-4.0; each logo remains its project's
+brand mark. Official `triggerdev-logo--dark.svg` is `#121317` and would vanish
+on the dark tile (`#171719`), so only the lime mark is kept and used on both
+themes.
+
 ## Modifications
 
 1. **Light minification.** XML declarations, comments, `<metadata>`,

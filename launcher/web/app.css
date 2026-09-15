@@ -59,8 +59,17 @@
   --tight: -.03em;   /* display tracking, à la Cursor. Never on small text. */
 }
 
+/* Theme. `data-theme` is set on <html> before first paint (inline script in
+   index.html, then view.js). System (default, and the value when the
+   attribute is missing) follows the OS. Light and Dark pin it. The two
+   dark blocks must stay in lockstep — one is "OS is dark and we are not
+   forcing light", the other is "the user asked for dark on a light OS". */
+html { color-scheme: light dark; }
+html[data-theme="light"] { color-scheme: light; }
+html[data-theme="dark"]  { color-scheme: dark; }
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg:            #0e0e11;
     --surface:       #171719;
     --surface-2:     #202024;
@@ -81,6 +90,28 @@
     --shadow:   0 1px 2px rgba(0, 0, 0, .5);
     --shadow-up: 0 8px 28px rgba(0, 0, 0, .6), 0 1px 3px rgba(0, 0, 0, .5);
   }
+}
+
+:root[data-theme="dark"] {
+  --bg:            #0e0e11;
+  --surface:       #171719;
+  --surface-2:     #202024;
+  --border:        #27272c;
+  --border-strong: #3a3a42;
+  --text:          #f1f1f4;
+  --muted:         #9c9ca6;
+  --faint:         #8b8b95;
+  --accent:        #a29dff;
+  --accent-ink:    #16161c;
+  --accent-soft:   #211f3d;
+  --ok:            #46cf83;
+  --warn:          #e8ae4a;
+  --warn-soft:     #2c2312;
+  --bad:           #f2867c;
+  --log-bg:        #0a0a0c;
+  --log-fg:        #d5d5dc;
+  --shadow:   0 1px 2px rgba(0, 0, 0, .5);
+  --shadow-up: 0 8px 28px rgba(0, 0, 0, .6), 0 1px 3px rgba(0, 0, 0, .5);
 }
 
 /* ---------- base ---------- */
@@ -134,6 +165,38 @@ h1, h2, p { margin: 0; }
            max(34px, calc(env(safe-area-inset-bottom) + 18px)) max(16px, env(safe-area-inset-left));
 }
 
+/* Board view fills the leftover viewport so columns can scroll inside
+   themselves instead of growing the page. */
+html:has(body.is-board),
+body.is-board {
+  height: 100%;
+  overflow: hidden;
+}
+body.is-board .wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+body.is-board .head { flex: none; }
+body.is-board main,
+body.is-board #view-grid,
+body.is-board #panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+body.is-board #view-grid > .toolrow,
+body.is-board #view-grid > .notice { flex: none; }
+body.is-board #view-board {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+
 /* ---------- header ---------- */
 
 .head {
@@ -173,7 +236,14 @@ h1, h2, p { margin: 0; }
   text-overflow: ellipsis;
 }
 
-.search { position: relative; display: block; }
+.searchrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.search { position: relative; display: block; flex: 1 1 auto; min-width: 0; }
 
 .search-icon {
   position: absolute;
@@ -209,6 +279,94 @@ h1, h2, p { margin: 0; }
 #filter::-webkit-search-decoration,
 #filter::-webkit-search-cancel-button { -webkit-appearance: none; }
 
+/* Square control matching the search field: theme cycle, category trigger. */
+.iconbtn {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: none;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 11px;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 540;
+  letter-spacing: var(--tight);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: border-color var(--dur) ease, box-shadow var(--dur) ease,
+              background-color var(--dur) ease;
+}
+.iconbtn svg { width: 18px; height: 18px; display: block; flex: none; }
+.iconbtn:active { transform: scale(.975); }
+@media (hover: hover) and (pointer: fine) {
+  .iconbtn:hover { background: var(--surface-2); }
+}
+.iconbtn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.theme-btn { padding: 0; }
+
+.gfilter { position: relative; flex: none; }
+
+.gfilter-btn {
+  max-width: 160px;
+  padding: 0 10px 0 12px;
+}
+.gfilter-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gfilter-chevron { width: 16px; height: 16px; color: var(--faint); }
+.gfilter-btn[aria-expanded="true"] .gfilter-chevron { transform: rotate(180deg); }
+.gfilter-btn.is-on { border-color: var(--accent); color: var(--accent); }
+
+.gfilter-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 220px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-up);
+}
+.gfilter-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .gfilter-opt:hover { background: var(--surface-2); }
+}
+.gfilter-opt input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+  flex: none;
+}
+
 @media (min-width: 640px) {
   .head {
     flex-direction: row;
@@ -216,7 +374,8 @@ h1, h2, p { margin: 0; }
     justify-content: space-between;
     gap: 24px;
   }
-  .search { width: 260px; flex: none; }
+  .searchrow { flex: 0 1 520px; }
+  .search { width: auto; flex: 1 1 220px; max-width: 280px; }
 }
 
 /* ---------- tabs ---------- */
@@ -318,7 +477,13 @@ h1, h2, p { margin: 0; }
   border-bottom: 0;
 }
 
-.toolrow > #view-toolbar { flex: 0 0 auto; }
+.toolrow > #view-toolbar {
+  flex: 0 0 auto;
+  /* Stays on the right when the tab strip is hidden (Board grouped by
+     Status). Without this the toolbar is the only flex child and jumps
+     to the left edge. */
+  margin-left: auto;
+}
 
 .panel:focus { outline: none; }
 .panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; }
@@ -335,6 +500,19 @@ h1, h2, p { margin: 0; }
 @media (min-width: 860px)  { .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (min-width: 1080px) { .grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 @media (min-width: 1320px) { .grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+
+/* Bucket headings span the full row so the tiles under them still pack
+   into the same column count. First heading sits tight against the tabs. */
+.grid-h {
+  grid-column: 1 / -1;
+  margin: 18px 2px 0;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: var(--tight);
+  color: var(--muted);
+}
+.grid-h:first-child { margin-top: 2px; }
 
 /* ---------- tile ---------- */
 
@@ -371,7 +549,7 @@ h1, h2, p { margin: 0; }
   align-items: flex-start;
   min-width: 0;
   max-width: 100%;
-  padding: 0;
+  padding: 0 28px 22px 0;
   font: inherit;
   text-align: left;
   text-decoration: none;
@@ -484,15 +662,25 @@ h1, h2, p { margin: 0; }
 
 /* Corner slot: status dot, deploy glyph, or planned badge. Sits above both
    targets and is inert — the state it shows is already spoken by the link's
-   accessible name, so it is decorative here and must not eat taps. */
+   accessible name, so it is decorative here and must not eat taps. RAM and
+   the status light live at the bottom of the card; the star takes the
+   top-right. */
 .tile-corner {
   position: absolute;
   z-index: 2;
-  top: 13px;
+  top: auto;
   right: 13px;
+  bottom: 13px;
   display: flex;
   align-items: center;
   pointer-events: none;
+}
+
+.tile .vw-star {
+  position: absolute;
+  z-index: 3;
+  top: 8px;
+  right: 8px;
 }
 
 .dot {
