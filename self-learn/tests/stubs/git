@@ -3,9 +3,13 @@
 #   remote_sha       — sha reported for origin/BRANCH (default aaa1111);
 #                      change it between runs to simulate a push
 #   git_auth_fail    — exists => ls-remote fails like missing credentials
+#   fixture/<sha>/   — checkout contents applied by `git reset --hard <sha>`
+#                      (origin/* resolves through remote_sha); lets a test make
+#                      a new commit actually change files in the checkout
 echo "git $*" >> "$CALLS_LOG"
 
-if [ "${1:-}" = "-C" ]; then shift 2; fi
+repo_dir=""
+if [ "${1:-}" = "-C" ]; then repo_dir="$2"; shift 2; fi
 
 case "${1:-}" in
   ls-remote)
@@ -27,6 +31,17 @@ case "${1:-}" in
   rev-parse)
     cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111
     ;;
-  fetch|reset) ;;
+  fetch) ;;
+  reset)
+    # `git reset --hard --quiet <rev>` — apply the commit's fixture if the test
+    # provided one, so the checkout really changes on a new commit.
+    rev="${!#}"
+    case "$rev" in
+      origin/*) rev="$(cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111)" ;;
+    esac
+    if [ -n "$repo_dir" ] && [ -d "$STATE_DIR/fixture/$rev" ]; then
+      cp -R "$STATE_DIR/fixture/$rev/." "$repo_dir/"
+    fi
+    ;;
 esac
 exit 0

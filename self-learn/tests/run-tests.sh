@@ -135,6 +135,8 @@ test_fresh_deploy() {
   check "installed deps (npm ci)"       calls_have "npm ci"
   check "web env written"               grep -q "^DATABASE_URL=postgres://catalog:" "$(REPO_DIR)/apps/web/.env.local"
   check "catalog env written"           grep -q "^SELF_LEARN_HOME=" "$(REPO_DIR)/services/catalog/.env"
+  check "web env mode is 600"           sh -c "[ \"$(stat -c %a "$(REPO_DIR)/apps/web/.env.local" 2>/dev/null || stat -f %Lp "$(REPO_DIR)/apps/web/.env.local")\" = 600 ]"
+  check "catalog env mode is 600"       sh -c "[ \"$(stat -c %a "$(REPO_DIR)/services/catalog/.env" 2>/dev/null || stat -f %Lp "$(REPO_DIR)/services/catalog/.env")\" = 600 ]"
   check "compose up invoked"            [ -f "$STATE_DIR/compose_up" ]
   check "catalog migrated"              calls_have "npm run catalog -- migrate"
   check "seed imported"                 calls_have "npm run catalog -- import seed"
@@ -151,11 +153,13 @@ test_fresh_deploy() {
     check "app restarted"               calls_have "systemctl --user restart self-learn"
     check "deploy timer enabled"        calls_have "systemctl --user enable --now self-learn-deploy.timer"
     check "export timer enabled"        calls_have "systemctl --user enable --now self-learn-export.timer"
+    check "export unit mode is 600"     sh -c "[ \"$(stat -c %a "$HOME/.config/systemd/user/self-learn-export.service" 2>/dev/null || stat -f %Lp "$HOME/.config/systemd/user/self-learn-export.service")\" = 600 ]"
     check "lingering enabled"           calls_have "loginctl enable-linger"
   else
     check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.self-learn.web.plist" ]
     check "deploy agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
     check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
+    check "deploy agent sets PATH"      grep -q "/opt/homebrew/bin" "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
     check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.self-learn.web"
   fi
   check "served on tailscale :8107"     calls_have "tailscale serve --bg --https=8107 http://127.0.0.1:8107"
@@ -195,11 +199,16 @@ test_push_triggers_redeploy() {
   run_poll
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the new sha"     out_has "deploying bbb2222"
-  check "app stopped first"       calls_have "systemctl --user stop self-learn.service"
+  if [ "$OS" = "Linux" ]; then
+    check "app stopped first"     calls_have "systemctl --user stop self-learn.service"
+    check "app started again"     calls_have "systemctl --user start self-learn.service"
+  else
+    check "app stopped first"     calls_have "launchctl bootout gui/.*/com.self-learn.web"
+    check "app started again"     calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+  fi
   check "rebuilt"                 calls_have "npm run build"
   check "catalog migrated"        calls_have "npm run catalog -- migrate"
   check "npm ci skipped"          no_call "npm ci"
-  check "app started again"       calls_have "systemctl --user start self-learn.service"
   check "built sha updated"       grep -qx bbb2222 "$HOME/services/self-learn/state/built-sha"
   teardown
 }
@@ -209,13 +218,17 @@ test_lockfile_change_triggers_ci() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  echo "fake-lockfile-v2" > "$(REPO_DIR)/package-lock.json"
+  # The new commit's fixture makes `git reset --hard` actually change the
+  # checkout — proves deploy reads the lockfile it pulled, not the old tree.
+  mkdir -p "$STATE_DIR/fixture/bbb2222"
+  echo "fake-lockfile-v2" > "$STATE_DIR/fixture/bbb2222/package-lock.json"
   echo "bbb2222" > "$STATE_DIR/remote_sha"
   : > "$CALLS_LOG"
   run_poll
-  check "exits zero"          [ "$CODE" -eq 0 ]
-  check "npm ci ran"          calls_have "npm ci"
-  check "rebuilt"             calls_have "npm run build"
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  check "checkout has new lockfile"  grep -qx "fake-lockfile-v2" "$(REPO_DIR)/package-lock.json"
+  check "npm ci ran"                 calls_have "npm ci"
+  check "rebuilt"                    calls_have "npm run build"
   teardown
 }
 
@@ -230,24 +243,60 @@ test_stopped_app_stays_stopped() {
   run_poll
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "rebuilt"             calls_have "npm run build"
-  check "no stop attempted"   no_call "systemctl --user stop self-learn"
-  check "not restarted"       no_call "systemctl --user start self-learn"
+  if [ "$OS" = "Linux" ]; then
+    check "no stop attempted" no_call "systemctl --user stop self-learn"
+    check "not restarted"     no_call "systemctl --user start self-learn"
+  else
+    check "no stop attempted" no_call "launchctl bootout"
+    check "not restarted"     no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+  fi
+  check "postgres left up"    no_call "compose --project-directory .* stop$"
   check "says it was left"    out_has "left stopped"
   teardown
 }
 
+test_stopped_stack_stays_stopped() {
+  echo "• poller: app + Postgres both stopped -> updated, both left stopped"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  rm -f "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "rebuilt"                  calls_have "npm run build"
+  check "catalog migrated"         calls_have "npm run catalog -- migrate"
+  check "postgres put back down"   calls_have "compose --project-directory .* stop$"
+  check "db marked down again"     [ ! -f "$STATE_DIR/db_running" ]
+  if [ "$OS" = "Linux" ]; then
+    check "app not restarted"      no_call "systemctl --user start self-learn"
+  else
+    check "app not restarted"      no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+  fi
+  teardown
+}
+
 test_poll_lock() {
-  echo "• poller: concurrent run skips cleanly while the lock is held"
+  echo "• poller: a live owner's lock skips; a dead owner's lock is reclaimed"
   setup
   touch "$STATE_DIR/operator"
   run_deploy
   mkdir "$HOME/services/self-learn/.deploy.lock"
+  echo $$ > "$HOME/services/self-learn/.deploy.lock/pid"
   : > "$CALLS_LOG"
   run_poll
-  check "exits zero"          [ "$CODE" -eq 0 ]
-  check "reports the skip"    out_has "another deploy is running"
-  check "touched no git"      no_call "git fetch"
-  rmdir "$HOME/services/self-learn/.deploy.lock"
+  check "exits zero"             [ "$CODE" -eq 0 ]
+  check "reports the skip"       out_has "another deploy is running"
+  check "touched no git"         no_call "fetch --quiet"
+  rm -rf "$HOME/services/self-learn/.deploy.lock"
+  mkdir "$HOME/services/self-learn/.deploy.lock"
+  ( exit 0 ) & dead=$!; wait "$dead" 2>/dev/null || true
+  echo "$dead" > "$HOME/services/self-learn/.deploy.lock/pid"
+  : > "$CALLS_LOG"
+  run_poll
+  check "reclaims a dead lock"   out_has "owner pid $dead is gone"
+  check "deploy proceeds"        calls_have "fetch --quiet"
   teardown
 }
 
@@ -276,6 +325,80 @@ test_port_override() {
   check "served on :9999 -> 9999" calls_have "tailscale serve --bg --https=9999 http://127.0.0.1:9999"
   if [ "$OS" = "Linux" ]; then
     check "unit uses :9999"       grep -q -- "-p 9999" "$HOME/.config/systemd/user/self-learn.service"
+  fi
+  teardown
+}
+
+test_persisted_https_port() {
+  echo "• re-run: a persisted HTTPS_PORT != LOCAL_PORT is not clobbered"
+  setup
+  touch "$STATE_DIR/operator"
+  export HTTPS_PORT=8443
+  run_deploy
+  check "served on :8443"        calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8107"
+  check "PUBLIC_URL says :8443"  env_has "PUBLIC_URL=https://test-host.tailfake.ts.net:8443"
+  unset HTTPS_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero"             [ "$CODE" -eq 0 ]
+  check "still served on :8443"  calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8107"
+  check "not regressed to :8107" no_call "tailscale serve --bg --https=8107"
+  teardown
+}
+
+test_setup_leaves_stopped() {
+  echo "• re-run: a deliberately stopped app is updated but not restarted"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  rm -f "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "says it left it stopped" out_has "leaving it stopped"
+  check "postgres put back down"  calls_have "compose --project-directory .* stop$"
+  check "serve still configured"  calls_have "tailscale serve --bg --https=8107"
+  check "no health checks"        no_call "^curl "
+  if [ "$OS" = "Linux" ]; then
+    check "app not restarted"     no_call "systemctl --user restart self-learn"
+    check "app not enabled"       no_call "systemctl --user enable self-learn$"
+  else
+    check "agent not loaded"      no_call "launchctl bootstrap .*com.self-learn.web.plist"
+  fi
+  teardown
+}
+
+test_deploy_pinned_sha() {
+  echo "• rollback: deploy.sh --sha pins the build to an older commit"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  : > "$CALLS_LOG"
+  run_poll --sha ccc0000
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "deploys the pinned sha"  out_has "deploying ccc0000"
+  check "resets to the pin"       calls_have "reset --hard --quiet ccc0000"
+  check "built sha is the pin"    grep -qx ccc0000 "$HOME/services/self-learn/state/built-sha"
+  teardown
+}
+
+test_failed_build_restores() {
+  echo "• poller: failed build restores the snapshot and restarts the old build"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  touch "$STATE_DIR/build_fails"
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says it restored"        out_has "restoring the pre-deploy snapshot"
+  check ".next put back"          [ -d "$(REPO_DIR)/apps/web/.next" ]
+  check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/self-learn/state/built-sha"
+  if [ "$OS" = "Linux" ]; then
+    check "old build restarted"   calls_have "systemctl --user start self-learn.service"
+  else
+    check "old build restarted"   calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
   fi
   teardown
 }
@@ -337,6 +460,8 @@ test_live() {
   live_check "built sha matches origin"    sh -c "[ \"\$(git -C '$svc_home/repo' rev-parse origin/main)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   live_check "web .env.local exists"       test -f "$svc_home/repo/apps/web/.env.local"
   live_check "catalog .env exists"         test -f "$svc_home/repo/services/catalog/.env"
+  live_check "web .env.local is 600"       test "$(stat -c %a "$svc_home/repo/apps/web/.env.local" 2>/dev/null || stat -f %Lp "$svc_home/repo/apps/web/.env.local")" = 600
+  live_check "catalog .env is 600"         test "$(stat -c %a "$svc_home/repo/services/catalog/.env" 2>/dev/null || stat -f %Lp "$svc_home/repo/services/catalog/.env")" = 600
   live_check "bootstrap marker exists"     test -f "$svc_home/state/db-bootstrapped"
   if [ "$OS" = "Linux" ]; then
     live_check "app unit active"           sh -c "systemctl --user is-active self-learn.service | grep -qx active"
@@ -364,9 +489,14 @@ test_idempotent_rerun
 test_push_triggers_redeploy
 test_lockfile_change_triggers_ci
 test_stopped_app_stays_stopped
+test_stopped_stack_stays_stopped
 test_poll_lock
 test_skip_seed
 test_port_override
+test_persisted_https_port
+test_setup_leaves_stopped
+test_deploy_pinned_sha
+test_failed_build_restores
 test_operator_escalation
 test_serve_approval_pause
 

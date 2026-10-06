@@ -62,14 +62,20 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
   upstream's "one reader" model). Tailnet is still the perimeter; the
   password gates a roommate on the tailnet, not the internet.
 - `OWNER_PASSWORD` / `AUTH_SECRET` / `POSTGRES_PASSWORD` are generated
-  into `.env` (mode 600) on first run and never overwritten.
+  into `.env` (mode 600) on first run and never overwritten. Every file
+  that carries them — the checkout env files below and the export
+  unit/plist with `DATABASE_URL` in it — is written mode 600.
 - The deploy clone (`~/services/self-learn/repo`) is machine-managed and
   hard-reset on every deploy — **never edit it by hand**. The two env
   files inside it (`apps/web/.env.local`, `services/catalog/.env`) are
   rewritten from `.env` on every deploy; rotate secrets in `.env`, then
   `deploy.sh --force`.
-- A deliberately stopped app stays stopped across deploys: the poller
-  rebuilds and migrates but only restarts the app if it was running.
+- A deliberately stopped app stays stopped across deploys *and* setup
+  re-runs: the poller rebuilds and migrates but only restarts the app if
+  it was running, and Postgres is returned to whatever state it was
+  found in. If a deploy step fails partway, the previous
+  `node_modules`/`.next` are restored from the rename-aside snapshot and
+  the old build restarted — never a half-written tree.
 
 ## Dependencies
 
@@ -103,7 +109,9 @@ submodules (`tools/*` stays uninitialised — the seed import is pointed at
    `catalog blob audit --fix` to claim the blob root for this database.
    `SKIP_SEED=1` skips this for a dump restore instead (below).
 7. Enables + starts the app and both timers, enables lingering (Linux),
-   and publishes `tailscale serve --bg --https=8107`.
+   and publishes `tailscale serve --bg --https=8107`. An app that was
+   deliberately stopped before the re-run is left stopped (and Postgres
+   put back the way it was found).
 
 ## Deploy
 
@@ -137,14 +145,17 @@ rsync -a --exclude .owner ~/.self-learn/blobs/ kai-home-server:~/.self-learn/blo
 # first deploy here — leave the catalog empty
 cd self-learn && SKIP_SEED=1 AUTH_SECRET=<laptop's> ./setup.sh
 
-# then restore into the running container
+# restore into the running container: drop the migrated-but-empty
+# database first — the deploy already ran `catalog migrate`, and a bare
+# pg_restore into that schema errors on existing objects
+docker exec -it self-learn-db psql -U catalog -d postgres \
+  -c 'DROP DATABASE self_learn WITH (FORCE); CREATE DATABASE self_learn;'
 docker exec -i self-learn-db pg_restore --no-owner -U catalog -d self_learn < ~/self_learn.dump
 cd ~/services/self-learn/repo && npm run catalog -- doctor && npm run catalog -- blob audit --fix
 ```
 
-(If the seed already ran, drop and recreate first:
-`docker exec -it self-learn-db psql -U catalog -d postgres -c 'DROP DATABASE self_learn WITH (FORCE); CREATE DATABASE self_learn;'`
-— Docker prompts for the `POSTGRES_PASSWORD` from `.env`.) The
+(The psql step prompts for `POSTGRES_PASSWORD` from `.env`. The same
+drop-and-recreate covers a database that *was* seeded.) The
 `--exclude .owner` matters: the blob store's marker names the laptop's
 database, and a copied marker makes uploads and `audit --fix` refuse the
 root (upstream S3).
@@ -153,6 +164,7 @@ root (upstream S3).
 
 ```sh
 ~/services/self-learn/bin/deploy.sh --force          # pull + rebuild + migrate + restart now
+~/services/self-learn/bin/deploy.sh --sha <commit>   # pin to a commit (rollback — TROUBLESHOOT.md)
 journalctl --user -u self-learn -f                   # app logs
 journalctl --user -u self-learn-deploy -n 50         # deploy history
 journalctl --user -u self-learn-export               # nightly export runs

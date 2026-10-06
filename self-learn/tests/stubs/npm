@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # npm stub: `npm ci` creates node_modules in the cwd; `npm run build` creates
 # apps/web/.next; `npm run catalog`/`npm run start` only log.
+# $STATE_DIR/build_fails => `npm run build` exits 1 (for the rollback test).
 echo "npm $*" >> "$CALLS_LOG"
 
 case "${1:-}" in
   ci) mkdir -p node_modules ;;
   run)
     case "${2:-}" in
-      build) mkdir -p apps/web/.next ;;
+      build)
+        if [ -f "$STATE_DIR/build_fails" ]; then
+          echo "npm ERR! next build failed" >&2
+          exit 1
+        fi
+        mkdir -p apps/web/.next
+        ;;
     esac
     ;;
 esac

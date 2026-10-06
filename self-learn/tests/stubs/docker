@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # docker stub. State in $STATE_DIR:
 #   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   db_running      — exists => `compose ps` reports the db container up;
+#                     written by `compose up`, removed by `compose stop|down`
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -14,11 +16,13 @@ case "$1" in
     case "$2" in
       version) echo "Docker Compose version v2.99-stub" ;;
       *)
-        # compose --project-directory <dir> up -d / exec -T db pg_isready ...
+        # compose --project-directory <dir> <up -d|ps|stop|exec -T db ...>
         for a in "$@"; do
           case "$a" in
-            up)   touch "$STATE_DIR/compose_up" ;;
-            exec) exit 0 ;;
+            up)        touch "$STATE_DIR/compose_up" "$STATE_DIR/db_running" ;;
+            stop|down) rm -f "$STATE_DIR/db_running" ;;
+            ps)        [ -f "$STATE_DIR/db_running" ] && echo "cafe0123" ;;
+            exec)      exit 0 ;;
           esac
         done
         ;;

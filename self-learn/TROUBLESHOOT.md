@@ -4,10 +4,11 @@ Layered triage: deploy pipeline → database → app → publish → client. Wor
 top-down; each layer assumes the one above it is healthy.
 
 **A deliberately stopped app stays stopped.** The poller rebuilds and
-migrates but only restarts the app if it was running (this is how the
-launcher's stop button survives the daily poll). So a red tile with fresh
-deploy logs means stopped-on-purpose, not broken — `systemctl --user
-start self-learn` or the launcher's start button.
+migrates but only restarts the app if it was running, and Postgres is
+put back in the state it was found (this is how the launcher's stop
+button survives the daily poll and setup re-runs). So a red tile with
+fresh deploy logs means stopped-on-purpose, not broken — `systemctl
+--user start self-learn` or the launcher's start button.
 
 ## Quick status
 
@@ -42,8 +43,8 @@ API", you are not in the `docker` group *in this shell* — re-run under
 - `could not read Username` / auth errors → git credentials broke:
   `gh auth login && gh auth setup-git`, then run `deploy.sh` by hand.
 - `another deploy is running — skipping` on every run → stale lock from a
-  killed build; self-clears after 60 min, or:
-  `rmdir ~/services/self-learn/.deploy.lock`.
+  killed build; self-clears when the owner pid is dead or after 60 min,
+  or: `rm -rf ~/services/self-learn/.deploy.lock`.
 
 **Deploy fails.** Run it by hand for the full error:
 `~/services/self-learn/bin/deploy.sh --force`
@@ -55,8 +56,10 @@ API", you are not in the `docker` group *in this shell* — re-run under
   deploy.sh rewrites the checkout copy from `.env` on every run, so an
   edited-here value is the fix, not a symptom.
 - `next build` fails after a pull → usually a real upstream regression;
-  the app is left stopped (previous `.next` may be half-written). Fix or
-  roll back (below), then `--force`.
+  the deploy restores the previous `node_modules`/`.next` from its
+  rename-aside snapshot and restarts the old build, so the site stays up
+  on the last good commit. Fix upstream or roll back (below), then
+  `--force`.
 - Node errors after a system update → `node --version` must be >= 22.22.2
   and live where `.env`'s `NODE_BIN` points; if node moved (e.g. nix
   generation change), update `NODE_BIN` in `.env` and re-run `setup.sh`.
@@ -131,20 +134,18 @@ API", you are not in the `docker` group *in this shell* — re-run under
 
 ## Rollback
 
-`git reset --hard` the checkout to the previous sha, rebuild, restart:
+`deploy.sh --sha` pins the build to a specific commit. Pause the poll
+first — the next tick redeploys the branch tip and undoes the pin:
 
 ```sh
 systemctl --user stop self-learn-deploy.timer    # don't let the poll re-pull
-cd ~/services/self-learn/repo
-git reset --hard <previous-sha>
-~/services/self-learn/bin/deploy.sh --force      # sees HEAD==origin? then:
-git fetch origin && git reset --hard <previous-sha> && ~/services/self-learn/bin/deploy.sh --force
+~/services/self-learn/bin/deploy.sh --sha <previous-sha>
+# ...fixed upstream? resume the daily poll (redeploys origin/main):
+systemctl --user start self-learn-deploy.timer
 ```
 
-Careful: `deploy.sh` fetches `origin/main` — a rollback deploys the SHA
-you reset to only until the next fetch sees it differ; pin by pausing the
-timer first, or push a revert commit instead (cleanest — the poller
-deploys it like anything else). Database migrations are forward-only: a
+Or skip the pin and push a revert commit instead — cleanest, the poller
+deploys it like anything else. Database migrations are forward-only: a
 rolled-back app against a migrated DB is upstream's expected state
 (`migrate` is a hash check, not a replay).
 
