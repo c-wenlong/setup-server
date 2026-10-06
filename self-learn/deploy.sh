@@ -199,7 +199,6 @@ if [ "$need_ci" = "1" ]; then
   [ ! -d node_modules ] || mv node_modules "$SNAP/node_modules"
   echo "installing dependencies (npm ci)"
   npm ci --no-audit --no-fund || die_deploy "npm ci"
-  echo "$lock_sum" > "$BUILD_STATE/npm-lock-cksum"
 fi
 
 # ------------------------------------------------------------------ database
@@ -227,6 +226,10 @@ npm run catalog -- migrate || die_deploy "catalog migrate"
 # --------------------------------------------------------------------- build
 npm run build || die_deploy "next build"
 rm -rf "$SNAP"
+# Mark state only now: on a failure the snapshot restore rolled node_modules
+# back, so the lockfile cksum must still describe the OLD tree — writing it
+# here keeps the next retry honest.
+echo "$lock_sum" > "$BUILD_STATE/npm-lock-cksum"
 echo "$target_sha" > "$BUILD_STATE/built-sha"
 
 # ---------------------------------------------------------------- start again
