@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# npm stub: `npm ci` creates node_modules in the cwd; `npm run build` creates
+# apps/web/.next; `npm run catalog`/`npm run start` only log.
+echo "npm $*" >> "$CALLS_LOG"
+
+case "${1:-}" in
+  ci) mkdir -p node_modules ;;
+  run)
+    case "${2:-}" in
+      build) mkdir -p apps/web/.next ;;
+    esac
+    ;;
+esac
+exit 0

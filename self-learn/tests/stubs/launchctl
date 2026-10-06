@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# launchctl stub (used when the mocked suite runs on macOS): logs and tracks
+# the web agent's loaded state in $STATE_DIR/web_active.
+echo "launchctl $*" >> "$CALLS_LOG"
+
+case "${1:-}" in
+  print)
+    [ -f "$STATE_DIR/web_active" ] && exit 0 || exit 1
+    ;;
+  bootout)
+    rm -f "$STATE_DIR/web_active"
+    ;;
+  bootstrap|kickstart)
+    touch "$STATE_DIR/web_active"
+    ;;
+esac
+exit 0

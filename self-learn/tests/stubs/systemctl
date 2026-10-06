@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# systemctl stub: logs and succeeds. Tracks self-learn.service active state in
+# $STATE_DIR/web_active so deploy.sh's stop-if-running logic is exercised.
+echo "systemctl $*" >> "$CALLS_LOG"
+
+case "${2:-}" in
+  is-active)
+    [ -f "$STATE_DIR/web_active" ] && exit 0 || exit 3
+    ;;
+  stop)
+    rm -f "$STATE_DIR/web_active"
+    ;;
+  start|restart)
+    touch "$STATE_DIR/web_active"
+    ;;
+esac
+exit 0

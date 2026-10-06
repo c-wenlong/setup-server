@@ -44,6 +44,9 @@
        artwork in the kaichenpedia repo, so it needs no plate on either theme.
        Raster because no vector original exists. */
     'kaichenpedia':  { file: 'kaichenpedia', ext: 'png' },
+    /* The Gnosia mark from the self-learn repo's own brand set
+       (apps/web/public/brand/mark.png). Raster, no vector original. */
+    'self-learn':    { file: 'self-learn',    ext: 'png' },
     'manimkc':       { file: 'manimkc',      ext: 'png' },
     'seafile':       { file: 'seafile' },
     'syncthing':     { file: 'syncthing' },

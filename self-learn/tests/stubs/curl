@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# curl stub: health checks succeed.
+echo "curl $*" >> "$CALLS_LOG"
+exit 0

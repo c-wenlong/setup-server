@@ -1,0 +1,171 @@
+# self-learn — troubleshooting
+
+Layered triage: deploy pipeline → database → app → publish → client. Work
+top-down; each layer assumes the one above it is healthy.
+
+**A deliberately stopped app stays stopped.** The poller rebuilds and
+migrates but only restarts the app if it was running (this is how the
+launcher's stop button survives the daily poll). So a red tile with fresh
+deploy logs means stopped-on-purpose, not broken — `systemctl --user
+start self-learn` or the launcher's start button.
+
+## Quick status
+
+```sh
+systemctl --user is-active self-learn                  # app up?
+systemctl --user list-timers self-learn-*              # poller + export scheduled?
+journalctl --user -u self-learn-deploy -n 30           # last deploy runs
+cat ~/services/self-learn/state/built-sha              # what was last built
+docker inspect -f '{{.State.Status}}' self-learn-db    # Postgres up?
+curl -sI http://127.0.0.1:8107/ | head -1              # app answering locally?
+tailscale serve status                               # :8107 published?
+ls ~/.self-learn/archive/latest                      # nightly export landing?
+```
+
+If `docker` says "permission denied while trying to connect to the docker
+API", you are not in the `docker` group *in this shell* — re-run under
+`sg docker -c '...'`.
+
+## Layer 1 — deploys not happening
+
+**I pushed but the app didn't update.**
+
+- The poller only runs daily by default — deploy now:
+  `~/services/self-learn/bin/deploy.sh`, or check the last run:
+  `journalctl --user -u self-learn-deploy -n 30`.
+- `up to date at <sha>` with an old sha → the fetch isn't seeing your
+  push: wrong branch? `.env` `BRANCH` must match what you push to.
+- No log entries at all → timer not running:
+  `systemctl --user enable --now self-learn-deploy.timer`; if the box
+  just rebooted and nothing user-level runs, check lingering:
+  `loginctl show-user $USER -p Linger` → `sudo loginctl enable-linger $USER`.
+- `could not read Username` / auth errors → git credentials broke:
+  `gh auth login && gh auth setup-git`, then run `deploy.sh` by hand.
+- `another deploy is running — skipping` on every run → stale lock from a
+  killed build; self-clears after 60 min, or:
+  `rmdir ~/services/self-learn/.deploy.lock`.
+
+**Deploy fails.** Run it by hand for the full error:
+`~/services/self-learn/bin/deploy.sh --force`
+
+- `npm ci` / network errors → transient; the next timer tick retries.
+- `catalog migrate` fails → Postgres down or `DATABASE_URL` wrong:
+  `docker ps | grep self-learn-db`, and compare `DATABASE_URL` in
+  `self-learn/.env` against `services/catalog/.env` inside the checkout —
+  deploy.sh rewrites the checkout copy from `.env` on every run, so an
+  edited-here value is the fix, not a symptom.
+- `next build` fails after a pull → usually a real upstream regression;
+  the app is left stopped (previous `.next` may be half-written). Fix or
+  roll back (below), then `--force`.
+- Node errors after a system update → `node --version` must be >= 22.22.2
+  and live where `.env`'s `NODE_BIN` points; if node moved (e.g. nix
+  generation change), update `NODE_BIN` in `.env` and re-run `setup.sh`.
+
+## Layer 2 — database broken
+
+**`docker ps` shows self-learn-db down or restarting.**
+
+- `docker logs self-learn-db` — a bad `POSTGRES_PASSWORD` change in
+  `.env` is the classic: the password only applies at *first* container
+  init; editing it later makes the app and CLI fail auth while the
+  container itself is healthy. Revert `.env` to the generated value, or
+  change it inside Postgres too.
+- Port clash on :5432 → `ss -ltn | grep 5432` — a host Postgres or
+  another container claimed it. Move ours: `PG_PORT=` in `.env`, update
+  `DATABASE_URL` to match, re-run `setup.sh`.
+- Dump restore failed partway → drop and recreate, then restore again:
+  `docker exec -it self-learn-db psql -U catalog -d postgres -c 'DROP DATABASE self_learn WITH (FORCE); CREATE DATABASE self_learn;'`
+  (password in `.env`), re-run `pg_restore`, then
+  `npm run catalog -- migrate` in the checkout.
+- `blob audit` refuses the root ("owner names another database") → a
+  `.owner` marker was rsynced over from the laptop. Delete
+  `~/.self-learn/blobs/.owner`, then
+  `npm run catalog -- blob audit --fix` in the checkout.
+
+## Layer 3 — app broken
+
+**`curl http://127.0.0.1:8107/` fails or the unit won't stay up.**
+
+- `journalctl --user -u self-learn -n 100` — port taken? `-p` arg wrong?
+  `next` binary missing (an interrupted `npm ci` — re-run
+  `deploy.sh --force`)?
+- Landing page loads but every content page says "could not read its
+  content" → the app reaches Postgres but a type isn't flipped (fresh
+  seed path runs six flips; a restored dump carries its own). Check:
+  `cd ~/services/self-learn/repo && npm run catalog -- status`, and flip
+  what it names.
+- Pages load but say the database is unreachable / writes 503 →
+  `DATABASE_URL` mismatch: `apps/web/.env.local` in the checkout is
+  rewritten from `self-learn/.env` each deploy; fix `.env`, then
+  `deploy.sh --force`.
+- Sign-in refuses the correct password → you edited
+  `apps/web/.env.local` in the checkout and a deploy reverted it; the
+  source of truth is `self-learn/.env`. An `.env.local` at the repo ROOT
+  is never read — the app reads it from `apps/web/` only.
+- "was not running — left stopped" in deploy logs → expected after a
+  manual stop; `systemctl --user start self-learn`.
+
+## Layer 4 — publish broken
+
+**Local works, `https://…:8107` doesn't.**
+
+- `tailscale serve status` should map `:8107` → `127.0.0.1:8107`. Re-add:
+  `tailscale serve --bg --https=8107 http://127.0.0.1:8107`
+- `Access denied` → operator not set: `sudo tailscale set --operator=$USER`.
+- First-ever HTTPS hit can take ~60s (cert minting).
+- ⚠️ **Never `tailscale serve reset`** — it wipes the serve config for
+  the whole node. Single-port removal: `tailscale serve --https=8107 off`.
+- Sign-in succeeds but the session cookie won't stick over plain
+  `http://` → by design: the cookie is `Secure` only over https
+  (upstream S6). Use the `https://` URL.
+- **Kuma red but the app is up** — the monitor probes the tailnet URL,
+  so a publishing failure scores down too. Curl loopback first.
+  Everything red at once is tailscaled.
+
+## Layer 5 — client broken
+
+- Other tailnet services reachable? If not, it's the client's Tailscale.
+- Signed out everywhere at once → `AUTH_SECRET` rotated (`.env` edited,
+  or a first-run without the laptop's value). Sign in again; provider
+  keys saved in Settings must be re-entered.
+
+## Rollback
+
+`git reset --hard` the checkout to the previous sha, rebuild, restart:
+
+```sh
+systemctl --user stop self-learn-deploy.timer    # don't let the poll re-pull
+cd ~/services/self-learn/repo
+git reset --hard <previous-sha>
+~/services/self-learn/bin/deploy.sh --force      # sees HEAD==origin? then:
+git fetch origin && git reset --hard <previous-sha> && ~/services/self-learn/bin/deploy.sh --force
+```
+
+Careful: `deploy.sh` fetches `origin/main` — a rollback deploys the SHA
+you reset to only until the next fetch sees it differ; pin by pausing the
+timer first, or push a revert commit instead (cleanest — the poller
+deploys it like anything else). Database migrations are forward-only: a
+rolled-back app against a migrated DB is upstream's expected state
+(`migrate` is a hash check, not a replay).
+
+## Nuke and pave
+
+```sh
+systemctl --user disable --now self-learn-deploy.timer self-learn-export.timer self-learn.service
+rm -f ~/.config/systemd/user/self-learn.service \
+      ~/.config/systemd/user/self-learn-deploy.{service,timer} \
+      ~/.config/systemd/user/self-learn-export.{service,timer}
+systemctl --user daemon-reload
+docker compose --project-directory ~/dev/setup-server/self-learn down -v   # -v drops the Postgres volume
+rm -rf ~/services/self-learn
+rm -rf ~/.self-learn                # blob store + vault + archives — only if unwanted
+rm -f ~/dev/setup-server/self-learn/.env
+tailscale serve --https=8107 off
+cd ~/dev/setup-server/self-learn && ./setup.sh
+```
+
+The only irreplaceable state is the Postgres volume (learner history) and
+`~/.self-learn/blobs` (videos, diagrams). A `pg_dump` plus the latest
+`~/.self-learn/archive/` export is a full backup; `pg_dump` also covers
+the sealed provider keys, which `~/.self-learn` alone does not — and a
+dump only restores sealed keys under the same `AUTH_SECRET`.

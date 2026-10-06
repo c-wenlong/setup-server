@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# git stub. State in $STATE_DIR:
+#   remote_sha       — sha reported for origin/BRANCH (default aaa1111);
+#                      change it between runs to simulate a push
+#   git_auth_fail    — exists => ls-remote fails like missing credentials
+echo "git $*" >> "$CALLS_LOG"
+
+if [ "${1:-}" = "-C" ]; then shift 2; fi
+
+case "${1:-}" in
+  ls-remote)
+    if [ -f "$STATE_DIR/git_auth_fail" ]; then
+      echo "fatal: could not read Username for 'https://github.com': terminal prompts disabled" >&2
+      exit 128
+    fi
+    printf '%s\trefs/heads/main\n' "$(cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111)"
+    ;;
+  clone)
+    # last argument is the target directory; fake a self-learn checkout
+    target=""
+    for a in "$@"; do target="$a"; done
+    mkdir -p "$target/.git" "$target/apps/web" "$target/services/catalog" \
+      "$target/scripts" "$target/seed"
+    echo "fake-lockfile-v1" > "$target/package-lock.json"
+    echo "// nightly export stub" > "$target/scripts/nightly-export.mjs"
+    ;;
+  rev-parse)
+    cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111
+    ;;
+  fetch|reset) ;;
+esac
+exit 0
