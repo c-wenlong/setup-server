@@ -132,6 +132,76 @@ API", you are not in the `docker` group *in this shell* — re-run under
   or a first-run without the laptop's value). Sign in again; provider
   keys saved in Settings must be re-entered.
 
+## Layer 6 — sync broken (`sync.sh`)
+
+`./sync.sh status` is the triage entry point: it tables both catalogs and
+reports whether each side's sync client is alive.
+
+**`seaf : not installed` / daemon not answering.**
+
+- `systemctl --user status self-learn-seafile` — the unit is
+  `Type=oneshot` (`seaf-cli start` returns after spawning the daemon),
+  so `active (exited)` is healthy; `journalctl --user -u
+  self-learn-seafile` has real errors. Re-run `./sync.sh install` to
+  repair — it is idempotent (existing account/library are reused).
+- `seaf-cli list -c ~/services/self-learn/seafile/ccnet` — the
+  `self-learn-blobs` row should say `synchronized`. If the library is
+  missing, the daemon dropped it: `./sync.sh install` re-links.
+- Nothing syncs after a reboot → lingering off? `loginctl show-user
+  $USER -p Linger`. Also check `seaf-daemon`/`ccnet` actually run:
+  `pgrep -fl 'seaf-daemon|ccnet'`.
+
+**On the Mac.** No seaf-cli on macOS — the Seafile Client app owns the
+sync. Check the client's library list: `self-learn-blobs` should show a
+green state. A red/error state → right-click → resync, or delete the
+local sync entry and repeat the `mac-setup` pairing steps. Confirm
+`~/.self-learn/blobs/seafile-ignore.txt` still lists `/.owner` and
+`/.tmp` — without it the Mac's `.owner` marker would upload and wedge
+the server's blob root.
+
+**`blob audit` reports rows "outstanding" / findings.**
+
+Expected right after a `push`/`pull` or while Seafile is still
+delivering — rows are catalog entries whose objects haven't arrived
+yet. Give the daemon a few minutes, re-run `status`. If findings never
+drain, the daemon on one end is dead (above). Do **not** run `blob audit
+--fix` on either machine: it deletes orphans older than a day, and on a
+shared store a delete propagates to the other side.
+
+**`blob audit` refuses the root ("owner names another database").**
+
+A foreign `.owner` landed — either `seafile-ignore.txt` was missing when
+pairing happened, or a `push`/`pull` restored the database without
+rewriting the marker. Fix: delete `blobs/.owner` on the affected machine
+and re-run `./sync.sh push` or `pull` (it rewrites the marker for the
+current `pg_database` oid), or `npm run catalog -- blob audit --fix` in
+the local checkout if nothing is mid-transfer.
+
+**`push`/`pull` fails.**
+
+- `cannot ssh kaichen@…` → Tailscale down on either end, or the ssh key
+  isn't installed for BatchMode. `ssh kaichen@<mac> true` must succeed
+  non-interactively.
+- `a deploy or sync is running` → the shared `.deploy.lock` is held.
+  Same rules as deploy: it self-clears when the owner pid dies or after
+  60 min, or `rm -rf ~/services/self-learn/.deploy.lock`.
+- `pg_restore failed` on either side → the receiving database may be
+  left empty/partial — re-run the same command; a restore is always
+  drop+create first, so retrying is safe. pg version skew matters:
+  `pg_restore` on the receiver must be >= the dumper's major version.
+- `pull` stops `self-learn.service` for the restore; if it dies between
+  stop and start the app stays stopped —
+  `systemctl --user start self-learn` once the DB is whole.
+- A `pgrep` warning about a Next dev server on the Mac means `push`'s
+  `DROP … WITH (FORCE)` will sever its connections — expected; restart
+  the dev server after.
+
+**Undoing the sync.** Mac: right-click the library in Seafile Client →
+unsync (folder stays). Server: `systemctl --user disable --now
+self-learn-seafile.service`, remove the `SEAFILE_SYNC_*`/`MAC_*` lines
+from `.env`, `rm -rf ~/services/self-learn/seafile`. The blob folders
+and catalogs on both ends are untouched — they just stop converging.
+
 ## Rollback
 
 `deploy.sh --sha` pins the build to a specific commit. Pause the poll

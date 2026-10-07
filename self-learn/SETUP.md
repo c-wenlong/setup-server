@@ -160,6 +160,57 @@ drop-and-recreate covers a database that *was* seeded.) The
 database, and a copied marker makes uploads and `audit --fix` refuse the
 root (upstream S3).
 
+## Syncing with the MacBook (`sync.sh`)
+
+The one-shot rsync above becomes continuous with `sync.sh`. Blobs ride a
+dedicated Seafile library in both directions; the database rides
+`push`/`pull` only when asked — the two catalogs are meant to diverge,
+so a transfer is always a full replace (`pg_dump` → drop+create →
+`pg_restore`), never a merge.
+
+```
+server                          Seafile                          MacBook
+~/.self-learn/blobs  ◄── self-learn-blobs library (private) ──►  ~/.self-learn/blobs
+  seaf-cli daemon      dedicated non-admin sync account          Seafile Client.app
+  (self-learn-         (.owner + .tmp stay machine-local          (GUI pairing —
+   seafile.service)     via seafile-ignore.txt)                    no seaf-cli on macOS)
+
+./sync.sh push ──► pg_dump here ──► scp ──► drop+create ──► pg_restore on the Mac
+./sync.sh pull ──► pg_dump on the Mac ──► scp ──► stop app ──► drop+create ──► restore
+```
+
+```sh
+./sync.sh install     # server: sync account + library + seaf-cli daemon unit
+./sync.sh mac-setup   # Mac: lands seafile-ignore.txt first, then pairing steps
+./sync.sh status      # both catalogs and both blob stores, side by side
+./sync.sh push|pull   # full-catalog replace in the named direction
+```
+
+- `install` creates a **non-admin** Seafile account
+  (`self-learn-sync@<host>`) and a private `self-learn-blobs` library,
+  then runs `seaf-cli` under `self-learn-seafile.service` (systemd user
+  unit, restarted on login). Credentials persist into `.env` (mode 600)
+  — `SEAFILE_SYNC_USER`/`_PASSWORD`/`_REPO`. Admin credentials are only
+  read from the sibling `seafile/.env` at install time, never stored.
+- `mac-setup` writes `~/.self-learn/blobs/seafile-ignore.txt` on the Mac
+  **before** any pairing: `.owner` names one machine's database, and a
+  synced marker would make uploads and `blob audit` refuse the other
+  side's root. There is no `seaf-cli` for macOS, so pairing is the four
+  GUI steps it prints (if a nix `seaf-cli` is ever present it pairs
+  headless plus a LaunchAgent instead).
+- `push`/`pull` rewrite the receiver's `blobs/.owner` for the new
+  `pg_database` oid after every restore, and warn that the receiver's
+  `vault/` is stale — rebuild it with `learn vault pull` on that
+  machine. `pull` stops `self-learn.service` for the restore (and
+  restarts it only if it was running); `push` warns if a Next dev server
+  is holding connections on the Mac.
+- Both directions take the same `.deploy.lock` the poller uses: a sync
+  blocks a deploy and vice versa — a deploy must never migrate a
+  database mid-restore.
+- `status` tables each catalog table (count + newest timestamp) on both
+  ends, plus `.owner`, blob counts, and whether each side's sync client
+  is live — the quick way to see how far the two primaries have drifted.
+
 ## Ops
 
 ```sh
@@ -174,6 +225,8 @@ docker compose --project-directory ~/dev/setup-server/self-learn exec db \
   psql -U catalog self_learn                         # SQL in (password in .env)
 ls ~/.self-learn/archive/latest                      # newest readable export
 tailscale serve status
+./sync.sh status                                     # both catalogs + blob stores
+systemctl --user status self-learn-seafile           # blob-sync daemon
 ```
 
 The catalog CLI works in the checkout (`cd ~/services/self-learn/repo &&

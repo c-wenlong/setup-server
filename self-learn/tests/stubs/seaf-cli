@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# seaf-cli stub. State in $STATE_DIR:
+#   seaf_synced_<repo>  — exists => `list` shows that repo as synced
+#   seaf_fail_sync      — exists => `sync` exits 1
+echo "seaf-cli $*" >> "$CALLS_LOG"
+
+case "${1:-}" in
+  init)
+    # -d <dir>: make the ccnet dir so later checks see an initialised client
+    while [ $# -gt 0 ]; do
+      [ "$1" = "-d" ] && { mkdir -p "$2/ccnet"; shift; }
+      shift
+    done
+    ;;
+  start|stop) ;;
+  sync)
+    [ -f "$STATE_DIR/seaf_fail_sync" ] && exit 1
+    repo=""
+    while [ $# -gt 0 ]; do
+      [ "$1" = "-l" ] && repo="$2"
+      shift
+    done
+    [ -n "$repo" ] && touch "$STATE_DIR/seaf_synced_$repo"
+    ;;
+  list)
+    for f in "$STATE_DIR"/seaf_synced_*; do
+      [ -e "$f" ] || continue
+      echo "Name: self-learn-blobs  ID: ${f##*seaf_synced_}  status: synchronized"
+    done
+    ;;
+  status) ;;
+esac
+exit 0

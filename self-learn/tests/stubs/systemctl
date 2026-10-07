@@ -1,22 +1,35 @@
 #!/usr/bin/env bash
-# systemctl stub: logs and succeeds. Tracks self-learn.service state in
-# $STATE_DIR: web_active (is-active) and web_failed (is-failed), so the
-# stop-if-running and leave-stopped logic in setup.sh/deploy.sh is exercised.
+# systemctl stub: logs and succeeds. Tracks per-unit state in $STATE_DIR:
+#   web_active / web_failed  — self-learn.service (is-active / is-failed)
+#   seaf_active              — self-learn-seafile.service
+# enable --now also marks the unit active.
 echo "systemctl $*" >> "$CALLS_LOG"
+
+# setup.sh addresses units bare (`self-learn`), deploy.sh with the suffix
+# (`self-learn.service`) — normalise so both hit the same marker.
+unit="${*: -1}"; unit="${unit%.service}"
+marker=""; failed_marker="x_$unit"
+case "$unit" in
+  self-learn)         marker=web_active;  failed_marker=web_failed ;;
+  self-learn-seafile) marker=seaf_active; failed_marker=seaf_failed ;;
+esac
 
 case "${2:-}" in
   is-active)
-    [ -f "$STATE_DIR/web_active" ] && exit 0 || exit 3
+    [ -n "$marker" ] && [ -f "$STATE_DIR/$marker" ] && exit 0 || exit 3
     ;;
   is-failed)
-    [ -f "$STATE_DIR/web_failed" ] && exit 0 || exit 4
+    [ -f "$STATE_DIR/$failed_marker" ] && exit 0 || exit 4
     ;;
   stop)
-    rm -f "$STATE_DIR/web_active"
+    [ -n "$marker" ] && rm -f "$STATE_DIR/$marker"
     ;;
   start|restart)
-    rm -f "$STATE_DIR/web_failed"
-    touch "$STATE_DIR/web_active"
+    [ -n "$marker" ] && { rm -f "$STATE_DIR/$failed_marker"; touch "$STATE_DIR/$marker"; }
+    ;;
+  enable)
+    # `enable --now UNIT` starts it too
+    case "$*" in *--now*) [ -n "$marker" ] && touch "$STATE_DIR/$marker" ;; esac
     ;;
 esac
 exit 0

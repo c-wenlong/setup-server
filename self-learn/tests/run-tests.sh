@@ -28,14 +28,79 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/docker-compose.yml" \
+    "$SERVICE_DIR/sync.sh" "$SVC/"
+}
+
+# A self-learn .env as a finished setup.sh would have written it — enough for
+# sync.sh tests without a full mocked deploy.
+mk_env() {
+  mkdir -p "$HOME/services/self-learn/bin" "$HOME/services/self-learn/state" \
+    "$HOME/.self-learn/blobs/local"
+  cat > "$SVC/.env" <<EOF
+SERVICE_HOME=$HOME/services/self-learn
+SELF_LEARN_HOME=$HOME/.self-learn
+MAC_SSH=tester@mac.invalid
+NODE_BIN=/usr/bin
+LOCAL_PORT=8107
+PG_PORT=5432
+POSTGRES_USER=catalog
+POSTGRES_PASSWORD=pw
+POSTGRES_DB=self_learn
+DATABASE_URL=postgres://catalog:pw@127.0.0.1:5432/self_learn
+EOF
+  chmod 600 "$SVC/.env"
+}
+
+# The sibling seafile service's .env, at the default sibling path
+# ($SVC/../seafile/.env).
+mk_seafile_env() {
+  mkdir -p "$SANDBOX/seafile"
+  cat > "$SANDBOX/seafile/.env" <<EOF
+LOCAL_PORT=8081
+SEAFILE_SERVER_PROTOCOL=https
+SEAFILE_SERVER_HOSTNAME=test-host.tailfake.ts.net:8443
+INIT_SEAFILE_ADMIN_EMAIL=admin@test
+INIT_SEAFILE_ADMIN_PASSWORD=adminpw
+EOF
+}
+
+# Canned snapshot query answers (name|ts_col|present meta, then union rows).
+mk_psql_canned() {
+  cat > "$STATE_DIR/psql_meta" <<'EOF'
+asset|created_at|t
+catalog_instance||t
+event|at|t
+review|last_reviewed|t
+EOF
+  cat > "$STATE_DIR/psql_rows" <<'EOF'
+asset|42|2026-10-06 10:00:00
+catalog_instance|1|-
+event|510|2026-10-06 18:00:00
+review|77|2026-10-06 12:00:00
+EOF
+  cat > "$STATE_DIR/mac_psql_meta" <<'EOF'
+asset|created_at|t
+catalog_instance||t
+event|at|t
+review|last_reviewed|t
+EOF
+  cat > "$STATE_DIR/mac_psql_rows" <<'EOF'
+asset|40|2026-10-05 10:00:00
+catalog_instance|1|-
+event|505|2026-10-05 18:00:00
+review|70|2026-10-05 12:00:00
+EOF
 }
 
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
   unset FAKE_UID LOCAL_PORT HTTPS_PORT PG_PORT REPO_URL BRANCH POLL_SECONDS \
-    SKIP_SEED OWNER_PASSWORD AUTH_SECRET STATE_DIR CALLS_LOG
+    SKIP_SEED OWNER_PASSWORD AUTH_SECRET STATE_DIR CALLS_LOG \
+    SEAFILE_ENV MAC_SSH MAC_HOME MAC_REPO MAC_PGBIN MAC_DB MAC_DB_URL \
+    MAC_PGPORT MAC_SEAFILE_URL SEAFILE_URL SEAFILE_SYNC_USER \
+    SEAFILE_SYNC_PASSWORD SEAFILE_SYNC_REPO
 }
 
 run_deploy() {
@@ -48,6 +113,12 @@ run_deploy() {
 # Run the installed poller script directly (as the timer would).
 run_poll() {
   OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/self-learn/bin/deploy.sh" "$@" 2>&1)"
+  CODE=$?
+}
+
+# sync.sh runs in place from the service copy.
+run_sync() {
+  OUT="$(PATH="$STUBS:$PATH" bash "$SVC/sync.sh" "$@" 2>&1)"
   CODE=$?
 }
 
@@ -425,6 +496,166 @@ test_serve_approval_pause() {
   teardown
 }
 
+test_sync_install() {
+  echo "• sync install: account, library, ignore file, daemon unit"
+  setup; mk_env; mk_seafile_env
+  run_sync install
+  if [ "$OS" != "Linux" ]; then
+    check "refuses off-Linux" [ "$CODE" -ne 0 ]
+    check "points at mac-setup" out_has "mac-setup"
+    teardown; return
+  fi
+  check "exits zero"            [ "$CODE" -eq 0 ]
+  check "created the account"   calls_have "api/v2.1/admin/users"
+  check "created the library"   calls_have "api2/repos"
+  check "linked library"        calls_have "seaf-cli sync -l stub-repo-777"
+  check "ignore has .owner"     grep -q '^/.owner$' "$HOME/.self-learn/blobs/seafile-ignore.txt"
+  check "ignore has .tmp"       grep -q '^/.tmp$' "$HOME/.self-learn/blobs/seafile-ignore.txt"
+  check "creds persisted"       env_has "SEAFILE_SYNC_REPO=stub-repo-777"
+  check "env stays 600"         test "$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")" = 600
+  check "unit written"          test -f "$HOME/.config/systemd/user/self-learn-seafile.service"
+  check "unit enabled"          calls_have "systemctl --user enable --now self-learn-seafile.service"
+  teardown
+}
+
+test_sync_install_idempotent() {
+  echo "• sync install re-run: existing account/library untouched"
+  [ "$OS" = "Linux" ] || return 0
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_URL=http://127.0.0.1:8081
+SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  run_sync install
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "no account create"   no_call "api/v2.1/admin/users"
+  check "no repo create"      no_call "api2/repos"
+  check "still links library" calls_have "seaf-cli sync -l stub-repo-777"
+  teardown
+}
+
+test_sync_mac_setup_gui() {
+  echo "• sync mac-setup: ignore file lands first, GUI steps printed"
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  run_sync mac-setup
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "remote ignore written"   grep -q '^/.owner$' "$STATE_DIR/mac_ignore.txt"
+  check "ignore covers .tmp"      grep -q '^/.tmp$' "$STATE_DIR/mac_ignore.txt"
+  check "prints GUI steps"        out_has "Seafile Client"
+  check "prints the account"      out_has "self-learn-sync@test"
+  check "prints tailnet URL"      out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
+test_sync_mac_setup_headless() {
+  echo "• sync mac-setup: seaf-cli on the Mac pairs headless + LaunchAgent"
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  echo "/nix/store/seafile/bin/seaf-cli" > "$STATE_DIR/mac_seaf_cli"
+  run_sync mac-setup
+  check "exits zero"            [ "$CODE" -eq 0 ]
+  check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
+  check "plist written"         grep -q "seaf-cli" "$STATE_DIR/mac_plist.xml"
+  check "agent bootstrapped"    calls_have "launchctl bootstrap"
+  teardown
+}
+
+test_sync_push() {
+  echo "• sync push: dump server db, restore it on the Mac"
+  setup; mk_env; mk_psql_canned
+  mkdir -p "$HOME/services/self-learn/repo"
+  run_sync push
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "dumped locally"      calls_have "docker exec -i self-learn-db pg_dump -Fc -U catalog self_learn"
+  check "scp to mac"          calls_have "scp .*:/tmp/self_learn-sync.dump"
+  check "drop sent"           grep -q "DROP DATABASE" "$STATE_DIR/mac_sql.log"
+  check "createdb on mac"     calls_have "createdb"
+  check "restore on mac"      calls_have "pg_restore --no-owner"
+  check "owner rewritten"     grep -q '"self_learn:33692"' "$STATE_DIR/mac_owner.txt"
+  check "mac audit ran"       calls_have "npm run catalog -- blob audit"
+  check "vault warned"        out_has "vault"
+  check "dump cleaned"        test ! -f "$HOME/services/self-learn/state/self_learn-push.dump"
+  teardown
+}
+
+test_sync_pull() {
+  echo "• sync pull: dump Mac db, restore here, app restarted"
+  setup; mk_env; mk_psql_canned
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/web_active"
+  run_sync pull
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "remote dump"         calls_have "pg_dump -Fc"
+  check "scp back"            calls_have "scp .*:/tmp/self_learn-sync.dump"
+  check "app stopped"         calls_have "systemctl --user stop self-learn.service"
+  check "compose up"          calls_have "compose --project-directory .* up -d"
+  check "drop sent locally"   grep -q "DROP DATABASE" "$STATE_DIR/local_sql.log"
+  check "local restore"       calls_have "pg_restore --no-owner"
+  check "owner rewritten"     grep -q '"self_learn:16384"' "$HOME/.self-learn/blobs/.owner"
+  check "audit ran"           calls_have "npm run catalog -- blob audit"
+  check "app restarted"       calls_have "systemctl --user start self-learn.service"
+  teardown
+}
+
+test_sync_pull_stopped_app() {
+  echo "• sync pull: a stopped app is restored without being started"
+  setup; mk_env; mk_psql_canned
+  mkdir -p "$HOME/services/self-learn/repo"
+  run_sync pull
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "restore ran"         calls_have "pg_restore --no-owner"
+  check "no stop call"        no_call "systemctl --user stop self-learn.service"
+  check "no start call"       no_call "systemctl --user start self-learn.service"
+  teardown
+}
+
+test_sync_push_locked() {
+  echo "• sync push: a live deploy/sync lock refuses to run"
+  setup; mk_env; mk_psql_canned
+  mkdir "$HOME/services/self-learn/.deploy.lock"
+  echo $$ > "$HOME/services/self-learn/.deploy.lock/pid"
+  run_sync push
+  check "exits non-zero"      [ "$CODE" -ne 0 ]
+  check "says why"            out_has "deploy or sync is running"
+  check "no dump taken"       no_call "pg_dump"
+  teardown
+}
+
+test_sync_status() {
+  echo "• sync status: both sides tabled; unreachable Mac degrades"
+  setup; mk_env; mk_psql_canned
+  run_sync status
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "server section"      out_has "SERVER"
+  check "mac section"         out_has "MAC"
+  check "server rows"         out_has "asset.*42"
+  check "mac rows"            out_has "asset.*40"
+  check "mac client noted"    out_has "seaf"
+  teardown
+}
+
+test_sync_status_unreachable() {
+  echo "• sync status: unreachable Mac reports cleanly"
+  setup; mk_env; mk_psql_canned
+  touch "$STATE_DIR/mac_unreachable"
+  run_sync status
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "server still shown"  out_has "SERVER"
+  check "says unreachable"    out_has "unreachable"
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -478,6 +709,12 @@ test_live() {
 }
 
 # ------------------------------------------------------------------ main
+# A stub that isn't executable is skipped by PATH lookup and the REAL command
+# runs — for ssh/scp that means the real Mac. Refuse to run rather than risk it.
+for f in "$STUBS"/*; do
+  [ -x "$f" ] || { red "stub not executable: $f — chmod +x it"; exit 1; }
+done
+
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
 test_preflight_tailscale_down
@@ -499,6 +736,16 @@ test_deploy_pinned_sha
 test_failed_build_restores
 test_operator_escalation
 test_serve_approval_pause
+test_sync_install
+test_sync_install_idempotent
+test_sync_mac_setup_gui
+test_sync_mac_setup_headless
+test_sync_push
+test_sync_pull
+test_sync_pull_stopped_app
+test_sync_push_locked
+test_sync_status
+test_sync_status_unreachable
 
 if [ "${1:-}" = "--live" ]; then
   echo
