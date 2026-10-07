@@ -15,6 +15,9 @@ case "${1:-}" in
   start|stop) ;;
   sync)
     [ -f "$STATE_DIR/seaf_fail_sync" ] && exit 1
+    # the password arrives piped on stdin (sync.sh never puts it on argv);
+    # consume it like the real getpass fallback would
+    [ ! -t 0 ] && cat >/dev/null
     repo=""
     while [ $# -gt 0 ]; do
       [ "$1" = "-l" ] && repo="$2"

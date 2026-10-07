@@ -88,6 +88,7 @@ MAC_PGBIN="${MAC_PGBIN:-/opt/homebrew/opt/postgresql@17/bin}"
 MAC_DB="${MAC_DB:-self_learn}"
 MAC_PGPORT="${MAC_PGPORT:-5432}"
 MAC_DB_URL="${MAC_DB_URL:-postgres://kaichen@127.0.0.1:$MAC_PGPORT/$MAC_DB}"
+MAC_DUMP="$MAC_HOME/self_learn-sync.dump"   # staging path on the Mac (not shared /tmp)
 # nix-installed node/npm are not on a bare ssh PATH
 MAC_PATH_PREFIX="${MAC_PATH_PREFIX:-/etc/profiles/per-user/kaichen/bin}"
 
@@ -115,6 +116,18 @@ usage() {
 # A single key from the sibling seafile service's .env — never source it
 # wholesale: it carries its own LOCAL_PORT, which would shadow ours.
 seafile_env() { sed -n "s/^$1=//p" "$SEAFILE_ENV" | tail -1; }
+
+# The whole request goes to curl as a config on stdin (-K -): URLs, tokens
+# and passwords stay out of the process list. The caller pipes body fields,
+# one `data-urlencode "k=v"` per line — which also encodes the values.
+seafile_api() {
+  local method="$1" path="$2" token="${3:-}"
+  {
+    printf 'request = "%s"\nurl = "%s%s"\n' "$method" "$SEAFILE_URL" "$path"
+    [ -n "$token" ] && printf 'header = "Authorization: Token %s"\n' "$token"
+    cat
+  } | curl -fsS -K -
+}
 
 # --------------------------------------------------------------------- lock
 # Same mkdir+pid lock deploy.sh takes: while a sync holds it a firing poller
@@ -311,8 +324,9 @@ cmd_install() {
   [ -n "$INIT_SEAFILE_ADMIN_EMAIL" ] && [ -n "$INIT_SEAFILE_ADMIN_PASSWORD" ] \
     || die "admin credentials missing from $SEAFILE_ENV"
 
-  admin_token="$(curl -fsS -X POST "$SEAFILE_URL/api2/auth-token/" \
-      -d "username=$INIT_SEAFILE_ADMIN_EMAIL" -d "password=$INIT_SEAFILE_ADMIN_PASSWORD" \
+  admin_token="$(printf 'data-urlencode "username=%s"\ndata-urlencode "password=%s"\n' \
+      "$INIT_SEAFILE_ADMIN_EMAIL" "$INIT_SEAFILE_ADMIN_PASSWORD" \
+    | seafile_api POST /api2/auth-token/ \
     | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p')"
   [ -n "$admin_token" ] || die "Seafile admin auth failed ($SEAFILE_URL/api2/auth-token/)"
 
@@ -320,10 +334,9 @@ cmd_install() {
     SEAFILE_SYNC_USER="self-learn-sync@$(hostname -s 2>/dev/null || hostname)"
     SEAFILE_SYNC_PASSWORD="$(randhex 24)"
     info "Creating Seafile account $SEAFILE_SYNC_USER"
-    curl -fsS -X POST -H "Authorization: Token $admin_token" \
-      "$SEAFILE_URL/api/v2.1/admin/users/" \
-      -d "email=$SEAFILE_SYNC_USER" -d "name=self-learn blob sync" \
-      -d "password=$SEAFILE_SYNC_PASSWORD" >/dev/null \
+    printf 'data-urlencode "email=%s"\ndata-urlencode "name=self-learn blob sync"\ndata-urlencode "password=%s"\n' \
+        "$SEAFILE_SYNC_USER" "$SEAFILE_SYNC_PASSWORD" \
+      | seafile_api POST /api/v2.1/admin/users/ "$admin_token" >/dev/null \
       || die "could not create the sync account"
     ok "Account created"
   else
@@ -331,13 +344,14 @@ cmd_install() {
   fi
 
   if [ -z "${SEAFILE_SYNC_REPO:-}" ]; then
-    user_token="$(curl -fsS -X POST "$SEAFILE_URL/api2/auth-token/" \
-        -d "username=$SEAFILE_SYNC_USER" -d "password=$SEAFILE_SYNC_PASSWORD" \
+    user_token="$(printf 'data-urlencode "username=%s"\ndata-urlencode "password=%s"\n' \
+        "$SEAFILE_SYNC_USER" "$SEAFILE_SYNC_PASSWORD" \
+      | seafile_api POST /api2/auth-token/ \
       | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p')"
     [ -n "$user_token" ] || die "could not log in as $SEAFILE_SYNC_USER"
     info "Creating library self-learn-blobs"
-    SEAFILE_SYNC_REPO="$(curl -fsS -X POST -H "Authorization: Token $user_token" \
-        "$SEAFILE_URL/api2/repos/" -d "name=self-learn-blobs" \
+    SEAFILE_SYNC_REPO="$(printf 'data-urlencode "name=self-learn-blobs"\n' \
+      | seafile_api POST /api2/repos/ "$user_token" \
       | sed -n 's/.*"repo_id": *"\([^"]*\)".*/\1/p')"
     [ -n "$SEAFILE_SYNC_REPO" ] || die "library creation returned no repo_id"
     ok "Library $SEAFILE_SYNC_REPO created"
@@ -366,13 +380,20 @@ EOF
   ok "Wrote $IGNORE_FILE (.owner/.tmp stay machine-local)"
 
   # --- daemon + library link (idempotent) ---
-  [ -d "$SEAF_DIR/ccnet" ] || "$SEAF_CLI" init -d "$SEAF_DIR" >/dev/null || die "seaf-cli init failed"
+  # -c is the ccnet config dir on every subcommand, init included — without
+  # it init would populate the default ~/.ccnet and every other call would
+  # point at an uninitialised $SEAF_DIR/ccnet.
+  [ -d "$SEAF_DIR/ccnet" ] || "$SEAF_CLI" init -c "$SEAF_DIR/ccnet" -d "$SEAF_DIR" >/dev/null \
+    || die "seaf-cli init failed"
   "$SEAF_CLI" start -c "$SEAF_DIR/ccnet" >/dev/null 2>&1 || true
   if ! "$SEAF_CLI" list -c "$SEAF_DIR/ccnet" 2>/dev/null | grep -q "$SEAFILE_SYNC_REPO"; then
     info "Linking library -> $BLOBS_DIR"
-    "$SEAF_CLI" sync -l "$SEAFILE_SYNC_REPO" -s "$SEAFILE_URL" \
-      -d "$BLOBS_DIR" -u "$SEAFILE_SYNC_USER" -p "$SEAFILE_SYNC_PASSWORD" \
-      -c "$SEAF_DIR/ccnet" >/dev/null || die "seaf-cli sync failed"
+    # No -p on argv: without the flag seaf-cli getpass()es, and setsid drops
+    # the controlling tty so the password comes off this pipe, not the terminal.
+    printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | setsid "$SEAF_CLI" sync \
+      -l "$SEAFILE_SYNC_REPO" -s "$SEAFILE_URL" -d "$BLOBS_DIR" \
+      -u "$SEAFILE_SYNC_USER" -c "$SEAF_DIR/ccnet" >/dev/null 2>&1 \
+      || die "seaf-cli sync failed"
   fi
   ok "Library linked to $BLOBS_DIR"
 
@@ -433,11 +454,14 @@ EOF
   SEAF_MAC="$($SSH "$MAC_SSH" 'export PATH="'"$MAC_PATH_PREFIX"':$PATH"; command -v seaf-cli' 2>/dev/null || true)"
   if [ -n "$SEAF_MAC" ]; then
     info "seaf-cli found on the Mac ($SEAF_MAC) — pairing headless"
-    $SSH "$MAC_SSH" "'$SEAF_MAC' init -d '$MAC_HOME/.seafile' >/dev/null 2>&1 || true
+    # The password rides ssh's stdin — plain ssh allocates no remote tty, so
+    # seaf-cli's getpass reads it from there and it never appears in argv
+    # on either side.
+    printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | $SSH "$MAC_SSH" "'$SEAF_MAC' init -c '$MAC_HOME/.seafile/ccnet' -d '$MAC_HOME/.seafile' >/dev/null 2>&1 || true
       '$SEAF_MAC' start -c '$MAC_HOME/.seafile/ccnet' >/dev/null 2>&1 || true
       '$SEAF_MAC' list -c '$MAC_HOME/.seafile/ccnet' 2>/dev/null | grep -q '$SEAFILE_SYNC_REPO' || \
         '$SEAF_MAC' sync -l '$SEAFILE_SYNC_REPO' -s '$MAC_SEAFILE_URL' \
-          -d '$MAC_HOME/blobs' -u '$SEAFILE_SYNC_USER' -p '$SEAFILE_SYNC_PASSWORD' \
+          -d '$MAC_HOME/blobs' -u '$SEAFILE_SYNC_USER' \
           -c '$MAC_HOME/.seafile/ccnet'" || die "seaf-cli pairing on the Mac failed"
     $SSH "$MAC_SSH" "cat > ~/Library/LaunchAgents/com.self-learn.seafile.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -515,8 +539,10 @@ cmd_push() {
   local dump="$BUILD_STATE/self_learn-push.dump"
 
   info "pg_dump $POSTGRES_DB (docker exec $DB_CONTAINER)"
-  docker exec -i "$DB_CONTAINER" pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB" > "$dump" \
-    || die "pg_dump failed"
+  # Full-catalog dump = secrets-bearing file: 0600 on both ends, staged
+  # under the Mac's private ~ (scp -p carries the mode), never /tmp.
+  ( umask 077; docker exec -i "$DB_CONTAINER" pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB" \
+      > "$dump" ) || die "pg_dump failed"
   ok "Dumped $(du -h "$dump" | cut -f1)"
 
   if $SSH "$MAC_SSH" "pgrep -fl 'next.*dev|next-server' 2>/dev/null | grep -q ."; then
@@ -524,16 +550,16 @@ cmd_push() {
   fi
 
   info "copying dump to the Mac"
-  $SCP "$dump" "$MAC_SSH:/tmp/self_learn-sync.dump" >/dev/null || die "scp failed"
+  $SCP -p "$dump" "$MAC_SSH:$MAC_DUMP" >/dev/null || die "scp failed"
 
   info "restoring on the Mac: drop + create + pg_restore"
   mpsql postgres <<EOF || die "drop failed on the Mac"
 DROP DATABASE IF EXISTS "$MAC_DB" WITH (FORCE);
 EOF
   $SSH "$MAC_SSH" "$MAC_PGBIN/createdb \"$MAC_DB\"" || die "createdb failed on the Mac"
-  $SSH "$MAC_SSH" "$MAC_PGBIN/pg_restore --no-owner -d \"$MAC_DB\" /tmp/self_learn-sync.dump" \
+  $SSH "$MAC_SSH" "$MAC_PGBIN/pg_restore --no-owner -d \"$MAC_DB\" '$MAC_DUMP'" \
     || die "pg_restore failed on the Mac — its database may be empty/partial; fix and re-run"
-  $SSH "$MAC_SSH" "rm -f /tmp/self_learn-sync.dump" || true
+  $SSH "$MAC_SSH" "rm -f '$MAC_DUMP'" || true
   rm -f "$dump"
 
   write_owner_mac
@@ -551,10 +577,10 @@ cmd_pull() {
   local dump="$BUILD_STATE/self_learn-pull.dump"
 
   info "pg_dump on the Mac"
-  $SSH "$MAC_SSH" "$MAC_PGBIN/pg_dump -Fc \"$MAC_DB\" > /tmp/self_learn-sync.dump" \
+  $SSH "$MAC_SSH" "umask 077; $MAC_PGBIN/pg_dump -Fc \"$MAC_DB\" > '$MAC_DUMP'" \
     || die "pg_dump failed on the Mac"
-  $SCP "$MAC_SSH:/tmp/self_learn-sync.dump" "$dump" >/dev/null || die "scp failed"
-  $SSH "$MAC_SSH" "rm -f /tmp/self_learn-sync.dump" || true
+  $SCP -p "$MAC_SSH:$MAC_DUMP" "$dump" >/dev/null || die "scp failed"
+  $SSH "$MAC_SSH" "rm -f '$MAC_DUMP'" || true
   ok "Pulled $(du -h "$dump" | cut -f1)"
 
   WAS_ACTIVE=0

@@ -131,10 +131,10 @@ check() {
   fi
 }
 
-out_has()    { grep -q "$1" <<<"$OUT"; }
-calls_have() { grep -q "$1" "$CALLS_LOG"; }
-no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
-env_has()    { grep -q "$1" "$SVC/.env"; }
+out_has()    { grep -q -- "$1" <<<"$OUT"; }
+calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
+no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
+env_has()    { grep -q -- "$1" "$SVC/.env"; }
 REPO_DIR()   { printf '%s' "$HOME/services/self-learn/repo"; }
 
 # ----------------------------------------------------------------- tests
@@ -515,6 +515,8 @@ test_sync_install() {
   check "env stays 600"         test "$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")" = 600
   check "unit written"          test -f "$HOME/.config/systemd/user/self-learn-seafile.service"
   check "unit enabled"          calls_have "systemctl --user enable --now self-learn-seafile.service"
+  check "admin pw not in argv"  no_call "adminpw"
+  check "sync pw not in argv"   no_call " -p "
   teardown
 }
 
@@ -578,7 +580,8 @@ test_sync_push() {
   run_sync push
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "dumped locally"      calls_have "docker exec -i self-learn-db pg_dump -Fc -U catalog self_learn"
-  check "scp to mac"          calls_have "scp .*:/tmp/self_learn-sync.dump"
+  check "scp to mac"          calls_have "scp .*-p .*self_learn-sync.dump"
+  check "not staged in /tmp"  no_call ":/tmp/"
   check "drop sent"           grep -q "DROP DATABASE" "$STATE_DIR/mac_sql.log"
   check "createdb on mac"     calls_have "createdb"
   check "restore on mac"      calls_have "pg_restore --no-owner"
@@ -597,7 +600,7 @@ test_sync_pull() {
   run_sync pull
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "remote dump"         calls_have "pg_dump -Fc"
-  check "scp back"            calls_have "scp .*:/tmp/self_learn-sync.dump"
+  check "scp back"            calls_have "scp .*-p .*self_learn-sync.dump"
   check "app stopped"         calls_have "systemctl --user stop self-learn.service"
   check "compose up"          calls_have "compose --project-directory .* up -d"
   check "drop sent locally"   grep -q "DROP DATABASE" "$STATE_DIR/local_sql.log"
@@ -629,6 +632,17 @@ test_sync_push_locked() {
   check "exits non-zero"      [ "$CODE" -ne 0 ]
   check "says why"            out_has "deploy or sync is running"
   check "no dump taken"       no_call "pg_dump"
+  teardown
+}
+
+test_sync_push_pg_fails() {
+  echo "• sync push: a failed local dump ships nothing"
+  setup; mk_env; mk_psql_canned
+  touch "$STATE_DIR/pg_fails"
+  run_sync push
+  check "exits non-zero"      [ "$CODE" -ne 0 ]
+  check "says why"            out_has "pg_dump failed"
+  check "nothing shipped"     no_call "scp"
   teardown
 }
 
@@ -744,6 +758,7 @@ test_sync_push
 test_sync_pull
 test_sync_pull_stopped_app
 test_sync_push_locked
+test_sync_push_pg_fails
 test_sync_status
 test_sync_status_unreachable
 
