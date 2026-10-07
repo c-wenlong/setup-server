@@ -385,7 +385,9 @@ EOF
   # --- daemon + library link (idempotent) ---
   # -c is the ccnet config dir on every subcommand, init included — without
   # it init would populate the default ~/.ccnet and every other call would
-  # point at an uninitialised $SEAF_DIR/ccnet.
+  # point at an uninitialised $SEAF_DIR/ccnet. init does a single mkdir of
+  # the -c dir, so its parent must already exist.
+  mkdir -p "$SEAF_DIR"
   [ -d "$SEAF_DIR/ccnet" ] || "$SEAF_CLI" init -c "$SEAF_DIR/ccnet" -d "$SEAF_DIR" >/dev/null \
     || die "seaf-cli init failed"
 
@@ -473,7 +475,7 @@ EOF
   SEAF_MAC="$($SSH "$MAC_SSH" 'export PATH="'"$MAC_PATH_PREFIX"':$PATH"; command -v seaf-cli' 2>/dev/null || true)"
   if [ -n "$SEAF_MAC" ]; then
     info "seaf-cli found on the Mac ($SEAF_MAC) — pairing headless"
-    $SSH "$MAC_SSH" "[ -d '$MAC_HOME/.seafile/ccnet' ] || '$SEAF_MAC' init -c '$MAC_HOME/.seafile/ccnet' -d '$MAC_HOME/.seafile'" \
+    $SSH "$MAC_SSH" "mkdir -p '$MAC_HOME/.seafile' && { [ -d '$MAC_HOME/.seafile/ccnet' ] || '$SEAF_MAC' init -c '$MAC_HOME/.seafile/ccnet' -d '$MAC_HOME/.seafile'; }" \
       || die "seaf-cli init on the Mac failed"
     # The agent runs seaf-daemon itself (next to seaf-cli) in the foreground
     # with KeepAlive — a oneshot `seaf-cli start` wrapper would leave a dead
