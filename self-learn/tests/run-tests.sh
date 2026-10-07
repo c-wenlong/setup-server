@@ -514,7 +514,8 @@ test_sync_install() {
   check "creds persisted"       env_has "SEAFILE_SYNC_REPO=stub-repo-777"
   check "env stays 600"         test "$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")" = 600
   check "unit written"          test -f "$HOME/.config/systemd/user/self-learn-seafile.service"
-  check "unit enabled"          calls_have "systemctl --user enable --now self-learn-seafile.service"
+  check "unit enabled"          calls_have "systemctl --user enable self-learn-seafile.service"
+  check "unit restarted"        calls_have "systemctl --user restart self-learn-seafile.service"
   check "daemon is the process" grep -q "ExecStart=.*seaf-daemon" "$HOME/.config/systemd/user/self-learn-seafile.service"
   check "unit restarts"         grep -q "Restart=always" "$HOME/.config/systemd/user/self-learn-seafile.service"
   check "admin pw not in argv"  no_call "adminpw"

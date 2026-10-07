@@ -410,7 +410,10 @@ RestartSec=10
 WantedBy=default.target
 EOF
   systemctl --user daemon-reload
-  systemctl --user enable --now "$SEAF_UNIT" >/dev/null 2>&1 || die "could not start $SEAF_UNIT"
+  # restart, not enable --now: an older unit left active (the oneshot shape
+  # that predates this daemon) would survive enable --now untouched.
+  systemctl --user enable "$SEAF_UNIT" >/dev/null 2>&1 || die "could not enable $SEAF_UNIT"
+  systemctl --user restart "$SEAF_UNIT" || die "could not start $SEAF_UNIT"
 
   # list/sync talk to the daemon's rpc socket — wait until it answers.
   for _ in $(seq 1 20); do
@@ -468,15 +471,8 @@ EOF
   SEAF_MAC="$($SSH "$MAC_SSH" 'export PATH="'"$MAC_PATH_PREFIX"':$PATH"; command -v seaf-cli' 2>/dev/null || true)"
   if [ -n "$SEAF_MAC" ]; then
     info "seaf-cli found on the Mac ($SEAF_MAC) — pairing headless"
-    # The password rides ssh's stdin — plain ssh allocates no remote tty, so
-    # seaf-cli's getpass reads it from there and it never appears in argv
-    # on either side.
-    printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | $SSH "$MAC_SSH" "'$SEAF_MAC' init -c '$MAC_HOME/.seafile/ccnet' -d '$MAC_HOME/.seafile' >/dev/null 2>&1 || true
-      '$SEAF_MAC' start -c '$MAC_HOME/.seafile/ccnet' >/dev/null 2>&1 || true
-      '$SEAF_MAC' list -c '$MAC_HOME/.seafile/ccnet' 2>/dev/null | grep -q '$SEAFILE_SYNC_REPO' || \
-        '$SEAF_MAC' sync -l '$SEAFILE_SYNC_REPO' -s '$MAC_SEAFILE_URL' \
-          -d '$MAC_HOME/blobs' -u '$SEAFILE_SYNC_USER' \
-          -c '$MAC_HOME/.seafile/ccnet'" || die "seaf-cli pairing on the Mac failed"
+    $SSH "$MAC_SSH" "[ -d '$MAC_HOME/.seafile/ccnet' ] || '$SEAF_MAC' init -c '$MAC_HOME/.seafile/ccnet' -d '$MAC_HOME/.seafile'" \
+      || die "seaf-cli init on the Mac failed"
     # The agent runs seaf-daemon itself (next to seaf-cli) in the foreground
     # with KeepAlive — a oneshot `seaf-cli start` wrapper would leave a dead
     # daemon looking alive, same failure the systemd unit avoids.
@@ -498,7 +494,15 @@ EOF
 </plist>
 EOF
     $SSH "$MAC_SSH" "launchctl bootout gui/\$(id -u)/com.self-learn.seafile 2>/dev/null; launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.self-learn.seafile.plist" \
-      || warn "LaunchAgent load failed — start the daemon by hand: $SEAF_MAC start -c $MAC_HOME/.seafile/ccnet"
+      || warn "LaunchAgent load failed — start the daemon by hand: $SEAF_DAEMON_MAC -c $MAC_HOME/.seafile/ccnet -d $MAC_HOME/.seafile/seafile-data -w $MAC_HOME/.seafile/seafile"
+    # The agent owns the daemon — no `seaf-cli start` here, or two daemons
+    # fight over the same ccnet dir and KeepAlive retries forever. Pairing
+    # waits for the agent's daemon to answer rpc first.
+    printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | $SSH "$MAC_SSH" "for _ in \$(seq 1 20); do '$SEAF_MAC' list -c '$MAC_HOME/.seafile/ccnet' >/dev/null 2>&1 && break; sleep 0.5; done
+      '$SEAF_MAC' list -c '$MAC_HOME/.seafile/ccnet' 2>/dev/null | grep -q '$SEAFILE_SYNC_REPO' || \
+        '$SEAF_MAC' sync -l '$SEAFILE_SYNC_REPO' -s '$MAC_SEAFILE_URL' \
+          -d '$MAC_HOME/blobs' -u '$SEAFILE_SYNC_USER' \
+          -c '$MAC_HOME/.seafile/ccnet'" || die "seaf-cli pairing on the Mac failed"
     ok "seaf-cli paired on the Mac; daemon returns at login"
   else
     cat <<EOF
