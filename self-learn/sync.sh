@@ -332,7 +332,9 @@ cmd_install() {
   [ -n "$admin_token" ] || die "Seafile admin auth failed ($SEAFILE_URL/api2/auth-token/)"
 
   if [ -z "${SEAFILE_SYNC_USER:-}" ]; then
-    SEAFILE_SYNC_USER="self-learn-sync@$(hostname -s 2>/dev/null || hostname)"
+    # .local suffix: Seafile rejects emails whose domain has no dot (400
+    # "email invalid"), and a bare hostname has none.
+    SEAFILE_SYNC_USER="self-learn-sync@$(hostname -s 2>/dev/null || hostname).local"
     SEAFILE_SYNC_PASSWORD="$(randhex 24)"
     info "Creating Seafile account $SEAFILE_SYNC_USER"
     printf 'data-urlencode "email=%s"\ndata-urlencode "name=self-learn blob sync"\ndata-urlencode "password=%s"\n' \
