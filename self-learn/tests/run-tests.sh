@@ -509,8 +509,9 @@ test_sync_install() {
   check "created the account"   calls_have "api/v2.1/admin/users"
   check "created the library"   calls_have "api2/repos"
   check "linked library"        calls_have "seaf-cli sync -l stub-repo-777"
-  check "ignore has .owner"     grep -q '^/.owner$' "$HOME/.self-learn/blobs/seafile-ignore.txt"
-  check "ignore has .tmp"       grep -q '^/.tmp$' "$HOME/.self-learn/blobs/seafile-ignore.txt"
+  check "links blobs/local"     calls_have " -d $HOME/.self-learn/blobs/local"
+  check "ignore has .owner"     grep -q '^/.owner$' "$HOME/.self-learn/blobs/local/seafile-ignore.txt"
+  check "ignore has .tmp"       grep -q '^/.tmp$' "$HOME/.self-learn/blobs/local/seafile-ignore.txt"
   check "creds persisted"       env_has "SEAFILE_SYNC_REPO=stub-repo-777"
   check "env stays 600"         test "$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")" = 600
   check "unit written"          test -f "$HOME/.config/systemd/user/self-learn-seafile.service"
@@ -538,6 +539,43 @@ EOF
   check "no account create"   no_call "api/v2.1/admin/users"
   check "no repo create"      no_call "api2/repos"
   check "still links library" calls_have "seaf-cli sync -l stub-repo-777"
+  teardown
+}
+
+test_sync_install_old_layout() {
+  echo "• sync install: library synced to blobs/ root refuses, names the fix"
+  [ "$OS" = "Linux" ] || return 0
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_URL=http://127.0.0.1:8081
+SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  touch "$STATE_DIR/seaf_synced_stub-repo-777"
+  echo "$HOME/.self-learn/blobs" > "$STATE_DIR/seaf_path_stub-repo-777"
+  run_sync install
+  check "exits non-zero"      [ "$CODE" -ne 0 ]
+  check "says desync"         out_has "desync"
+  check "no new link"         no_call "seaf-cli sync -l stub-repo-777"
+  teardown
+}
+
+test_sync_install_already_linked() {
+  echo "• sync install: repo already on blobs/local is left alone"
+  [ "$OS" = "Linux" ] || return 0
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_URL=http://127.0.0.1:8081
+SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  touch "$STATE_DIR/seaf_synced_stub-repo-777"
+  echo "$HOME/.self-learn/blobs/local" > "$STATE_DIR/seaf_path_stub-repo-777"
+  run_sync install
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "no relink"           no_call "seaf-cli sync -l stub-repo-777"
   teardown
 }
 
@@ -571,6 +609,7 @@ EOF
   run_sync mac-setup
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
+  check "remote links blobs/local" calls_have "-d '/Users/kaichen/.self-learn/blobs/local'"
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
   check "agent bootstrapped"    calls_have "launchctl bootstrap"
@@ -759,6 +798,8 @@ test_operator_escalation
 test_serve_approval_pause
 test_sync_install
 test_sync_install_idempotent
+test_sync_install_old_layout
+test_sync_install_already_linked
 test_sync_mac_setup_gui
 test_sync_mac_setup_headless
 test_sync_push

@@ -170,10 +170,10 @@ so a transfer is always a full replace (`pg_dump` → drop+create →
 
 ```
 server                          Seafile                          MacBook
-~/.self-learn/blobs  ◄── self-learn-blobs library (private) ──►  ~/.self-learn/blobs
+~/.self-learn/blobs/local ◄── self-learn-blobs library ──► ~/.self-learn/blobs/local
   seaf-cli daemon      dedicated non-admin sync account          Seafile Client.app
-  (self-learn-         (.owner + .tmp stay machine-local          (GUI pairing —
-   seafile.service)     via seafile-ignore.txt)                    no seaf-cli on macOS)
+  (self-learn-         (.owner + .tmp sit beside local/,          (GUI pairing —
+   seafile.service)     outside the synced tree)                   no seaf-cli on macOS)
 
 ./sync.sh push ──► pg_dump here ──► scp ──► drop+create ──► pg_restore on the Mac
 ./sync.sh pull ──► pg_dump on the Mac ──► scp ──► stop app ──► drop+create ──► restore
@@ -187,7 +187,7 @@ server                          Seafile                          MacBook
 ```
 
 - `install` creates a **non-admin** Seafile account
-  (`self-learn-sync@<host>`) and a private `self-learn-blobs` library,
+  (`self-learn-sync@<host>.local`) and a private `self-learn-blobs` library,
   then runs `seaf-daemon` in the foreground under
   `self-learn-seafile.service` (systemd user unit, `Restart=always` — a
   dead daemon is revived, and `active (running)` actually means syncing).
@@ -197,10 +197,12 @@ server                          Seafile                          MacBook
   and no password ever lands on a process list (`curl -K -` reads the
   request from stdin; `seaf-cli` takes it via its getpass stdin
   fallback).
-- `mac-setup` writes `~/.self-learn/blobs/seafile-ignore.txt` on the Mac
-  **before** any pairing: `.owner` names one machine's database, and a
-  synced marker would make uploads and `blob audit` refuse the other
-  side's root. There is no `seaf-cli` for macOS, so pairing is the four
+- `mac-setup` writes `~/.self-learn/blobs/local/seafile-ignore.txt` on the
+  Mac **before** any pairing. Only `blobs/local` is the library worktree —
+  `.owner` and `.tmp` sit at `blobs/` root, outside the synced tree, so a
+  foreign `.owner` can never be delivered onto either machine (the ignore
+  file inside `local/` is a second line of defence). There is no
+  `seaf-cli` for macOS, so pairing is the four
   GUI steps it prints (if a nix `seaf-cli` is ever present it pairs
   headless plus a LaunchAgent instead).
 - `push`/`pull` rewrite the receiver's `blobs/.owner` for the new

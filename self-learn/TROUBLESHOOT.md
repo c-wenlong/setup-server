@@ -155,10 +155,12 @@ reports whether each side's sync client is alive.
 **On the Mac.** No seaf-cli on macOS — the Seafile Client app owns the
 sync. Check the client's library list: `self-learn-blobs` should show a
 green state. A red/error state → right-click → resync, or delete the
-local sync entry and repeat the `mac-setup` pairing steps. Confirm
-`~/.self-learn/blobs/seafile-ignore.txt` still lists `/.owner` and
-`/.tmp` — without it the Mac's `.owner` marker would upload and wedge
-the server's blob root.
+local sync entry and repeat the `mac-setup` pairing steps — into
+`~/.self-learn/blobs/local`, not `~/.self-learn/blobs` (the whole `blobs`
+dir as library root is the retired layout; `.owner` lived inside it and
+syncs clobbered it across machines). Confirm
+`~/.self-learn/blobs/local/seafile-ignore.txt` still lists `/.owner` and
+`/.tmp`.
 
 **`blob audit` reports rows "outstanding" / findings.**
 
@@ -171,9 +173,9 @@ shared store a delete propagates to the other side.
 
 **`blob audit` refuses the root ("owner names another database").**
 
-A foreign `.owner` landed — either `seafile-ignore.txt` was missing when
-pairing happened, or a `push`/`pull` restored the database without
-rewriting the marker. Fix: delete `blobs/.owner` on the affected machine
+A foreign `.owner` landed — only possible via manual file copy or a
+`push`/`pull` restore that didn't rewrite the marker (`.owner` sits
+outside the synced `blobs/local` tree, so Seafile can't deliver one). Fix: delete `blobs/.owner` on the affected machine
 and re-run `./sync.sh push` or `pull` (it rewrites the marker for the
 current `pg_database` oid), or `npm run catalog -- blob audit --fix` in
 the local checkout if nothing is mid-transfer.

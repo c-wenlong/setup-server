@@ -4,10 +4,10 @@
 #
 # Two halves, following docs/HOMESERVER.md in the self-learn repo (S1–S3):
 #
-#   blobs — ~/.self-learn/blobs rides a dedicated Seafile library
+#   blobs — ~/.self-learn/blobs/local rides a dedicated Seafile library
 #           ("self-learn-blobs") continuously. The store is content-addressed,
-#           so both sides union without conflicts. `.owner` and `.tmp` stay
-#           machine-local via seafile-ignore.txt: the marker names one
+#           so both sides union without conflicts. `.owner` and `.tmp` sit
+#           beside local/, outside the synced tree: the marker names one
 #           database, and a foreign one makes uploads and `blob audit`
 #           refuse the root. Server side: seaf-cli under a systemd user
 #           unit. Mac side: the installed Seafile Client.app pairs the
@@ -79,7 +79,12 @@ WEB_LABEL="com.self-learn.web"
 SEAF_UNIT="self-learn-seafile.service"
 SEAF_DIR="$SERVICE_HOME/seafile"    # ccnet config root for the sync daemon
 BLOBS_DIR="$SELF_LEARN_HOME/blobs"
-IGNORE_FILE="$BLOBS_DIR/seafile-ignore.txt"
+# Only blobs/local is the library worktree. .owner and .tmp sit beside it at
+# blobs/ root — outside the tree entirely, so a seafile-ignore miss or a
+# merge conflict can never carry a foreign .owner onto this machine (the
+# ignore file inside local/ is a second line of defence, not the first).
+LINK_DIR="$BLOBS_DIR/local"
+IGNORE_FILE="$LINK_DIR/seafile-ignore.txt"
 
 MAC_SSH="${MAC_SSH:-kaichen@100.66.100.47}"
 MAC_HOME="${MAC_HOME:-/Users/kaichen/.self-learn}"
@@ -289,7 +294,7 @@ audit_mac() {
 
 # ------------------------------------------------------------ seafile ignore
 write_ignore_local() {
-  mkdir -p "$BLOBS_DIR"
+  mkdir -p "$LINK_DIR"
   cat > "$IGNORE_FILE" <<'EOF'
 # Written by self-learn/sync.sh — machine-local entries that must not sync.
 # .owner names this machine's database for this blob root; a foreign marker
@@ -427,16 +432,21 @@ EOF
   "$SEAF_CLI" list -c "$SEAF_DIR/ccnet" >/dev/null 2>&1 \
     || die "seaf-daemon is not answering — journalctl --user -u $SEAF_UNIT"
 
-  if ! "$SEAF_CLI" list -c "$SEAF_DIR/ccnet" 2>/dev/null | grep -q "$SEAFILE_SYNC_REPO"; then
-    info "Linking library -> $BLOBS_DIR"
+  linked_dir="$("$SEAF_CLI" list -c "$SEAF_DIR/ccnet" 2>/dev/null \
+    | awk -v r="$SEAFILE_SYNC_REPO" '$2 == r {print $3}')"
+  if [ -n "$linked_dir" ] && [ "$linked_dir" != "$LINK_DIR" ]; then
+    die "library is synced to $linked_dir, not $LINK_DIR — desync the old mapping first: $SEAF_CLI desync -d '$linked_dir' -c '$SEAF_DIR/ccnet'"
+  fi
+  if [ -z "$linked_dir" ]; then
+    info "Linking library -> $LINK_DIR"
     # No -p on argv: without the flag seaf-cli getpass()es, and setsid drops
     # the controlling tty so the password comes off this pipe, not the terminal.
     printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | setsid "$SEAF_CLI" sync \
-      -l "$SEAFILE_SYNC_REPO" -s "$SEAFILE_URL" -d "$BLOBS_DIR" \
+      -l "$SEAFILE_SYNC_REPO" -s "$SEAFILE_URL" -d "$LINK_DIR" \
       -u "$SEAFILE_SYNC_USER" -c "$SEAF_DIR/ccnet" >/dev/null 2>&1 \
       || die "seaf-cli sync failed"
   fi
-  ok "Library linked to $BLOBS_DIR"
+  ok "Library linked to $LINK_DIR"
 
   echo
   ok "Server side of the blob link is live."
@@ -461,8 +471,8 @@ cmd_mac_setup() {
 
   # Written before any pairing — a synced .owner/.tmp on either side would
   # poison the other machine's blob root.
-  info "Writing $MAC_HOME/blobs/seafile-ignore.txt"
-  $SSH "$MAC_SSH" "mkdir -p '$MAC_HOME/blobs' && cat > '$MAC_HOME/blobs/seafile-ignore.txt'" <<'EOF'
+  info "Writing $MAC_HOME/blobs/local/seafile-ignore.txt"
+  $SSH "$MAC_SSH" "mkdir -p '$MAC_HOME/blobs/local' && cat > '$MAC_HOME/blobs/local/seafile-ignore.txt'" <<'EOF'
 # Written by self-learn/sync.sh — machine-local entries that must not sync.
 # .owner names this machine's database for this blob root; a foreign marker
 # makes uploads and `blob audit` refuse it (docs/HOMESERVER.md S3).
@@ -505,7 +515,7 @@ EOF
     printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | $SSH "$MAC_SSH" "for _ in \$(seq 1 20); do '$SEAF_MAC' list -c '$MAC_HOME/.seafile/ccnet' >/dev/null 2>&1 && break; sleep 0.5; done
       '$SEAF_MAC' list -c '$MAC_HOME/.seafile/ccnet' 2>/dev/null | grep -q '$SEAFILE_SYNC_REPO' || \
         '$SEAF_MAC' sync -l '$SEAFILE_SYNC_REPO' -s '$MAC_SEAFILE_URL' \
-          -d '$MAC_HOME/blobs' -u '$SEAFILE_SYNC_USER' \
+          -d '$MAC_HOME/blobs/local' -u '$SEAFILE_SYNC_USER' \
           -c '$MAC_HOME/.seafile/ccnet'" || die "seaf-cli pairing on the Mac failed"
     ok "seaf-cli paired on the Mac; daemon returns at login"
   else
@@ -520,7 +530,7 @@ there is no seaf-cli for macOS). On the MacBook, once:
        user     $SEAFILE_SYNC_USER
        password $SEAFILE_SYNC_PASSWORD   (also in .env)
   3. Right-click the "self-learn-blobs" library -> "Sync this library" ->
-     "sync with an existing folder" -> pick ~/.self-learn/blobs.
+     "sync with an existing folder" -> pick ~/.self-learn/blobs/local.
   4. Enable auto-start on login in the client's settings if it is off.
 
 seafile-ignore.txt is already in place, so the Mac's own .owner never

@@ -18,17 +18,34 @@ case "${1:-}" in
     # the password arrives piped on stdin (sync.sh never puts it on argv);
     # consume it like the real getpass fallback would
     [ ! -t 0 ] && cat >/dev/null
-    repo=""
+    repo="" dir=""
     while [ $# -gt 0 ]; do
       [ "$1" = "-l" ] && repo="$2"
+      [ "$1" = "-d" ] && dir="$2"
       shift
     done
     [ -n "$repo" ] && touch "$STATE_DIR/seaf_synced_$repo"
+    [ -n "$dir" ] && echo "$dir" > "$STATE_DIR/seaf_path_$repo"
+    ;;
+  desync)
+    dir=""
+    while [ $# -gt 0 ]; do
+      [ "$1" = "-d" ] && dir="$2"
+      shift
+    done
+    for f in "$STATE_DIR"/seaf_path_*; do
+      [ -e "$f" ] || continue
+      [ "$(cat "$f")" = "$dir" ] && { rm -f "$f" "${f/path_/synced_}"; }
+    done
     ;;
   list)
     for f in "$STATE_DIR"/seaf_synced_*; do
       [ -e "$f" ] || continue
-      echo "Name: self-learn-blobs  ID: ${f##*seaf_synced_}  status: synchronized"
+      repo="${f##*seaf_synced_}"
+      path="$HOME/.self-learn/blobs/local"
+      [ -f "$STATE_DIR/seaf_path_$repo" ] && path="$(cat "$STATE_DIR/seaf_path_$repo")"
+      # real output: three columns — name, id, synced folder
+      echo "self-learn-blobs $repo $path"
     done
     ;;
   status) ;;
