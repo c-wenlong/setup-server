@@ -188,10 +188,15 @@ server                          Seafile                          MacBook
 
 - `install` creates a **non-admin** Seafile account
   (`self-learn-sync@<host>`) and a private `self-learn-blobs` library,
-  then runs `seaf-cli` under `self-learn-seafile.service` (systemd user
-  unit, restarted on login). Credentials persist into `.env` (mode 600)
-  — `SEAFILE_SYNC_USER`/`_PASSWORD`/`_REPO`. Admin credentials are only
-  read from the sibling `seafile/.env` at install time, never stored.
+  then runs `seaf-daemon` in the foreground under
+  `self-learn-seafile.service` (systemd user unit, `Restart=always` — a
+  dead daemon is revived, and `active (running)` actually means syncing).
+  Credentials persist into `.env` (mode 600) —
+  `SEAFILE_SYNC_USER`/`_PASSWORD`/`_REPO`. Admin credentials are only
+  read from the sibling `seafile/.env` at install time, never stored,
+  and no password ever lands on a process list (`curl -K -` reads the
+  request from stdin; `seaf-cli` takes it via its getpass stdin
+  fallback).
 - `mac-setup` writes `~/.self-learn/blobs/seafile-ignore.txt` on the Mac
   **before** any pairing: `.owner` names one machine's database, and a
   synced marker would make uploads and `blob audit` refuse the other

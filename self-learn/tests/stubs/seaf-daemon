@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# seaf-daemon stub — the real daemon runs in the foreground under systemd;
+# in the sandbox systemd is stubbed, so it is only ever probed, never run.
+echo "seaf-daemon $*" >> "$CALLS_LOG"
+exit 0

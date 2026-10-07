@@ -515,6 +515,8 @@ test_sync_install() {
   check "env stays 600"         test "$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")" = 600
   check "unit written"          test -f "$HOME/.config/systemd/user/self-learn-seafile.service"
   check "unit enabled"          calls_have "systemctl --user enable --now self-learn-seafile.service"
+  check "daemon is the process" grep -q "ExecStart=.*seaf-daemon" "$HOME/.config/systemd/user/self-learn-seafile.service"
+  check "unit restarts"         grep -q "Restart=always" "$HOME/.config/systemd/user/self-learn-seafile.service"
   check "admin pw not in argv"  no_call "adminpw"
   check "sync pw not in argv"   no_call " -p "
   teardown
@@ -568,7 +570,8 @@ EOF
   run_sync mac-setup
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
-  check "plist written"         grep -q "seaf-cli" "$STATE_DIR/mac_plist.xml"
+  check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
+  check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
   check "agent bootstrapped"    calls_have "launchctl bootstrap"
   teardown
 }
@@ -596,7 +599,7 @@ test_sync_pull() {
   echo "• sync pull: dump Mac db, restore here, app restarted"
   setup; mk_env; mk_psql_canned
   mkdir -p "$HOME/services/self-learn/repo"
-  touch "$STATE_DIR/web_active"
+  touch "$STATE_DIR/web_active" "$STATE_DIR/db_running"
   run_sync pull
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "remote dump"         calls_have "pg_dump -Fc"
@@ -608,6 +611,7 @@ test_sync_pull() {
   check "owner rewritten"     grep -q '"self_learn:16384"' "$HOME/.self-learn/blobs/.owner"
   check "audit ran"           calls_have "npm run catalog -- blob audit"
   check "app restarted"       calls_have "systemctl --user start self-learn.service"
+  check "postgres left up"    no_call "compose --project-directory .* stop$"
   teardown
 }
 
@@ -620,6 +624,8 @@ test_sync_pull_stopped_app() {
   check "restore ran"         calls_have "pg_restore --no-owner"
   check "no stop call"        no_call "systemctl --user stop self-learn.service"
   check "no start call"       no_call "systemctl --user start self-learn.service"
+  check "postgres back down"  calls_have "compose --project-directory .* stop$"
+  check "db marker gone"      test ! -f "$STATE_DIR/db_running"
   teardown
 }
 

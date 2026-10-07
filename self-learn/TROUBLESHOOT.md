@@ -139,11 +139,12 @@ reports whether each side's sync client is alive.
 
 **`seaf : not installed` / daemon not answering.**
 
-- `systemctl --user status self-learn-seafile` — the unit is
-  `Type=oneshot` (`seaf-cli start` returns after spawning the daemon),
-  so `active (exited)` is healthy; `journalctl --user -u
-  self-learn-seafile` has real errors. Re-run `./sync.sh install` to
-  repair — it is idempotent (existing account/library are reused).
+- `systemctl --user status self-learn-seafile` — the unit runs
+  `seaf-daemon` in the foreground, so `active (running)` is healthy and a
+  crashed daemon restarts itself (`Restart=always`). `journalctl --user -u
+  self-learn-seafile` has the daemon's own errors. Re-run
+  `./sync.sh install` to repair — it is idempotent (existing
+  account/library are reused).
 - `seaf-cli list -c ~/services/self-learn/seafile/ccnet` — the
   `self-learn-blobs` row should say `synchronized`. If the library is
   missing, the daemon dropped it: `./sync.sh install` re-links.
