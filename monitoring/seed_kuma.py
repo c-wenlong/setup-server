@@ -114,6 +114,11 @@ MONITORS = [
 MONITORS.append(
     ("ollama", f"http://127.0.0.1:{os.environ.get('OLLAMA_PORT', '11434')}/api/version")
 )
+# The self-learn studio runner is loopback-only too — the app proxies
+# /studio/api/* to it, so the published :8107 monitor can never see it down.
+# Only meaningful while STUDIO_ENABLED=1 in self-learn/.env; delete the
+# monitor (or pause it) if the flag goes back to 0.
+MONITORS.append(("self-learn-studio", "http://127.0.0.1:7250/api/health"))
 
 api = UptimeKumaApi(f"http://127.0.0.1:{os.environ['KUMA_PORT']}", timeout=30)
 user = os.environ["KUMA_ADMIN_USER"]

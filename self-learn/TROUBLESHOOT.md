@@ -132,6 +132,30 @@ API", you are not in the `docker` group *in this shell* — re-run under
   or a first-run without the laptop's value). Sign in again; provider
   keys saved in Settings must be re-entered.
 
+## Studio runner broken (`self-learn-studio`)
+
+**The Studio page loads but jobs never start / the panel says the runner is down.**
+
+- `curl -s http://127.0.0.1:7250/api/health` — the runner's own surface
+  (loopback only; the app proxies `/studio/api/*` to it). If it fails:
+  `journalctl --user -u self-learn-studio -n 100`. Unit missing entirely →
+  re-run `setup.sh`.
+- Studio missing from the UI at all → `STUDIO_ENABLED` isn't 1 in
+  `self-learn/.env`. Set it and re-run `setup.sh` — that flag gates both
+  the web UI and the runner's enable. Flipping it back to 0 and
+  re-running stops and disables the unit.
+- Jobs start and immediately fail with a claude/auth error → the runner
+  spawns `STUDIO_CLAUDE_BIN` (baked into the unit at setup time). Check
+  `claude` still exists at that path and `~/.claude` credentials are
+  still valid — `claude -p 'say hi'` as the deploy user proves both.
+- Jobs fail with "catalog" errors → the runner reaches Postgres by
+  spawning `npm run catalog` in the checkout, which reads
+  `services/catalog/.env` — same diagnosis as Layer 2.
+- A deploy appeared to kill a job mid-run → expected: the poller stops
+  and restarts the runner with the app (it shares the checkout's
+  `node_modules`). Job state under `~/services/self-learn/studio` is the
+  write-ahead log — interrupted jobs resume or can be re-enqueued.
+
 ## Layer 6 — sync broken (`sync.sh`)
 
 `./sync.sh status` is the triage entry point: it tables both catalogs and

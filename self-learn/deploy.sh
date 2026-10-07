@@ -44,6 +44,8 @@ NEXT_DIR="$REPO_DIR/apps/web/.next"
 SNAP="$BUILD_STATE/rollback"
 WEB_UNIT="self-learn.service"
 WEB_LABEL="com.self-learn.web"
+STUDIO_UNIT="self-learn-studio.service"
+STUDIO_LABEL="com.self-learn.studio"
 
 # --------------------------------------------------------------------- lock
 # mkdir is the portable atomic lock (macOS has no flock). The holder writes
@@ -78,29 +80,42 @@ case "${1:-}" in
   *) echo "usage: deploy.sh [--force | --sha <commit>]" >&2; exit 2 ;;
 esac
 
-# --------------------------------------------------------------- web service
+# --------------------------------------------------------------- app services
+# The studio runner is managed with the app: it shells `npm run catalog` out
+# of the same node_modules, so it goes down for the npm ci window and comes
+# back only if it was running — a deliberately stopped runner stays stopped.
 WAS_ACTIVE=0
-web_is_active() {
+STUDIO_WAS_ACTIVE=0
+if [ "$OS" = "Linux" ]; then
+  WEB_SVC="$WEB_UNIT"; STUDIO_SVC="$STUDIO_UNIT"
+else
+  WEB_SVC="$WEB_LABEL"; STUDIO_SVC="$STUDIO_LABEL"
+fi
+svc_is_active() {
   if [ "$OS" = "Linux" ]; then
-    systemctl --user is-active --quiet "$WEB_UNIT"
+    systemctl --user is-active --quiet "$1"
   else
-    launchctl print "gui/$(id -u)/$WEB_LABEL" >/dev/null 2>&1
+    launchctl print "gui/$(id -u)/$1" >/dev/null 2>&1
   fi
 }
-web_stop() {
+svc_stop() {
   if [ "$OS" = "Linux" ]; then
-    systemctl --user stop "$WEB_UNIT"
+    systemctl --user stop "$1"
   else
-    launchctl bootout "gui/$(id -u)/$WEB_LABEL" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$1" 2>/dev/null || true
   fi
 }
-web_start() {
+svc_start() {
   if [ "$OS" = "Linux" ]; then
-    systemctl --user start "$WEB_UNIT"
+    systemctl --user start "$1"
   else
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$WEB_LABEL.plist" \
-      2>/dev/null || launchctl kickstart -k "gui/$(id -u)/$WEB_LABEL"
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$1.plist" \
+      2>/dev/null || launchctl kickstart -k "gui/$(id -u)/$1"
   fi
+}
+studio_installed() {
+  [ -f "$HOME/.config/systemd/user/$STUDIO_UNIT" ] \
+    || [ -f "$HOME/Library/LaunchAgents/$STUDIO_LABEL.plist" ]
 }
 # Postgres is started below for the migrate; if it was not running before and
 # the app is staying stopped, the operator's stop covered it — put it back.
@@ -127,7 +142,10 @@ die_deploy() {
   db_as_found
   if [ "$WAS_ACTIVE" = "1" ]; then
     echo "restarting the previous build" >&2
-    web_start || true
+    svc_start "$WEB_SVC" || true
+  fi
+  if [ "$STUDIO_WAS_ACTIVE" = "1" ]; then
+    svc_start "$STUDIO_SVC" || true
   fi
   exit 1
 }
@@ -150,10 +168,15 @@ fi
 echo "deploying $target_sha (was: $built_sha)"
 
 # ------------------------------------------------------------- stop the app
-if web_is_active; then
+if svc_is_active "$WEB_SVC"; then
   WAS_ACTIVE=1
   echo "stopping the web app while node_modules and .next are replaced"
-  web_stop || die_deploy "stop $WEB_UNIT"
+  svc_stop "$WEB_SVC" || die_deploy "stop $WEB_UNIT"
+fi
+if studio_installed && svc_is_active "$STUDIO_SVC"; then
+  STUDIO_WAS_ACTIVE=1
+  echo "stopping the studio runner while node_modules is replaced"
+  svc_stop "$STUDIO_SVC" || die_deploy "stop $STUDIO_UNIT"
 fi
 
 git -C "$REPO_DIR" reset --hard --quiet "$target_sha" || die_deploy "git reset"
@@ -172,6 +195,8 @@ DATABASE_URL=$DATABASE_URL
 OWNER_PASSWORD=$OWNER_PASSWORD
 AUTH_SECRET=$AUTH_SECRET
 NEXT_PUBLIC_SITE_URL=$PUBLIC_URL
+STUDIO_ENABLED=${STUDIO_ENABLED:-0}
+ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-0}
 EOF
 
 cat > "$REPO_DIR/services/catalog/.env" <<EOF
@@ -235,9 +260,13 @@ echo "$target_sha" > "$BUILD_STATE/built-sha"
 # ---------------------------------------------------------------- start again
 db_as_found
 if [ "$WAS_ACTIVE" = "1" ]; then
-  web_start || die_deploy "start $WEB_UNIT"
+  svc_start "$WEB_SVC" || die_deploy "start $WEB_UNIT"
   echo "web app restarted"
 else
   echo "web app was not running — left stopped (start it with setup.sh or systemctl --user start $WEB_UNIT)"
+fi
+if [ "$STUDIO_WAS_ACTIVE" = "1" ]; then
+  svc_start "$STUDIO_SVC" || die_deploy "start $STUDIO_UNIT"
+  echo "studio runner restarted"
 fi
 echo "deployed $target_sha"

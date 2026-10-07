@@ -2,6 +2,7 @@
 # systemctl stub: logs and succeeds. Tracks per-unit state in $STATE_DIR:
 #   web_active / web_failed  — self-learn.service (is-active / is-failed)
 #   seaf_active              — self-learn-seafile.service
+#   studio_active            — self-learn-studio.service
 # enable --now also marks the unit active.
 echo "systemctl $*" >> "$CALLS_LOG"
 
@@ -10,8 +11,9 @@ echo "systemctl $*" >> "$CALLS_LOG"
 unit="${*: -1}"; unit="${unit%.service}"
 marker=""; failed_marker="x_$unit"
 case "$unit" in
-  self-learn)         marker=web_active;  failed_marker=web_failed ;;
-  self-learn-seafile) marker=seaf_active; failed_marker=seaf_failed ;;
+  self-learn)         marker=web_active;    failed_marker=web_failed ;;
+  self-learn-seafile) marker=seaf_active;   failed_marker=seaf_failed ;;
+  self-learn-studio)  marker=studio_active; failed_marker=studio_failed ;;
 esac
 
 case "${2:-}" in

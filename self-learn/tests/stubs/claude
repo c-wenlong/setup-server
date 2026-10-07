@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# claude stub: presence only. setup.sh resolves it via `command -v` and bakes
+# the absolute path into the studio unit as STUDIO_CLAUDE_BIN.
+echo "claude $*" >> "$CALLS_LOG"
+exit 0

@@ -23,8 +23,9 @@ git push (laptop)
         │
 self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
   (systemd user timer;          │                     (nightly 03:00:
-   launchd on macOS)            │ 1. stop app if running  catalog export ->
-                                │ 2. git reset --hard     ~/.self-learn/archive)
+   launchd on macOS)            │ 1. stop app + studio if   catalog export ->
+                                │    running                ~/.self-learn/archive)
+                                │ 2. git reset --hard
                                 │    origin/main
                                 │ 3. write checkout env files
                                 │    (apps/web/.env.local,
@@ -32,14 +33,24 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
                                 │ 4. npm ci      (only when package-lock changes)
                                 │ 5. catalog migrate
                                 │ 6. next build
-                                │ 7. start app if it was running
+                                │ 7. start app + studio if they were running
                                 ▼
               ~/services/self-learn/repo  (machine-managed clone)
                                 │  next start -p 8107 -H 127.0.0.1
                                 ▼
               self-learn.service (systemd user unit / launchd)
-                     127.0.0.1:8107 ──► Tailscale Serve HTTPS :8107
-        https://kai-home-server.taild6a23f.ts.net:8107   (tailnet only)
+                     │           127.0.0.1:8107 ──► Tailscale Serve HTTPS :8107
+                     │  https://kai-home-server.taild6a23f.ts.net:8107
+                     │                            (tailnet only)
+                     │  /studio/api/* proxied to ──► self-learn-studio.service
+                     ▼          (npm run studio — diagram job runner, spawns
+        self-learn-db            the claude CLI per job, loopback-only on
+        (postgres:17)            127.0.0.1:7250 — never Serve-published.
+                     ▲           Runs only while STUDIO_ENABLED=1 in .env;
+        app + catalog CLI +      job state under ~/services/self-learn/studio)
+        studio all connect
+        here (127.0.0.1:5432)
+   ~/.self-learn/  blobs/ vault/ archive/  (upstream layout — rsync target)
 
    self-learn-db (postgres:17 container) 127.0.0.1:5432
         ▲ app + `npm run catalog` on the host both connect here
@@ -82,14 +93,15 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
 | Dependency | Why | Checked in preflight |
 |---|---|---|
 | git + non-interactive repo access | poller fetches the private repo unattended | `git ls-remote` with prompts disabled |
-| Node.js >= 22.22.2 (+ npm) | upstream `engines`; build, catalog CLI, `next start` | version compare |
+| Node.js >= 22.22.2 (+ npm) | upstream `engines`; build, catalog CLI, `next start`, studio runner | version compare |
 | Docker + Compose v2 | Postgres container | daemon reachable |
 | Tailscale (running) | HTTPS publish | backend state |
+| `claude` CLI, logged in | the studio runner spawns it per job | resolved at unit-write time (`PATH`, then `~/.nix-profile`, `~/.claude/local`, homebrew); a miss only **warns** — the app deploys fine, studio jobs just fail until it lands |
 
 Not needed: Postgres client tools (migrations and the seed go through the
 catalog CLI; a dump restore can run `pg_restore` inside the container),
 submodules (`tools/*` stays uninitialised — the seed import is pointed at
-`/nonexistent` roots and the studio is not deployed).
+`/nonexistent` roots and the video tools are not deployed here).
 
 ## What setup.sh does
 
@@ -100,8 +112,12 @@ submodules (`tools/*` stays uninitialised — the seed import is pointed at
    line is ignored once `.env` exists.
 3. Installs `deploy.sh` -> `~/services/self-learn/bin/` (refreshed every
    run) and creates `~/.self-learn/blobs`.
-4. Writes the units — `self-learn.service` (the app), the deploy
-   `.timer`, the nightly export `.timer` — or the three LaunchAgents.
+4. Writes the units — `self-learn.service` (the app),
+   `self-learn-studio.service` (the diagram job runner), the deploy
+   `.timer`, the nightly export `.timer` — or the four LaunchAgents.
+   The studio unit gets the resolved `claude` path baked in as
+   `STUDIO_CLAUDE_BIN` and `STUDIO_HOME=~/services/self-learn/studio`,
+   so job workspaces survive a checkout re-clone.
 5. Runs the initial deploy: clone, env files, `npm ci`, Postgres up,
    `catalog migrate`, `next build`.
 6. Bootstraps the catalog **once** (marker `state/db-bootstrapped`):
@@ -109,9 +125,11 @@ submodules (`tools/*` stays uninitialised — the seed import is pointed at
    `catalog blob audit --fix` to claim the blob root for this database.
    `SKIP_SEED=1` skips this for a dump restore instead (below).
 7. Enables + starts the app and both timers, enables lingering (Linux),
-   and publishes `tailscale serve --bg --https=8107`. An app that was
-   deliberately stopped before the re-run is left stopped (and Postgres
-   put back the way it was found).
+   and publishes `tailscale serve --bg --https=8107`. The studio runner
+   is enabled + started only while `STUDIO_ENABLED=1` — flipping the flag
+   to 0 and re-running stops and disables it. An app that was
+   deliberately stopped before the re-run is left stopped (studio
+   follows it, and Postgres is put back the way it was found).
 
 ## Deploy
 
@@ -122,7 +140,9 @@ cd self-learn && ./setup.sh
 Overrides (first run only — after that, edit `.env`): `LOCAL_PORT` /
 `HTTPS_PORT` (default 8107), `PG_PORT` (5432), `REPO_URL`, `BRANCH`
 (main), `POLL_SECONDS` (86400 = daily), `SKIP_SEED` (1 = leave the
-catalog empty for a dump restore), `OWNER_PASSWORD`, `AUTH_SECRET`.
+catalog empty for a dump restore), `OWNER_PASSWORD`, `AUTH_SECRET`,
+`STUDIO_ENABLED` (0; 1 = run the studio job runner + UI — needs a
+logged-in `claude`), `ASSET_FILES_ENABLED` (1).
 
 For a real deployment, pass the **laptop's `AUTH_SECRET`** on first run
 (`AUTH_SECRET=... ./setup.sh`): provider keys saved in Settings are
@@ -224,6 +244,8 @@ server                          Seafile                          MacBook
 ~/services/self-learn/bin/deploy.sh --force          # pull + rebuild + migrate + restart now
 ~/services/self-learn/bin/deploy.sh --sha <commit>   # pin to a commit (rollback — TROUBLESHOOT.md)
 journalctl --user -u self-learn -f                   # app logs
+journalctl --user -u self-learn-studio -f            # studio runner logs
+curl -s http://127.0.0.1:7250/api/health             # runner health (loopback)
 journalctl --user -u self-learn-deploy -n 50         # deploy history
 journalctl --user -u self-learn-export               # nightly export runs
 systemctl --user list-timers self-learn-*
@@ -240,14 +262,28 @@ The catalog CLI works in the checkout (`cd ~/services/self-learn/repo &&
 npm run catalog -- status`) — `services/catalog/.env` there points it at
 this database.
 
+## The studio runner
+
+`STUDIO_ENABLED=1` (the server's `.env` has it on) runs a third service:
+`self-learn-studio` (`npm run studio` — `tsx services/studio/src/index.ts`),
+the diagram job runner behind the app's `/studio/api/*` proxy. It binds
+`127.0.0.1:7250`, is never published through Serve (the app proxies to it
+and stamps the signed-in owner itself), and reaches Postgres the way the
+app's own CLI does — it spawns `npm run catalog --`, which reads the
+deploy-written `services/catalog/.env`. Each job spawns the `claude` CLI
+resolved at setup time (`STUDIO_CLAUDE_BIN` in the unit), authenticating
+with the login credentials in `~/.claude` — the runner's default
+`STUDIO_AGENT_AUTH=login` strips `ANTHROPIC_API_KEY` from the job env.
+Job workspaces and the write-ahead log live in
+`~/services/self-learn/studio` (`STUDIO_HOME`), outside the
+machine-managed checkout. Its lifecycle follows the app: setup and the
+deploy poller stop/start them together, and a deliberately stopped stack
+stays stopped. Optional spend cap: set `STUDIO_DAILY_USD` in `.env` and
+re-run `setup.sh` — the unit template propagates it into the runner's
+environment (empty means no cap).
+
 ## Not deployed (upstream leftovers)
 
-- **The studio runner** (`npm run studio`, diagram/video jobs): needs
-  `claude` logged in, the `tldrawkc` submodule built, and headless
-  Chromium — upstream step 12. Diagram jobs on this box would also land in
-  the homeserver's catalog, a second history to sync. Left out;
-  `STUDIO_ENABLED` is deliberately absent from the generated
-  `.env.local`.
 - **The video tools** (`tools/manimkc`, `tools/remotionkc`,
   `tools/revideokc`): rendering stays on the Mac (upstream S5). The
   rendered videos themselves arrive via the blob-store rsync.

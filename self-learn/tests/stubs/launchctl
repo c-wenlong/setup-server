@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # launchctl stub (used when the mocked suite runs on macOS): logs and tracks
-# the web agent's loaded state in $STATE_DIR/web_active.
+# agent loaded state in $STATE_DIR — web_active for com.self-learn.web (and
+# anything else, matching the historical single-marker behaviour),
+# studio_active for com.self-learn.studio.
 echo "launchctl $*" >> "$CALLS_LOG"
+
+marker=web_active
+case " ${*: -1} " in *studio*) marker=studio_active ;; esac
 
 case "${1:-}" in
   print)
-    [ -f "$STATE_DIR/web_active" ] && exit 0 || exit 1
+    [ -f "$STATE_DIR/$marker" ] && exit 0 || exit 1
     ;;
   bootout)
-    rm -f "$STATE_DIR/web_active"
+    rm -f "$STATE_DIR/$marker"
     ;;
   bootstrap|kickstart)
-    touch "$STATE_DIR/web_active"
+    touch "$STATE_DIR/$marker"
     ;;
 esac
 exit 0

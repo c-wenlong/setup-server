@@ -98,6 +98,7 @@ teardown() {
   export HOME="$ORIG_HOME"
   unset FAKE_UID LOCAL_PORT HTTPS_PORT PG_PORT REPO_URL BRANCH POLL_SECONDS \
     SKIP_SEED OWNER_PASSWORD AUTH_SECRET STATE_DIR CALLS_LOG \
+    STUDIO_ENABLED ASSET_FILES_ENABLED \
     SEAFILE_ENV MAC_SSH MAC_HOME MAC_REPO MAC_PGBIN MAC_DB MAC_DB_URL \
     MAC_PGPORT MAC_SEAFILE_URL SEAFILE_URL SEAFILE_SYNC_USER \
     SEAFILE_SYNC_PASSWORD SEAFILE_SYNC_REPO
@@ -221,17 +222,24 @@ test_fresh_deploy() {
     check "app binds loopback+port"     grep -q -- "-p 8107 -H 127.0.0.1" "$HOME/.config/systemd/user/self-learn.service"
     check "deploy timer written"        [ -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
     check "export timer written"        [ -f "$HOME/.config/systemd/user/self-learn-export.timer" ]
+    check "studio unit written"         [ -f "$HOME/.config/systemd/user/self-learn-studio.service" ]
+    check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/self-learn-studio.service"
+    check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/self-learn-studio.service"
+    check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/self-learn/studio" "$HOME/.config/systemd/user/self-learn-studio.service"
     check "app restarted"               calls_have "systemctl --user restart self-learn"
     check "deploy timer enabled"        calls_have "systemctl --user enable --now self-learn-deploy.timer"
     check "export timer enabled"        calls_have "systemctl --user enable --now self-learn-export.timer"
+    check "studio off by default"       calls_have "systemctl --user disable --now self-learn-studio"
     check "export unit mode is 600"     sh -c "[ \"$(stat -c %a "$HOME/.config/systemd/user/self-learn-export.service" 2>/dev/null || stat -f %Lp "$HOME/.config/systemd/user/self-learn-export.service")\" = 600 ]"
     check "lingering enabled"           calls_have "loginctl enable-linger"
   else
     check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.self-learn.web.plist" ]
+    check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.studio.plist" ]
     check "deploy agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
     check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
     check "deploy agent sets PATH"      grep -q "/opt/homebrew/bin" "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
     check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.self-learn.web"
+    check "studio agent not loaded"     no_call "launchctl bootstrap .*com.self-learn.studio"
   fi
   check "served on tailscale :8107"     calls_have "tailscale serve --bg --https=8107 http://127.0.0.1:8107"
   check "prints final URL"              out_has "https://test-host.tailfake.ts.net:8107"
@@ -435,6 +443,78 @@ test_setup_leaves_stopped() {
     check "app not enabled"       no_call "systemctl --user enable self-learn$"
   else
     check "agent not loaded"      no_call "launchctl bootstrap .*com.self-learn.web.plist"
+  fi
+  teardown
+}
+
+test_studio_enabled() {
+  echo "• STUDIO_ENABLED=1: runner unit enabled+started, health-probed; flip to 0 stops it"
+  setup
+  touch "$STATE_DIR/operator"
+  export STUDIO_ENABLED=1
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check ".env keeps the flag"     env_has "STUDIO_ENABLED=1"
+  check "web env has the flag"    grep -qx "STUDIO_ENABLED=1" "$(REPO_DIR)/apps/web/.env.local"
+  if [ "$OS" = "Linux" ]; then
+    check "studio enabled"        calls_have "systemctl --user enable self-learn-studio"
+    check "studio restarted"      calls_have "systemctl --user restart self-learn-studio"
+    check "no disable call"       no_call "systemctl --user disable --now self-learn-studio"
+  else
+    check "studio agent loaded"   calls_have "launchctl bootstrap gui/.*/com.self-learn.studio"
+    check "plist has claude bin"  grep -q "STUDIO_CLAUDE_BIN" "$HOME/Library/LaunchAgents/com.self-learn.studio.plist"
+  fi
+  check "studio health probed"  calls_have "curl .*127.0.0.1:7250/api/health"
+
+  sed -i.bak 's/^STUDIO_ENABLED=1/STUDIO_ENABLED=0/' "$SVC/.env" && rm -f "$SVC/.env.bak"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"       [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "studio disabled+stopped" calls_have "systemctl --user disable --now self-learn-studio"
+  else
+    check "studio agent booted out" calls_have "launchctl bootout gui/.*/com.self-learn.studio"
+  fi
+  teardown
+}
+
+test_deploy_bounces_studio() {
+  echo "• poller: a running studio runner is stopped+restarted with the app"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  # The unit is written on every install; simulate a runner that came up after
+  # setup (flag flipped on, or a manual start) and must survive the deploy.
+  touch "$STATE_DIR/studio_active"
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "studio stopped"        calls_have "systemctl --user stop self-learn-studio.service"
+    check "studio started again"  calls_have "systemctl --user start self-learn-studio.service"
+  else
+    check "studio stopped"        calls_have "launchctl bootout gui/.*/com.self-learn.studio"
+    check "studio started again"  calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.studio"
+  fi
+  teardown
+}
+
+test_deploy_leaves_stopped_studio() {
+  echo "• poller: a stopped studio runner is updated but left stopped"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "rebuilt"                 calls_have "npm run build"
+  if [ "$OS" = "Linux" ]; then
+    check "studio not stopped"    no_call "stop self-learn-studio"
+    check "studio not started"    no_call "start self-learn-studio"
+  else
+    check "studio untouched"      no_call "launchctl \(bootout\|bootstrap\|kickstart\).*com.self-learn.studio"
   fi
   teardown
 }
@@ -754,6 +834,20 @@ test_live() {
   live_check "web .env.local is 600"       test "$(stat -c %a "$svc_home/repo/apps/web/.env.local" 2>/dev/null || stat -f %Lp "$svc_home/repo/apps/web/.env.local")" = 600
   live_check "catalog .env is 600"         test "$(stat -c %a "$svc_home/repo/services/catalog/.env" 2>/dev/null || stat -f %Lp "$svc_home/repo/services/catalog/.env")" = 600
   live_check "bootstrap marker exists"     test -f "$svc_home/state/db-bootstrapped"
+  # The runner is only expected up when the flag is on — an enabled-but-dead
+  # studio is a finding, a disabled one is not.
+  local studio_flag
+  studio_flag="$(sed -n 's/^STUDIO_ENABLED=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
+  if [ "$studio_flag" = "1" ]; then
+    live_check "studio health answers"     curl -fsS "http://127.0.0.1:7250/api/health"
+    live_check "no wildcard studio listener" no_external_listener 7250
+    if [ "$OS" = "Linux" ]; then
+      live_check "studio unit active"      sh -c "systemctl --user is-active self-learn-studio.service | grep -qx active"
+      live_check "studio unit enabled"     sh -c "systemctl --user is-enabled self-learn-studio.service | grep -qx enabled"
+    else
+      live_check "studio agent loaded"     sh -c "launchctl print gui/$(id -u)/com.self-learn.studio"
+    fi
+  fi
   if [ "$OS" = "Linux" ]; then
     live_check "app unit active"           sh -c "systemctl --user is-active self-learn.service | grep -qx active"
     live_check "app unit enabled"          sh -c "systemctl --user is-enabled self-learn.service | grep -qx enabled"
@@ -792,6 +886,9 @@ test_skip_seed
 test_port_override
 test_persisted_https_port
 test_setup_leaves_stopped
+test_studio_enabled
+test_deploy_bounces_studio
+test_deploy_leaves_stopped_studio
 test_deploy_pinned_sha
 test_failed_build_restores
 test_operator_escalation
