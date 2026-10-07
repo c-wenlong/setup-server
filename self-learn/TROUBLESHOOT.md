@@ -140,6 +140,12 @@ API", you are not in the `docker` group *in this shell* — re-run under
   (loopback only; the app proxies `/studio/api/*` to it). If it fails:
   `journalctl --user -u self-learn-studio -n 100`. Unit missing entirely →
   re-run `setup.sh`.
+- Health answers but `"tldrawkc": false` / queue refuses every job → the
+  submodule isn't built. Under `STUDIO_ENABLED=1` the next
+  `deploy.sh --force` rebuilds it; by hand:
+  `cd ~/services/self-learn/repo && git submodule update --init tools/tldrawkc
+  && (cd tools/tldrawkc && npm ci && npm run build)`, then restart
+  `self-learn-studio` so its cached probe re-runs.
 - Studio missing from the UI at all → `STUDIO_ENABLED` isn't 1 in
   `self-learn/.env`. Set it and re-run `setup.sh` — that flag gates both
   the web UI and the runner's enable. Flipping it back to 0 and

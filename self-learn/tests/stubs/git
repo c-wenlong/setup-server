@@ -32,6 +32,14 @@ case "${1:-}" in
     cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111
     ;;
   fetch) ;;
+  submodule)
+    # `git -C <repo> submodule update --init tools/<name>` — materialise the
+    # submodule dir so the tldrawkc build step can cd into it. Rev-parse is
+    # answered by the case below from remote_sha regardless of -C.
+    for a in "$@"; do
+      case "$a" in tools/*) [ -n "$repo_dir" ] && mkdir -p "$repo_dir/$a" ;; esac
+    done
+    ;;
   reset)
     # `git reset --hard --quiet <rev>` — apply the commit's fixture if the test
     # provided one, so the checkout really changes on a new commit.

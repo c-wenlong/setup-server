@@ -226,6 +226,23 @@ if [ "$need_ci" = "1" ]; then
   npm ci --no-audit --no-fund || die_deploy "npm ci"
 fi
 
+# -------------------------------------------------------------- tldrawkc
+# The studio runner refuses to queue jobs without a built tldrawkc. Only
+# fetched while the flag is on (it is a second private repo and a full npm
+# build), and rebuilt only when the recorded gitlink moved or a previous
+# build never completed — the stamp under $BUILD_STATE is what makes the
+# check cheap on every other deploy.
+if [ "${STUDIO_ENABLED:-0}" = "1" ]; then
+  git -C "$REPO_DIR" submodule update --init tools/tldrawkc || die_deploy "tldrawkc submodule update"
+  tl_sha="$(git -C "$REPO_DIR/tools/tldrawkc" rev-parse HEAD 2>/dev/null || echo none)"
+  if [ "$tl_sha" != "$(cat "$BUILD_STATE/tldrawkc-sha" 2>/dev/null || echo none)" ]; then
+    echo "building tldrawkc ($tl_sha)"
+    (cd "$REPO_DIR/tools/tldrawkc" && npm ci --no-audit --no-fund && npm run build) \
+      || die_deploy "tldrawkc build"
+    echo "$tl_sha" > "$BUILD_STATE/tldrawkc-sha"
+  fi
+fi
+
 # ------------------------------------------------------------------ database
 # A stopped app may mean a stopped Postgres too (launcher stop covers both) —
 # record which it was so db_as_found can leave it that way again.

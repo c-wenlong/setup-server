@@ -217,6 +217,7 @@ test_fresh_deploy() {
   check "bootstrap marker written"      [ -f "$HOME/services/self-learn/state/db-bootstrapped" ]
   check "built (next build)"            calls_have "npm run build"
   check "built sha recorded"            grep -qx aaa1111 "$HOME/services/self-learn/state/built-sha"
+  check "tldrawkc not fetched"          no_call "submodule update"
   if [ "$OS" = "Linux" ]; then
     check "app unit written"            [ -f "$HOME/.config/systemd/user/self-learn.service" ]
     check "app binds loopback+port"     grep -q -- "-p 8107 -H 127.0.0.1" "$HOME/.config/systemd/user/self-learn.service"
@@ -456,6 +457,8 @@ test_studio_enabled() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check ".env keeps the flag"     env_has "STUDIO_ENABLED=1"
   check "web env has the flag"    grep -qx "STUDIO_ENABLED=1" "$(REPO_DIR)/apps/web/.env.local"
+  check "tldrawkc fetched"        calls_have "submodule update --init tools/tldrawkc"
+  check "tldrawkc built+stamped"  [ -f "$HOME/services/self-learn/state/tldrawkc-sha" ]
   if [ "$OS" = "Linux" ]; then
     check "studio enabled"        calls_have "systemctl --user enable self-learn-studio"
     check "studio restarted"      calls_have "systemctl --user restart self-learn-studio"

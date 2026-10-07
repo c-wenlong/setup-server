@@ -100,8 +100,12 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
 
 Not needed: Postgres client tools (migrations and the seed go through the
 catalog CLI; a dump restore can run `pg_restore` inside the container),
-submodules (`tools/*` stays uninitialised — the seed import is pointed at
-`/nonexistent` roots and the video tools are not deployed here).
+the video-tool submodules (`tools/manimkc`, `tools/remotionkc`,
+`tools/revideokc` stay uninitialised — the seed import is pointed at
+`/nonexistent` roots). The one submodule exception is `tools/tldrawkc`:
+the studio runner refuses to queue jobs without it built, so while
+`STUDIO_ENABLED=1` the deploy script keeps it initialised and rebuilds
+it whenever the recorded gitlink moves.
 
 ## What setup.sh does
 
@@ -281,6 +285,14 @@ deploy poller stop/start them together, and a deliberately stopped stack
 stays stopped. Optional spend cap: set `STUDIO_DAILY_USD` in `.env` and
 re-run `setup.sh` — the unit template propagates it into the runner's
 environment (empty means no cap).
+
+The runner's hard dependency inside the checkout is `tools/tldrawkc` —
+it refuses to queue a job while that submodule is unbuilt (health says
+`tldrawkc: false` with the fix command). `deploy.sh` handles it: under
+`STUDIO_ENABLED=1` every deploy runs `git submodule update --init
+tools/tldrawkc` and rebuilds (`npm ci && npm run build`) only when the
+recorded gitlink moved — the last-built sha is stamped at
+`~/services/self-learn/state/tldrawkc-sha`.
 
 ## Not deployed (upstream leftovers)
 
