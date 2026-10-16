@@ -86,6 +86,11 @@ PUBLISHED = [
     ("plane", 8105, "/api/instances/"),
     # /api/heartbeat, not / — the UI is a SPA. Official healthcheck.
     ("umami", 8106, "/api/heartbeat"),
+    # "/" is the public landing page and the only unauthenticated 200 —
+    # Gnosia has no health route. It proves the Next server answers, not
+    # that Postgres does: content pages read the catalog per request, and
+    # the landing page reads none, so a DB fault won't be caught here.
+    ("self-learn", 8107, "/"),
     # /login.html, not / — "/" is a 302 to it and Kuma scores a 302 as down.
     # This proves the web UI is up and says nothing about DNS; the resolver
     # gets its own monitor below, because those two fail independently.
@@ -109,6 +114,39 @@ MONITORS = [
 MONITORS.append(
     ("ollama", f"http://127.0.0.1:{os.environ.get('OLLAMA_PORT', '11434')}/api/version")
 )
+
+
+def self_learn_studio_enabled():
+    """STUDIO_ENABLED=1 in self-learn/.env, the flag that turns the runner on.
+
+    That file is self-learn's own switch, so it is read from there rather than
+    from this service's environment. A missing file or flag means off, which
+    is setup.sh's default; the last assignment wins, as when the file is
+    sourced. SELF_LEARN_ENV overrides the path (the tests use it).
+    """
+    path = os.environ.get("SELF_LEARN_ENV") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "self-learn", ".env")
+    enabled = False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                key, sep, value = line.strip().partition("=")
+                if sep and key == "STUDIO_ENABLED":
+                    enabled = value.strip().strip("\"'") == "1"
+    except OSError:
+        pass
+    return enabled
+
+
+# The self-learn studio runner is loopback-only too — the app proxies
+# /studio/api/* to it, so the published :8107 monitor can never see it down.
+# Seeded only while the runner is switched on: with STUDIO_ENABLED=0 (the
+# default) nothing listens on :7250, and a monitor there would alert for an
+# intentionally absent service. Turning Studio on later needs this seed run
+# again (re-run monitoring/setup.sh) to add it. A monitor seeded earlier is
+# left as it is; if the flag goes back to 0, pause it in the Kuma UI.
+if self_learn_studio_enabled():
+    MONITORS.append(("self-learn-studio", "http://127.0.0.1:7250/api/health"))
 
 api = UptimeKumaApi(f"http://127.0.0.1:{os.environ['KUMA_PORT']}", timeout=30)
 user = os.environ["KUMA_ADMIN_USER"]

@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# ssh stub — pretends to be the MacBook. Logs argv; remote commands arrive as
+# a single trailing string, remote stdin (SQL, file contents) is stdin here.
+# State in $STATE_DIR:
+#   mac_unreachable    — exists => every call exits 255
+#   mac_seaf_cli       — file content is the remote seaf-cli path (absent => none)
+#   mac_devserver      — exists => pgrep finds a next dev server
+#   mac_pg_fails       — exists => remote psql/createdb/pg_restore exit 1
+#   mac_psql_meta      — file content: canned rows for the snapshot meta query
+#   mac_psql_rows      — file content: canned rows for the snapshot union query
+# Writes captured stdin payloads to $STATE_DIR/mac_ignore.txt /
+# mac_owner.txt / mac_plist.xml when the remote command is a `cat >` write.
+echo "ssh $*" >> "$CALLS_LOG"
+[ -f "$STATE_DIR/mac_unreachable" ] && exit 255
+
+remote="${*: -1}"   # last arg = the remote command string
+
+case "$remote" in
+  *"command -v seaf-cli"*)
+    if [ -f "$STATE_DIR/mac_seaf_cli" ]; then
+      cat "$STATE_DIR/mac_seaf_cli"; exit 0
+    fi
+    exit 1
+    ;;
+  *"cat > "*"seafile-ignore.txt"*) cat > "$STATE_DIR/mac_ignore.txt" ;;
+  *"cat > "*"/blobs/.owner"*)      cat > "$STATE_DIR/mac_owner.txt" ;;
+  *"cat > "*"LaunchAgents"*)       cat > "$STATE_DIR/mac_plist.xml" ;;
+  *pg_dump*)
+    [ -f "$STATE_DIR/mac_pg_fails" ] && exit 1 ;;
+  *psql*)
+    [ -f "$STATE_DIR/mac_pg_fails" ] && exit 1
+    sql="$(cat)"
+    echo "$sql" >> "$STATE_DIR/mac_sql.log"
+    case "$sql" in
+      *information_schema*) [ -f "$STATE_DIR/mac_psql_meta" ] && cat "$STATE_DIR/mac_psql_meta" ;;
+      *"UNION ALL"*)         [ -f "$STATE_DIR/mac_psql_rows" ] && cat "$STATE_DIR/mac_psql_rows" ;;
+      *pg_database*)         echo "33692" ;;
+      *row_to_json*)         echo 'instance|{"id":1,"type":"primary"}' ;;
+      *"DROP DATABASE"*)     [ -f "$STATE_DIR/mac_pg_fails" ] && exit 1 ;;
+    esac
+    ;;
+  *createdb*|*pg_restore*)
+    [ -f "$STATE_DIR/mac_pg_fails" ] && exit 1 ;;
+  *pgrep*)
+    if echo "$remote" | grep -q 'next.*dev\|next-server'; then
+      [ -f "$STATE_DIR/mac_devserver" ] || exit 1
+      echo "1234 next dev"
+    else
+      # client probe: present unless mac_unreachable (handled above)
+      echo "5678 seaf-daemon"
+    fi
+    ;;
+  *"npm run catalog"*)
+    [ -f "$STATE_DIR/mac_audit_fails" ] && exit 1 ;;
+esac
+exit 0

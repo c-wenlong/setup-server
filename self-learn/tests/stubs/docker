@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm   — exists => `docker ps` fails like a non-docker-group user
+#   db_running       — exists => `compose ps` reports the db container up;
+#                      written by `compose up`, removed by `compose stop|down`
+#   pg_fails         — exists => `exec` psql/createdb/pg_restore/pg_dump exit 1
+#   psql_meta        — file content: canned rows for the snapshot meta query
+#   psql_rows        — file content: canned rows for the snapshot union query
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    ;;
+  exec)
+    # exec -i self-learn-db <pg tool> ... — the SQL arrives on stdin.
+    shift; while [ $# -gt 0 ] && [ "$1" != "self-learn-db" ]; do shift; done
+    shift   # now $1 = the tool inside the container
+    case "${1:-}" in
+      pg_isready|pg_restore) [ -f "$STATE_DIR/pg_fails" ] && exit 1 ;;
+      pg_dump)
+        [ -f "$STATE_DIR/pg_fails" ] && exit 1
+        echo "STUB-PGDUMP-BYTES"
+        ;;
+      psql)
+        sql="$(cat)"
+        echo "$sql" >> "$STATE_DIR/local_sql.log"
+        case "$sql" in
+          *"DROP DATABASE"*|*"CREATE DATABASE"*)
+            [ -f "$STATE_DIR/pg_fails" ] && exit 1 ;;
+          *information_schema*) [ -f "$STATE_DIR/psql_meta" ] && cat "$STATE_DIR/psql_meta" ;;
+          *"UNION ALL"*)        [ -f "$STATE_DIR/psql_rows" ] && cat "$STATE_DIR/psql_rows" ;;
+          *pg_database*)        echo "16384" ;;
+          *row_to_json*)        echo 'instance|{"id":1,"type":"primary"}' ;;
+        esac
+        ;;
+    esac
+    ;;
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        # compose --project-directory <dir> <up -d|ps|stop|exec -T db ...>
+        for a in "$@"; do
+          case "$a" in
+            up)        touch "$STATE_DIR/compose_up" "$STATE_DIR/db_running" ;;
+            stop|down) rm -f "$STATE_DIR/db_running" ;;
+            ps)        [ -f "$STATE_DIR/db_running" ] && echo "cafe0123" ;;
+            exec)      exit 0 ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0

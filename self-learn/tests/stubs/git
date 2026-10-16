@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# git stub. State in $STATE_DIR:
+#   remote_sha       — sha reported for origin/BRANCH (default aaa1111);
+#                      change it between runs to simulate a push
+#   git_auth_fail    — exists => ls-remote fails like missing credentials
+#   fixture/<sha>/   — checkout contents applied by `git reset --hard <sha>`
+#                      (origin/* resolves through remote_sha); lets a test make
+#                      a new commit actually change files in the checkout
+echo "git $*" >> "$CALLS_LOG"
+
+repo_dir=""
+if [ "${1:-}" = "-C" ]; then repo_dir="$2"; shift 2; fi
+
+case "${1:-}" in
+  ls-remote)
+    if [ -f "$STATE_DIR/git_auth_fail" ]; then
+      echo "fatal: could not read Username for 'https://github.com': terminal prompts disabled" >&2
+      exit 128
+    fi
+    printf '%s\trefs/heads/main\n' "$(cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111)"
+    ;;
+  clone)
+    # last argument is the target directory; fake a self-learn checkout
+    target=""
+    for a in "$@"; do target="$a"; done
+    mkdir -p "$target/.git" "$target/apps/web" "$target/services/catalog" \
+      "$target/scripts" "$target/seed"
+    echo "fake-lockfile-v1" > "$target/package-lock.json"
+    echo "// nightly export stub" > "$target/scripts/nightly-export.mjs"
+    ;;
+  rev-parse)
+    cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111
+    ;;
+  fetch) ;;
+  submodule)
+    # `git -C <repo> submodule update --init tools/<name>` — materialise the
+    # submodule dir so the tldrawkc build step can cd into it. Rev-parse is
+    # answered by the case below from remote_sha regardless of -C.
+    for a in "$@"; do
+      case "$a" in tools/*) [ -n "$repo_dir" ] && mkdir -p "$repo_dir/$a" ;; esac
+    done
+    ;;
+  reset)
+    # `git reset --hard --quiet <rev>` — apply the commit's fixture if the test
+    # provided one, so the checkout really changes on a new commit.
+    rev="${!#}"
+    case "$rev" in
+      origin/*) rev="$(cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111)" ;;
+    esac
+    if [ -n "$repo_dir" ] && [ -d "$STATE_DIR/fixture/$rev" ]; then
+      cp -R "$STATE_DIR/fixture/$rev/." "$repo_dir/"
+    fi
+    ;;
+esac
+exit 0

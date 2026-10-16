@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# systemctl stub: logs and succeeds. Tracks per-unit state in $STATE_DIR:
+#   web_active / web_failed  — self-learn.service (is-active / is-failed)
+#   seaf_active              — self-learn-seafile.service
+#   studio_active            — self-learn-studio.service
+# enable --now also marks the unit active.
+echo "systemctl $*" >> "$CALLS_LOG"
+
+# setup.sh addresses units bare (`self-learn`), deploy.sh with the suffix
+# (`self-learn.service`) — normalise so both hit the same marker.
+unit="${*: -1}"; unit="${unit%.service}"
+marker=""; failed_marker="x_$unit"
+case "$unit" in
+  self-learn)         marker=web_active;    failed_marker=web_failed ;;
+  self-learn-seafile) marker=seaf_active;   failed_marker=seaf_failed ;;
+  self-learn-studio)  marker=studio_active; failed_marker=studio_failed ;;
+esac
+
+case "${2:-}" in
+  is-active)
+    [ -n "$marker" ] && [ -f "$STATE_DIR/$marker" ] && exit 0 || exit 3
+    ;;
+  is-failed)
+    [ -f "$STATE_DIR/$failed_marker" ] && exit 0 || exit 4
+    ;;
+  stop)
+    [ -n "$marker" ] && rm -f "$STATE_DIR/$marker"
+    ;;
+  start|restart)
+    [ -n "$marker" ] && { rm -f "$STATE_DIR/$failed_marker"; touch "$STATE_DIR/$marker"; }
+    ;;
+  enable)
+    # `enable --now UNIT` starts it too
+    case "$*" in *--now*) [ -n "$marker" ] && touch "$STATE_DIR/$marker" ;; esac
+    ;;
+esac
+exit 0

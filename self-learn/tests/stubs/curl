@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# curl stub: health checks succeed; Seafile API calls get canned JSON.
+# sync.sh sends requests as `curl -fsS -K -`: the request (url, auth header,
+# data-urlencode fields) arrives as a config file on stdin. We parse the url
+# out of it and log `curl <argv> -> <url>` — the header/data fields are not
+# persisted anywhere, because keeping them out of argv AND files is the point.
+#   $STATE_DIR/seafile_admin_fails — auth-token POST exits 1
+#   $STATE_DIR/seafile_user_exists — admin/users POST errors as "exists"
+echo "curl $*" >> "$CALLS_LOG"
+
+req=""
+case " $* " in
+  *" -K "*|*" --config "*) req="$(cat)" ;;
+esac
+
+url=""
+for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done
+[ -z "$url" ] && url="$(printf '%s\n' "$req" | sed -n 's/^url = "\(.*\)"$/\1/p')"
+[ -n "$url" ] && echo "curl-api -> $url" >> "$CALLS_LOG"
+
+case "$url" in
+  *api2/auth-token*)
+    [ -f "$STATE_DIR/seafile_admin_fails" ] && exit 1
+    echo '{"token":"stub-token-abc123"}'
+    ;;
+  *api/v2.1/admin/users*)
+    if [ -f "$STATE_DIR/seafile_user_exists" ]; then
+      echo '{"error_msg":"A user with this email already exists."}' >&2
+      exit 1
+    fi
+    echo '{"email":"self-learn-sync@test","is_active":true}'
+    ;;
+  *api2/repos*)
+    case "$req $*" in
+      *POST*) echo '{"repo_id":"stub-repo-777"}' ;;
+      *)      echo '[{"id":"stub-repo-777","name":"self-learn-blobs"}]' ;;
+    esac
+    ;;
+esac
+exit 0

@@ -176,6 +176,65 @@ test_live() {
   live_check "ntfy tailnet HTTPS"         curl -fsS -o /dev/null --max-time 30 "$url:$nport/v1/health"
 }
 
+# Runs the real seed_kuma.py against a fake uptime_kuma_api that records the
+# monitors it is asked to add, so what is seeded is asserted, not assumed.
+run_seed() {
+  mkdir -p "$SANDBOX/fakelib"
+  cat > "$SANDBOX/fakelib/uptime_kuma_api.py" <<'PYEOF'
+import os
+
+
+class MonitorType:
+    HTTP = "http"
+    DNS = "dns"
+
+
+class NotificationType:
+    NTFY = "ntfy"
+
+
+class UptimeKumaApi:
+    def __init__(self, url, timeout=30): pass
+    def need_setup(self): return False
+    def setup(self, *a): pass
+    def login(self, *a): pass
+    def get_notifications(self): return []
+    def add_notification(self, **kw): return {"id": 1}
+    def get_monitors(self): return []
+    def edit_monitor(self, *a, **kw): pass
+    def disconnect(self): pass
+
+    def add_monitor(self, **kw):
+        with open(os.environ["FAKE_KUMA_LOG"], "a") as fh:
+            fh.write(kw["name"] + "\n")
+PYEOF
+  : > "$SANDBOX/kuma.log"
+  OUT="$(PYTHONPATH="$SANDBOX/fakelib" FAKE_KUMA_LOG="$SANDBOX/kuma.log" \
+    KUMA_PORT=3001 KUMA_ADMIN_USER=u KUMA_ADMIN_PASSWORD=p NTFY_PORT=8080 \
+    SELF_LEARN_ENV="$1" python3 "$SERVICE_DIR/seed_kuma.py" 2>&1)"
+  CODE=$?
+}
+
+seeded()     { grep -qx -- "$1" "$SANDBOX/kuma.log"; }
+not_seeded() { ! seeded "$1"; }
+
+test_seed_studio_monitor() {
+  echo "• seed: the studio monitor exists only while STUDIO_ENABLED=1 in self-learn/.env"
+  setup
+  printf 'STUDIO_ENABLED=0\n' > "$SANDBOX/sl.env"
+  run_seed "$SANDBOX/sl.env"
+  check "flag off: seed exits zero"        [ "$CODE" -eq 0 ]
+  check "flag off: app monitor still added" seeded self-learn
+  check "flag off: no studio monitor"      not_seeded self-learn-studio
+  run_seed "$SANDBOX/absent.env"
+  check "no env file: no studio monitor"   not_seeded self-learn-studio
+  printf 'STUDIO_ENABLED=0\nSTUDIO_ENABLED=1\n' > "$SANDBOX/sl.env"
+  run_seed "$SANDBOX/sl.env"
+  check "flag on: seed exits zero"         [ "$CODE" -eq 0 ]
+  check "flag on: studio monitor added"    seeded self-learn-studio
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
@@ -184,6 +243,7 @@ test_fresh_deploy
 test_idempotent_rerun
 test_port_override
 test_operator_escalation
+test_seed_studio_monitor
 
 if [ "${1:-}" = "--live" ]; then
   echo
