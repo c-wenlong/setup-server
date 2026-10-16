@@ -3702,6 +3702,19 @@ class SharedControlRegistryTest(unittest.TestCase):
         self.assertEqual([p["unit"] for p in optional],
                          ["self-learn-studio.service"])
 
+    def test_self_learn_reports_the_web_app_not_the_optional_runner(self):
+        # ntfy-control reports the first part's state unless `primary` names
+        # another. With Studio off or stopped the runner is never active, so
+        # without this a running app would show as stopped on the phone.
+        self.assertEqual(self.control("self-learn")["primary"],
+                         "self-learn.service")
+
+    def test_every_primary_names_one_of_its_own_parts(self):
+        for key in self.services:
+            primary = self.control(key).get("primary")
+            if primary:
+                self.assertIn(primary, self.names(key), key)
+
     def test_locked_services_carry_a_reason_and_no_parts(self):
         for key in ("ntfy", "ollama"):
             block = self.control(key)
