@@ -2,7 +2,24 @@
 # npm stub: `npm ci` creates node_modules in the cwd; `npm run build` creates
 # apps/web/.next; `npm run catalog`/`npm run start` only log.
 # $STATE_DIR/build_fails => `npm run build` exits 1 (for the rollback test).
+# Inside tools/tldrawkc, `npm run build` emits dist/ instead, and
+# $STATE_DIR/tldrawkc_build_fails => it clobbers dist/ and exits 1.
 echo "npm $*" >> "$CALLS_LOG"
+
+case "$PWD" in
+  */tools/tldrawkc)
+    if [ "${1:-}" = "run" ] && [ "${2:-}" = "build" ]; then
+      rm -rf dist; mkdir -p dist
+      if [ -f "$STATE_DIR/tldrawkc_build_fails" ]; then
+        echo "partial" > dist/partial
+        echo "npm ERR! tldrawkc build failed" >&2
+        exit 1
+      fi
+      echo "built" > dist/marker
+      exit 0
+    fi
+    ;;
+esac
 
 case "${1:-}" in
   ci) mkdir -p node_modules ;;

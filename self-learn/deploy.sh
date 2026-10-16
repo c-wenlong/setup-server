@@ -42,6 +42,8 @@ BUILD_STATE="$SERVICE_HOME/state"
 LOCK="$SERVICE_HOME/.deploy.lock"
 NEXT_DIR="$REPO_DIR/apps/web/.next"
 SNAP="$BUILD_STATE/rollback"
+TL_DIR="$REPO_DIR/tools/tldrawkc"
+TL_SNAP="$BUILD_STATE/rollback-tldrawkc"
 WEB_UNIT="self-learn.service"
 WEB_LABEL="com.self-learn.web"
 STUDIO_UNIT="self-learn-studio.service"
@@ -139,6 +141,20 @@ die_deploy() {
     fi
     rm -rf "$SNAP"
   fi
+  # tldrawkc's own node_modules and dist/ are renamed aside before its build
+  # (below). The runner executes dist/, so a half-written one would restart
+  # the studio unable to queue diagram jobs; the checkout itself may sit at
+  # the new revision, which is harmless while the old build output is back.
+  if [ -d "$TL_SNAP/node_modules" ] || [ -d "$TL_SNAP/dist" ]; then
+    echo "restoring the previous tldrawkc build" >&2
+    if [ -d "$TL_SNAP/node_modules" ]; then
+      rm -rf "$TL_DIR/node_modules"; mv "$TL_SNAP/node_modules" "$TL_DIR/node_modules"
+    fi
+    if [ -d "$TL_SNAP/dist" ]; then
+      rm -rf "$TL_DIR/dist"; mv "$TL_SNAP/dist" "$TL_DIR/dist"
+    fi
+    rm -rf "$TL_SNAP"
+  fi
   db_as_found
   if [ "$WAS_ACTIVE" = "1" ]; then
     echo "restarting the previous build" >&2
@@ -161,7 +177,16 @@ remote_sha="$(git -C "$REPO_DIR" rev-parse "origin/$BRANCH")"
 target_sha="${PIN_SHA:-$remote_sha}"
 built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
 
-if [ "$target_sha" = "$built_sha" ] && [ -d "$NEXT_DIR" ] && [ "$FORCE" -eq 0 ]; then
+# The two feature flags are written into apps/web/.env.local below, and the
+# runner is set up from the same flags, so a flag change in $ENV_FILE is
+# something to deploy even when origin has not moved. Without this a setup.sh
+# re-run after flipping STUDIO_ENABLED exits "up to date" here, and the web
+# app keeps hiding (or exposing) Studio against the runner's new state.
+env_sig="STUDIO_ENABLED=${STUDIO_ENABLED:-0} ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-0}"
+built_env_sig="$(cat "$BUILD_STATE/env-sig" 2>/dev/null || echo none)"
+
+if [ "$target_sha" = "$built_sha" ] && [ "$env_sig" = "$built_env_sig" ] \
+    && [ -d "$NEXT_DIR" ] && [ "$FORCE" -eq 0 ]; then
   echo "up to date at $built_sha"
   exit 0
 fi
@@ -229,16 +254,23 @@ fi
 # -------------------------------------------------------------- tldrawkc
 # The studio runner refuses to queue jobs without a built tldrawkc. Only
 # fetched while the flag is on (it is a second private repo and a full npm
-# build), and rebuilt only when the recorded gitlink moved or a previous
-# build never completed — the stamp under $BUILD_STATE is what makes the
-# check cheap on every other deploy.
+# build). Rebuilt when the recorded gitlink moved, when no build ever
+# completed, or when the build output is gone: the stamp under $BUILD_STATE
+# outlives a lost checkout, so it cannot be the only evidence of a build.
+# Its node_modules and dist/ are renamed aside first so a failed build puts
+# the previous one back (die_deploy) instead of leaving a half-written dist/.
 if [ "${STUDIO_ENABLED:-0}" = "1" ]; then
   git -C "$REPO_DIR" submodule update --init tools/tldrawkc || die_deploy "tldrawkc submodule update"
-  tl_sha="$(git -C "$REPO_DIR/tools/tldrawkc" rev-parse HEAD 2>/dev/null || echo none)"
-  if [ "$tl_sha" != "$(cat "$BUILD_STATE/tldrawkc-sha" 2>/dev/null || echo none)" ]; then
+  tl_sha="$(git -C "$TL_DIR" rev-parse HEAD 2>/dev/null || echo none)"
+  if [ "$tl_sha" != "$(cat "$BUILD_STATE/tldrawkc-sha" 2>/dev/null || echo none)" ] \
+      || [ ! -d "$TL_DIR/dist" ] || [ ! -d "$TL_DIR/node_modules" ]; then
     echo "building tldrawkc ($tl_sha)"
-    (cd "$REPO_DIR/tools/tldrawkc" && npm ci --no-audit --no-fund && npm run build) \
+    rm -rf "$TL_SNAP"; mkdir -p "$TL_SNAP"
+    [ ! -d "$TL_DIR/dist" ] || mv "$TL_DIR/dist" "$TL_SNAP/dist"
+    [ ! -d "$TL_DIR/node_modules" ] || mv "$TL_DIR/node_modules" "$TL_SNAP/node_modules"
+    (cd "$TL_DIR" && npm ci --no-audit --no-fund && npm run build) \
       || die_deploy "tldrawkc build"
+    rm -rf "$TL_SNAP"
     echo "$tl_sha" > "$BUILD_STATE/tldrawkc-sha"
   fi
 fi
@@ -273,6 +305,7 @@ rm -rf "$SNAP"
 # here keeps the next retry honest.
 echo "$lock_sum" > "$BUILD_STATE/npm-lock-cksum"
 echo "$target_sha" > "$BUILD_STATE/built-sha"
+echo "$env_sig" > "$BUILD_STATE/env-sig"
 
 # ---------------------------------------------------------------- start again
 db_as_found

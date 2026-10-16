@@ -137,6 +137,19 @@ calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q -- "$1" "$SVC/.env"; }
 REPO_DIR()   { printf '%s' "$HOME/services/self-learn/repo"; }
+TL_DIR()     { printf '%s' "$(REPO_DIR)/tools/tldrawkc"; }
+# Line of the first logged call matching $1 (empty when none), to assert order.
+call_line()  { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1; }
+# The studio runner's unit as setup.sh leaves it, so sync.sh sees it installed.
+mk_studio_unit() {
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    touch "$HOME/.config/systemd/user/self-learn-studio.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    touch "$HOME/Library/LaunchAgents/com.self-learn.studio.plist"
+  fi
+}
 
 # ----------------------------------------------------------------- tests
 test_preflight_docker_perms() {
@@ -503,6 +516,71 @@ test_deploy_bounces_studio() {
   teardown
 }
 
+test_flag_change_redeploys() {
+  echo "• poller: a feature-flag change redeploys even with no new commit"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  : > "$CALLS_LOG"
+  run_poll
+  check "unchanged flags: up to date" out_has "up to date"
+  check "unchanged flags: no build"   no_call "npm run build"
+  echo "STUDIO_ENABLED=1" >> "$SVC/.env"   # sourced last, so it wins
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "redeploys the same commit"   out_has "deploying aaa1111"
+  check "web env has the new flag"    grep -qx "STUDIO_ENABLED=1" "$(REPO_DIR)/apps/web/.env.local"
+  check "tldrawkc built for it"       [ -f "$(TL_DIR)/dist/marker" ]
+  : > "$CALLS_LOG"
+  run_poll
+  check "settled: up to date again"   out_has "up to date"
+  teardown
+}
+
+test_tldrawkc_failed_build_restores() {
+  echo "• poller: a failed tldrawkc build puts the previous build back"
+  setup
+  touch "$STATE_DIR/operator"
+  export STUDIO_ENABLED=1
+  run_deploy
+  echo "old" > "$(TL_DIR)/dist/marker"
+  touch "$STATE_DIR/studio_active"
+  echo "bbb2222" > "$STATE_DIR/remote_sha"     # the stub answers tldrawkc's rev-parse from this too
+  touch "$STATE_DIR/tldrawkc_build_fails"
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says it restored"            out_has "restoring the previous tldrawkc build"
+  check "previous dist/ is back"      grep -qx old "$(TL_DIR)/dist/marker"
+  check "no half-written dist/"       test ! -e "$(TL_DIR)/dist/partial"
+  check "node_modules is back"        [ -d "$(TL_DIR)/node_modules" ]
+  check "stamp still the old build"   grep -qx aaa1111 "$HOME/services/self-learn/state/tldrawkc-sha"
+  check "snapshot cleaned up"         test ! -e "$HOME/services/self-learn/state/rollback-tldrawkc"
+  if [ "$OS" = "Linux" ]; then
+    check "studio restarted"          calls_have "systemctl --user start self-learn-studio.service"
+  else
+    check "studio restarted"          calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.studio"
+  fi
+  teardown
+}
+
+test_tldrawkc_rebuilt_when_output_is_gone() {
+  echo "• poller: tldrawkc is rebuilt when dist/ is gone, even if the stamp matches"
+  setup
+  touch "$STATE_DIR/operator"
+  export STUDIO_ENABLED=1
+  run_deploy
+  check "stamped after the first build" grep -qx aaa1111 "$HOME/services/self-learn/state/tldrawkc-sha"
+  rm -rf "$(TL_DIR)/dist" "$(TL_DIR)/node_modules"
+  : > "$CALLS_LOG"
+  run_poll --force
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "dist/ rebuilt"               [ -f "$(TL_DIR)/dist/marker" ]
+  check "node_modules reinstalled"    [ -d "$(TL_DIR)/node_modules" ]
+  teardown
+}
+
 test_deploy_leaves_stopped_studio() {
   echo "• poller: a stopped studio runner is updated but left stopped"
   setup
@@ -693,6 +771,7 @@ EOF
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
   check "remote links blobs/local" calls_have "-d '/Users/kaichen/.self-learn/blobs/local'"
+  check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.self-learn.seafile.plist"
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
   check "agent bootstrapped"    calls_have "launchctl bootstrap"
@@ -735,6 +814,42 @@ test_sync_pull() {
   check "audit ran"           calls_have "npm run catalog -- blob audit"
   check "app restarted"       calls_have "systemctl --user start self-learn.service"
   check "postgres left up"    no_call "compose --project-directory .* stop$"
+  teardown
+}
+
+test_sync_pull_studio() {
+  echo "• sync pull: a running studio runner is stopped before the restore and restarted after"
+  setup; mk_env; mk_psql_canned; mk_studio_unit
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/web_active" "$STATE_DIR/db_running" "$STATE_DIR/studio_active"
+  run_sync pull
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "restore ran"                 calls_have "pg_restore --no-owner"
+  if [ "$OS" = "Linux" ]; then
+    check "studio stopped"            calls_have "systemctl --user stop self-learn-studio.service"
+    check "studio started again"      calls_have "systemctl --user start self-learn-studio.service"
+    check "studio stops before the app" \
+      [ "$(call_line 'stop self-learn-studio.service')" -lt "$(call_line 'stop self-learn.service')" ]
+    check "studio starts after the app" \
+      [ "$(call_line 'start self-learn.service')" -lt "$(call_line 'start self-learn-studio.service')" ]
+  else
+    check "studio stopped"            calls_have "launchctl bootout gui/.*/com.self-learn.studio"
+    check "studio started again"      calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.studio"
+  fi
+  check "studio is up at the end"     test -f "$STATE_DIR/studio_active"
+  teardown
+}
+
+test_sync_pull_stopped_studio() {
+  echo "• sync pull: a stopped studio runner is left stopped"
+  setup; mk_env; mk_psql_canned; mk_studio_unit
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  run_sync pull
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "restore ran"                 calls_have "pg_restore --no-owner"
+  check "studio never stopped"        no_call "stop self-learn-studio"
+  check "studio never started"        no_call "start self-learn-studio"
   teardown
 }
 
@@ -892,6 +1007,9 @@ test_setup_leaves_stopped
 test_studio_enabled
 test_deploy_bounces_studio
 test_deploy_leaves_stopped_studio
+test_flag_change_redeploys
+test_tldrawkc_failed_build_restores
+test_tldrawkc_rebuilt_when_output_is_gone
 test_deploy_pinned_sha
 test_failed_build_restores
 test_operator_escalation
@@ -904,6 +1022,8 @@ test_sync_mac_setup_gui
 test_sync_mac_setup_headless
 test_sync_push
 test_sync_pull
+test_sync_pull_studio
+test_sync_pull_stopped_studio
 test_sync_pull_stopped_app
 test_sync_push_locked
 test_sync_push_pg_fails
