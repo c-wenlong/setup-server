@@ -30,7 +30,7 @@ services:
     # media server that silently jumps a major version can invalidate the
     # library database and the client apps' saved credentials.
     image: jellyfin/jellyfin:${JELLYFIN_VERSION:-12.0}
-    restart: always
+    restart: unless-stopped
     # Run as the host user that owns ${JELLYFIN_CONFIG} and ${JELLYFIN_CACHE}.
     # The official image starts as root otherwise and every file it writes into
     # the bind mounts ends up root-owned — backing up or moving the library

@@ -38,7 +38,7 @@ services:
     depends_on:
       - redis
       - database
-    restart: always
+    restart: unless-stopped
     healthcheck:
       disable: false
 
@@ -51,7 +51,7 @@ services:
     env_file:
       - .env
     mem_limit: ${ML_MEM_LIMIT:-3g}
-    restart: always
+    restart: unless-stopped
     healthcheck:
       disable: false
 
@@ -60,7 +60,7 @@ services:
     image: docker.io/valkey/valkey:9@sha256:8e8d64b405ce18f41b8e5ee20aa4687a8ed0022d1298f2ce31cdcf3a76e09411
     healthcheck:
       test: redis-cli ping || exit 1
-    restart: always
+    restart: unless-stopped
 
   database:
     container_name: immich_postgres
@@ -74,7 +74,7 @@ services:
       # Do not edit the next line. To move the DB, change DB_DATA_LOCATION in .env
       - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
     shm_size: 1gb
-    restart: always
+    restart: unless-stopped
     healthcheck:
       disable: false
 

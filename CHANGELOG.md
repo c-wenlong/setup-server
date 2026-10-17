@@ -8,6 +8,18 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stopped apps no longer come back after a reboot.** The 15 compose files
+  that set `restart: always` (appflowy, coolify, firefly-iii, forgejo,
+  home-assistant, immich, jellyfin, metabase, openhands, plane, self-learn,
+  stirling-pdf, trigger-dev, umami, vaultwarden) now use `unless-stopped` on
+  every service. `always` restarts a container whenever dockerd starts, even
+  after the `docker stop` the launcher and ntfy-control use, so the
+  2026-10-09 reboot started 35 stopped containers and filled RAM and swap.
+  `scripts/check-structure.sh` now fails any compose file that sets
+  `restart: always`, and AGENTS.md makes `unless-stopped` the rule.
+
 ### Added
 
 - **metabase: one-shot deploy of Metabase OSS v0.63.17.3** (self-hosted

@@ -8,7 +8,7 @@
 #      127.0.0.1:LOCAL_PORT (default 8105) mapping to proxy :80 and omit
 #      443 entirely.
 #   2. Image tag pinned (APP_RELEASE=v1.4.2). Upstream floats `stable`.
-#   3. restart: always at service level. Official puts restart_policy
+#   3. restart: unless-stopped at service level. Official puts restart_policy
 #      under `deploy`, which Compose on a non-swarm host ignores.
 #   4. mem_limit on every container. Official has none. This is eleven
 #      processes; unbounded they will OOM the rest of the box.
@@ -91,7 +91,7 @@ services:
   web:
     container_name: plane-web
     image: makeplane/plane-frontend:${APP_RELEASE:-v1.4.2}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_WEB_MEM_LIMIT:-256m}
     depends_on:
@@ -101,7 +101,7 @@ services:
   space:
     container_name: plane-space
     image: makeplane/plane-space:${APP_RELEASE:-v1.4.2}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_SPACE_MEM_LIMIT:-256m}
     depends_on:
@@ -112,7 +112,7 @@ services:
   admin:
     container_name: plane-admin
     image: makeplane/plane-admin:${APP_RELEASE:-v1.4.2}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_ADMIN_MEM_LIMIT:-256m}
     depends_on:
@@ -122,7 +122,7 @@ services:
   live:
     container_name: plane-live
     image: makeplane/plane-live:${APP_RELEASE:-v1.4.2}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_LIVE_MEM_LIMIT:-256m}
     environment:
@@ -135,7 +135,7 @@ services:
     container_name: plane-api
     image: makeplane/plane-backend:${APP_RELEASE:-v1.4.2}
     command: ./bin/docker-entrypoint-api.sh
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_API_MEM_LIMIT:-768m}
     volumes:
@@ -156,7 +156,7 @@ services:
     container_name: plane-worker
     image: makeplane/plane-backend:${APP_RELEASE:-v1.4.2}
     command: ./bin/docker-entrypoint-worker.sh
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_WORKER_MEM_LIMIT:-512m}
     volumes:
@@ -173,7 +173,7 @@ services:
     container_name: plane-beat-worker
     image: makeplane/plane-backend:${APP_RELEASE:-v1.4.2}
     command: ./bin/docker-entrypoint-beat.sh
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_BEAT_MEM_LIMIT:-128m}
     volumes:
@@ -207,7 +207,7 @@ services:
     container_name: plane-db
     image: postgres:${POSTGRES_VERSION:-15.7-alpine}
     command: postgres -c 'max_connections=200'
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_DB_MEM_LIMIT:-512m}
     environment:
@@ -224,7 +224,7 @@ services:
   plane-redis:
     container_name: plane-redis
     image: valkey/valkey:${VALKEY_VERSION:-7.2.11-alpine}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_REDIS_MEM_LIMIT:-128m}
     volumes:
@@ -233,7 +233,7 @@ services:
   plane-mq:
     container_name: plane-mq
     image: rabbitmq:${RABBITMQ_VERSION:-3.13.6-alpine}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_MQ_MEM_LIMIT:-256m}
     environment:
@@ -246,7 +246,7 @@ services:
     # Docker Hub froze minio/minio. Same image, quay.io.
     image: quay.io/minio/minio:${MINIO_VERSION:-RELEASE.2024-12-18T13-15-44Z}
     command: server /export --console-address ":9090"
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_MINIO_MEM_LIMIT:-256m}
     environment:
@@ -257,7 +257,7 @@ services:
   proxy:
     container_name: plane-proxy
     image: makeplane/plane-proxy:${APP_RELEASE:-v1.4.2}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${PLANE_PROXY_MEM_LIMIT:-64m}
     environment:

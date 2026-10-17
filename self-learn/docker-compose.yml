@@ -35,7 +35,7 @@ services:
   db:
     container_name: self-learn-db
     image: postgres:${POSTGRES_VERSION:-17-alpine}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${POSTGRES_MEM_LIMIT:-512m}
     environment:

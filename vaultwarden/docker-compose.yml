@@ -35,7 +35,7 @@ services:
     # Upgrade deliberately: back up ${VAULTWARDEN_DATA} first, bump
     # VAULTWARDEN_VERSION in .env, then re-run setup.sh.
     image: vaultwarden/server:${VAULTWARDEN_VERSION:-1.37.2}
-    restart: always
+    restart: unless-stopped
     # No `user:` override. This image's entrypoint expects to be root — it is
     # the documented way to run it, and Rocket binds :80 inside the container.
     # Consequence to remember: everything under ${VAULTWARDEN_DATA} ends up

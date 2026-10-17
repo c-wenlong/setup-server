@@ -62,7 +62,7 @@ keep it in step when you add a service.
 | `SETUP.md` | Architecture diagram, security model, dependency table, what the script does step-by-step, client-side setup, ops commands. |
 | `TROUBLESHOOT.md` | Layered triage (service → local health → publish → client), symptom-keyed fixes, nuke-and-pave recipe. |
 | `tests/run-tests.sh` | See below. |
-| `docker-compose.yml` | Docker-based services only (most of them). Ports published to `127.0.0.1` only, restart policy set, so no systemd unit is needed. Jellyfin adds a second overlay file, `docker-compose.gpu.yml`, for its opt-in NVENC path. |
+| `docker-compose.yml` | Docker-based services only (most of them). Ports published to `127.0.0.1` only, `restart: unless-stopped` on every service (never `always`, so a stopped app stays stopped across reboots), so no systemd unit is needed. Jellyfin adds a second overlay file, `docker-compose.gpu.yml`, for its opt-in NVENC path. |
 
 Planning documents (`PLAN.md`, `SPEC.md`, `COMPETITIVE-ANALYSIS.md`, a `docs/`
 folder) are optional and kept after a service ships; when the shipped service

@@ -9,7 +9,7 @@
 #   2. Image tag pinned (UMAMI_VERSION). Upstream floats
 #      `postgresql-latest`. v3 is Postgres-only.
 #   3. mem_limit. Official has none.
-#   4. restart: always (repo convention).
+#   4. restart: unless-stopped (repo convention).
 #   5. Telemetry off. APP_SECRET and TWO_FACTOR_ENCRYPTION_KEY generated
 #      by setup.sh. Default admin/umami password is rotated on first boot.
 #
@@ -28,7 +28,7 @@ services:
   umami:
     container_name: umami
     image: ghcr.io/umami-software/umami:${UMAMI_VERSION:-3.3.1}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${UMAMI_MEM_LIMIT:-512m}
     environment:
@@ -54,7 +54,7 @@ services:
   db:
     container_name: umami-db
     image: postgres:${POSTGRES_VERSION:-16-alpine}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${UMAMI_DB_MEM_LIMIT:-256m}
     environment:

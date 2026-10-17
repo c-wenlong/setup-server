@@ -31,7 +31,7 @@ services:
   forgejo:
     container_name: forgejo
     image: codeberg.org/forgejo/forgejo:${FORGEJO_VERSION:-15}
-    restart: always
+    restart: unless-stopped
     environment:
       # Remap the container's `git` user onto the host user that owns
       # ${FORGEJO_DATA}, so the bind mount stays writable and repositories are

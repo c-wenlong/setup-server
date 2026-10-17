@@ -211,7 +211,7 @@ test_fresh_deploy() {
   check "compose binds no wildcard"      no_wildcard_bind
   check "container port is 80"           compose_hasF ':80'
   check "image pinned from .env"         compose_hasF 'image: vaultwarden/server:${VAULTWARDEN_VERSION'
-  check "restart policy set"             compose_has 'restart: *always'
+  check "restart policy unless-stopped"  compose_has 'restart: *unless-stopped'
   check "no ADMIN_TOKEN key in compose"  compose_lacks 'ADMIN_TOKEN'
   # Fail CLOSED if .env is ever lost: a truncated .env must not reopen
   # registration to the whole tailnet.

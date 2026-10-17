@@ -190,7 +190,7 @@ test_fresh_deploy() {
   check "compose binds no wildcard"      no_wildcard_bind
   check "media mounted read-only"        compose_hasF ':/media:ro'
   check "image pinned from .env"         compose_hasF 'image: jellyfin/jellyfin:${JELLYFIN_VERSION'
-  check "restart policy set"             compose_has 'restart: *always'
+  check "restart policy unless-stopped"  compose_has 'restart: *unless-stopped'
   check "advertises PublishedServerUrl"  compose_has 'JELLYFIN_PublishedServerUrl'
   check "no DLNA discovery port 1900"    compose_lacks '1900'
   check "no client-discovery port 7359"  compose_lacks '7359'

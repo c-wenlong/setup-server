@@ -43,7 +43,7 @@ services:
     # migrations are one-way. Upgrade deliberately — dump the database first
     # (see SETUP.md), bump FIREFLY_VERSION in .env, then re-run setup.sh.
     image: fireflyiii/core:${FIREFLY_VERSION:-version-6.4.2}
-    restart: always
+    restart: unless-stopped
 
     # php-fpm + nginx. Measured idle well under this; the cap exists so a
     # runaway import cannot take the box down with it.
@@ -198,7 +198,7 @@ services:
     container_name: firefly-iii-db
     # Stock postgres, pinned to the 16 line. Firefly needs no extensions.
     image: postgres:${POSTGRES_VERSION:-16-alpine}
-    restart: always
+    restart: unless-stopped
     mem_limit: ${FIREFLY_DB_MEM_LIMIT:-512m}
     environment:
       POSTGRES_DB: ${FIREFLY_DB_NAME:-firefly}
@@ -235,7 +235,7 @@ services:
     container_name: firefly-iii-importer
     # Pinned to 1.9.0 exactly.
     image: fireflyiii/data-importer:${IMPORTER_VERSION:-version-1.9.0}
-    restart: always
+    restart: unless-stopped
     mem_limit: ${FIREFLY_IMPORTER_MEM_LIMIT:-512m}
     environment:
       # Container-to-container over the compose network. Deliberately NOT the

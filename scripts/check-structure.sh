@@ -12,7 +12,8 @@
 #   - README.md's Services table has a row linking [<name>](<name>/)
 #   - DIRECTORY.md has a table row linking [<name>](<name>/)
 #
-# Plus one repo-wide rule: no .env may ever be tracked by git.
+# Plus two repo-wide rules: no .env may ever be tracked by git, and no
+# docker-compose*.yml may set `restart: always`.
 #
 # One line per failure, non-zero exit if anything failed. No side effects: this
 # only reads the tree and asks git what it tracks.
@@ -109,6 +110,19 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 else
   printf 'note: not a git checkout, skipping the tracked-.env check\n'
 fi
+
+# `restart: always` brings a container back whenever dockerd starts, even after
+# a manual `docker stop`. The launcher and ntfy-control stop apps that way, so
+# every stopped `always` stack came back after the 2026-10-09 reboot and ran
+# the box out of RAM and swap. `unless-stopped` remembers the stop. Overlays
+# (docker-compose.gpu.yml) are scanned too. Quoted values count.
+for compose in */docker-compose*.yml */docker-compose*.yaml; do
+  [ -e "$compose" ] || continue
+  bad="$(awk '/^[[:space:]]*restart:[[:space:]]*["'"'"']?always["'"'"']?[[:space:]]*(#.*)?$/ { print NR }' "$compose")"
+  for line in $bad; do
+    fail "$compose:$line sets restart: always (use unless-stopped, so a stopped app stays stopped across reboots)"
+  done
+done
 
 # ------------------------------------------------------------------ result
 n_services="$(printf '%s\n' $SERVICES | grep -c .)"

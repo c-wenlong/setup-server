@@ -30,7 +30,7 @@ services:
     # per release), then set HA_VERSION in .env and re-run setup.sh. Downgrades
     # are not supported once .storage has been migrated.
     image: ghcr.io/home-assistant/home-assistant:${HA_VERSION:-2026.9.1}
-    restart: always
+    restart: unless-stopped
 
     # THE ONE THAT NEEDS EXPLAINING.
     #

@@ -19,7 +19,7 @@ services:
   openhands:
     container_name: openhands-agent-canvas
     image: ghcr.io/openhands/agent-canvas:${OPENHANDS_VERSION:-latest}
-    restart: always
+    restart: unless-stopped
     mem_limit: ${OPENHANDS_MEM_LIMIT:-2g}
     environment:
       PORT: "8000"
