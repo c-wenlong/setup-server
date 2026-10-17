@@ -12,7 +12,7 @@
 #   3. Image tags pinned (APPFLOWY_CLOUD_VERSION / GOTRUE_VERSION / …).
 #      Upstream floats `latest`.
 #   4. mem_limit on every container. Official has none.
-#   5. restart: always (repo convention), not on-failure.
+#   5. restart: unless-stopped (repo convention), not on-failure.
 #   6. Our nginx.conf (no 443, no pgadmin, no /minio console). /minio-api
 #      stays — clients need it for presigned uploads.
 #
@@ -31,7 +31,7 @@ services:
   nginx:
     container_name: appflowy-nginx
     image: nginx:${NGINX_VERSION:-1.27-alpine}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_NGINX_MEM_LIMIT:-64m}
     volumes:
@@ -53,7 +53,7 @@ services:
   postgres:
     container_name: appflowy-postgres
     image: pgvector/pgvector:${PGVECTOR_VERSION:-pg16}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_DB_MEM_LIMIT:-512m}
     environment:
@@ -73,7 +73,7 @@ services:
   redis:
     container_name: appflowy-redis
     image: redis:${REDIS_VERSION:-7-alpine}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_REDIS_MEM_LIMIT:-64m}
     command: redis-server --save 20 1 --loglevel warning
@@ -92,7 +92,7 @@ services:
     # Docker Hub minio/minio is frozen/source-only (MinIO Inc., late 2025).
     # Same RELEASE tag, still published on quay.io.
     image: quay.io/minio/minio:${MINIO_VERSION:-RELEASE.2024-12-18T13-15-44Z}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_MINIO_MEM_LIMIT:-256m}
     environment:
@@ -113,7 +113,7 @@ services:
   gotrue:
     container_name: appflowy-gotrue
     image: appflowyinc/gotrue:${GOTRUE_VERSION:-0.18.8}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_GOTRUE_MEM_LIMIT:-128m}
     depends_on:
@@ -151,7 +151,7 @@ services:
   appflowy_cloud:
     container_name: appflowy-cloud
     image: appflowyinc/appflowy_cloud:${APPFLOWY_CLOUD_VERSION:-0.18.8}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_CLOUD_MEM_LIMIT:-512m}
     depends_on:
@@ -194,7 +194,7 @@ services:
   admin_frontend:
     container_name: appflowy-admin
     image: appflowyinc/admin_frontend:${APPFLOWY_ADMIN_FRONTEND_VERSION:-0.18.1}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_ADMIN_MEM_LIMIT:-128m}
     depends_on:
@@ -211,7 +211,7 @@ services:
   appflowy_worker:
     container_name: appflowy-worker
     image: appflowyinc/appflowy_worker:${APPFLOWY_WORKER_VERSION:-0.18.8}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_WORKER_MEM_LIMIT:-256m}
     depends_on:
@@ -239,7 +239,7 @@ services:
   appflowy_web:
     container_name: appflowy-web
     image: appflowyinc/appflowy_web:${APPFLOWY_WEB_VERSION:-0.18.4}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${APPFLOWY_WEB_MEM_LIMIT:-128m}
     depends_on:

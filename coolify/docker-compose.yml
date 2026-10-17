@@ -41,7 +41,7 @@ services:
   coolify:
     container_name: coolify
     image: ${REGISTRY_URL:-docker.io}/coollabsio/coolify:${COOLIFY_VERSION:-4.3.21}
-    restart: always
+    restart: unless-stopped
     working_dir: /var/www/html
     extra_hosts:
       - host.docker.internal:host-gateway
@@ -89,7 +89,7 @@ services:
   postgres:
     container_name: coolify-db
     image: postgres:15-alpine
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${COOLIFY_DB_MEM_LIMIT:-256m}
     environment:
@@ -109,7 +109,7 @@ services:
   redis:
     container_name: coolify-redis
     image: redis:7-alpine
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${COOLIFY_REDIS_MEM_LIMIT:-128m}
     command: redis-server --save 20 1 --loglevel warning --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD missing from .env}
@@ -131,7 +131,7 @@ services:
   soketi:
     container_name: coolify-realtime
     image: ${REGISTRY_URL:-docker.io}/coollabsio/coolify-realtime:${COOLIFY_REALTIME_VERSION:-1.0.19}
-    restart: always
+    restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
     logging: *logging-config

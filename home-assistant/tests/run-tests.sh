@@ -449,7 +449,7 @@ test_compose_privilege_surface() {
   check "not privileged"             compose_lacks 'privileged'
   check "no NET_ADMIN/NET_RAW"       compose_lacks 'cap_add'
   check "no /run/dbus mount"         compose_lacks '/run/dbus'
-  check "restart policy set"         compose_has 'restart: *always'
+  check "restart policy unless-stopped" compose_has 'restart: *unless-stopped'
   check "container name is stable"   compose_has 'container_name: *home-assistant'
   check "config dir is the only rw mount" compose_hasF ':/config'
   check "localtime mounted read-only"     compose_hasF '/etc/localtime:/etc/localtime:ro'

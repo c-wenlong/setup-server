@@ -37,7 +37,7 @@ services:
   webapp:
     container_name: trigger-webapp
     image: ghcr.io/triggerdotdev/trigger.dev:${TRIGGER_IMAGE_TAG:-v4.6.0}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${WEBAPP_MEM_LIMIT:-1g}
     ports:
@@ -120,7 +120,7 @@ services:
   postgres:
     container_name: trigger-postgres
     image: postgres:${POSTGRES_IMAGE_TAG:-14}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${POSTGRES_MEM_LIMIT:-256m}
     volumes:
@@ -144,7 +144,7 @@ services:
   redis:
     container_name: trigger-redis
     image: redis:${REDIS_IMAGE_TAG:-7}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${REDIS_MEM_LIMIT:-64m}
     volumes:
@@ -161,7 +161,7 @@ services:
   electric:
     container_name: trigger-electric
     image: electricsql/electric:${ELECTRIC_IMAGE_TAG:-1.2.4}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${ELECTRIC_MEM_LIMIT:-384m}
     depends_on:
@@ -177,7 +177,7 @@ services:
   minio:
     container_name: trigger-minio
     image: bitnamilegacy/minio:${MINIO_IMAGE_TAG:-2025.7.23-debian-12-r5}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${MINIO_MEM_LIMIT:-384m}
     networks:
@@ -199,7 +199,7 @@ services:
   clickhouse:
     container_name: trigger-clickhouse
     image: clickhouse/clickhouse-server:${CLICKHOUSE_IMAGE_TAG:-26.2}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${CLICKHOUSE_MEM_LIMIT:-768m}
     ulimits:
@@ -241,7 +241,7 @@ services:
   registry:
     container_name: trigger-registry
     image: registry:${REGISTRY_IMAGE_TAG:-2}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${REGISTRY_MEM_LIMIT:-64m}
     ports:
@@ -261,7 +261,7 @@ services:
   supervisor:
     container_name: trigger-supervisor
     image: ghcr.io/triggerdotdev/supervisor:${TRIGGER_IMAGE_TAG:-v4.6.0}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${SUPERVISOR_MEM_LIMIT:-256m}
     depends_on:
@@ -306,7 +306,7 @@ services:
   docker-proxy:
     container_name: trigger-docker-proxy
     image: tecnativa/docker-socket-proxy:${DOCKER_PROXY_IMAGE_TAG:-v0.5.0}
-    restart: always
+    restart: unless-stopped
     logging: *logging-config
     mem_limit: ${DOCKER_PROXY_MEM_LIMIT:-32m}
     volumes:
