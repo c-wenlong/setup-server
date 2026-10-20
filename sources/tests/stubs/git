@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# git stub. The service builds the existing fetch clone (SOURCE_REPO), so this
+# stub only answers the read/pull commands deploy.sh runs. State in $STATE_DIR:
+#   local_sha   — sha reported by `rev-parse HEAD` (default aaa1111);
+#                 change it between runs to simulate a new commit
+#   pull_fail   — exists => `pull --ff-only` fails (dirty/diverged clone)
+echo "git $*" >> "$CALLS_LOG"
+
+if [ "${1:-}" = "-C" ]; then shift 2; fi
+
+case "${1:-}" in
+  rev-parse)
+    case "${2:-}" in
+      --git-dir) echo ".git" ;;   # like real rev-parse inside a worktree
+      *) cat "$STATE_DIR/local_sha" 2>/dev/null || echo aaa1111 ;;
+    esac
+    ;;
+  pull)
+    if [ -f "$STATE_DIR/pull_fail" ]; then
+      echo "error: cannot pull with rebase: you have unstaged changes" >&2
+      exit 1
+    fi
+    ;;
+  fetch|status) ;;
+esac
+exit 0

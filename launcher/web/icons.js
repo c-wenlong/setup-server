@@ -47,6 +47,9 @@
     /* The Gnosia mark from the self-learn repo's own brand set
        (apps/web/public/brand/mark.png). Raster, no vector original. */
     'self-learn':    { file: 'self-learn',    ext: 'png' },
+    /* The site's own favicon (site/favicon.svg in the sources repo) — the
+       filled lavender plate reads on both tile themes, so no -dark pair. */
+    'sources':       { file: 'sources' },
     'manimkc':       { file: 'manimkc',      ext: 'png' },
     'seafile':       { file: 'seafile' },
     'syncthing':     { file: 'syncthing' },

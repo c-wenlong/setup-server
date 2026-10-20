@@ -302,6 +302,27 @@
       "description": "Gnosia study hub: the private self-learn repo's Next.js roadmap and Claude tutoring loop over a Postgres catalog — courses, concept notes, spaced-repetition reviews, indexed videos and diagrams. Native `next start` under a systemd user unit on 127.0.0.1:8107 behind Serve; Postgres 17 is a container on loopback :5432 because the catalog CLI runs on the host. A daily poller pulls main and rebuilds (stop app, npm ci, migrate, next build, start), and a nightly 03:00 timer exports the catalog to ~/.self-learn/archive. Sign-in is the app's own OWNER_PASSWORD from .env — the tailnet is still the perimeter, the password just gates one owner from another tailnet device."
     },
     {
+      "key": "sources",
+      "name": "sources",
+      "tagline": "Archive",
+      "group": "knowledge",
+      "icon": "archive",
+      "url": "https://HOST:8098/",
+      "health": "http://127.0.0.1:8098/",
+      "marker": "~/services/sources",
+      "setup": "sources/setup.sh",
+      "env": "sources/.env",
+      "control": {
+        "parts": [
+          {
+            "container": "sources"
+          }
+        ],
+        "kuma": "sources"
+      },
+      "description": "Passphrase-encrypted browser for the private sources archive (YouTube transcripts, blogs, newsletters, papers, personas): categories, sources, authors, personas and a reader. nginx serves the AES-256-GCM build on 127.0.0.1:8098 behind Serve; a daily poller rebuilds when the fetch clone at ~/dev/sources moves, so the weekly fetch commit goes live the same day. Unlock with the same SITE_PASSPHRASE as the GitHub Pages site. ~/services/sources/bin/deploy.sh --force rebuilds now."
+    },
+    {
       "key": "appflowy",
       "name": "AppFlowy",
       "tagline": "Notes",

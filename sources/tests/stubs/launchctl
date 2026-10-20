@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# launchctl stub (used when the mocked suite runs on macOS): logs and succeeds.
+echo "launchctl $*" >> "$CALLS_LOG"
+exit 0
