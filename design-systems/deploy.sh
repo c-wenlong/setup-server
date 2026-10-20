@@ -89,9 +89,17 @@ if git -C "$REPO_DIR" lfs version >/dev/null 2>&1; then
   git -C "$REPO_DIR" lfs pull 2>&1 | tail -3 || true
 fi
 
-if [ ! -x "$REPO_DIR/.venv/bin/zensical" ]; then
-  echo "installing the pinned Zensical into the repo's .venv (uv)"
-  ( cd "$REPO_DIR" && uv venv -q --python 3.13 .venv && uv pip install -q --python .venv/bin/python -r requirements.txt )
+# Deps: bootstrap .venv when zensical is missing, and re-sync whenever
+# requirements.txt is newer than the last successful install — a changed
+# pin must not leave the poller building with stale packages. The stamp is
+# touched only after a successful install, so a failed one retries on the
+# next run. `uv venv --allow-existing` no-ops on a venv that is already
+# there (a bare `uv venv` refuses to recreate it).
+VENV_STAMP="$REPO_DIR/.venv/.deploy-stamp"
+if [ ! -x "$REPO_DIR/.venv/bin/zensical" ] || [ "$REPO_DIR/requirements.txt" -nt "$VENV_STAMP" ]; then
+  echo "syncing the repo's .venv (uv)"
+  ( cd "$REPO_DIR" && uv venv -q --allow-existing --python 3.13 .venv && uv pip install -q --python .venv/bin/python -r requirements.txt )
+  touch "$VENV_STAMP"
 fi
 
 echo "building gallery data + docs site"
@@ -110,9 +118,18 @@ cp -a "$REPO_DIR/site" "$WWW_DIR/next"
 # down. The previous release stays in releases/ for rollback.
 mkdir -p "$WWW_DIR/releases"
 prev_target="$(readlink "$WWW_DIR/current" 2>/dev/null || true)"
-rm -rf "$WWW_DIR/releases/$local_sha"
-mv "$WWW_DIR/next" "$WWW_DIR/releases/$local_sha"
-ln -sfn "releases/$local_sha" "$WWW_DIR/current.new"
+target="$local_sha"
+if [ "$prev_target" = "releases/$local_sha" ]; then
+  # A --force rebuild of the live sha can't reuse its directory name:
+  # deleting or moving the release `current` points at would leave the site
+  # serving a missing root (a window where requests 404, and a kill mid-way
+  # leaves `current` dangling). Build beside it under a suffixed name; the
+  # old build stays on as the previous release.
+  target="$local_sha.rebuild-$(date +%s)"
+fi
+rm -rf "$WWW_DIR/releases/$target"
+mv "$WWW_DIR/next" "$WWW_DIR/releases/$target"
+ln -sfn "releases/$target" "$WWW_DIR/current.new"
 if [ "$(uname -s)" = "Darwin" ]; then
   mv -hf "$WWW_DIR/current.new" "$WWW_DIR/current"   # BSD mv: no -T
 else
@@ -122,7 +139,7 @@ fi
 # Keep current and previous releases; drop anything older.
 for d in "$WWW_DIR/releases"/*/; do
   name="$(basename "$d")"
-  [ "$name" = "$local_sha" ] || [ "releases/$name" = "$prev_target" ] || rm -rf "$d"
+  [ "$name" = "$target" ] || [ "releases/$name" = "$prev_target" ] || rm -rf "$d"
 done
 
 mkdir -p "$BUILD_STATE"

@@ -208,6 +208,53 @@ test_push_triggers_redeploy() {
   teardown
 }
 
+test_force_rebuild_same_sha() {
+  echo "• --force rebuild of the live sha: current never dangles, old build stays previous"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  : > "$CALLS_LOG"
+  run_poll --force
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "rebuilt"                     calls_have "zensical build"
+  check "current resolves"            [ -f "$HOME/services/design-systems/www/current/index.html" ]
+  check "current is the new build"    sh -c 'readlink "$1" | grep -q "aaa1111\.rebuild-"' _ "$HOME/services/design-systems/www/current"
+  check "two releases kept"           sh -c '[ "$(ls -d "$1"/releases/*/ | wc -l)" -eq 2 ]' _ "$HOME/services/design-systems/www"
+  check "old build kept as previous"  [ -d "$HOME/services/design-systems/www/releases/aaa1111" ]
+  teardown
+}
+
+test_deps_resync_on_requirements_change() {
+  echo "• poller re-syncs .venv when requirements.txt is newer than the last install"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "deps installed once"   calls_have "uv pip install"
+  : > "$CALLS_LOG"
+  # requirements.txt newer than .venv/.deploy-stamp -> reinstall on a rebuild
+  touch -t 209901010000 "$SOURCE_REPO/requirements.txt"
+  run_poll --force
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "deps re-installed"   calls_have "uv pip install"
+  teardown
+}
+
+test_spaced_repo_path() {
+  echo "• SOURCE_REPO with spaces: .env stays shell-parseable end to end"
+  setup
+  touch "$STATE_DIR/operator"
+  export SOURCE_REPO="$SANDBOX/repo with space"
+  mkdir -p "$SOURCE_REPO/.git" "$SOURCE_REPO/tools" "$SOURCE_REPO/systems"
+  echo "# catalog stub" > "$SOURCE_REPO/tools/catalog.py"
+  echo "x" > "$SOURCE_REPO/requirements.txt"
+  run_deploy
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "path in .env"        env_has "SOURCE_REPO="
+  check "built the site"      calls_have "zensical build"
+  check "site swapped in"     [ -f "$HOME/services/design-systems/www/current/index.html" ]
+  teardown
+}
+
 test_poll_lock() {
   echo "• poller: concurrent run skips cleanly while the lock is held"
   setup
@@ -299,6 +346,9 @@ test_lfs_pointers_unfixable
 test_fresh_deploy
 test_idempotent_rerun
 test_push_triggers_redeploy
+test_force_rebuild_same_sha
+test_deps_resync_on_requirements_change
+test_spaced_repo_path
 test_poll_lock
 test_port_override
 test_operator_escalation
