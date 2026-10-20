@@ -82,7 +82,10 @@
     'stirling-pdf':  { file: 'stirling-pdf' },                /* #8e3131    */
     'metabase':      { file: 'metabase' },                    /* #509ee3    */
     'plane':         { file: 'plane' },                       /* #5275fc    */
-    'umami':         { file: 'umami', dark: true }            /* black ink  */
+    'umami':         { file: 'umami', dark: true },           /* black ink  */
+    /* Bespoke mark: three swatch cards on a slate plate — reads on both
+       tile themes, so no -dark pair. No upstream brand (private repo). */
+    'design-systems': { file: 'design-systems' }
   };
 
   /* Spellings the registry might plausibly use for the same service. */
@@ -242,6 +245,13 @@
     box: [
       ['rect', { x: 4.4, y: 4.4, width: 15.2, height: 15.2, rx: 4.2 }],
       ['circle', { cx: 12, cy: 12, r: 2.2 }]
+    ],
+    palette: [
+      ['path', { d: 'M12 3.6a8.4 8.4 0 0 0 0 16.8c.95 0 1.5-.55 1.5-1.3 0-.4-.15-.72-.4-.96-.22-.22-.34-.52-.34-.84a1.3 1.3 0 0 1 1.3-1.3h1.5a4.4 4.4 0 0 0 4.4-4.4c0-4.5-3.6-8.06-7.96-8.06Z' }],
+      ['circle', { cx: 7.8, cy: 9.4, r: 1.1 }],
+      ['circle', { cx: 12, cy: 7.6, r: 1.1 }],
+      ['circle', { cx: 16.2, cy: 9.4, r: 1.1 }],
+      ['circle', { cx: 8, cy: 13.8, r: 1.1 }]
     ]
   };
 
@@ -274,6 +284,7 @@
     backup: 'cloud', sync: 'cloud',
     install: 'download', deploy: 'download', arrow_down: 'download',
     restart: 'power', onoff: 'power', service: 'power',
+    swatch: 'palette', swatches: 'palette', design: 'palette', theme: 'palette', color: 'palette', colour: 'palette',
     generic: 'box', unknown: 'box', app: 'box'
   };
 

@@ -337,6 +337,28 @@
       "description": "Passphrase-encrypted browser for the private sources archive (YouTube transcripts, blogs, newsletters, papers, personas): categories, sources, authors, personas and a reader. nginx serves the AES-256-GCM build on 127.0.0.1:8098 behind Serve; a daily poller rebuilds when the fetch clone at ~/dev/sources moves, so the weekly fetch commit goes live the same day. Unlock with the same SITE_PASSPHRASE as the GitHub Pages site. ~/services/sources/bin/deploy.sh --force rebuilds now."
     },
     {
+      "key": "design-systems",
+      "name": "design-systems",
+      "tagline": "Design",
+      "group": "knowledge",
+      "icon": "palette",
+      "author": "c-wenlong",
+      "url": "https://HOST:8108/gallery/",
+      "health": "http://127.0.0.1:8108/gallery/",
+      "marker": "~/services/design-systems",
+      "setup": "design-systems/setup.sh",
+      "env": "design-systems/.env",
+      "control": {
+        "parts": [
+          {
+            "container": "design-systems"
+          }
+        ],
+        "kuma": "design-systems"
+      },
+      "description": "The private designs repo as a browsable library: the gallery of every captured design system (tokens, screenshots, components) plus the docs site and scorecard. nginx serves the Zensical build on 127.0.0.1:8108 behind Serve, and answers /systems/, /tools/, /example/, /catalog.json and /README.md straight from a read-only mount of the working clone at ~/dev/design-systems (same allowlist as the repo's make serve — the ~300 MB of LFS screenshots are never copied into a release). No passphrase: the repo's own Pages deploy strips and encrypts the gallery, but the tailnet is the boundary here. A daily poller rebuilds when the clone's HEAD moves; ~/services/design-systems/bin/deploy.sh --force rebuilds now."
+    },
+    {
       "key": "appflowy",
       "name": "AppFlowy",
       "tagline": "Notes",

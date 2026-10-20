@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# curl stub: health checks succeed. When asked for an http_code write-out,
+# prints 200 (the script greps for a 2xx/3xx).
+echo "curl $*" >> "$CALLS_LOG"
+
+for a in "$@"; do
+  if [ "$a" = "%{http_code}" ]; then
+    printf '200'
+    exit 0
+  fi
+done
+exit 0
