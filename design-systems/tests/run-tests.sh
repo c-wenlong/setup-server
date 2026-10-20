@@ -321,7 +321,9 @@ media_alias_serves_file() {
   dir="$svc_home/media/refero"
   [ -d "$dir" ] || return 1
   sent="$dir/.live-check-$$"
-  echo "live-check" > "$sent" || return 1
+  # chmod: under a 077 umask the sentinel would land 0600 and the nginx
+  # worker could not read it even when the alias is wired right.
+  echo "live-check" > "$sent" && chmod 644 "$sent" || return 1
   body="$(curl -fsS "http://127.0.0.1:$port/refero-media/.live-check-$$" 2>/dev/null)"
   rm -f "$sent"
   [ "$body" = "live-check" ]
