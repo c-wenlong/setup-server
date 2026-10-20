@@ -91,6 +91,9 @@ PUBLISHED = [
     # that Postgres does: content pages read the catalog per request, and
     # the landing page reads none, so a DB fault won't be caught here.
     ("self-learn", 8107, "/"),
+    # "/" is the app shell (200): the whole corpus is encrypted blobs, so no
+    # deeper endpoint exists — this proves nginx serves, nothing more.
+    ("sources", 8098, "/"),
     # /login.html, not / — "/" is a 302 to it and Kuma scores a 302 as down.
     # This proves the web UI is up and says nothing about DNS; the resolver
     # gets its own monitor below, because those two fail independently.

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# uv stub. `uv sync` no-ops; `uv run scripts/build_site.py --out DIR` fakes a
+# build by writing the files the tests look for (index.html + d/key.json).
+echo "uv $*" >> "$CALLS_LOG"
+
+case "$1" in
+  sync) ;;
+  run)
+    out=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "--out" ] && out="$a"
+      prev="$a"
+    done
+    if [ -n "$out" ]; then
+      mkdir -p "$out/d"
+      echo "stub index" > "$out/index.html"
+      echo "stub js" > "$out/app.js"
+      echo '{}' > "$out/d/key.json"
+    fi
+    ;;
+esac
+exit 0
