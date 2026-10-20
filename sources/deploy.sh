@@ -121,9 +121,18 @@ if [ -d "$WWW_DIR/current" ] && [ ! -L "$WWW_DIR/current" ]; then
 else
   prev_target="$(readlink "$WWW_DIR/current" 2>/dev/null || true)"
 fi
-rm -rf "$WWW_DIR/releases/$local_sha"
-mv "$WWW_DIR/next" "$WWW_DIR/releases/$local_sha"
-ln -sfn "releases/$local_sha" "$WWW_DIR/current.new"
+target="$local_sha"
+if [ "$prev_target" = "releases/$local_sha" ]; then
+  # A --force rebuild of the live sha can't reuse its directory name:
+  # deleting or moving the release `current` points at would leave the site
+  # serving a missing root (a window where requests 404, and a kill mid-way
+  # leaves `current` dangling). Build beside it under a suffixed name; the
+  # old build stays on as the previous release.
+  target="$local_sha.rebuild-$(date +%s)"
+fi
+rm -rf "$WWW_DIR/releases/$target"
+mv "$WWW_DIR/next" "$WWW_DIR/releases/$target"
+ln -sfn "releases/$target" "$WWW_DIR/current.new"
 if [ "$(uname -s)" = "Darwin" ]; then
   mv -hf "$WWW_DIR/current.new" "$WWW_DIR/current"   # BSD mv: no -T
 else
@@ -133,7 +142,7 @@ fi
 # Keep current and previous releases; drop anything older.
 for d in "$WWW_DIR/releases"/*/; do
   name="$(basename "$d")"
-  [ "$name" = "$local_sha" ] || [ "releases/$name" = "$prev_target" ] || rm -rf "$d"
+  [ "$name" = "$target" ] || [ "releases/$name" = "$prev_target" ] || rm -rf "$d"
 done
 
 mkdir -p "$BUILD_STATE"
