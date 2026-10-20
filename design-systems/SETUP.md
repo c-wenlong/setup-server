@@ -42,7 +42,11 @@ immediately with `~/services/design-systems/bin/deploy.sh --force`.
           │                                                            ▼
           └──── /systems|/tools|/example|catalog.json|README.md ── nginx (Docker)
                  (read-only mount of the checkout,                  127.0.0.1:8108
-                  same allowlist make serve answers)                     │
+                  same allowlist make serve answers)                     ▲
+                                                                        │  bind mount (ro)
+                                              ~/services/design-systems/media
+                                              (refero shots/posters/videos/favicons,
+                                               mirrored by tools/refero/mirror_media.py)
                                                                          ▼
                                                   Tailscale Serve  HTTPS :8108 (tailnet only)
                         https://kai-home-server.taild6a23f.ts.net:8108/gallery/
@@ -69,6 +73,14 @@ The repo's dev server answers a fixed allowlist (`tools/catalog.py`'s
 `/README.md`) from the checkout. nginx does the same with `alias` onto a
 read-only bind mount of `SOURCE_REPO`, so a release stays small and the
 checkout is the single copy.
+
+Refero media follows the same idea but lives outside the repo: the
+gallery's `#/refero` pages point at `/refero-media/shots|posters|videos|
+detail|favicons/<slug>.*`, aliased onto `~/services/design-systems/media/
+refero/` (populated by `python3 tools/refero/mirror_media.py` from the
+repo). Videos are too heavy to commit or to copy per release, so the mirror
+is a host-side dir — a missing file falls back to the refero CDN URL in
+the browser, nothing breaks.
 
 ## Why polling, not a webhook
 
@@ -111,7 +123,9 @@ and free; worst-case latency is `POLL_SECONDS` (daily by default), and
    path, service home; mode `0600`). Re-runs read `.env` as the source of
    truth.
 3. Writes `~/services/design-systems/nginx.conf` if absent (docs site +
-   the repo-path aliases).
+   the repo-path aliases + the `/refero-media/` media alias). An existing
+   conf is never overwritten; if it predates the media alias, setup.sh
+   prints the line to add.
 4. Installs `deploy.sh` -> `~/services/design-systems/bin/` (refreshed
    every run; edit the repo copy, then re-run setup.sh).
 5. Runs the initial deploy: pull, `lfs pull`, `catalog.py build`,

@@ -150,6 +150,9 @@ test_fresh_deploy() {
   check ".env has public URL"         env_has "PUBLIC_URL=https://test-host.tailfake.ts.net:8108/"
   check ".env is owner-only"          sh -c '[ "$(stat -c %a "$0" 2>/dev/null || stat -f %Lp "$0")" = 600 ]' "$SVC/.env"
   check "deploy script installed"     [ -x "$HOME/services/design-systems/bin/deploy.sh" ]
+  check "media dir created"           [ -d "$HOME/services/design-systems/media/refero" ]
+  check "nginx conf has media alias"  grep -q "refero-media" "$HOME/services/design-systems/nginx.conf"
+  check "compose mounts media"        grep -q "srv/media" "$SERVICE_DIR/docker-compose.yml"
   check "env path baked into script"  grep -q "$SVC/.env" "$HOME/services/design-systems/bin/deploy.sh"
   check "venv created (uv venv)"      calls_have "uv venv"
   check "deps installed (uv pip)"     calls_have "uv pip install"
@@ -323,6 +326,7 @@ test_live() {
   live_check "gallery responds"         curl -fsS "http://127.0.0.1:$port/gallery/"
   live_check "gallery data responds"    sh -c "curl -fsS 'http://127.0.0.1:$port/gallery/data.json' | grep -q systems"
   live_check "repo path responds"       sh -c "curl -fsS 'http://127.0.0.1:$port/catalog.json' | grep -q systems"
+  live_check "media alias wired"        sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:$port/refero-media/'); [ \"\$code\" = 200 ] || [ \"\$code\" = 403 ]"
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches repo"   sh -c "[ \"\$(git -C '$repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   if [ "$OS" = "Linux" ]; then
