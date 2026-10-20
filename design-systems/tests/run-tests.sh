@@ -313,6 +313,20 @@ no_external_listener() {
   fi
 }
 
+# A bare request to /refero-media/ can't tell "autoindex off" apart from
+# "nginx can't read the dir". Drop a sentinel file and fetch it back through
+# the alias — only a working mount returns the contents.
+media_alias_serves_file() {
+  local port="$1" svc_home="$2" dir sent body
+  dir="$svc_home/media/refero"
+  [ -d "$dir" ] || return 1
+  sent="$dir/.live-check-$$"
+  echo "live-check" > "$sent" || return 1
+  body="$(curl -fsS "http://127.0.0.1:$port/refero-media/.live-check-$$" 2>/dev/null)"
+  rm -f "$sent"
+  [ "$body" = "live-check" ]
+}
+
 test_live() {
   echo "• live: verify the real deployment on this machine"
   local ts port url svc_home repo
@@ -326,7 +340,7 @@ test_live() {
   live_check "gallery responds"         curl -fsS "http://127.0.0.1:$port/gallery/"
   live_check "gallery data responds"    sh -c "curl -fsS 'http://127.0.0.1:$port/gallery/data.json' | grep -q systems"
   live_check "repo path responds"       sh -c "curl -fsS 'http://127.0.0.1:$port/catalog.json' | grep -q systems"
-  live_check "media alias wired"        sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:$port/refero-media/'); [ \"\$code\" = 200 ] || [ \"\$code\" = 403 ]"
+  live_check "media alias wired"        media_alias_serves_file "$port" "$svc_home"
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches repo"   sh -c "[ \"\$(git -C '$repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   if [ "$OS" = "Linux" ]; then
