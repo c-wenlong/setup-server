@@ -38,6 +38,7 @@ set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8098}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
+[ -n "${SOURCE_REPO:-}" ] && SOURCE_REPO_SET=1
 SOURCE_REPO="${SOURCE_REPO:-$HOME/dev/sources}"
 BRANCH="${BRANCH:-main}"
 POLL_SECONDS="${POLL_SECONDS:-86400}"   # daily; deploy.sh --force deploys now
@@ -81,6 +82,12 @@ state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"
 [ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
 
 # The build runs inside the fetch clone; it must exist and look like sources.
+# A saved .env wins over the default path on re-runs: only an explicit
+# SOURCE_REPO=... overrides it.
+if [ -f "$ENV_FILE" ] && [ -z "${SOURCE_REPO_SET+x}" ]; then
+  saved_repo="$(sed -n 's/^SOURCE_REPO=\(.*\)$/\1/p' "$ENV_FILE")"
+  [ -n "$saved_repo" ] && SOURCE_REPO="$saved_repo"
+fi
 [ -d "$SOURCE_REPO/.git" ] || die "Sources repo not found at $SOURCE_REPO (set SOURCE_REPO=... or clone it first)."
 [ -f "$SOURCE_REPO/scripts/build_site.py" ] || die "$SOURCE_REPO does not look like the sources repo (no scripts/build_site.py)."
 
@@ -111,9 +118,12 @@ HTTPS_PORT=$HTTPS_PORT
 POLL_SECONDS=$POLL_SECONDS
 SERVICE_HOME=$HOME/services/sources
 UV_BIN=$(dirname "$(command -v uv)")
-SITE_PASSPHRASE=$SITE_PASSPHRASE
 PUBLIC_URL=https://$host:$HTTPS_PORT/
 EOF
+  # deploy.sh sources this file as shell code, so the passphrase must be
+  # written shell-quoted (%q): spaces or metachars in it would otherwise
+  # break or change the saved value.
+  printf 'SITE_PASSPHRASE=%q\n' "$SITE_PASSPHRASE" >> "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
 fi
@@ -140,6 +150,10 @@ server {
     server_name _;
     root /usr/share/nginx/html/current;
     index index.html;
+
+    # Build internals live under the same mount as `current` — not part of
+    # the site, so hide them rather than serve partial or duplicate trees.
+    location ~ ^/(releases|next)(/|$) { return 404; }
 
     location / {
         try_files $uri $uri/ =404;

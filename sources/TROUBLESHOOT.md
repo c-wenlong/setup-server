@@ -53,6 +53,10 @@ appearing in `tailscale serve status` proves nothing about the site.
 - `another deploy is running — skipping` on every run → stale lock from a
   killed build; it self-clears after 60 min, or immediately:
   `rmdir ~/services/sources/.deploy.lock`.
+- `fetch_all.sh still holds ... sources-fetch.lock` → a fetch was running;
+  the deploy waited up to `SOURCES_DEPLOY_LOCK_WAIT` (default 900s) and
+  skipped. Routine fetches take ~2 min, so repeats of this line mean a
+  fetch is stuck — check `journalctl -u sources-fetch`.
 
 **Build fails (site keeps serving the old version — that's by design).**
 Run it by hand to see the full error:
@@ -118,12 +122,16 @@ Rebuild with the right value: fix `.env`, then `bin/deploy.sh --force`.
 
 ## Rollback
 
-The previous build stays in `www/prev`:
+`www/current` is a symlink into `www/releases/<sha>`; the previous release
+is kept beside it. Repoint `current` at the older release:
+
 ```sh
 cd ~/services/sources/www
-mv current bad && mv prev current
+ls releases/                       # pick the sha to go back to
+ln -sfn releases/<sha> current.new && mv -Tf current.new current
 ```
-(Any later successful deploy overwrites the rollback — pin by stopping the
+
+(Any later successful deploy moves `current` again — pin by stopping the
 timer first: `systemctl --user stop sources-deploy.timer`.)
 
 ## Nuke and pave

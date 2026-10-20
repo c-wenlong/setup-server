@@ -18,11 +18,13 @@
 # It is pulled forward (ff-only) but never reset or committed here.
 #
 # Build pipeline:
+#   flock .git/sources-fetch.lock        # shared with fetch_all.sh: a build
+#                                        # never reads a half-fetched tree
 #   git -C $SOURCE_REPO pull --ff-only     # best effort; a dirty or offline
 #                                          # repo just builds its local HEAD
 #   uv sync --quiet                        # in the repo, like run_web.sh
 #   uv run scripts/build_site.py --out www/next
-#   swap www/next into www/current         # atomic: next -> current
+#   repoint www/current -> releases/<sha>  # atomic: one rename over the old symlink
 
 set -euo pipefail
 
@@ -61,6 +63,22 @@ if [ ! -d "$REPO_DIR/.git" ]; then
   exit 1
 fi
 
+# A running fetch writes into this same checkout. fetch_all.sh holds an
+# exclusive flock on .git/sources-fetch.lock for its whole run
+# (docs/FETCHING.md), so take the same lock and hold it through the build:
+# the site is only ever built from a tree no fetch is mid-write on. A routine
+# fetch is ~2 min; wait up to SOURCES_DEPLOY_LOCK_WAIT (default 900s), then
+# skip — the next timer tick retries. No fetch timer exists off this Linux
+# box, so on macOS (no flock) the race cannot happen and no lock is taken.
+if [ "$(uname -s)" = "Linux" ] && command -v flock >/dev/null 2>&1; then
+  FETCH_LOCK="$REPO_DIR/$(git -C "$REPO_DIR" rev-parse --git-dir)/sources-fetch.lock"
+  exec 8>"$FETCH_LOCK"
+  if ! flock -w "${SOURCES_DEPLOY_LOCK_WAIT:-900}" 8; then
+    echo "fetch_all.sh still holds $FETCH_LOCK — skipping this deploy"
+    exit 0
+  fi
+fi
+
 # Best effort: a weekly-fetch clone can be ahead of origin (push pending),
 # behind it (pushed from elsewhere), or dirty — HEAD after this is what we
 # build either way. Only a committed state is ever read.
@@ -88,11 +106,35 @@ mkdir -p "$WWW_DIR"
 ( cd "$REPO_DIR" && uv run scripts/build_site.py --out "$WWW_DIR/next" )
 
 # --------------------------------------------------------------------- swap
-# nginx serves $WWW_DIR/current (bind mount of the parent keeps the swap
-# atomic — never mv the mounted dir itself).
-rm -rf "$WWW_DIR/prev"
-[ -d "$WWW_DIR/current" ] && mv "$WWW_DIR/current" "$WWW_DIR/prev"
-mv "$WWW_DIR/next" "$WWW_DIR/current"
+# nginx serves the `current` symlink inside the parent mount. Repoint it with
+# one rename — moving directories in two steps would leave a gap where the
+# root does not exist, and a deploy killed mid-swap would leave the site
+# down. The previous release stays in releases/ for rollback.
+mkdir -p "$WWW_DIR/releases"
+# Migrate the original layout where `current` was the build directory
+# itself: park it under releases/ first so the symlink lands cleanly.
+if [ -d "$WWW_DIR/current" ] && [ ! -L "$WWW_DIR/current" ]; then
+  legacy="$built_sha"; [ "$legacy" = "none" ] && legacy="legacy"
+  rm -rf "$WWW_DIR/releases/$legacy"
+  mv "$WWW_DIR/current" "$WWW_DIR/releases/$legacy"
+  prev_target="releases/$legacy"
+else
+  prev_target="$(readlink "$WWW_DIR/current" 2>/dev/null || true)"
+fi
+rm -rf "$WWW_DIR/releases/$local_sha"
+mv "$WWW_DIR/next" "$WWW_DIR/releases/$local_sha"
+ln -sfn "releases/$local_sha" "$WWW_DIR/current.new"
+if [ "$(uname -s)" = "Darwin" ]; then
+  mv -hf "$WWW_DIR/current.new" "$WWW_DIR/current"   # BSD mv: no -T
+else
+  mv -Tf "$WWW_DIR/current.new" "$WWW_DIR/current"   # one rename over the old symlink
+fi
+
+# Keep current and previous releases; drop anything older.
+for d in "$WWW_DIR/releases"/*/; do
+  name="$(basename "$d")"
+  [ "$name" = "$local_sha" ] || [ "releases/$name" = "$prev_target" ] || rm -rf "$d"
+done
 
 mkdir -p "$BUILD_STATE"
 echo "$local_sha" > "$BUILD_STATE/built-sha"

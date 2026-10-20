@@ -21,12 +21,15 @@ weekly fetch timer ──┐                     push from any device
                managed on main)              │
                      ▲                       │
                      │      sources-deploy.timer ──► bin/deploy.sh
-                     │        (systemd user timer;    │ 1. git pull --ff-only (best effort)
-                     │         launchd on macOS)      │ 2. uv sync --quiet
-                     │                                │ 3. uv run scripts/build_site.py --out www/next
+                     │        (systemd user timer;    │ 1. flock .git/sources-fetch.lock
+                     │         launchd on macOS)      │    (shared with fetch_all.sh —
+                     │                                │     no build over a half-fetched tree)
+                     │                                │ 2. git pull --ff-only (best effort)
+                     │                                │ 3. uv sync --quiet
+                     │                                │ 4. uv run scripts/build_site.py --out www/next
                      │                                │    (gzip + AES-256-GCM per file;
                      │                                │     SITE_PASSPHRASE from .env)
-                     │                                │ 4. atomic swap   www/next -> www/current
+                     │                                │ 5. atomic repoint  current -> releases/<sha>
                      │                                ▼
                      │                     ~/services/sources/www/current
                      │                                │  bind mount (ro)
@@ -122,10 +125,13 @@ docker compose --project-directory ~/dev/setup-server/sources ps|logs|restart
 tailscale serve status
 ```
 
-A failed build leaves the previous `www/current` serving untouched — a
-broken commit never takes the site down. The last good build is also kept
-in `www/prev`. If `git pull` fails (dirty tree, offline, diverged) the
-poller builds the local HEAD instead and notes it in the log.
+A failed build leaves `www/current` pointing at the last release — a
+broken commit never takes the site down, and the repoint itself is one
+rename (no gap where nginx has no root). The previous release stays in
+`www/releases/` for rollback. If `git pull` fails (dirty tree, offline,
+diverged) the poller builds the local HEAD instead and notes it in the
+log; if a fetch is mid-run the deploy waits for its lock up to 15 min,
+then skips to the next tick.
 
 ## Client side
 

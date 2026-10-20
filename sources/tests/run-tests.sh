@@ -32,7 +32,8 @@ setup() {
   mkdir -p "$SOURCE_REPO/.git" "$SOURCE_REPO/scripts"
   echo "# build stub" > "$SOURCE_REPO/scripts/build_site.py"
 
-  export SITE_PASSPHRASE="test-passphrase-value"
+  # A passphrase with a space exercises the %q quoting in the written .env.
+  export SITE_PASSPHRASE="test pass phrase"
 }
 
 teardown() {
@@ -117,7 +118,8 @@ test_fresh_deploy() {
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env has repo path"          env_has "SOURCE_REPO=$SOURCE_REPO"
   check ".env has poll interval"      env_has "POLL_SECONDS=86400"
-  check ".env has passphrase"         env_has "SITE_PASSPHRASE=test-passphrase-value"
+  check ".env has passphrase"         env_has "^SITE_PASSPHRASE="
+  check "passphrase round-trips"      sh -c '. "$1" >/dev/null 2>&1 && [ "$SITE_PASSPHRASE" = "test pass phrase" ]' _ "$SVC/.env"
   check ".env has public URL"         env_has "PUBLIC_URL=https://test-host.tailfake.ts.net:8098/"
   check ".env is owner-only"          sh -c '[ "$(stat -c %a "$0" 2>/dev/null || stat -f %Lp "$0")" = 600 ]' "$SVC/.env"
   check "deploy script installed"     [ -x "$HOME/services/sources/bin/deploy.sh" ]
@@ -125,6 +127,7 @@ test_fresh_deploy() {
   check "synced deps (uv sync)"       calls_have "uv sync"
   check "built the site"              calls_have "uv run scripts/build_site.py --out"
   check "site swapped into current"   [ -f "$HOME/services/sources/www/current/index.html" ]
+  check "current is a release link"   sh -c '[ "$(readlink "$1")" = releases/aaa1111 ]' _ "$HOME/services/sources/www/current"
   check "recorded built sha"          grep -qx aaa1111 "$HOME/services/sources/state/built-sha"
   check "compose up invoked"          [ -f "$STATE_DIR/compose_up" ]
   if [ "$OS" = "Linux" ]; then
@@ -169,7 +172,8 @@ test_push_triggers_redeploy() {
   check "deploys the new sha"     out_has "deploying bbb2222"
   check "rebuilt the site"        calls_have "uv run scripts/build_site.py"
   check "built sha updated"       grep -qx bbb2222 "$HOME/services/sources/state/built-sha"
-  check "previous build kept"     [ -f "$HOME/services/sources/www/prev/index.html" ]
+  check "previous release kept"   [ -d "$HOME/services/sources/www/releases/aaa1111" ]
+  check "current repointed"       sh -c '[ "$(readlink "$1")" = releases/bbb2222 ]' _ "$HOME/services/sources/www/current"
   check "current build swapped"   [ -f "$HOME/services/sources/www/current/index.html" ]
   teardown
 }
@@ -186,6 +190,27 @@ test_poll_lock() {
   check "reports the skip"    out_has "another deploy is running"
   check "touched no git"      no_call "git -C .* rev-parse"
   rmdir "$HOME/services/sources/.deploy.lock"
+  teardown
+}
+
+test_fetch_lock() {
+  echo "• poller: skips while a fetch holds the shared repo lock"
+  [ "$OS" = "Linux" ] || { green "    ✓ (skipped on macOS — no flock, no fetch timer)"; PASS=$((PASS + 1)); return; }
+  command -v flock >/dev/null || { green "    ✓ (skipped — no flock binary)"; PASS=$((PASS + 1)); return; }
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  export SOURCES_DEPLOY_LOCK_WAIT=1
+  ( exec 9>"$SOURCE_REPO/.git/sources-fetch.lock"; flock -x 9; sleep 30 ) &
+  holder=$!
+  sleep 0.2   # let the holder take the lock before the poller tries
+  : > "$CALLS_LOG"
+  run_poll
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "reports the skip"    out_has "still holds .*sources-fetch.lock"
+  check "did not rebuild"     no_call "uv run scripts/build_site.py"
+  unset SOURCES_DEPLOY_LOCK_WAIT
   teardown
 }
 
@@ -264,6 +289,7 @@ test_fresh_deploy
 test_idempotent_rerun
 test_push_triggers_redeploy
 test_poll_lock
+test_fetch_lock
 test_port_override
 test_operator_escalation
 

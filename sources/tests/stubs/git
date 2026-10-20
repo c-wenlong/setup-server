@@ -10,7 +10,10 @@ if [ "${1:-}" = "-C" ]; then shift 2; fi
 
 case "${1:-}" in
   rev-parse)
-    cat "$STATE_DIR/local_sha" 2>/dev/null || echo aaa1111
+    case "${2:-}" in
+      --git-dir) echo ".git" ;;   # like real rev-parse inside a worktree
+      *) cat "$STATE_DIR/local_sha" 2>/dev/null || echo aaa1111 ;;
+    esac
     ;;
   pull)
     if [ -f "$STATE_DIR/pull_fail" ]; then
