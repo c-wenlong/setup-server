@@ -52,7 +52,10 @@
       empty: 'Nothing is down — every deployed service is answering.' },
     { id: 'uninstalled', label: 'Uninstalled',
       match: function (s) { return s.state === 'available' || s.state === 'planned'; },
-      empty: 'Everything in the repo is deployed.' }
+      empty: 'Everything in the repo is deployed.' },
+    { id: 'c-wenlong', label: 'c-wenlong',
+      match: function (s) { return s.author === 'c-wenlong'; },
+      empty: 'No services here are authored by c-wenlong.' }
   ];
 
   /* v3 view/sort/usage module (view.js), loaded just before this file. Every
@@ -658,7 +661,7 @@
 
   function matches(svc, q) {
     if (!q) return true;
-    var hay = [svc.name, svc.tagline, svc.key, svc.group,
+    var hay = [svc.name, svc.tagline, svc.key, svc.group, svc.author,
                groupLabel(svc.group)].join(' ').toLowerCase();
     var words = q.split(/\s+/);
     for (var i = 0; i < words.length; i++) {
