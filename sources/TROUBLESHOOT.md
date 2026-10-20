@@ -122,13 +122,15 @@ Rebuild with the right value: fix `.env`, then `bin/deploy.sh --force`.
 
 ## Rollback
 
-`www/current` is a symlink into `www/releases/<sha>`; the previous release
-is kept beside it. Repoint `current` at the older release:
+`www/current` is a symlink into `www/releases/`; the previous release is
+kept beside it. Directory names are the built sha, with a `.rebuild-<ts>`
+suffix when a `--force` rebuilt a sha that was already live. Repoint
+`current` at the older release:
 
 ```sh
 cd ~/services/sources/www
-ls releases/                       # pick the sha to go back to
-ln -sfn releases/<sha> current.new && mv -Tf current.new current
+ls releases/                       # pick the directory to go back to
+ln -sfn releases/<name> current.new && mv -Tf current.new current
 ```
 
 (Any later successful deploy moves `current` again — pin by stopping the

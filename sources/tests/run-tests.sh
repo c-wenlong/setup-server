@@ -179,7 +179,13 @@ test_push_triggers_redeploy() {
 }
 
 test_force_rebuild_same_sha() {
-  echo "• --force rebuild of the live sha: current never dangles, old build stays previous"
+  echo "• --force rebuild of the live sha: builds beside it, old build stays previous"
+  # The gap this guards is microseconds inside the swap, so post-hoc checks
+  # can't observe it directly; what they pin is the fix's shape — the new
+  # build lands under a <sha>.rebuild-* name while `current` still resolves,
+  # and the old directory is kept rather than deleted under the live name.
+  # A revert to rm -rf'ing the live release would fail the name and
+  # keep checks below.
   setup
   touch "$STATE_DIR/operator"
   run_deploy
