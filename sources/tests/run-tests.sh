@@ -178,6 +178,22 @@ test_push_triggers_redeploy() {
   teardown
 }
 
+test_force_rebuild_same_sha() {
+  echo "• --force rebuild of the live sha: current never dangles, old build stays previous"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  : > "$CALLS_LOG"
+  run_poll --force
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "rebuilt"                     calls_have "uv run scripts/build_site.py"
+  check "current resolves"            [ -f "$HOME/services/sources/www/current/index.html" ]
+  check "current is the new build"    sh -c 'readlink "$1" | grep -q "aaa1111\.rebuild-"' _ "$HOME/services/sources/www/current"
+  check "two releases kept"           sh -c '[ "$(ls -d "$1"/releases/*/ | wc -l)" -eq 2 ]' _ "$HOME/services/sources/www"
+  check "old build kept as previous"  [ -d "$HOME/services/sources/www/releases/aaa1111" ]
+  teardown
+}
+
 test_poll_lock() {
   echo "• poller: concurrent run skips cleanly while the lock is held"
   setup
@@ -288,6 +304,7 @@ test_preflight_passphrase_missing
 test_fresh_deploy
 test_idempotent_rerun
 test_push_triggers_redeploy
+test_force_rebuild_same_sha
 test_poll_lock
 test_fetch_lock
 test_port_override
