@@ -16,3 +16,7 @@ services:
       # LFS screenshots stay in the clone instead of being copied into
       # every release.
       - ${SOURCE_REPO}:/srv/repo:ro
+      # Mirrored refero media (shots, posters, scroll videos, favicons),
+      # populated by tools/refero/mirror_media.py — outside the repo and
+      # outside releases, so one copy serves every deploy.
+      - ${SERVICE_HOME}/media:/srv/media:ro

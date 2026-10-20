@@ -160,12 +160,17 @@ fi
 # values come back unescaped.
 set -a; . "$ENV_FILE"; set +a
 
-mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SERVICE_HOME/www"
+mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SERVICE_HOME/www" "$SERVICE_HOME/media/refero"
 
 # ---------------------------------------------------------------- nginx.conf
 NGINX_CONF="$SERVICE_HOME/nginx.conf"
 if [ -f "$NGINX_CONF" ]; then
   ok "nginx.conf already exists, leaving untouched: $NGINX_CONF"
+  if ! grep -q "refero-media" "$NGINX_CONF"; then
+    warn "nginx.conf predates the refero media mount. Add beside the other location blocks:
+      location /refero-media/ { alias /srv/media/refero/; }
+  then restart the container: docker compose --project-directory $SERVICE_DIR restart"
+  fi
 else
   info "Writing nginx.conf (docs site + the repo paths the gallery links to)"
   cat > "$NGINX_CONF" <<'EOF'
@@ -195,6 +200,11 @@ server {
     location /example/ { alias /srv/repo/example/; autoindex on; }
     location = /catalog.json { alias /srv/repo/catalog.json; }
     location = /README.md    { alias /srv/repo/README.md; }
+
+    # Mirrored refero media (~/services/design-systems/media/refero/, filled
+    # by tools/refero/mirror_media.py): screenshots, scroll videos, favicons.
+    # One copy outside www/releases/, stable across deploys.
+    location /refero-media/ { alias /srv/media/refero/; }
 
     location / {
         try_files $uri $uri/ =404;
