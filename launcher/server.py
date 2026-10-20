@@ -1032,6 +1032,9 @@ def services_payload():
             # hover tooltip needs it, and without it here that module had to
             # fetch every service individually just to show one bubble.
             "description": description,
+            # Owner of the service's remote repo — drives the 'c-wenlong'
+            # tab. Always present, null when the registry row has none.
+            "author": svc.get("author"),
             "icon": svc.get("icon"),
             "url": substitute_host(svc.get("url"), host),
             "state": derive_state(svc.get("setup"), installed, active),

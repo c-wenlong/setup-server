@@ -495,9 +495,10 @@ class ServiceJobFieldTest(SandboxTest):
     """`job` on each service: what lets a reopened tile reattach to a deploy."""
 
     # The identity fields, in payload order. `description` joined them so the
-    # grid's hover tooltip does not have to fetch each service individually.
-    EIGHT = ["key", "name", "tagline", "group", "description", "icon", "url",
-             "state", "installed", "active"]
+    # grid's hover tooltip does not have to fetch each service individually;
+    # `author` joined them so the 'c-wenlong' tab can filter on it.
+    EIGHT = ["key", "name", "tagline", "group", "description", "author",
+             "icon", "url", "state", "installed", "active"]
 
     def setUp(self):
         super().setUp()
@@ -709,6 +710,7 @@ class HttpTest(SandboxTest):
         self.make_script("alpha/setup.sh")
         self.write_registry({"services": [
             {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
+             "author": "c-wenlong",
              "url": "https://HOST:1/", "health": None, "marker": None,
              "setup": "alpha/setup.sh"},
         ]})
@@ -746,12 +748,13 @@ class HttpTest(SandboxTest):
         doc = json.loads(body)
         self.assertEqual(doc["host"], "box.ts.net")
         svc = doc["services"][0]
-        self.assertEqual(sorted(svc), ["active", "control", "deployed_at",
-                                       "description", "group", "icon",
-                                       "installed", "job", "key", "name",
-                                       "resources", "state", "tagline",
-                                       "url", "usage"])
+        self.assertEqual(sorted(svc), ["active", "author", "control",
+                                       "deployed_at", "description", "group",
+                                       "icon", "installed", "job", "key",
+                                       "name", "resources", "state",
+                                       "tagline", "url", "usage"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
+        self.assertEqual(svc["author"], "c-wenlong")
         self.assertIsNone(svc["job"])
 
     def test_services_field_order_is_stable(self):
@@ -761,8 +764,8 @@ class HttpTest(SandboxTest):
         doc = json.loads(self.get("/api/services")[1])
         self.assertEqual(list(doc["services"][0]),
                          ["key", "name", "tagline", "group", "description",
-                          "icon", "url", "state", "installed", "active",
-                          "job", "control", "usage", "deployed_at",
+                          "author", "icon", "url", "state", "installed",
+                          "active", "job", "control", "usage", "deployed_at",
                           "resources"])
 
     def test_groups_empty_when_the_registry_has_none(self):
