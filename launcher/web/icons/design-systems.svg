@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- design-systems: three swatch cards on a slate plate (reads on both
+       light and dark tile themes). Bespoke mark; the repo is private and
+       has no brand of its own. -->
+  <rect width="24" height="24" rx="5.5" fill="#334155"/>
+  <rect x="5" y="5.6" width="4.6" height="12.8" rx="1.2" fill="#c4b5fd"/>
+  <rect x="9.7" y="5.6" width="4.6" height="12.8" rx="1.2" fill="#7dd3fc"/>
+  <rect x="14.4" y="5.6" width="4.6" height="12.8" rx="1.2" fill="#86efac"/>
+</svg>

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# uv stub. `uv venv ... .venv` drops a fake `zensical` binary into the venv so
+# deploy.sh finds `.venv/bin/zensical` afterwards; `uv pip install` no-ops.
+echo "uv $*" >> "$CALLS_LOG"
+
+case "$1" in
+  venv)
+    dir=".venv"
+    for a in "$@"; do
+      case "$a" in .venv|*/.venv) dir="$a" ;; esac
+    done
+    mkdir -p "$dir/bin"
+    cat > "$dir/bin/zensical" <<'Z'
+#!/usr/bin/env bash
+# zensical stub: `build` fakes the docs site output the tests look for.
+echo "zensical $*" >> "$CALLS_LOG"
+if [ "$1" = "build" ]; then
+  mkdir -p site/gallery
+  echo "stub index" > site/index.html
+  echo "stub gallery" > site/gallery/index.html
+fi
+exit 0
+Z
+    chmod +x "$dir/bin/zensical"
+    ;;
+  pip|sync|run) ;;
+esac
+exit 0

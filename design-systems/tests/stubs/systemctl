@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# systemctl stub: logs and succeeds.
+echo "systemctl $*" >> "$CALLS_LOG"
+exit 0

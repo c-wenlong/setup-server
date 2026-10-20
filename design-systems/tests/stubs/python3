@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# python3 stub. deploy.sh runs `python3 tools/catalog.py build` (gallery
+# data.json + thumbs/) and `python3 tools/scorecard.py` (docs/scorecard/ +
+# zensical.toml) from the repo root — fake both outputs.
+echo "python3 $*" >> "$CALLS_LOG"
+
+case "${1:-}" in
+  *tools/catalog.py)
+    if [ "${2:-}" = "build" ]; then
+      mkdir -p docs/gallery/thumbs
+      echo '{}' > docs/gallery/data.json
+    fi
+    ;;
+  *tools/scorecard.py)
+    mkdir -p docs/scorecard
+    : > zensical.toml
+    ;;
+esac
+exit 0
