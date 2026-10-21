@@ -171,6 +171,10 @@ if [ -f "$NGINX_CONF" ]; then
       location /refero-media/ { alias /srv/media/refero/; }
   then restart the container: docker compose --project-directory $SERVICE_DIR restart"
   fi
+  if ! grep -q "gzip on" "$NGINX_CONF"; then
+    warn "nginx.conf predates the caching/compression config. Diff it against the
+  template in $SERVICE_DIR/setup.sh, then restart the container."
+  fi
 else
   info "Writing nginx.conf (docs site + the repo paths the gallery links to)"
   cat > "$NGINX_CONF" <<'EOF'
@@ -183,6 +187,15 @@ server {
     include /etc/nginx/mime.types;
     types { text/markdown md; }
 
+    # Payload: compress the text assets (bundle.js ~170KB -> ~45KB,
+    # data.json ~1.5MB -> ~120KB). Images are already compressed formats.
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/css application/javascript application/json image/svg+xml text/markdown;
+
+    etag on;
+
     root /usr/share/nginx/html/current;
     index index.html;
 
@@ -190,24 +203,46 @@ server {
     # the site, so hide them rather than serve partial or duplicate trees.
     location ~ ^/(releases|next)(/|$) { return 404; }
 
+    # Fingerprinted theme assets (main.<hash>.min.css, bundle.<hash>.min.js):
+    # the name changes when the content does, so they cache forever. The
+    # quotes keep nginx from reading {8} as a block opener.
+    location ~ "\.[0-9a-f]{8}\.min\.(css|js)$" {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    # Gallery thumbnails: capture dates sit in the filenames, so a recapture
+    # produces new names — safe to hold for a month.
+    location /gallery/thumbs/ {
+        add_header Cache-Control "public, max-age=2592000";
+    }
+
     # Repository paths, answered straight from the checkout — the same
     # allowlist the repo's `make serve` answers (tools/catalog.py
     # REPO_PATHS). The gallery's full-size screenshots and package files
     # live here; they are never part of the built site (LFS, ~300 MB), so
     # the checkout is bind-mounted read-only instead of copied per release.
-    location /systems/ { alias /srv/repo/systems/; autoindex on; }
-    location /tools/   { alias /srv/repo/tools/;   autoindex on; }
-    location /example/ { alias /srv/repo/example/; autoindex on; }
-    location = /catalog.json { alias /srv/repo/catalog.json; }
-    location = /README.md    { alias /srv/repo/README.md; }
+    # They advance on every deploy: revalidate each load, so an unchanged
+    # file answers a cheap 304.
+    location /systems/ { alias /srv/repo/systems/; autoindex on; add_header Cache-Control "no-cache"; }
+    location /tools/   { alias /srv/repo/tools/;   autoindex on; add_header Cache-Control "no-cache"; }
+    location /example/ { alias /srv/repo/example/; autoindex on; add_header Cache-Control "no-cache"; }
+    location = /catalog.json { alias /srv/repo/catalog.json; add_header Cache-Control "no-cache"; }
+    location = /README.md    { alias /srv/repo/README.md; add_header Cache-Control "no-cache"; }
 
     # Mirrored refero media (~/services/design-systems/media/refero/, filled
     # by tools/refero/mirror_media.py): screenshots, scroll videos, favicons.
     # One copy outside www/releases/, stable across deploys.
-    location /refero-media/ { alias /srv/media/refero/; }
+    location /refero-media/ {
+        alias /srv/media/refero/;
+        add_header Cache-Control "public, max-age=2592000";
+    }
 
+    # Everything else: HTML pages, unhashed css/js and the gallery's JSON —
+    # revalidate every load so a deploy is visible at once; unchanged files
+    # answer 304.
     location / {
         try_files $uri $uri/ =404;
+        add_header Cache-Control "no-cache";
     }
 }
 EOF
