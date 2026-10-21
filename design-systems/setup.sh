@@ -168,7 +168,7 @@ if [ -f "$NGINX_CONF" ]; then
   ok "nginx.conf already exists, leaving untouched: $NGINX_CONF"
   if ! grep -q "refero-media" "$NGINX_CONF"; then
     warn "nginx.conf predates the refero media mount. Add beside the other location blocks:
-      location /refero-media/ { alias /srv/media/refero/; }
+      location ^~ /refero-media/ { alias /srv/media/refero/; }
   then restart the container: docker compose --project-directory $SERVICE_DIR restart"
   fi
   if ! grep -q "gzip on" "$NGINX_CONF"; then
@@ -205,14 +205,15 @@ server {
 
     # Fingerprinted theme assets (main.<hash>.min.css, bundle.<hash>.min.js):
     # the name changes when the content does, so they cache forever. The
-    # quotes keep nginx from reading {8} as a block opener.
+    # quotes keep nginx from reading {8} as a block opener, and ^~ on the
+    # prefix locations below keeps this regex from stealing their URIs.
     location ~ "\.[0-9a-f]{8}\.min\.(css|js)$" {
         add_header Cache-Control "public, max-age=31536000, immutable";
     }
 
     # Gallery thumbnails: capture dates sit in the filenames, so a recapture
     # produces new names — safe to hold for a month.
-    location /gallery/thumbs/ {
+    location ^~ /gallery/thumbs/ {
         add_header Cache-Control "public, max-age=2592000";
     }
 
@@ -223,16 +224,16 @@ server {
     # the checkout is bind-mounted read-only instead of copied per release.
     # They advance on every deploy: revalidate each load, so an unchanged
     # file answers a cheap 304.
-    location /systems/ { alias /srv/repo/systems/; autoindex on; add_header Cache-Control "no-cache"; }
-    location /tools/   { alias /srv/repo/tools/;   autoindex on; add_header Cache-Control "no-cache"; }
-    location /example/ { alias /srv/repo/example/; autoindex on; add_header Cache-Control "no-cache"; }
+    location ^~ /systems/ { alias /srv/repo/systems/; autoindex on; add_header Cache-Control "no-cache"; }
+    location ^~ /tools/   { alias /srv/repo/tools/;   autoindex on; add_header Cache-Control "no-cache"; }
+    location ^~ /example/ { alias /srv/repo/example/; autoindex on; add_header Cache-Control "no-cache"; }
     location = /catalog.json { alias /srv/repo/catalog.json; add_header Cache-Control "no-cache"; }
     location = /README.md    { alias /srv/repo/README.md; add_header Cache-Control "no-cache"; }
 
     # Mirrored refero media (~/services/design-systems/media/refero/, filled
     # by tools/refero/mirror_media.py): screenshots, scroll videos, favicons.
     # One copy outside www/releases/, stable across deploys.
-    location /refero-media/ {
+    location ^~ /refero-media/ {
         alias /srv/media/refero/;
         add_header Cache-Control "public, max-age=2592000";
     }
