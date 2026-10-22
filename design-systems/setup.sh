@@ -32,7 +32,7 @@
 #
 # Requirements beyond the repo baseline (curl, Docker, Tailscale): git,
 # python3 (the gallery/scorecard generators are stdlib-only; Pillow is used
-# for thumbnails when present) and uv (for the repo's pinned Zensical).
+# for thumbnails when present) and uv (for the site builder's venv).
 #
 # Idempotent: re-running refreshes the deploy script + poller and repairs any
 # missing piece; an existing .env and nginx.conf are never overwritten.
@@ -63,7 +63,7 @@ command -v git >/dev/null || die "git is required."
 command -v python3 >/dev/null || die "python3 is required (tools/catalog.py + tools/scorecard.py)."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
 
-command -v uv >/dev/null || die "uv is required (installs the repo's pinned Zensical into .venv). Install: https://docs.astral.sh/uv/"
+command -v uv >/dev/null || die "uv is required (installs the site builder's deps into .venv). Install: https://docs.astral.sh/uv/"
 
 if ! command -v docker >/dev/null; then
   [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
