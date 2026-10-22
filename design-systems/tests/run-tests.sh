@@ -29,11 +29,11 @@ setup() {
 
   # A fake working clone: .git/ + tools/catalog.py is what setup.sh checks;
   # systems/ exists so the LFS pointer scan has somewhere to look, and the
-  # stub uv/zensical/python3 fill in .venv, docs/ and site/ at build time.
+  # stub uv/venv-python/python3 fill in .venv, docs/ and site/ at build time.
   export SOURCE_REPO="$SANDBOX/repo"
   mkdir -p "$SOURCE_REPO/.git" "$SOURCE_REPO/tools" "$SOURCE_REPO/systems"
   echo "# catalog stub" > "$SOURCE_REPO/tools/catalog.py"
-  echo "zensical==0.0.0" > "$SOURCE_REPO/requirements.txt"
+  echo "markdown==0.0.0" > "$SOURCE_REPO/requirements.txt"
 }
 
 teardown() {
@@ -158,7 +158,7 @@ test_fresh_deploy() {
   check "deps installed (uv pip)"     calls_have "uv pip install"
   check "gallery data built"          calls_have "python3 tools/catalog.py build"
   check "scorecard built"             calls_have "python3 tools/scorecard.py"
-  check "docs site built"             calls_have "zensical build"
+  check "docs site built"             calls_have "python tools/site.py"
   check "site swapped into current"   [ -f "$HOME/services/design-systems/www/current/index.html" ]
   check "gallery page in release"     [ -f "$HOME/services/design-systems/www/current/gallery/index.html" ]
   check "current is a release link"   sh -c '[ "$(readlink "$1")" = releases/aaa1111 ]' _ "$HOME/services/design-systems/www/current"
@@ -187,7 +187,7 @@ test_idempotent_rerun() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "edited .env preserved"   env_has "CUSTOM-MARK"
   check "reports up to date"      out_has "up to date at aaa1111"
-  check "no rebuild"              no_call "zensical build"
+  check "no rebuild"              no_call "python tools/site.py"
   check "never invoked sudo"      no_call "^sudo "
   check "compose up re-invoked"   [ -f "$STATE_DIR/compose_up" ]
   teardown
@@ -203,7 +203,7 @@ test_push_triggers_redeploy() {
   run_poll
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the new sha"     out_has "deploying bbb2222"
-  check "rebuilt the site"        calls_have "zensical build"
+  check "rebuilt the site"        calls_have "python tools/site.py"
   check "built sha updated"       grep -qx bbb2222 "$HOME/services/design-systems/state/built-sha"
   check "previous release kept"   [ -d "$HOME/services/design-systems/www/releases/aaa1111" ]
   check "current repointed"       sh -c '[ "$(readlink "$1")" = releases/bbb2222 ]' _ "$HOME/services/design-systems/www/current"
@@ -219,7 +219,7 @@ test_force_rebuild_same_sha() {
   : > "$CALLS_LOG"
   run_poll --force
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check "rebuilt"                     calls_have "zensical build"
+  check "rebuilt"                     calls_have "python tools/site.py"
   check "current resolves"            [ -f "$HOME/services/design-systems/www/current/index.html" ]
   check "current is the new build"    sh -c 'readlink "$1" | grep -q "aaa1111\.rebuild-"' _ "$HOME/services/design-systems/www/current"
   check "two releases kept"           sh -c '[ "$(ls -d "$1"/releases/*/ | wc -l)" -eq 2 ]' _ "$HOME/services/design-systems/www"
@@ -253,7 +253,7 @@ test_spaced_repo_path() {
   run_deploy
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "path in .env"        env_has "SOURCE_REPO="
-  check "built the site"      calls_have "zensical build"
+  check "built the site"      calls_have "python tools/site.py"
   check "site swapped in"     [ -f "$HOME/services/design-systems/www/current/index.html" ]
   teardown
 }

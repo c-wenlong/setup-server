@@ -15,14 +15,14 @@
 #
 # SOURCE_REPO is the working clone at ~/dev/design-systems — the deploy only
 # reads it and pulls it forward, it never commits or resets there. The build
-# mirrors the repo's `make serve` (catalog build -> scorecard -> zensical):
+# mirrors the repo's `make serve` (catalog build -> scorecard -> site.py):
 #
 #   git -C $SOURCE_REPO pull --ff-only   # best effort; a dirty or offline
 #                                        # repo just builds its local HEAD
 #   git -C $SOURCE_REPO lfs pull         # screenshots/fonts are LFS objects
 #   python3 tools/catalog.py build       # gallery data.json + thumbs/
-#   python3 tools/scorecard.py           # docs/scorecard/ + zensical.toml
-#   .venv/bin/zensical build --clean     # the docs site into site/
+#   python3 tools/scorecard.py           # docs/scorecard/ pages
+#   .venv/bin/python tools/site.py     # the docs site into site/
 #   cp -a site -> www/next ; repoint current -> releases/<sha>
 #
 set -euo pipefail
@@ -89,14 +89,14 @@ if git -C "$REPO_DIR" lfs version >/dev/null 2>&1; then
   git -C "$REPO_DIR" lfs pull 2>&1 | tail -3 || true
 fi
 
-# Deps: bootstrap .venv when zensical is missing, and re-sync whenever
+# Deps: bootstrap .venv when it is missing, and re-sync whenever
 # requirements.txt is newer than the last successful install — a changed
 # pin must not leave the poller building with stale packages. The stamp is
 # touched only after a successful install, so a failed one retries on the
 # next run. `uv venv --allow-existing` no-ops on a venv that is already
 # there (a bare `uv venv` refuses to recreate it).
 VENV_STAMP="$REPO_DIR/.venv/.deploy-stamp"
-if [ ! -x "$REPO_DIR/.venv/bin/zensical" ] || [ "$REPO_DIR/requirements.txt" -nt "$VENV_STAMP" ]; then
+if [ ! -x "$REPO_DIR/.venv/bin/python" ] || [ "$REPO_DIR/requirements.txt" -nt "$VENV_STAMP" ]; then
   echo "syncing the repo's .venv (uv)"
   ( cd "$REPO_DIR" && uv venv -q --allow-existing --python 3.13 .venv && uv pip install -q --python .venv/bin/python -r requirements.txt )
   touch "$VENV_STAMP"
@@ -108,7 +108,7 @@ mkdir -p "$WWW_DIR"
 ( cd "$REPO_DIR" \
   && python3 tools/catalog.py build \
   && python3 tools/scorecard.py \
-  && .venv/bin/zensical build --clean )
+  && .venv/bin/python tools/site.py )
 cp -a "$REPO_DIR/site" "$WWW_DIR/next"
 
 # --------------------------------------------------------------------- swap

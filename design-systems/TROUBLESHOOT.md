@@ -61,17 +61,17 @@ Run it by hand to see the full error:
   thumbnail step: the checkout's screenshots were never materialised.
   `git -C ~/dev/design-systems lfs pull` (install `git-lfs` first if
   needed), then re-run deploy.
-- `Zensical is not installed` / `.venv/bin/zensical` missing → the repo's
-  `.venv` was deleted; deploy.sh recreates it (`uv venv` + `uv pip install
-  -r requirements.txt`) — if that fails, `uv` must be on `.env`'s `UV_BIN`
-  path; if uv moved, update `UV_BIN` or re-run setup.sh.
+- `tools/site.py` import errors (`import markdown`) → the repo's `.venv`
+  was deleted or requirements.txt changed; deploy.sh recreates/re-syncs it
+  (`uv venv` + `uv pip install -r requirements.txt`) — if that fails, `uv`
+  must be on `.env`'s `UV_BIN` path; if uv moved, update `UV_BIN` or re-run
+  setup.sh.
 - `python3` import errors on `tools/scorecard.py` → it imports
   `tools/catalog.py`; both run from the repo root with system python3
   (stdlib only). If it fails, the repo itself is in a bad state —
   `git -C ~/dev/design-systems status` and fix there.
-- `zensical build` warnings-as-errors → deploy.sh runs without `--strict`
-  on purpose; a hard failure there is a real docs/ markup problem —
-  reproduce with `make docs` in the clone.
+- `tools/site.py` render errors → a real docs/ markup problem; reproduce
+  with `make docs` in the clone.
 - A stuck `site/` or `www/next` → `rm -rf ~/dev/design-systems/site
   ~/services/design-systems/www/next` and retry (both are regenerated).
 

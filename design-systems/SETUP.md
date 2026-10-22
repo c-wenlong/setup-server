@@ -32,8 +32,8 @@ immediately with `~/services/design-systems/bin/deploy.sh --force`.
           │                                                            │ 3. python3 tools/catalog.py build
           │                                                            │    (gallery data.json + thumbs/)
           │                                                            │ 4. python3 tools/scorecard.py
-          │                                                            │    (docs/scorecard/ + zensical.toml)
-          │                                                            │ 5. .venv/bin/zensical build --clean
+          │                                                            │    (docs/scorecard/ pages)
+          │                                                            │ 5. .venv/bin/python tools/site.py
           │                                                            │    (docs site into site/)
           │                                                            │ 6. atomic repoint  current -> releases/<sha>
           │                                                            ▼
@@ -108,7 +108,7 @@ and free; worst-case latency is `POLL_SECONDS` (daily by default), and
 |---|---|---|
 | git | pull the clone forward | presence |
 | python3 | `tools/catalog.py build` + `tools/scorecard.py` (stdlib-only; Pillow is used for thumbnails when installed) | presence |
-| uv | installs the repo's pinned Zensical into `.venv` (once) | presence |
+| uv | installs the site builder's `markdown` dep into `.venv` (once) | presence |
 | git-lfs | materialise screenshot/font objects; without it the checkout holds ASCII pointers and the thumbnail step crashes | pointer scan → `git lfs pull`, die if any remain |
 | the clone at `SOURCE_REPO` | the build's entire input + the served repo paths | `.git/` + `tools/catalog.py` exist |
 | Docker + Compose v2 | nginx container | daemon reachable |
@@ -129,8 +129,8 @@ and free; worst-case latency is `POLL_SECONDS` (daily by default), and
 4. Installs `deploy.sh` -> `~/services/design-systems/bin/` (refreshed
    every run; edit the repo copy, then re-run setup.sh).
 5. Runs the initial deploy: pull, `lfs pull`, `catalog.py build`,
-   `scorecard.py`, `zensical build`, copy `site/` to `www/next`, swap.
-   Bootstraps the repo's `.venv` with the pinned Zensical if missing.
+   `scorecard.py`, `tools/site.py`, copy `site/` to `www/next`, swap.
+   Bootstraps the repo's `.venv` (the `markdown` package the site build needs) if missing.
 6. `docker compose up -d` (nginx, `restart: unless-stopped`) + local health
    check on `/gallery/`.
 7. Installs the poller: systemd user timer (`OnUnitActiveSec=POLL_SECONDS`)
