@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # uv stub: `uv tool install ... <spec>` writes a fake swe into $UV_TOOL_BIN_DIR.
-# The fake swe has `swe remote` unless $STATE_DIR/old_swe existed when it was
-# installed (baked in, so a live build and a rejected one can differ), and answers
-# `swe remote pair --json` with a fixed token. $STATE_DIR/uv_fails => exit 1.
+# The fake swe has `swe remote serve --public-url` unless, when it was installed
+# (baked in, so a live build and a rejected one can differ), $STATE_DIR/old_swe
+# existed (no `swe remote` at all) or $STATE_DIR/no_public_url did (a `swe
+# remote` from before --public-url). It answers `swe remote pair --json` with a
+# fixed token and the link in $STATE_DIR/pair_url (default: the https Serve
+# URL), plus &name=<n> for --name=<n>. $STATE_DIR/uv_fails => exit 1.
 echo "uv $*" >> "$CALLS_LOG"
 [ -f "$STATE_DIR/uv_fails" ] && { echo "error: failed to fetch" >&2; exit 1; }
 [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ] || exit 0
@@ -10,7 +13,9 @@ echo "uv $*" >> "$CALLS_LOG"
 spec="${*: -1}"
 echo "$spec" > "$STATE_DIR/uv_spec"
 mkdir -p "$UV_TOOL_BIN_DIR"
-old=no; [ -f "$STATE_DIR/old_swe" ] && old=yes
+old=no
+[ -f "$STATE_DIR/no_public_url" ] && old=partial
+[ -f "$STATE_DIR/old_swe" ] && old=yes
 {
   echo '#!/usr/bin/env bash'
   echo "OLD=$old"
@@ -21,16 +26,20 @@ case "$*" in
   remote)
     if [ "$OLD" = yes ]; then echo "unknown command: remote" >&2; exit 2; fi
     echo "  swe remote serve [--host=H] [--port=N]   Run the hub"
+    [ "$OLD" = partial ] || echo "  swe remote serve --public-url=URL      Run behind tailscale serve"
     ;;
   "remote pair --json"*)
+    url="https://test-host.tailfake.ts.net:8477/#pair=FAKETOKEN123"
+    [ -f "$STATE_DIR/pair_url" ] && url="$(cat "$STATE_DIR/pair_url")"
+    for a in "$@"; do case "$a" in --name=*) url="$url&name=${a#--name=}" ;; esac; done
     cat <<JSON
 {
   "schema": 1,
   "data": {
-    "host": "127.0.0.1",
+    "host": "test-host.tailfake.ts.net",
     "port": 8477,
     "token": "FAKETOKEN123",
-    "url": "http://127.0.0.1:8477/#pair=FAKETOKEN123",
+    "url": "$url",
     "expires_in_s": 300
   }
 }

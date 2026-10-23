@@ -131,7 +131,8 @@ test_fresh_deploy() {
   check "checked the build has swe remote"   calls_have "hub-swe remote"
   if [ "$OS" = "Linux" ]; then
     check "wrote systemd unit"               [ -f "$UNIT" ]
-    check "unit binds 127.0.0.1:8477"        unit_has "ExecStart=$INSTALL/bin/swe remote serve --host=127.0.0.1 --port=8477"
+    check "unit binds 127.0.0.1:8477"        unit_has "ExecStart=$INSTALL/bin/swe remote serve --host=127.0.0.1 --port=8477 "
+    check "unit passes the public https URL" unit_has "--public-url=https://test-host.tailfake.ts.net:8477"
     check "unit restarts always"             unit_has "Restart=always"
     check "unit PATH puts the hub build first" unit_has "Environment=PATH=$INSTALL/bin:"
     check "enabled the unit"                 calls_have "systemctl --user enable quiver-hub.service"
@@ -141,6 +142,7 @@ test_fresh_deploy() {
   else
     check "wrote LaunchAgent plist"          [ -f "$PLIST" ]
     check "plist binds 127.0.0.1"            plist_has "<string>--host=127.0.0.1</string>"
+    check "plist passes the public URL"      plist_has "<string>--public-url=https://test-host.tailfake.ts.net:8477</string>"
     check "bootstrapped LaunchAgent"         calls_have "launchctl bootstrap"
   fi
   check "health-checked /v1/status"          calls_have "http://127.0.0.1:8477/v1/status"
@@ -149,7 +151,9 @@ test_fresh_deploy() {
   check "end-to-end check passed"            out_has "End-to-end check passed"
   check "prints the pair.sh step"            out_has "pair.sh iphone"
   check "prints the satellite command"       out_has "swe remote agent --hub=https://test-host.tailfake.ts.net:8477 --token=<token>"
-  check "warns the PATH swe is too old"      out_has "has no 'swe remote'"
+  check "warns the PATH swe is too old"      out_has "predates 'swe remote serve --public-url'"
+  check "prints Pair with Tailscale steps"   out_has "tap 'Pair with Tailscale'"
+  check "prints the approve command"         out_has "remote devices --approve=<code>"
   teardown
 }
 
@@ -361,6 +365,18 @@ test_too_old_quiver() {
   teardown
 }
 
+test_quiver_without_public_url() {
+  echo "• a ref with swe remote but no --public-url: refused (the unit needs it)"
+  setup
+  touch "$STATE_DIR/no_public_url"
+  run_deploy
+  check "exits non-zero"         [ "$CODE" -ne 0 ]
+  check "names the missing flag" out_has "needs 6c70755 or later"
+  check "no live build linked"   [ ! -e "$INSTALL/bin" ]
+  check "no unit written"        [ ! -e "$UNIT" ]
+  teardown
+}
+
 test_port_override() {
   echo "• LOCAL_PORT=9000 on first run: HTTPS follows, both recorded"
   setup
@@ -371,6 +387,7 @@ test_port_override() {
   check ".env HTTPS_PORT=9000"    env_has "HTTPS_PORT=9000"
   check "serve publishes :9000"   calls_have "tailscale serve --bg --https=9000 http://127.0.0.1:9000"
   [ "$OS" = "Linux" ] && check "unit binds :9000" unit_has "--host=127.0.0.1 --port=9000"
+  [ "$OS" = "Linux" ] && check "public URL follows :9000" unit_has "--public-url=https://test-host.tailfake.ts.net:9000"
   teardown
 }
 
@@ -452,7 +469,8 @@ test_pair_prints_https_links() {
   pre_deployed
   run_pair iphone
   check "exits zero"                [ "$CODE" -eq 0 ]
-  check "minted via the hub build"  calls_have "hub-swe remote pair --json --host=127.0.0.1 --port=8477 --name=iphone"
+  check "minted via the hub build"  calls_have "hub-swe remote pair --json --name=iphone"
+  check "lets swe pick the address" no_call "remote pair --json --host"
   check "phone link is https Serve" out_has "https://test-host.tailfake.ts.net:8477/#pair=FAKETOKEN123&name=iphone"
   check "never the http bind link"  out_lacks "http://127.0.0.1:8477/#pair"
   check "satellite command"         out_has "swe remote agent --hub=https://test-host.tailfake.ts.net:8477 --token=FAKETOKEN123"
@@ -460,14 +478,27 @@ test_pair_prints_https_links() {
   teardown
 }
 
-test_pair_custom_https_port() {
-  echo "• pair.sh honours HTTPS_PORT from .env"
+test_pair_refuses_http_link() {
+  echo "• pair.sh: an http link (hub without --public-url) is refused"
   setup
   pre_deployed
-  printf 'LOCAL_PORT=8477\nHTTPS_PORT=9443\n' > "$SVC/.env"
+  echo "http://127.0.0.1:8477/#pair=FAKETOKEN123" > "$STATE_DIR/pair_url"
+  run_pair
+  check "exits non-zero"        [ "$CODE" -ne 0 ]
+  check "says to re-run setup"  out_has "Re-run"
+  check "never prints the link as the phone link" out_lacks "Phone:"
+  teardown
+}
+
+test_pair_custom_https_port() {
+  echo "• pair.sh uses whatever https address swe reports"
+  setup
+  pre_deployed
+  echo "https://test-host.tailfake.ts.net:9443/#pair=FAKETOKEN123" > "$STATE_DIR/pair_url"
   run_pair
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "link uses :9443"       out_has "https://test-host.tailfake.ts.net:9443/#pair=FAKETOKEN123"
+  check "satellite uses :9443"  out_has "--hub=https://test-host.tailfake.ts.net:9443 --token"
   check "no name without arg"   no_call "--name="
   teardown
 }
@@ -520,6 +551,10 @@ EOF
   return 0
 }
 
+pair_link_is() { # pair_link_is <swe> <prefix>: `swe remote pair --json` url starts with prefix
+  local j; j="$("$1" remote pair --json --name=live-test)" || return 1
+  grep -qF "\"url\": \"$2" <<<"$j"
+}
 status_ok() { local b; b="$(curl -fsS --max-time "$2" "$1")" || return 1; grep -q '"ok": *true' <<<"$b"; }
 body_has()  { local b; b="$(curl -fsS --max-time 30 "$1")" || return 1; grep -qF -- "$2" <<<"$b"; }
 http_code_is() { [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$1")" = "$2" ]; }
@@ -545,12 +580,13 @@ test_live() {
   live_check ".env present with LOCAL_PORT"       [ -n "$local_port" ]
   live_check "hub build installed with a commit"  [ -s "$HOME/.local/share/quiver-hub/installed-rev" ]
   live_check "live build links that commit's release" sh -c "case \"\$(readlink '$HOME/.local/share/quiver-hub/bin')\" in releases/\$(cat '$HOME/.local/share/quiver-hub/installed-rev')*/bin) exit 0;; esac; exit 1"
-  live_check "hub build has swe remote"           sh -c "'$swe' remote 2>&1 | grep -q 'swe remote serve'"
+  live_check "hub build has swe remote --public-url" sh -c "'$swe' remote 2>&1 | grep -q -- '--public-url'"
   if [ "$OS" = "Linux" ]; then
     live_check "systemd service is active"        systemctl --user is-active quiver-hub.service
     live_check "service is enabled at boot"       systemctl --user is-enabled quiver-hub.service
     live_check "lingering is on (boot persist)"   sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
     live_check "unit binds 127.0.0.1"             grep -q -- "--host=127.0.0.1 --port=$local_port" "$HOME/.config/systemd/user/quiver-hub.service"
+    live_check "unit passes --public-url"         grep -q -- "--public-url=$url\$" "$HOME/.config/systemd/user/quiver-hub.service"
   else
     live_check "LaunchAgent is loaded"            launchctl print "gui/$(id -u)/com.setup-server.quiver-hub"
   fi
@@ -560,6 +596,9 @@ test_live() {
   live_check "tailnet HTTPS /v1/status is ok"     status_ok "$url/v1/status" 30
   live_check "tailnet HTTPS serves the PWA"       body_has "$url/" "Have a pair token?"
   live_check "API needs a device credential"      http_code_is "$url/v1/sessions" 401
+  live_check "hub saved its public URL"           grep -qF "\"public_url\": \"$url\"" "$HOME/.quiver/data/remote/hub.json"
+  # Mints a real (unused) token; it expires on its own after 5 minutes.
+  live_check "swe remote pair gives the https link" pair_link_is "$swe" "$url/#pair="
 }
 
 # ------------------------------------------------------------------ main
@@ -582,6 +621,7 @@ test_unknown_ref
 test_github_unreachable
 test_uv_failure
 test_too_old_quiver
+test_quiver_without_public_url
 test_port_override
 test_env_wins_over_port
 test_refuses_443
@@ -590,6 +630,7 @@ test_hub_never_healthy
 test_serve_approval_retry
 test_pair_before_deploy
 test_pair_prints_https_links
+test_pair_refuses_http_link
 test_pair_custom_https_port
 
 if [ "${1:-}" = "--live" ]; then
