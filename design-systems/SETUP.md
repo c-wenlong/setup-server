@@ -123,9 +123,15 @@ and free; worst-case latency is `POLL_SECONDS` (daily by default), and
    path, service home; mode `0600`). Re-runs read `.env` as the source of
    truth.
 3. Writes `~/services/design-systems/nginx.conf` if absent (docs site +
-   the repo-path aliases + the `/refero-media/` media alias). An existing
-   conf is never overwritten; if it predates the media alias, setup.sh
-   prints the line to add.
+   the repo-path aliases + the `/refero-media/` media alias). It also
+   carries the response policy: gzip for the text assets (`data.json`
+   alone is ~1.5 MB, ~120 KB on the wire) and a Cache-Control per file
+   class — `no-cache` revalidation for HTML, JSON, the unhashed
+   `app.js`/`style.css` and the repo paths, 1 day for `gallery/thumbs/`
+   (names are path-derived, not content-hashed) and 30 days for the
+   write-once `/refero-media/` mirror. An existing conf is never
+   overwritten; if it predates the media alias or the gzip/Cache-Control
+   block, setup.sh prints what to add.
 4. Installs `deploy.sh` -> `~/services/design-systems/bin/` (refreshed
    every run; edit the repo copy, then re-run setup.sh).
 5. Runs the initial deploy: pull, `lfs pull`, `catalog.py build`,
