@@ -18,8 +18,8 @@ curl -fsS https://kai-home-server.taild6a23f.ts.net:8477/v1/status
 Or just: `./tests/run-tests.sh --live`
 
 Use the hub's own build for every `swe remote ...` command below. The `swe`
-on the interactive PATH may predate `swe remote` (setup.sh warns when it
-does):
+on the interactive PATH may predate `swe remote serve --public-url`
+(setup.sh warns when it does):
 
 ```sh
 S=~/.local/share/quiver-hub/bin/swe
@@ -35,7 +35,8 @@ journalctl --user -u quiver-hub.service -e --no-pager
   Stop the other process, or set another `LOCAL_PORT` (and `HTTPS_PORT`) in
   `.env` and re-run `./setup.sh`. Then re-pair satellites: their stored hub
   URL carries the old port.
-- **`unknown command: remote`** or a Python traceback at import: the build is
+- **`unknown command: remote`**, `unknown flag: --public-url`, or a Python
+  traceback at import: the build is
   broken or too old. `cat ~/.local/share/quiver-hub/installed-rev`, then
   `rm ~/.local/share/quiver-hub/installed-rev && ./setup.sh` to force a clean
   reinstall of the current `QUIVER_REF`.
@@ -75,34 +76,37 @@ journalctl --user -u quiver-hub.service -e --no-pager
 
 ## 5. Pairing and client problems
 
-- **"Pair with Tailscale" says the device can't be identified (`not_tailnet`)**:
-  expected on this deploy. Behind Serve the hub sees every client as
-  `127.0.0.1`, and `tailscale whois 127.0.0.1` finds no node. Pair by token:
-  `./pair.sh iphone` and open the `https://...#pair=` link it prints.
-- **The link from `swe remote pair` doesn't open on the phone**: that command
-  prints `http://127.0.0.1:8477/#pair=...`, the bind address. Use `./pair.sh`,
-  which prints the `https://` Serve URL. Same token format, so the raw token
-  from either works in the **Have a pair token?** field.
+- **"Pair with Tailscale" answers `not_tailnet`**: the hub is not running
+  with `--public-url`, so it sees the phone as `127.0.0.1`.
+  `grep ExecStart ~/.config/systemd/user/quiver-hub.service` should end in
+  `--public-url=https://...:8477`; if not, re-run `./setup.sh`. If it does,
+  the phone may not be on the tailnet itself (a browser on a device that only
+  reaches the box some other way). Token pairing still works: `./pair.sh`.
+- **The code shows, but nothing approves it**: approve on the hub,
+  `$S remote devices --requests` then `$S remote devices --approve=<code>`.
+  The phone can't approve its own request, five wrong codes deny it, and the
+  request expires after 5 minutes.
+- **`swe remote pair` (or `pair.sh`) prints an `http://` link**: the hub
+  hasn't written `~/.quiver/data/remote/hub.json` with its public URL, so it
+  predates `--public-url` or hasn't started since. Re-run `./setup.sh`. Also
+  check you ran the hub's build (`$S`), not an older `swe` on PATH.
 - **`unknown or expired pair token`**: tokens are single-use and last 5
   minutes. Run `./pair.sh` again.
-- **Approving a pending pair request in a browser fails (`bad_origin`)**: the
-  approval routes compare `Origin` with `http://<Host>` and the browser sends
-  `https://...`. Approve from the hub instead:
-  `$S remote devices --requests`, then `$S remote devices --approve=<code>`.
-  (Only reachable once whois pairing works, see the first bullet.)
-- **ntfy lock-screen Allow/Deny buttons do nothing**: the hub builds those
-  links from its bind address, `http://127.0.0.1:8477`, which the phone
-  can't reach. Notifications themselves arrive; answer approvals in the PWA.
+- **Browser approval on the `#approve` page fails (`bad_origin`)**: the
+  public URL in the unit doesn't match the address in the browser (another
+  port or hostname). Re-run `./setup.sh` after changing `HTTPS_PORT`, and
+  open the exact `https://<host>:<port>` it prints.
+- **ntfy lock-screen Allow/Deny buttons go nowhere**: they are built from
+  `--public-url`, so the same check as the first bullet applies.
 - **PWA shows "pair this device first" after it worked**: the device was
   revoked, or `~/.quiver/data/remote/devices.json` was lost. `$S remote devices`
-  to check; re-pair with `./pair.sh`.
+  to check; re-pair (Pair with Tailscale, or `./pair.sh`).
 - **MacBook satellite never shows up**: on the Mac, `swe remote agent` must
   have been paired against the https URL:
   `swe remote agent --hub=https://kai-home-server.taild6a23f.ts.net:8477 --token=<token>`.
   `pairing failed` there means a bad or expired token, or the Mac is off the
   tailnet (`curl https://kai-home-server.taild6a23f.ts.net:8477/v1/status`
-  from the Mac). On the hub, `$S remote status --host=127.0.0.1 --port=8477`
-  lists the machines it knows.
+  from the Mac). On the hub, `$S remote status` lists the machines it knows.
 - **Sessions from this box missing or read-only**: the hub only sees
   harnesses on the unit's `PATH` (see SETUP.md). `systemctl --user show
   quiver-hub.service -p Environment` and compare with `command -v claude codex tmux`.

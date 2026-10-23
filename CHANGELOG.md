@@ -22,6 +22,14 @@ first, dated by merge.
 
 ### Added
 
+- **quiver-hub: "Pair with Tailscale" works behind Serve.** The unit now
+  runs `swe remote serve --public-url=https://<host>:<HTTPS_PORT>` (quiver
+  6c70755, #570), so the hub trusts Serve's forwarded headers from loopback
+  peers only, identifies the real tailnet device, and hands out https pair
+  links and ntfy buttons. setup.sh refuses a quiver build without
+  `--public-url`. `pair.sh` now wraps `swe remote pair`, which reads the
+  public URL from the hub's `hub.json`, and refuses an http link. The live
+  suite checks the flag, `hub.json` and that `swe remote pair` gives https.
 - **quiver-hub: Quiver's remote-control hub (`swe remote serve`)** as a
   systemd user unit on `127.0.0.1:8477`, published tailnet-only on
   `:8477`. The phone PWA (sessions, inbox, Usage tab) and MacBook

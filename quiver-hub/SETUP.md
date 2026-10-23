@@ -21,15 +21,22 @@ Security model:
 
 - The hub binds `127.0.0.1` only. Tailscale Serve terminates TLS and is the
   only way in, so only tailnet devices reach it.
-- Every API route except `/v1/status` and `/v1/pair` wants a per-device
-  bearer credential from `~/.quiver/data/remote/devices.json` (0600).
-  Devices get one by exchanging a single-use, 5-minute pair token minted on
-  the hub's shell (`./pair.sh`). Revoking a lost phone is
+- Every API route except `/v1/status` and the pairing routes wants a
+  per-device bearer credential from `~/.quiver/data/remote/devices.json`
+  (0600). A device gets one by **Pair with Tailscale** (the hub identifies
+  the tailnet node with `tailscale whois`, and you approve its 6-digit code
+  on the hub or from a paired device) or by exchanging a single-use,
+  5-minute pair token (`./pair.sh`). Revoking a lost phone is
   `swe remote devices --revoke=<id>`, without touching the tailnet.
-- Behind Serve the hub sees every client as `127.0.0.1`, so it cannot
-  identify devices with `tailscale whois`. That path fails closed (403
-  `not_tailnet`): nothing in the hub trusts a loopback peer. See
-  [Known gaps behind Serve](#known-gaps-behind-serve).
+- The unit runs `swe remote serve --public-url=https://<host>:<HTTPS_PORT>`
+  (quiver 6c70755, #570). With it, the hub trusts Serve's
+  `X-Forwarded-For`/`-Proto` headers, but only from loopback peers, which
+  behind Serve is tailscaled. That is how whois sees the real phone instead
+  of `127.0.0.1`. It also makes the hub hand out https pair links and ntfy
+  buttons, and accept https `Origin`s on the approval routes. The flip
+  side: any process on this box can set those headers. It runs as a user
+  who could read `devices.json` anyway, so this only matters if other,
+  untrusted accounts share the box.
 - The hub executes on this box by design: an attached session runs
   `claude -p`, `codex app-server` or tmux as you. The credential gates that.
 
@@ -118,10 +125,13 @@ What it does, in order:
    code-server's `/`) and any HTTPS port Serve already maps to another backend
 4. Resolves `QUIVER_REF` to a commit; installs it with `uv tool install`
    unless that commit is already installed
-5. Checks the build has `swe remote serve`, so a too-old pin never becomes a
-   crash-looping unit
+5. Checks the build has `swe remote serve --public-url` (quiver 6c70755 or
+   later), so a too-old pin never becomes a crash-looping unit
 6. Writes and (re)starts the systemd user unit / LaunchAgent:
-   `swe remote serve --host=127.0.0.1 --port=$LOCAL_PORT`, `Restart=always`
+   `swe remote serve --host=127.0.0.1 --port=$LOCAL_PORT
+   --public-url=https://<host>:$HTTPS_PORT`, `Restart=always`. On start the
+   hub writes `~/.quiver/data/remote/hub.json`, which `swe remote pair` and
+   `swe remote status` read, so neither needs flags
 7. Waits for `GET /v1/status` → `{"ok": true}` on loopback
 8. Enables lingering (Linux, only if off)
 9. `tailscale serve --bg --https=$HTTPS_PORT http://127.0.0.1:$LOCAL_PORT`
@@ -137,16 +147,17 @@ installed somewhere else needs that line extended in `setup.sh`.
 
 ### Phone (PWA)
 
-1. On the hub: `./pair.sh iphone`. It prints
-   `https://<host>:8477/#pair=<token>&name=iphone` and the raw token.
-2. Open that link on the phone (Safari on iPhone), or open
-   `https://<host>:8477/` and paste the token into **Have a pair token?**.
-   The token is single-use and lasts 5 minutes; run `pair.sh` again if it
-   expires.
+1. Open `https://<host>:8477/` on the phone (Safari on iPhone) and tap
+   **Pair with Tailscale**. It shows a 6-digit code.
+2. Approve it on the hub: `~/.local/share/quiver-hub/bin/swe remote devices
+   --approve=<code>` (`--requests` lists pending ones). Or approve from a
+   device that is already paired, on its `#approve` page. A device can't
+   approve its own request, and the request expires after 5 minutes.
 3. Share → **Add to Home Screen** for the app icon.
 
-Do not use **Pair with Tailscale** on this deploy. It answers
-`not_tailnet` behind Serve (gap 1 below).
+By token instead (for a device Tailscale can't identify): `./pair.sh iphone`
+prints `https://<host>:8477/#pair=<token>&name=iphone`; open it on the phone,
+or paste the token into **Have a pair token?**. Single use, 5 minutes.
 
 ### MacBook as a satellite
 
@@ -168,25 +179,19 @@ hub, and a sleeping Mac shows as offline with its last usage report.
 S=~/.local/share/quiver-hub/bin/swe
 $S remote devices                     # list paired devices
 $S remote devices --revoke=<id>       # lost phone
-$S remote status --host=127.0.0.1 --port=8477
+$S remote devices --requests          # pending "Pair with Tailscale" requests
+$S remote status                      # probes 127.0.0.1 via hub.json
 ```
 
-## Known gaps behind Serve
+## Behind Serve
 
-The hub was written to bind the tailnet IP and talk to clients directly.
-Behind Serve it sees loopback peers and its own `http://127.0.0.1` address.
-These stay until the hub learns about a fronting proxy, which is a quiver
-change, not a deploy one:
-
-| # | Gap | Effect | Workaround |
-|---|---|---|---|
-| 1 | "Pair with Tailscale" runs `tailscale whois` on the peer IP, which is `127.0.0.1` here | `POST /v1/pair/request` → 403 `not_tailnet` | Pair by token: `./pair.sh` |
-| 2 | `swe remote pair` prints `http://127.0.0.1:8477/#pair=...` | That link only opens on this box | `./pair.sh` prints the `https://` Serve link |
-| 3 | ntfy action buttons are built from the bind address (`http://127.0.0.1:8477`) | Lock-screen Allow/Deny buttons can't reach the hub; plain notifications still arrive | Answer approvals in the PWA. ntfy is not configured on this box yet (`swe remote notify`) |
-| 4 | Pair-approval routes compare `Origin` with `http://<Host>` | Approving a pending pair request from a browser over https → 403 `bad_origin` | Approve from the hub's shell: `swe remote devices --approve=<code>` (only relevant once gap 1 is fixed) |
-
-None of these blocks the deploy: token pairing, the PWA, SSE, the Usage tab
-and satellites all work over https.
+The hub was first written to bind the tailnet IP and talk to clients
+directly. Until quiver 6c70755 (#570), running it behind Serve meant it saw
+every client as `127.0.0.1` and advertised `http://127.0.0.1:8477`. So
+"Pair with Tailscale" answered 403 `not_tailnet`, `swe remote pair` printed
+an http link, ntfy buttons pointed at loopback, and browser approval was
+refused on `Origin`. `--public-url` fixes all four; `setup.sh` refuses older
+builds rather than run them without it.
 
 ## Operations
 
@@ -218,7 +223,7 @@ of this directory with a fake `$HOME` and PATH stubs for curl, git, uv,
 tailscale, sudo, systemctl, loginctl, launchctl, id, sleep and an old
 interactive `swe`. It covers the fresh install, an idempotent re-run (no
 reinstall, no sudo, `.env` kept), upgrade when main moves, pinning by SHA and
-by tag, unknown refs, GitHub or uv failures, a too-old quiver, port
+by tag, unknown refs, GitHub or uv failures, a too-old quiver (no `swe remote`, or no `--public-url`), port
 overrides and `.env` precedence, the `:443` refusal, an HTTPS port owned by
 another service, a hub that never gets healthy, the Serve approval loop, and
 `pair.sh`'s https links.
@@ -226,4 +231,7 @@ another service, a hub that never gets healthy, the Serve approval loop, and
 The live suite checks the unit is active and enabled, lingering, the unit
 binds 127.0.0.1, `/v1/status` on loopback and over the tailnet, no listener
 on a LAN interface, the Serve mapping, the PWA at `/`, and that the API
-refuses a request without a device credential (401).
+refuses a request without a device credential (401). It also checks the unit
+passes `--public-url`, the hub saved it to `hub.json`, and `swe remote pair`
+hands out an `https://` link (this mints one real token, unused, which
+expires after 5 minutes).
