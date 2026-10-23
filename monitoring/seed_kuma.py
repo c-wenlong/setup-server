@@ -108,6 +108,9 @@ PUBLISHED = [
     # builds. Kuma follows redirects, and a 200 here is the documented
     # "it started" check. The API key is not required for the document.
     ("openhands", 8000, "/"),
+    # /v1/status ({"ok": true}) is the hub's one unauthenticated route; "/"
+    # is the static PWA, which would stay green with the API down.
+    ("quiver-hub", 8477, "/v1/status"),
 ]
 
 MONITORS = [

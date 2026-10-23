@@ -262,6 +262,28 @@
       "description": "OpenHands Agent Canvas: browser UI over Claude Code and Codex via ACP. Official image, --public plus OPENHANDS_API_KEY from .env, loopback-only behind Serve on :8000. The agent sees only ~/agent-workspaces (as /projects)."
     },
     {
+      "key": "quiver-hub",
+      "name": "Quiver hub",
+      "tagline": "Remote",
+      "group": "ai",
+      "icon": "terminal",
+      "author": "c-wenlong",
+      "url": "https://HOST:8477/",
+      "health": "http://127.0.0.1:8477/v1/status",
+      "marker": "~/.local/share/quiver-hub",
+      "setup": "quiver-hub/setup.sh",
+      "env": "quiver-hub/.env",
+      "control": {
+        "parts": [
+          {
+            "unit": "quiver-hub.service"
+          }
+        ],
+        "kuma": "quiver-hub"
+      },
+      "description": "Quiver's remote-control hub (swe remote serve): the phone PWA for watching and steering coding-agent sessions, with an inbox and a Usage tab, and the hub MacBook satellites dial. Pinned uv install under ~/.local/share/quiver-hub, systemd user unit, loopback-only behind Serve on :8477. Pair a device by token with quiver-hub/pair.sh; 'Pair with Tailscale' can't identify devices behind Serve."
+    },
+    {
       "key": "kaichenpedia",
       "name": "kaichenpedia",
       "tagline": "Wiki",

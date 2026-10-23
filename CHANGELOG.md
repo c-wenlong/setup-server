@@ -22,6 +22,20 @@ first, dated by merge.
 
 ### Added
 
+- **quiver-hub: Quiver's remote-control hub (`swe remote serve`)** as a
+  systemd user unit on `127.0.0.1:8477`, published tailnet-only on
+  `:8477`. The phone PWA (sessions, inbox, Usage tab) and MacBook
+  satellites both use that URL. quiver is installed from git at a pinned
+  commit into its own uv tool dir (`~/.local/share/quiver-hub/`), so the
+  interactive `swe` and the hub never upgrade each other; `QUIVER_REF`
+  (default `main`) is resolved with `git ls-remote` and a re-run reinstalls
+  only when the commit moved. `pair.sh` mints a pair token and prints the
+  `https://` Serve link, because behind Serve the hub can't identify
+  devices with `tailscale whois` and `swe remote pair` prints its loopback
+  bind address. SETUP.md lists the four known gaps behind Serve. Also added
+  to the README, DIRECTORY.md, the Kuma seed and the launcher registry.
+  Mocked suite covers install, re-run, upgrade, SHA/tag pins, failures,
+  port precedence, Serve port conflicts and `pair.sh`.
 - **metabase: one-shot deploy of Metabase OSS v0.63.17.3** (self-hosted
   BI). App + Postgres, loopback-only behind Serve on `:8104` (forgejo
   already owns Metabase's upstream `:3000`). First admin seeded from
