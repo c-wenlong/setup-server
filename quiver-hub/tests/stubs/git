@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# git stub: only `git ls-remote <repo> <refs...>` is used. Known refs:
+#   refs/heads/main   -> $STATE_DIR/main_sha (default 1111...)
+#   refs/tags/v1.2.3  -> an annotated tag (tag object 3333..., peeled 2222...)
+# $STATE_DIR/git_fails existing => exit 128 (GitHub unreachable).
+echo "git $*" >> "$CALLS_LOG"
+[ -f "$STATE_DIR/git_fails" ] && { echo "fatal: unable to access" >&2; exit 128; }
+[ "${1:-}" = "ls-remote" ] || exit 0
+shift 2   # drop "ls-remote" and the repo URL
+
+main_sha="1111111111111111111111111111111111111111"
+[ -f "$STATE_DIR/main_sha" ] && main_sha="$(cat "$STATE_DIR/main_sha")"
+for ref in "$@"; do
+  case "$ref" in
+    refs/heads/main)    printf '%s\t%s\n' "$main_sha" "$ref" ;;
+    refs/tags/v1.2.3)   printf '%s\t%s\n' "3333333333333333333333333333333333333333" "$ref" ;;
+    'refs/tags/v1.2.3^{}') printf '%s\t%s\n' "2222222222222222222222222222222222222222" "$ref" ;;
+  esac
+done
+exit 0

@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+#
+# setup.sh — one-shot deploy of Quiver's remote hub (`swe remote serve`)
+# behind Tailscale (Linux + macOS).
+#
+# End state:
+#   - quiver installed from github.com/c-wenlong/quiver at a pinned commit, in
+#     its own uv tool dir (~/.local/share/quiver-hub), apart from the `swe` on
+#     your PATH so the two can't upgrade each other
+#   - `swe remote serve` listening on 127.0.0.1:LOCAL_PORT only
+#   - kept alive + started at boot/login:
+#       Linux: systemd --user unit + lingering
+#       macOS: launchd LaunchAgent (starts at login)
+#   - published tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT via
+#     Tailscale Serve: the phone PWA (sessions, inbox, Usage tab) and the
+#     satellite agents both use that URL
+#
+# Usage:
+#   ./setup.sh                          # local 8477, HTTPS 8477, quiver main
+#   LOCAL_PORT=8478 HTTPS_PORT=8478 ./setup.sh   # first run only; .env wins after
+#   QUIVER_REF=<sha|tag|branch> ./setup.sh       # install that ref this run
+#   ./pair.sh [device-name]             # pair a phone or a satellite (after deploy)
+#
+# Requirements: Linux (systemd) or macOS, curl, git, uv, Tailscale logged in.
+# Sudo is needed at most twice on Linux (lingering, tailscale operator), never
+# on macOS.
+#
+# Idempotent: safe to re-run. A re-run resolves QUIVER_REF again (so `main`
+# means "upgrade to the current tip"), reinstalls only when the commit moved,
+# regenerates the unit, restarts the hub and re-applies the Serve mapping.
+# An existing .env is never rewritten.
+
+set -euo pipefail
+
+LOCAL_PORT="${LOCAL_PORT:-8477}"
+# HTTPS follows LOCAL_PORT unless given, so overriding one can't split them.
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
+QUIVER_REF_EXPLICIT="${QUIVER_REF:-}"
+QUIVER_REF="${QUIVER_REF:-main}"
+QUIVER_REPO="${QUIVER_REPO:-https://github.com/c-wenlong/quiver.git}"
+
+SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SERVICE_DIR/.env"
+INSTALL_DIR="$HOME/.local/share/quiver-hub"
+SWE="$INSTALL_DIR/bin/swe"
+REV_FILE="$INSTALL_DIR/installed-rev"
+UNIT_NAME="quiver-hub.service"
+UNIT="$HOME/.config/systemd/user/$UNIT_NAME"
+PLIST_LABEL="com.setup-server.quiver-hub"
+PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+OS="$(uname -s)"
+
+info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
+die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+
+# Captured, then grepped: `cmd | grep -q` under pipefail fails spuriously when
+# grep exits on its first match and the writer takes SIGPIPE.
+has_remote() { local out; out="$("$1" remote 2>&1 || true)"; grep -q "swe remote serve" <<<"$out"; }
+hub_ok() {  # hub_ok <status url> <timeout>: the hub answers {"ok": true}
+  local body; body="$(curl -fsS --max-time "$2" "$1" 2>/dev/null)" || return 1
+  grep -q '"ok": *true' <<<"$body"
+}
+
+# ---------------------------------------------------------------- preflight
+info "Preflight checks ($OS)"
+case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
+[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root. The hub reads your own sessions (~/.claude, ~/.codex, ...) and runs as a user unit."
+command -v curl >/dev/null || die "curl is required (health checks)."
+command -v git >/dev/null  || die "git is required (resolving QUIVER_REF, and uv installs quiver from git)."
+command -v uv >/dev/null   || die "uv is required to install quiver. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh"
+if [ "$OS" = "Linux" ]; then
+  command -v systemctl >/dev/null || die "systemd is required on Linux (the hub runs as a systemd user unit)."
+  command -v loginctl >/dev/null  || die "loginctl is required on Linux (lingering, for boot persistence)."
+fi
+
+# Tailscale CLI: on PATH, or inside the macOS app bundle.
+if command -v tailscale >/dev/null; then
+  TAILSCALE="tailscale"
+elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+else
+  die "Tailscale is not installed. Install it first: https://tailscale.com/download"
+fi
+
+state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+
+TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+[ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
+ok "$OS + curl + git + uv + Tailscale (running as $TS_HOST)"
+
+# ---------------------------------------------------------------- .env
+if [ -f "$ENV_FILE" ]; then
+  ok "Config already exists, leaving untouched: $ENV_FILE"
+else
+  info "Writing $ENV_FILE"
+  cat > "$ENV_FILE" <<EOF
+# Generated by setup.sh on first run. Gitignored. Edit and re-run setup.sh;
+# pair.sh reads the ports from here too. No secrets live in this file.
+
+# The hub binds 127.0.0.1:LOCAL_PORT; Tailscale Serve publishes it on
+# https://<host>:HTTPS_PORT. 8477 is swe's own default hub port.
+LOCAL_PORT=$LOCAL_PORT
+HTTPS_PORT=$HTTPS_PORT
+
+# Which commit of c-wenlong/quiver the hub runs: a branch, tag or full SHA.
+# A branch means "move to its current tip on every setup.sh run"; a SHA pins.
+QUIVER_REF=$QUIVER_REF
+EOF
+  ok "Wrote $ENV_FILE"
+fi
+
+# Read back: .env is the source of truth for the ports, so a re-run can never
+# silently move a live deployment. An explicit QUIVER_REF wins for this run.
+REQUESTED_PORT="$LOCAL_PORT"
+REQUESTED_HTTPS="$HTTPS_PORT"
+set -a; . "$ENV_FILE"; set +a
+LOCAL_PORT="${LOCAL_PORT:?LOCAL_PORT missing from $ENV_FILE}"
+HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
+QUIVER_REF="${QUIVER_REF_EXPLICIT:-${QUIVER_REF:-main}}"
+if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
+  warn "LOCAL_PORT=$REQUESTED_PORT ignored: $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move it."
+fi
+if [ -n "$HTTPS_PORT_EXPLICIT" ] && [ "$HTTPS_PORT" != "$REQUESTED_HTTPS" ]; then
+  warn "HTTPS_PORT=$REQUESTED_HTTPS ignored: $ENV_FILE says $HTTPS_PORT. Edit .env and re-run to move it."
+fi
+
+case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
+case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
+# A bare `--https=443` replaces whatever owns "/" there (code-server on this box).
+[ "$HTTPS_PORT" != "443" ] || die "HTTPS_PORT=443 would replace the :443 / handler (code-server). Pick another port."
+
+# Serve is one mapping per port: publishing over another service's HTTPS port
+# would silently take it down. Our own mapping (a re-run) is fine.
+SERVE_TARGET="http://127.0.0.1:$LOCAL_PORT"
+existing="$("$TAILSCALE" serve status 2>/dev/null | awk -v hdr="https://$TS_HOST:$HTTPS_PORT " '
+  index($0, hdr) == 1 { inblk = 1; next }
+  /^https?:\/\// { inblk = 0 }
+  inblk && $2 == "/" && $3 == "proxy" { print $4; exit }' || true)"
+if [ -n "$existing" ] && [ "$existing" != "$SERVE_TARGET" ]; then
+  die "HTTPS :$HTTPS_PORT is already published for $existing. Set another HTTPS_PORT in $ENV_FILE (see tailscale serve status)."
+fi
+ok "Ports: 127.0.0.1:$LOCAL_PORT, HTTPS :$HTTPS_PORT"
+
+# ---------------------------------------------------- install / upgrade
+info "Resolving quiver $QUIVER_REF"
+if [[ "$QUIVER_REF" =~ ^[0-9a-f]{40}$ ]]; then
+  REV="$QUIVER_REF"
+else
+  # Branch first, then a tag (the peeled ^{} line, if any, is the commit).
+  refs="$(git ls-remote "$QUIVER_REPO" "refs/heads/$QUIVER_REF" "refs/tags/$QUIVER_REF" "refs/tags/$QUIVER_REF^{}" 2>/dev/null)" \
+    || die "git ls-remote $QUIVER_REPO failed. Is GitHub reachable?"
+  REV="$(printf '%s\n' "$refs" | awk -v r="refs/heads/$QUIVER_REF" '$2 == r { print $1; exit }')"
+  [ -n "$REV" ] || REV="$(printf '%s\n' "$refs" | awk -v r="refs/tags/$QUIVER_REF^{}" '$2 == r { print $1; exit }')"
+  [ -n "$REV" ] || REV="$(printf '%s\n' "$refs" | awk -v r="refs/tags/$QUIVER_REF" '$2 == r { print $1; exit }')"
+  [ -n "$REV" ] || die "No branch or tag named '$QUIVER_REF' in $QUIVER_REPO. Use a branch, a tag or a full 40-char SHA."
+fi
+ok "quiver $QUIVER_REF -> ${REV:0:12}"
+
+installed="$(cat "$REV_FILE" 2>/dev/null || true)"
+if [ "$installed" = "$REV" ] && [ -x "$SWE" ]; then
+  ok "quiver ${REV:0:12} already installed in $INSTALL_DIR"
+else
+  if [ -n "$installed" ]; then
+    info "Upgrading quiver ${installed:0:12} -> ${REV:0:12}"
+  else
+    info "Installing quiver ${REV:0:12} into $INSTALL_DIR"
+  fi
+  # Each commit gets its own uv tool dir and bin dir under releases/, apart
+  # from the `swe` on your PATH (uv tool, Nix, brew), which this never
+  # touches. The live build is whatever $INSTALL_DIR/bin links to, and that
+  # link moves only after the new build passes the check below, so a
+  # rejected or failed install leaves the running hub's build in place.
+  live=""
+  if [ -L "$INSTALL_DIR/bin" ]; then
+    live="$(readlink "$INSTALL_DIR/bin")"; live="${live#releases/}"; live="${live%/bin}"
+  fi
+  # Never install into the directory the live link points at: a forced
+  # reinstall of the same commit (installed-rev removed) gets a fresh name.
+  name="$REV"
+  [ "$name" != "$live" ] || name="$REV.$(date +%s)"
+  RELEASE="${INSTALL_DIR:?}/releases/${name:?}"
+  rm -rf "$RELEASE"
+  mkdir -p "$RELEASE"
+  UV_TOOL_DIR="$RELEASE/tools" UV_TOOL_BIN_DIR="$RELEASE/bin" \
+    uv tool install --force --reinstall --quiet "quiver @ git+$QUIVER_REPO@$REV" \
+    || { rm -rf "$RELEASE"; die "uv tool install failed for quiver@$REV (see above). The installed build is unchanged."; }
+  [ -x "$RELEASE/bin/swe" ] || { rm -rf "$RELEASE"; die "uv finished but $RELEASE/bin/swe is missing. The installed build is unchanged."; }
+  # The hub needs a quiver new enough to have `swe remote`. An old pin would
+  # give a unit that crash-loops on "unknown command".
+  has_remote "$RELEASE/bin/swe" \
+    || { rm -rf "$RELEASE"; die "quiver ${REV:0:12} has no 'swe remote serve' (too old). Use a newer QUIVER_REF; the installed build is unchanged."; }
+
+  # A first deploy before releases/ existed left bin/ and tools/ as real dirs.
+  [ -L "$INSTALL_DIR/bin" ] || rm -rf "${INSTALL_DIR:?}/bin" "${INSTALL_DIR:?}/tools"
+  ln -sfn "releases/$name/bin" "$INSTALL_DIR/bin"
+  printf '%s\n' "$REV" > "$REV_FILE"
+  # Keep the new build and the one it replaced (for a quick manual rollback).
+  for old in "$INSTALL_DIR"/releases/*; do
+    case "$(basename "$old")" in "$name"|"$live") ;; *) rm -rf "$old" ;; esac
+  done
+  ok "Installed quiver ${REV:0:12}"
+fi
+
+has_remote "$SWE" \
+  || die "$SWE has no 'swe remote serve'. Remove $REV_FILE and re-run to reinstall."
+ok "$("$SWE" --version 2>/dev/null | head -1) with 'swe remote' at $SWE"
+
+# ------------------------------------------------------------ service
+# The hub shells out to the harness CLIs it supervises (claude -p, codex
+# app-server, tmux, opencode) and to tailscale, and a user unit starts with a
+# minimal PATH. The hub's own bin dir goes first so any `swe` it spawns is
+# this build, then the usual user-level install locations.
+SVC_PATH="$INSTALL_DIR/bin:$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$HOME/.local/bin:$HOME/.npm-global/bin"
+if [ "$OS" = "Linux" ]; then
+  SVC_PATH="$SVC_PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  info "Installing systemd user unit ($UNIT_NAME)"
+  mkdir -p "$(dirname "$UNIT")"
+  # Regenerated on every run: this file is generated, never hand-edited.
+  cat > "$UNIT" <<EOF
+[Unit]
+Description=Quiver remote hub (swe remote serve) for the phone PWA and satellites
+After=network.target
+
+[Service]
+Type=exec
+ExecStart=$SWE remote serve --host=127.0.0.1 --port=$LOCAL_PORT
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=$SVC_PATH
+Restart=always
+RestartSec=5
+# The hub handles SIGTERM like ^C (flushes queued sends, closes SSE).
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT_NAME" >/dev/null 2>&1
+  systemctl --user restart "$UNIT_NAME"   # restart, not start: pick up a new build or unit
+  ok "Unit installed, enabled and (re)started"
+else
+  SVC_PATH="$SVC_PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  info "Installing launchd LaunchAgent ($PLIST_LABEL)"
+  mkdir -p "$(dirname "$PLIST")" "$HOME/Library/Logs"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$PLIST_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$SWE</string><string>remote</string><string>serve</string>
+    <string>--host=127.0.0.1</string><string>--port=$LOCAL_PORT</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+    <key>PATH</key><string>$SVC_PATH</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/quiver-hub.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/quiver-hub.log</string>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  ok "LaunchAgent loaded (starts at login; logs: ~/Library/Logs/quiver-hub.log)"
+fi
+
+if [ "$OS" = "Linux" ]; then
+  LOGCMD="journalctl --user -u $UNIT_NAME -n 50 --no-pager"
+else
+  LOGCMD="tail -n 50 ~/Library/Logs/quiver-hub.log"
+fi
+
+# /v1/status is the hub's one unauthenticated route, and answers {"ok": true}.
+info "Waiting for the hub on http://127.0.0.1:$LOCAL_PORT/v1/status"
+for i in $(seq 1 30); do
+  if hub_ok "http://127.0.0.1:$LOCAL_PORT/v1/status" 3; then
+    ok "Hub is healthy locally"
+    break
+  fi
+  [ "$i" -eq 30 ] && die "The hub did not answer on 127.0.0.1:$LOCAL_PORT. Logs: $LOGCMD"
+  sleep 1
+done
+
+# ------------------------------------------------------------- lingering
+# Linux only: makes user services start at boot and survive logout.
+if [ "$OS" = "Linux" ]; then
+  if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = "yes" ]; then
+    ok "Lingering already enabled"
+  else
+    info "Enabling lingering so the hub starts at boot (needs sudo, one time)"
+    sudo loginctl enable-linger "$USER"
+    ok "Lingering enabled"
+  fi
+fi
+
+# ------------------------------------------------------- tailscale serve
+if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "$SERVE_TARGET" >/dev/null 2>&1; then
+  if [ "$OS" = "Linux" ]; then
+    info "Granting Tailscale operator rights to $USER (needs sudo, one time)"
+    sudo tailscale set --operator="$USER"
+  fi
+  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "$SERVE_TARGET"; do
+    echo
+    info "Tailscale Serve needs one-time enablement: open the URL above, approve, then press Enter to retry."
+    read -r
+  done
+fi
+ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> $SERVE_TARGET (tailnet only)"
+
+# ------------------------------------------------------------ final check
+url="https://$TS_HOST:$HTTPS_PORT"
+info "Verifying $url (the first request on a new port can take ~60s while the cert is minted)"
+if hub_ok "$url/v1/status" 90; then
+  ok "End-to-end check passed"
+else
+  warn "Cert may still be minting. Try again in a minute: curl $url/v1/status"
+fi
+
+# The `swe` on PATH is a separate install. If it predates `swe remote`, the
+# hub-side commands below must use the hub's own build.
+path_swe="$(command -v swe 2>/dev/null || true)"
+if [ -n "$path_swe" ] && [ "$path_swe" != "$SWE" ] \
+   && ! has_remote "$path_swe"; then
+  warn "The swe on your PATH ($path_swe) has no 'swe remote'. Use $SWE for hub commands, or upgrade that install."
+fi
+
+echo
+printf '\033[1;32mDone.\033[0m The hub is at \033[1m%s\033[0m (tailnet only).\n' "$url"
+echo
+echo "Pair a phone (the 'Pair with Tailscale' button can't work behind Serve):"
+echo "  1. On this box: $SERVICE_DIR/pair.sh iphone"
+echo "  2. Open the https://...#pair= link it prints on the phone (or type the"
+echo "     token into the PWA's 'Have a pair token?' field). Tokens last 5 min."
+echo "  3. Safari > Share > Add to Home Screen for the app icon."
+echo
+echo "Pair the MacBook as a satellite: run pair.sh here, then on the Mac:"
+echo "  swe remote agent --hub=$url --token=<token>"
+echo
+echo "Hub commands (this build):"
+echo "  $SWE remote status --host=127.0.0.1 --port=$LOCAL_PORT"
+echo "  $SWE remote devices [--requests] [--approve=<code>] [--revoke=<id>]"
+echo
+echo "Manage it with:"
+if [ "$OS" = "Linux" ]; then
+  echo "  systemctl --user status|restart|stop $UNIT_NAME"
+  echo "  journalctl --user -u $UNIT_NAME -f"
+else
+  echo "  launchctl kickstart -k gui/\$(id -u)/$PLIST_LABEL   # restart"
+  echo "  tail -f ~/Library/Logs/quiver-hub.log"
+fi
+echo "  tailscale serve status        # or: tailscale serve --https=$HTTPS_PORT off"
+echo "  $SERVICE_DIR/setup.sh         # upgrade to the current $QUIVER_REF"
+echo "  $SERVICE_DIR/tests/run-tests.sh [--live]"

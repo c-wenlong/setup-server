@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# sudo stub: logs the call, then runs the command (which resolves to other stubs).
+echo "sudo $*" >> "$CALLS_LOG"
+exec "$@"

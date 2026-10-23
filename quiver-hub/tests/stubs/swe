@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# swe stub: stands in for the user's interactive `swe` on PATH, an old build
+# with no `remote` command (setup.sh should warn about it).
+echo "path-swe $*" >> "$CALLS_LOG"
+echo "unknown command: $1" >&2
+exit 2

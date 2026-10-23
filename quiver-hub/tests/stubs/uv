@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# uv stub: `uv tool install ... <spec>` writes a fake swe into $UV_TOOL_BIN_DIR.
+# The fake swe has `swe remote` unless $STATE_DIR/old_swe existed when it was
+# installed (baked in, so a live build and a rejected one can differ), and answers
+# `swe remote pair --json` with a fixed token. $STATE_DIR/uv_fails => exit 1.
+echo "uv $*" >> "$CALLS_LOG"
+[ -f "$STATE_DIR/uv_fails" ] && { echo "error: failed to fetch" >&2; exit 1; }
+[ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ] || exit 0
+
+spec="${*: -1}"
+echo "$spec" > "$STATE_DIR/uv_spec"
+mkdir -p "$UV_TOOL_BIN_DIR"
+old=no; [ -f "$STATE_DIR/old_swe" ] && old=yes
+{
+  echo '#!/usr/bin/env bash'
+  echo "OLD=$old"
+  cat <<'SWE'
+echo "hub-swe $*" >> "$CALLS_LOG"
+case "$*" in
+  --version) echo "swe 1.0.0" ;;
+  remote)
+    if [ "$OLD" = yes ]; then echo "unknown command: remote" >&2; exit 2; fi
+    echo "  swe remote serve [--host=H] [--port=N]   Run the hub"
+    ;;
+  "remote pair --json"*)
+    cat <<JSON
+{
+  "schema": 1,
+  "data": {
+    "host": "127.0.0.1",
+    "port": 8477,
+    "token": "FAKETOKEN123",
+    "url": "http://127.0.0.1:8477/#pair=FAKETOKEN123",
+    "expires_in_s": 300
+  }
+}
+JSON
+    ;;
+esac
+SWE
+} > "$UV_TOOL_BIN_DIR/swe"
+chmod +x "$UV_TOOL_BIN_DIR/swe"
