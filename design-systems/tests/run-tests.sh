@@ -63,6 +63,7 @@ check() {
 }
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
+out_lacks()  { ! grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
@@ -152,6 +153,12 @@ test_fresh_deploy() {
   check "deploy script installed"     [ -x "$HOME/services/design-systems/bin/deploy.sh" ]
   check "media dir created"           [ -d "$HOME/services/design-systems/media/refero" ]
   check "nginx conf has media alias"  grep -q "refero-media" "$HOME/services/design-systems/nginx.conf"
+  check "nginx conf gzips"            grep -q "gzip on" "$HOME/services/design-systems/nginx.conf"
+  check "nginx conf gzips json"       grep -q "gzip_types .*application/json" "$HOME/services/design-systems/nginx.conf"
+  check "thumbs cache a day"          sh -c 'grep -A2 "gallery/thumbs" "$1" | grep -q "max-age=86400"' _ "$HOME/services/design-systems/nginx.conf"
+  check "media caches a month"        sh -c 'grep -A2 "refero-media" "$1" | grep -q "max-age=2592000"' _ "$HOME/services/design-systems/nginx.conf"
+  check "repo paths revalidate"       grep -q "srv/repo/systems/.*no-cache" "$HOME/services/design-systems/nginx.conf"
+  check "default is no-cache"         sh -c 'grep -A2 "try_files" "$1" | grep -q "Cache-Control .no-cache"' _ "$HOME/services/design-systems/nginx.conf"
   check "compose mounts media"        grep -q "srv/media" "$SERVICE_DIR/docker-compose.yml"
   check "env path baked into script"  grep -q "$SVC/.env" "$HOME/services/design-systems/bin/deploy.sh"
   check "venv created (uv venv)"      calls_have "uv venv"
@@ -190,6 +197,26 @@ test_idempotent_rerun() {
   check "no rebuild"              no_call "python tools/site.py"
   check "never invoked sudo"      no_call "^sudo "
   check "compose up re-invoked"   [ -f "$STATE_DIR/compose_up" ]
+  teardown
+}
+
+test_nginx_conf_stale_warns() {
+  echo "• pre-existing nginx.conf without the gzip/Cache-Control block: kept, but warns"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$HOME/services/design-systems"
+  cat > "$HOME/services/design-systems/nginx.conf" <<'NGX'
+server {
+    listen 80;
+    location /refero-media/ { alias /srv/media/refero/; }
+    location / { try_files $uri $uri/ =404; }
+}
+NGX
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "conf left untouched"      grep -qx "    listen 80;" "$HOME/services/design-systems/nginx.conf"
+  check "warns to update"          out_has "predates the gzip/Cache-Control config"
+  check "no media-mount warning"   out_lacks "predates the refero media mount"
   teardown
 }
 
@@ -329,6 +356,19 @@ media_alias_serves_file() {
   [ "$body" = "live-check" ]
 }
 
+# Same sentinel trick for the Cache-Control policy: the long max-age is what
+# lets a month of refero media stay off the wire.
+media_serves_cache_header() {
+  local port="$1" svc_home="$2" dir sent headers
+  dir="$svc_home/media/refero"
+  [ -d "$dir" ] || return 1
+  sent="$dir/.live-check-$$"
+  echo "live-check" > "$sent" && chmod 644 "$sent" || return 1
+  headers="$(curl -fsSI "http://127.0.0.1:$port/refero-media/.live-check-$$" 2>/dev/null)"
+  rm -f "$sent"
+  grep -qi 'cache-control: public, max-age=2592000' <<<"$headers"
+}
+
 test_live() {
   echo "• live: verify the real deployment on this machine"
   local ts port url svc_home repo
@@ -343,6 +383,9 @@ test_live() {
   live_check "gallery data responds"    sh -c "curl -fsS 'http://127.0.0.1:$port/gallery/data.json' | grep -q systems"
   live_check "repo path responds"       sh -c "curl -fsS 'http://127.0.0.1:$port/catalog.json' | grep -q systems"
   live_check "media alias wired"        media_alias_serves_file "$port" "$svc_home"
+  live_check "data.json gzips"          sh -c "curl -fsS -o /dev/null -D - -H 'Accept-Encoding: gzip' 'http://127.0.0.1:$port/gallery/data.json' | grep -qi 'content-encoding: gzip'"
+  live_check "data.json revalidates"    sh -c "curl -fsSI 'http://127.0.0.1:$port/gallery/data.json' | grep -qi 'cache-control: no-cache'"
+  live_check "media caches long"        media_serves_cache_header "$port" "$svc_home"
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches repo"   sh -c "[ \"\$(git -C '$repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   if [ "$OS" = "Linux" ]; then
@@ -365,6 +408,7 @@ test_lfs_pointers_fixed
 test_lfs_pointers_unfixable
 test_fresh_deploy
 test_idempotent_rerun
+test_nginx_conf_stale_warns
 test_push_triggers_redeploy
 test_force_rebuild_same_sha
 test_deps_resync_on_requirements_change

@@ -101,6 +101,15 @@ the allowlist in `~/services/design-systems/nginx.conf`.
 `state/built-sha` updated. A deploy killed mid-swap can't leave a gap (the
 repoint is one rename) but can leave `www/next` behind; see Layer 1.
 
+**The deploy moved but the browser still shows the old version.**
+Every page-class asset answers `Cache-Control: no-cache` and revalidates
+by ETag, so staleness means the response never reached nginx — or the conf
+predates the caching block. Check
+`curl -sI http://127.0.0.1:8108/gallery/data.json | grep -i cache-control`:
+empty means `~/services/design-systems/nginx.conf` is a pre-gzip copy —
+re-run setup.sh (it prints the diff to apply), then
+`docker compose --project-directory ~/dev/setup-server/design-systems restart`.
+
 ## Layer 3 — publish broken
 
 **Local works, `https://…:8108` doesn't.**
