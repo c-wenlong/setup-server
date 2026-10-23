@@ -169,21 +169,36 @@ else
   else
     info "Installing quiver ${REV:0:12} into $INSTALL_DIR"
   fi
-  mkdir -p "$INSTALL_DIR"
-  # Its own tool dir and bin dir: the `swe` on your PATH (uv tool, Nix, brew)
-  # is a separate install that this never touches, and vice versa.
-  UV_TOOL_DIR="$INSTALL_DIR/tools" UV_TOOL_BIN_DIR="$INSTALL_DIR/bin" \
+  # Each commit gets its own uv tool dir and bin dir under releases/, apart
+  # from the `swe` on your PATH (uv tool, Nix, brew), which this never
+  # touches. The live build is whatever $INSTALL_DIR/bin links to, and that
+  # link moves only after the new build passes the check below, so a
+  # rejected or failed install leaves the running hub's build in place.
+  RELEASE="${INSTALL_DIR:?}/releases/${REV:?}"
+  rm -rf "$RELEASE"
+  mkdir -p "$RELEASE"
+  UV_TOOL_DIR="$RELEASE/tools" UV_TOOL_BIN_DIR="$RELEASE/bin" \
     uv tool install --force --reinstall --quiet "quiver @ git+$QUIVER_REPO@$REV" \
-    || die "uv tool install failed for quiver@$REV (see above)."
-  [ -x "$SWE" ] || die "uv finished but $SWE is missing."
+    || { rm -rf "$RELEASE"; die "uv tool install failed for quiver@$REV (see above)."; }
+  [ -x "$RELEASE/bin/swe" ] || { rm -rf "$RELEASE"; die "uv finished but $RELEASE/bin/swe is missing."; }
+  # The hub needs a quiver new enough to have `swe remote`. An old pin would
+  # give a unit that crash-loops on "unknown command".
+  has_remote "$RELEASE/bin/swe" \
+    || { rm -rf "$RELEASE"; die "quiver ${REV:0:12} has no 'swe remote serve' (too old). Use a newer QUIVER_REF; the installed build is unchanged."; }
+
+  # A first deploy before releases/ existed left bin/ and tools/ as real dirs.
+  [ -L "$INSTALL_DIR/bin" ] || rm -rf "${INSTALL_DIR:?}/bin" "${INSTALL_DIR:?}/tools"
+  ln -sfn "releases/$REV/bin" "$INSTALL_DIR/bin"
   printf '%s\n' "$REV" > "$REV_FILE"
+  # Keep the live build and the one before it (for a quick manual rollback).
+  for old in "$INSTALL_DIR"/releases/*; do
+    case "$(basename "$old")" in "$REV"|"$installed") ;; *) rm -rf "$old" ;; esac
+  done
   ok "Installed quiver ${REV:0:12}"
 fi
 
-# The hub needs a quiver new enough to have `swe remote`. An old pin would
-# give a unit that crash-loops on "unknown command".
 has_remote "$SWE" \
-  || die "$SWE has no 'swe remote serve' (quiver ${REV:0:12} is too old). Use a newer QUIVER_REF."
+  || die "$SWE has no 'swe remote serve'. Remove $REV_FILE and re-run to reinstall."
 ok "$("$SWE" --version 2>/dev/null | head -1) with 'swe remote' at $SWE"
 
 # ------------------------------------------------------------ service

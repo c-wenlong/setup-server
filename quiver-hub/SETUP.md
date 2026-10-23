@@ -63,6 +63,13 @@ its own uv tool dir and bin dir (`UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` under
   commit is recorded in `~/.local/share/quiver-hub/installed-rev`.
 - **Idempotent upgrade**: a re-run resolves the ref again and reinstalls only
   if the commit moved. `QUIVER_REF=main` (the default) means "track main".
+- **A bad upgrade can't take the hub down**: each commit installs into its
+  own `releases/<sha>/` and is checked for `swe remote serve` there. Only
+  then does `~/.local/share/quiver-hub/bin` (a symlink, and the path the unit
+  runs) move to it. A failed or too-old install is deleted and the live
+  build is untouched. The previous release is kept for a manual rollback
+  (`ln -sfn releases/<old sha>/bin bin`, write that sha to `installed-rev`,
+  restart the unit).
 - **No Nix requirement**: the flake would pin just as well, but this repo
   targets plain Linux and macOS boxes, and quiver's core is stdlib-only, so
   a wheel install is all it needs.

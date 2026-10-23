@@ -78,13 +78,14 @@ unit_has()   { grep -qF -- "$1" "$UNIT"; }
 plist_has()  { grep -qF -- "$1" "$PLIST"; }
 uv_spec_is() { [ "$(cat "$STATE_DIR/uv_spec" 2>/dev/null)" = "$1" ]; }
 rev_is()     { [ "$(cat "$INSTALL/installed-rev" 2>/dev/null)" = "$1" ]; }
+live_is()    { [ "$(readlink "$INSTALL/bin" 2>/dev/null)" = "releases/$1/bin" ]; }
 
 # A box that already ran setup.sh once: .env, the hub build, linger + operator.
 pre_deployed() {
   touch "$STATE_DIR/linger" "$STATE_DIR/operator"
   printf 'LOCAL_PORT=8477\nHTTPS_PORT=8477\nQUIVER_REF=main\n# my-custom-marker\n' > "$SVC/.env"
-  mkdir -p "$INSTALL/bin"
-  UV_TOOL_BIN_DIR="$INSTALL/bin" PATH="$STUBS:$PATH" uv tool install x >/dev/null
+  UV_TOOL_BIN_DIR="$INSTALL/releases/$MAIN_SHA/bin" PATH="$STUBS:$PATH" uv tool install x >/dev/null
+  ln -s "releases/$MAIN_SHA/bin" "$INSTALL/bin"
   echo "$MAIN_SHA" > "$INSTALL/installed-rev"
   printf 'https://test-host.tailfake.ts.net:8477 (tailnet only)\n|-- / proxy http://127.0.0.1:8477\n\n' > "$STATE_DIR/serve_status"
   : > "$CALLS_LOG"
@@ -123,7 +124,9 @@ test_fresh_deploy() {
   check ".env: QUIVER_REF=main"              env_has "QUIVER_REF=main"
   check "resolved main with ls-remote"       calls_have "git ls-remote $REPO refs/heads/main"
   check "uv installs the resolved commit"    uv_spec_is "quiver @ git+$REPO@$MAIN_SHA"
-  check "uv uses the hub's own tool dir"     [ -x "$INSTALL/bin/swe" ]
+  check "installs into a per-commit release" [ -x "$INSTALL/releases/$MAIN_SHA/bin/swe" ]
+  check "bin links to that release"          live_is "$MAIN_SHA"
+  check "hub swe reachable through the link" [ -x "$INSTALL/bin/swe" ]
   check "records the installed commit"       rev_is "$MAIN_SHA"
   check "checked the build has swe remote"   calls_have "hub-swe remote"
   if [ "$OS" = "Linux" ]; then
@@ -180,6 +183,70 @@ test_upgrade_when_main_moves() {
   check "says upgrading"        out_has "Upgrading quiver 111111111111 -> 444444444444"
   check "installs the new tip"  uv_spec_is "quiver @ git+$REPO@4444444444444444444444444444444444444444"
   check "records the new tip"   rev_is "4444444444444444444444444444444444444444"
+  check "bin links the new tip" live_is "4444444444444444444444444444444444444444"
+  check "keeps the previous release for rollback" [ -d "$INSTALL/releases/$MAIN_SHA" ]
+  teardown
+}
+
+test_prunes_old_releases() {
+  echo "• upgrade keeps only the live and the previous release"
+  setup
+  pre_deployed
+  mkdir -p "$INSTALL/releases/9999999999999999999999999999999999999999/bin"
+  echo "4444444444444444444444444444444444444444" > "$STATE_DIR/main_sha"
+  run_deploy
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  check "older release pruned"       [ ! -e "$INSTALL/releases/9999999999999999999999999999999999999999" ]
+  check "previous release kept"      [ -d "$INSTALL/releases/$MAIN_SHA" ]
+  teardown
+}
+
+test_rejected_upgrade_keeps_live_build() {
+  echo "• upgrade to a ref without swe remote: the live build stays in place"
+  setup
+  pre_deployed
+  echo "4444444444444444444444444444444444444444" > "$STATE_DIR/main_sha"
+  touch "$STATE_DIR/old_swe"
+  run_deploy
+  check "exits non-zero"             [ "$CODE" -ne 0 ]
+  check "says the build is unchanged" out_has "installed build is unchanged"
+  check "bin still links the old build" live_is "$MAIN_SHA"
+  check "installed-rev unchanged"    rev_is "$MAIN_SHA"
+  check "rejected release removed"   [ ! -e "$INSTALL/releases/4444444444444444444444444444444444444444" ]
+  check "live build still has swe remote" grep -q "OLD=no" "$INSTALL/bin/swe"
+  check "no service restart"         no_call "restart quiver-hub"
+  check "no LaunchAgent reload"      no_call "launchctl bootstrap"
+  teardown
+}
+
+test_failed_upgrade_keeps_live_build() {
+  echo "• uv fails during an upgrade: the live build stays in place"
+  setup
+  pre_deployed
+  echo "4444444444444444444444444444444444444444" > "$STATE_DIR/main_sha"
+  touch "$STATE_DIR/uv_fails"
+  run_deploy
+  check "exits non-zero"             [ "$CODE" -ne 0 ]
+  check "bin still links the old build" live_is "$MAIN_SHA"
+  check "installed-rev unchanged"    rev_is "$MAIN_SHA"
+  check "no half-installed release"  [ ! -e "$INSTALL/releases/4444444444444444444444444444444444444444" ]
+  check "no service restart"         no_call "restart quiver-hub"
+  teardown
+}
+
+test_migrates_flat_layout() {
+  echo "• upgrade from the first layout (real bin/ and tools/ dirs) to releases/"
+  setup
+  pre_deployed
+  rm "$INSTALL/bin"
+  mkdir -p "$INSTALL/bin" "$INSTALL/tools/quiver"
+  cp "$INSTALL/releases/$MAIN_SHA/bin/swe" "$INSTALL/bin/swe"
+  rm -rf "$INSTALL/releases"
+  echo "4444444444444444444444444444444444444444" > "$STATE_DIR/main_sha"
+  run_deploy
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  check "bin is now a link"          live_is "4444444444444444444444444444444444444444"
+  check "old tools/ dir removed"     [ ! -e "$INSTALL/tools" ]
   teardown
 }
 
@@ -258,6 +325,8 @@ test_too_old_quiver() {
   run_deploy
   check "exits non-zero"         [ "$CODE" -ne 0 ]
   check "says too old"           out_has "too old"
+  check "no live build linked"   [ ! -e "$INSTALL/bin" ]
+  check "no installed-rev"       [ ! -e "$INSTALL/installed-rev" ]
   check "no unit written"        [ ! -e "$UNIT" ]
   check "no LaunchAgent written" [ ! -e "$PLIST" ]
   teardown
@@ -446,6 +515,7 @@ test_live() {
   swe="$HOME/.local/share/quiver-hub/bin/swe"
   live_check ".env present with LOCAL_PORT"       [ -n "$local_port" ]
   live_check "hub build installed with a commit"  [ -s "$HOME/.local/share/quiver-hub/installed-rev" ]
+  live_check "live build links that commit's release" sh -c "[ \"\$(readlink '$HOME/.local/share/quiver-hub/bin')\" = \"releases/\$(cat '$HOME/.local/share/quiver-hub/installed-rev')/bin\" ]"
   live_check "hub build has swe remote"           sh -c "'$swe' remote 2>&1 | grep -q 'swe remote serve'"
   if [ "$OS" = "Linux" ]; then
     live_check "systemd service is active"        systemctl --user is-active quiver-hub.service
@@ -470,6 +540,10 @@ test_preflight_refuses_root
 test_fresh_deploy
 test_idempotent_rerun
 test_upgrade_when_main_moves
+test_prunes_old_releases
+test_rejected_upgrade_keeps_live_build
+test_failed_upgrade_keeps_live_build
+test_migrates_flat_layout
 test_pin_by_sha
 test_pin_by_tag
 test_explicit_ref_beats_env
