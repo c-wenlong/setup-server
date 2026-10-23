@@ -174,13 +174,21 @@ else
   # touches. The live build is whatever $INSTALL_DIR/bin links to, and that
   # link moves only after the new build passes the check below, so a
   # rejected or failed install leaves the running hub's build in place.
-  RELEASE="${INSTALL_DIR:?}/releases/${REV:?}"
+  live=""
+  if [ -L "$INSTALL_DIR/bin" ]; then
+    live="$(readlink "$INSTALL_DIR/bin")"; live="${live#releases/}"; live="${live%/bin}"
+  fi
+  # Never install into the directory the live link points at: a forced
+  # reinstall of the same commit (installed-rev removed) gets a fresh name.
+  name="$REV"
+  [ "$name" != "$live" ] || name="$REV.$(date +%s)"
+  RELEASE="${INSTALL_DIR:?}/releases/${name:?}"
   rm -rf "$RELEASE"
   mkdir -p "$RELEASE"
   UV_TOOL_DIR="$RELEASE/tools" UV_TOOL_BIN_DIR="$RELEASE/bin" \
     uv tool install --force --reinstall --quiet "quiver @ git+$QUIVER_REPO@$REV" \
-    || { rm -rf "$RELEASE"; die "uv tool install failed for quiver@$REV (see above)."; }
-  [ -x "$RELEASE/bin/swe" ] || { rm -rf "$RELEASE"; die "uv finished but $RELEASE/bin/swe is missing."; }
+    || { rm -rf "$RELEASE"; die "uv tool install failed for quiver@$REV (see above). The installed build is unchanged."; }
+  [ -x "$RELEASE/bin/swe" ] || { rm -rf "$RELEASE"; die "uv finished but $RELEASE/bin/swe is missing. The installed build is unchanged."; }
   # The hub needs a quiver new enough to have `swe remote`. An old pin would
   # give a unit that crash-loops on "unknown command".
   has_remote "$RELEASE/bin/swe" \
@@ -188,11 +196,11 @@ else
 
   # A first deploy before releases/ existed left bin/ and tools/ as real dirs.
   [ -L "$INSTALL_DIR/bin" ] || rm -rf "${INSTALL_DIR:?}/bin" "${INSTALL_DIR:?}/tools"
-  ln -sfn "releases/$REV/bin" "$INSTALL_DIR/bin"
+  ln -sfn "releases/$name/bin" "$INSTALL_DIR/bin"
   printf '%s\n' "$REV" > "$REV_FILE"
-  # Keep the live build and the one before it (for a quick manual rollback).
+  # Keep the new build and the one it replaced (for a quick manual rollback).
   for old in "$INSTALL_DIR"/releases/*; do
-    case "$(basename "$old")" in "$REV"|"$installed") ;; *) rm -rf "$old" ;; esac
+    case "$(basename "$old")" in "$name"|"$live") ;; *) rm -rf "$old" ;; esac
   done
   ok "Installed quiver ${REV:0:12}"
 fi

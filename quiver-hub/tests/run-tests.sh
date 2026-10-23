@@ -234,6 +234,35 @@ test_failed_upgrade_keeps_live_build() {
   teardown
 }
 
+test_forced_reinstall_failure_keeps_live_build() {
+  echo "• forced reinstall of the live commit fails: the live build survives"
+  setup
+  pre_deployed
+  rm "$INSTALL/installed-rev"
+  touch "$STATE_DIR/uv_fails"
+  run_deploy
+  check "exits non-zero"               [ "$CODE" -ne 0 ]
+  check "bin still links the live build" live_is "$MAIN_SHA"
+  check "live build still on disk"     [ -x "$INSTALL/bin/swe" ]
+  check "no service restart"           no_call "restart quiver-hub"
+  teardown
+}
+
+test_forced_reinstall_success() {
+  echo "• forced reinstall of the live commit: fresh dir, then the link moves"
+  setup
+  pre_deployed
+  rm "$INSTALL/installed-rev"
+  run_deploy
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  link_is_fresh() { case "$(readlink "$INSTALL/bin")" in "releases/$MAIN_SHA."*/bin) return 0 ;; esac; return 1; }
+  check "bin links a fresh dir for the same commit" link_is_fresh
+  check "new build reachable"          [ -x "$INSTALL/bin/swe" ]
+  check "installed-rev restored"       rev_is "$MAIN_SHA"
+  check "replaced build kept"          [ -d "$INSTALL/releases/$MAIN_SHA" ]
+  teardown
+}
+
 test_migrates_flat_layout() {
   echo "• upgrade from the first layout (real bin/ and tools/ dirs) to releases/"
   setup
@@ -515,7 +544,7 @@ test_live() {
   swe="$HOME/.local/share/quiver-hub/bin/swe"
   live_check ".env present with LOCAL_PORT"       [ -n "$local_port" ]
   live_check "hub build installed with a commit"  [ -s "$HOME/.local/share/quiver-hub/installed-rev" ]
-  live_check "live build links that commit's release" sh -c "[ \"\$(readlink '$HOME/.local/share/quiver-hub/bin')\" = \"releases/\$(cat '$HOME/.local/share/quiver-hub/installed-rev')/bin\" ]"
+  live_check "live build links that commit's release" sh -c "case \"\$(readlink '$HOME/.local/share/quiver-hub/bin')\" in releases/\$(cat '$HOME/.local/share/quiver-hub/installed-rev')*/bin) exit 0;; esac; exit 1"
   live_check "hub build has swe remote"           sh -c "'$swe' remote 2>&1 | grep -q 'swe remote serve'"
   if [ "$OS" = "Linux" ]; then
     live_check "systemd service is active"        systemctl --user is-active quiver-hub.service
@@ -543,6 +572,8 @@ test_upgrade_when_main_moves
 test_prunes_old_releases
 test_rejected_upgrade_keeps_live_build
 test_failed_upgrade_keeps_live_build
+test_forced_reinstall_failure_keeps_live_build
+test_forced_reinstall_success
 test_migrates_flat_layout
 test_pin_by_sha
 test_pin_by_tag
