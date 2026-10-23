@@ -212,9 +212,10 @@ server {
     location / { try_files $uri $uri/ =404; }
 }
 NGX
+  cp "$HOME/services/design-systems/nginx.conf" "$SANDBOX/nginx.orig"
   run_deploy
   check "exits zero"               [ "$CODE" -eq 0 ]
-  check "conf left untouched"      grep -qx "    listen 80;" "$HOME/services/design-systems/nginx.conf"
+  check "conf left untouched"      cmp -s "$SANDBOX/nginx.orig" "$HOME/services/design-systems/nginx.conf"
   check "warns to update"          out_has "predates the gzip/Cache-Control config"
   check "no media-mount warning"   out_lacks "predates the refero media mount"
   teardown
