@@ -69,7 +69,7 @@ documented, not oversights:
 
 The first two stay tailnet-only and the live suites assert that. The third is
 the exception worth understanding: an nftables table (`inet remote_desktop`,
-its own unit, enabled by `remote-desktop/setup.sh`) is the only mitigation, and
+its own unit, enabled by `services/remote-desktop/setup.sh`) is the only mitigation, and
 it is verified by measured behaviour rather than by config. See the
 remote-desktop row in [DIRECTORY.md](DIRECTORY.md) for exactly what was
 measured. A report showing that table failing open is very much in scope.

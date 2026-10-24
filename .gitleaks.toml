@@ -23,13 +23,13 @@ signature, decodes to nothing, and is never sent anywhere but the mocked suite.
 """
 targetRules = ["generic-api-key", "jwt", "jwt-base64"]
 condition = "AND"
-paths = ['''^home-assistant/tests/stubs/curl$''']
+paths = ['''^services/home-assistant/tests/stubs/curl$''']
 regexes = ['''eyJhbGciOiJIUzI1NiJ9\.stub''']
 
 # ---------------------------------------------------------------------------
 # Note on */.env
 #
-# A deployed box has real credentials in <service>/.env (setup.sh generates
+# A deployed box has real credentials in services/<service>/.env (setup.sh generates
 # them). Those files are gitignored and never tracked, so `gitleaks git` and
 # the pre-commit hook (staged content only) do not see them. `gitleaks dir .`
 # run on a deployed box WILL report them, and that is correct behaviour, not a

@@ -63,6 +63,11 @@ jobs:
         # "skip with a notice" branch in the Makefile does not fire here.
         run: make lint
 
+      - name: make test-scripts
+        # Mocked suites for repo tooling (scripts/migrate-layout.sh). Same
+        # sandbox rules as the service suites: temp $HOME and PATH stubs.
+        run: make test-scripts
+
   discover-suites:
     name: Discover mocked suites
     runs-on: ubuntu-latest
@@ -75,14 +80,15 @@ jobs:
 
       # Built at runtime rather than hardcoded so that adding a service (the
       # checklist in AGENTS.md) needs no edit here: drop in
-      # <service>/tests/run-tests.sh and CI picks it up. The Makefile's
-      # SERVICES variable discovers the same set the same way.
+      # services/<service>/tests/run-tests.sh (or app/<name>/tests/...) and CI
+      # picks it up. The Makefile's SERVICES variable discovers the same set
+      # the same way.
       - name: Build the service matrix
         id: find
         run: |
           set -euo pipefail
           services="$(
-            find . -mindepth 3 -maxdepth 3 -path './*/tests/run-tests.sh' \
+            find ./services ./app -mindepth 3 -maxdepth 3 -path './*/*/tests/run-tests.sh' \
               | sed 's|^\./||; s|/tests/run-tests\.sh$||' \
               | sort \
               | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))'
@@ -153,7 +159,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is the floor launcher/setup.sh enforces at preflight; 3.13 is the
+        # 3.9 is the floor app/web/setup.sh enforces at preflight; 3.13 is the
         # newest release. Compiling at both ends catches a file that drifted
         # past the floor (a match statement, a 3.10+ union annotation in a
         # position that is evaluated) or that trips a newer parser.
@@ -196,7 +202,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Allowlists, with a reason each, live in .gitleaks.toml. There is no
-          # entry for <service>/.env: those are gitignored and never tracked,
+          # entry for services/<service>/.env: those are gitignored and never tracked,
           # and if one ever is staged the scan must fail.
           GITLEAKS_CONFIG: .gitleaks.toml
           # GITLEAKS_LICENSE is only required when the repo belongs to a GitHub

@@ -8,7 +8,7 @@ Seafile, ollama). Shipped items are marked ✅ inline and kept for the reasoning
 
 ## Network-level wins (near-zero resources, biggest daily impact)
 
-- **AdGuard Home as tailnet DNS** — ✅ done (adguard/), deployed 2026-09-11 on
+- **AdGuard Home as tailnet DNS** — ✅ done (services/adguard/), deployed 2026-09-11 on
   :3080, one shot. Ad/tracker blocking for every device on the tailnet,
   cellular included, ~50 MB RAM. It kept its "highest QoL-per-megabyte" billing.
   Two things the survey did not anticipate. First, the Ubuntu port-53 fight
@@ -28,36 +28,36 @@ Seafile, ollama). Shipped items are marked ✅ inline and kept for the reasoning
 ## Ops for what's already built
 
 - **Uptime Kuma** — status dashboard + HTTP/docker/cert-expiry checks for
-  code-server, Seafile, etc. ✅ done (monitoring/)
+  code-server, Seafile, etc. ✅ done (services/monitoring/)
 - **ntfy** — self-hosted push notifications to iPhone; pairs with Kuma
   ("server tells phone when something breaks") and could carry auth links.
-  ✅ done (monitoring/)
+  ✅ done (services/monitoring/)
 
 ## Memories & media
 
 - **Immich** — self-hosted Google Photos (timeline, faces, semantic search,
   iOS auto-backup). Overlaps Seafile camera upload — pick one photo system.
   Heaviest option here (~2–3 GB with ML); the trigger for a storage drive.
-  ✅ done (immich/) — deployed 2026-09-10 with ML off until this box has
+  ✅ done (services/immich/) — deployed 2026-09-10 with ML off until this box has
   more RAM.
   Surveyed against PhotoPrism (no native mobile app → no background backup,
   paywalled multi-user) and Ente (server idles at 130–500 MB because all ML
   is on-device, true E2EE — the better pick *if* E2EE outranks polish, at the
   cost of MinIO/CORS setup and a smaller community).
-- **Jellyfin** — Netflix for your own media library. ✅ done (jellyfin/),
+- **Jellyfin** — Netflix for your own media library. ✅ done (services/jellyfin/),
   deployed 2026-09-11 on :8096. CPU transcoding does handle 1080p, and it was
   the only option at survey time: the box has a GTX 1070 but had no
   `nvidia-container-toolkit`, so Docker had no GPU runtime. That upgrade path
-  was taken the same day: `jellyfin/enable-nvenc.sh` installed the toolkit and
+  was taken the same day: `services/jellyfin/enable-nvenc.sh` installed the toolkit and
   NVENC hardware transcoding is on (`JELLYFIN_NVENC=on`), Pascal so no AV1.
   Took two attempts, not one: Jellyfin answers /Startup/* several seconds before it
   accepts connections, so the first run completed the wizard with no admin
-  account. The library is still empty — MEDIA_DIR in jellyfin/.env points at
+  account. The library is still empty — MEDIA_DIR in services/jellyfin/.env points at
   ~/services/jellyfin/media and nothing shows up until media lands there.
 
 ## Knowledge & documents
 
-- **Paperless-ngx** — ✅ done (paperless-ngx/), built 2026-09-11 on :8095.
+- **Paperless-ngx** — ✅ done (services/paperless-ngx/), built 2026-09-11 on :8095.
   OCR'd, searchable archive of receipts/contracts/tax docs; still the
   life-admin superpower it was billed as. Deployed as webserver + redis on
   **SQLite**, with Tika/Gotenberg (Office formats) left as a commented opt-in:
@@ -71,13 +71,13 @@ Seafile, ollama). Shipped items are marked ✅ inline and kept for the reasoning
   state rather than a fault.
 - **Karakeep** — bookmarks/read-later with auto-tagging + summaries via the
   local ollama.
-- **Open WebUI** — ChatGPT-style UI over ollama, phone-friendly. ✅ done (open-webui/)
+- **Open WebUI** — ChatGPT-style UI over ollama, phone-friendly. ✅ done (services/open-webui/)
 
 ## Dev infra
 
 - **Self-hosted GitHub Actions runner** — free unlimited CI minutes for
   existing GitHub repos; more practical than self-hosting git.
-- **Forgejo** — full self-hosted GitHub (repos + CI). ✅ done (forgejo/),
+- **Forgejo** — full self-hosted GitHub (repos + CI). ✅ done (services/forgejo/),
   deployed 2026-09-11 on :3000. Chosen over Gitea on governance: Codeberg
   e.V., a nonprofit, versus the for-profit that took Gitea's trademark in
   2022 — and migration runs Gitea → Forgejo but not back, so it is the
@@ -91,7 +91,7 @@ Seafile, ollama). Shipped items are marked ✅ inline and kept for the reasoning
 ## Remote access
 
 - **remote-desktop (Guacamole + gnome-remote-desktop)** — ✅ done
-  (remote-desktop/), deployed 2026-09-11 on :8094. This box's GNOME desktop in
+  (services/remote-desktop/), deployed 2026-09-11 on :8094. This box's GNOME desktop in
   a browser tab on the tailnet. Never surveyed here first; requested directly.
   The backend decision went to gnome-remote-desktop over the more commonly
   paired xrdp + XFCE purely on cost: it was already installed, enabled and
@@ -110,7 +110,7 @@ Seafile, ollama). Shipped items are marked ✅ inline and kept for the reasoning
 
 ## Home & security
 
-- **Home Assistant** — ✅ done (home-assistant/), deployed 2026-09-11 on :8123,
+- **Home Assistant** — ✅ done (services/home-assistant/), deployed 2026-09-11 on :8123,
   one shot. Local-first home automation; automations keep running when the
   internet does not, which is the whole argument for self-hosting it. Never
   surveyed before being built — it was requested directly. The interesting
@@ -123,7 +123,7 @@ Seafile, ollama). Shipped items are marked ✅ inline and kept for the reasoning
   `:::18555` on every interface, the one thing here that would have been
   LAN-reachable without TLS). Nothing is connected to it yet; it is
   infrastructure waiting for devices.
-- **Vaultwarden** — ✅ done (vaultwarden/), deployed 2026-09-11 on :8222, one
+- **Vaultwarden** — ✅ done (services/vaultwarden/), deployed 2026-09-11 on :8222, one
   shot. Bitwarden-compatible password vault in ~12 MB. Also not surveyed here
   first. It is the service that makes the missing backup job urgent rather
   than theoretical: losing `~/services/vaultwarden` loses every password, and
@@ -146,7 +146,7 @@ than item 10 alone.
 | 1 | **Backup job** (their PBS + ZFS replication + a DB backup UI) | restic/borg of `~/services` + `pg_dump`/`mysqldump` of Immich and Seafile, pushed off-box | ~0 RAM, half a day | Not a nicety any more. Vaultwarden holds every password and Immich holds photos, both on one unbacked disk — see the Vaultwarden note above. Their whole storage story is snapshot + replicate; this box has neither. Everything below is worthless if this disk dies. |
 | 2 | **Uptime Robot** (external) | Off-site check against the tailnet edge or a public canary | 10 min, free tier | Fixes the blind spot they call out explicitly: Kuma runs *on* the box it monitors, so if kai-home-server dies, nothing tells anyone. Pairs with the existing ntfy topic. |
 | 3 | **Dozzle** | Live tail + search of all container logs in a browser | ~10 MB | Highest bang-per-megabyte on the list. ~15 containers here, currently read with `docker logs` over SSH. One container, no config. |
-| 4 | **Paperless-ngx** + Tika + Gotenberg + Paperless-AI | OCR'd searchable archive of receipts, contracts, tax docs | ~800 MB–1.2 GB | ✅ base shipped (paperless-ngx/, 2026-09-11); Tika, Gotenberg and Paperless-AI are still unbuilt, left as a commented opt-in. Already listed under "Knowledge & documents" above; this survey independently put it top of the life-admin tier. Paperless-AI does the extraction the built-in OCR does poorly, and it points at the ollama already running. Watch RAM against ollama. |
+| 4 | **Paperless-ngx** + Tika + Gotenberg + Paperless-AI | OCR'd searchable archive of receipts, contracts, tax docs | ~800 MB–1.2 GB | ✅ base shipped (services/paperless-ngx/, 2026-09-11); Tika, Gotenberg and Paperless-AI are still unbuilt, left as a commented opt-in. Already listed under "Knowledge & documents" above; this survey independently put it top of the life-admin tier. Paperless-AI does the extraction the built-in OCR does poorly, and it points at the ollama already running. Watch RAM against ollama. |
 | 5 | **Scrutiny** | SMART health and failure trending per disk | ~50 MB | Beszel reports disk *usage*, not disk *dying*. Cheap early warning, and it makes #1 actionable before a drive goes rather than after. |
 | 6 | **IT Tools** | JWT decode, base64, hashes, cron parsing, ~80 more | ~30 MB | Trivial deploy; replaces pasting secrets into whatever site ranks first. |
 | 7 | **Excalidraw** and/or **Draw.io** | Self-hosted diagramming | ~50 MB each | Architecture here lives in markdown. Excalidraw for thinking out loud, Draw.io when the diagram has real structure (network maps). |
@@ -165,8 +165,8 @@ than item 10 alone.
 
 Already covered by something running: Pi-hole + Unbound (→ AdGuard),
 Uptime Kuma, Jellyfin and Plex (→ Jellyfin), Home Assistant, code-server,
-n8n, Trigger.dev (→ trigger-dev/, ✅ shipped on :8030), ollama + Open WebUI, GitLab/Forgejo (→ Forgejo), Jekyll (→ Quartz),
-Homepage (→ homepage/, ✅ shipped on :8100) and Little Link Server
+n8n, Trigger.dev (→ services/trigger-dev/, ✅ shipped on :8030), ollama + Open WebUI, GitLab/Forgejo (→ Forgejo), Jekyll (→ Quartz),
+Homepage (→ services/homepage/, ✅ shipped on :8100) and Little Link Server
 (→ launcher), Postgres/MariaDB/Valkey
 (embedded in Immich and Seafile), nvtop and parts of Scrutiny/Grafana
 (→ Beszel).
@@ -236,7 +236,7 @@ service-level `AGENTS.md`.
 **Verdict for this box.** Nothing here is urgent, and RAM says do at most one.
 Measured 2026-09-11: **2.1 GB available of 7.7 GB with 2.0 GB of swap already in
 use** — the box was already under pressure before Firefly III, which has since
-shipped (firefly-iii/), so re-measure before adding any of these. AdventureLog
+shipped (services/firefly-iii/), so re-measure before adding any of these. AdventureLog
 wants 2 GB at *first boot*
 (the world-geodata import is the spike, and OOM there is its most commonly
 reported failure) settling to ~1 GB; Dawarich is the heaviest of the three at

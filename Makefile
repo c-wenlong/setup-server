@@ -2,16 +2,17 @@ SHELL := bash
 .SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
 
-# Every top-level directory that ships a mocked suite. Discovered rather than
-# listed, so adding a service (the checklist in AGENTS.md) needs no edit here.
-SERVICES := $(patsubst %/tests/run-tests.sh,%,$(wildcard */tests/run-tests.sh))
+# Every services/<name>/ and app/<name>/ directory that ships a mocked suite.
+# Discovered rather than listed, so adding a service (the checklist in
+# AGENTS.md) needs no edit here.
+SERVICES := $(patsubst %/tests/run-tests.sh,%,$(wildcard services/*/tests/run-tests.sh app/*/tests/run-tests.sh))
 
 # Pinned so "green locally" and "green in CI" mean the same thing. The CI job
 # installs these exact versions; see .github/workflows/ci.yml.
 SHELLCHECK_VERSION := 0.10.0
 PY := python3
 
-.PHONY: help test test-live test-python lint structure shellcheck actionlint
+.PHONY: help test test-live test-python test-scripts lint structure shellcheck actionlint
 
 help:
 	@echo "setup-server"
@@ -19,6 +20,7 @@ help:
 	@echo "  make test         Run every service's mocked suite (sandboxed, no host changes)"
 	@echo "  make test-live    Run every service's --live suite (ONLY on a box where they are deployed)"
 	@echo "  make test-python  Run the launcher unit suite under coverage (same command as CI)"
+	@echo "  make test-scripts Run the mocked suites for repo tooling under scripts/tests/"
 	@echo "  make lint         shellcheck + structure check + actionlint (if installed)"
 	@echo "  make structure    Per-service contract check (scripts/check-structure.sh)"
 	@echo "  make shellcheck   shellcheck -S warning over every shell file (*.sh and the PATH stubs)"
@@ -44,11 +46,11 @@ define run_suites
 	  else failed="$$failed $$svc"; fi; \
 	done; \
 	echo; \
-	printf '%-20s %s\n' "SERVICE" "RESULT"; \
-	printf '%-20s %s\n' "--------------------" "------"; \
+	printf '%-28s %s\n' "SERVICE" "RESULT"; \
+	printf '%-28s %s\n' "----------------------------" "------"; \
 	for svc in $(SERVICES); do \
-	  case " $$failed " in *" $$svc "*) printf '%-20s %s\n' "$$svc" "FAIL" ;; \
-	                                 *) printf '%-20s %s\n' "$$svc" "pass" ;; esac; \
+	  case " $$failed " in *" $$svc "*) printf '%-28s %s\n' "$$svc" "FAIL" ;; \
+	                                 *) printf '%-28s %s\n' "$$svc" "pass" ;; esac; \
 	done; \
 	echo; \
 	n_pass=$$(echo $$passed | wc -w); n_fail=$$(echo $$failed | wc -w); \
@@ -69,14 +71,17 @@ test-live:
 
 test-python:
 	@# Discovery runs from the repo root with the start dir as its own top-level
-	@# dir: launcher/tests has no __init__.py, so unittest rejects it as a start
+	@# dir: app/web/tests has no __init__.py, so unittest rejects it as a start
 	@# dir otherwise. Running from the root is also what makes .coveragerc's
-	@# `source = launcher` resolve, so coverage.xml carries repo-root paths.
+	@# `source = app/web` resolve, so coverage.xml carries repo-root paths.
 	@HOME="$$(mktemp -d)"; export HOME; \
 	$(PY) -m coverage run --rcfile=.coveragerc \
-	  -m unittest discover -s launcher/tests -t launcher/tests -p 'test_*.py'
+	  -m unittest discover -s app/web/tests -t app/web/tests -p 'test_*.py'
 	@$(PY) -m coverage report --rcfile=.coveragerc
 	@$(PY) -m coverage xml --rcfile=.coveragerc
+
+test-scripts:
+	@for t in scripts/tests/test-*.sh; do echo "=== $$t"; ./$$t; done
 
 # ---------------------------------------------------------------- linting
 

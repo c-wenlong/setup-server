@@ -10,7 +10,7 @@ the default; Python (stdlib only) appears where a service needs a real program.
 
 ```bash
 git clone https://github.com/c-wenlong/setup-server.git
-cd setup-server/code-server
+cd setup-server/services/code-server
 ./tests/run-tests.sh
 ```
 
@@ -33,7 +33,7 @@ launchd unit. On a machine without the deployment it just fails noisily.
 The launcher additionally has a Python unit suite:
 
 ```bash
-python3 launcher/tests/test_server.py
+python3 app/web/tests/test_server.py
 ```
 
 From the repo root, `make` runs the same checks CI does:
@@ -47,9 +47,9 @@ pre-commit install # run those gates on every commit (pip install pre-commit)
 `make help` lists the rest, including `make test-python` for the launcher suite
 under coverage.
 
-There are two reference implementations: [code-server](code-server/setup.sh)
+There are two reference implementations: [code-server](services/code-server/setup.sh)
 for a native service under a systemd user unit or a launchd LaunchAgent, and
-[forgejo](forgejo/setup.sh) for the Docker shape. Read whichever matches the
+[forgejo](services/forgejo/setup.sh) for the Docker shape. Read whichever matches the
 service you are adding.
 
 ## Project layout
@@ -69,7 +69,7 @@ Three files at the root are shared, and a new service touches all three:
 | --- | --- |
 | [README.md](README.md) | The Services table: one row per service, what it gives you, how to deploy it |
 | [DIRECTORY.md](DIRECTORY.md) | What is actually running on the deployed box: ports, runtime, credentials pointers, loose ends |
-| [monitoring/seed_kuma.py](monitoring/seed_kuma.py) | The Uptime Kuma monitors, seeded from the `PUBLISHED` list |
+| [services/monitoring/seed_kuma.py](services/monitoring/seed_kuma.py) | The Uptime Kuma monitors, seeded from the `PUBLISHED` list |
 
 ## What to contribute
 
@@ -109,7 +109,7 @@ Three files at the root are shared, and a new service touches all three:
    option overrides, interactive-approval paths, and preflight failures. Get it
    green before running anything on a real box.
 6. **Register a new service everywhere.** A row in the README table, a row in
-   `DIRECTORY.md`, and an entry in `PUBLISHED` in `monitoring/seed_kuma.py` so
+   `DIRECTORY.md`, and an entry in `PUBLISHED` in `services/monitoring/seed_kuma.py` so
    Uptime Kuma probes it. Pick the health path carefully: several services here
    answer 200 or 302 on `/` while being broken underneath.
 7. **Never commit a `.env`.** `*/.env` is gitignored because `setup.sh`

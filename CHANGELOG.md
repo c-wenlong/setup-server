@@ -8,6 +8,26 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Changed
+
+- **Repo layout: services in `services/`, the launcher in `app/web/`.** All
+  32 service folders moved from the repo root to `services/<service>/`, and
+  `launcher/` moved to `app/web/` with its static UI renamed from `web/` to
+  `static/`, leaving room for `app/desktop/` later. Every root-relative path
+  in docs, `services.json`, tests, CI and the Makefile follows. The launcher
+  finds the repo root two levels up; ntfy-control finds `services.json` at
+  `app/web/`. `scripts/check-structure.sh` now fails a `setup.sh` left at the
+  root. **A deployed box must run `./scripts/migrate-layout.sh` right after
+  pulling**: it moves each `.env` and other untracked files to the new
+  folders (including an unsplit `paperclip-openhands/`), rewrites old paths
+  in place in `.env` files, the `*-deploy` timers' deploy.sh copies under
+  `~/services/*/bin/` and the systemd units / LaunchAgents, refreshes
+  ntfy-control's bin/ copies, restarts only the units it repointed (it does
+  not re-run setup.sh, which would re-apply default ports), and recreates
+  the containers that bind-mount a file from an old folder (appflowy nginx,
+  coolify, trigger-dev webapp and ClickHouse). It has a `--dry-run` and a
+  mocked suite (`make test-scripts`, also in CI).
+
 ### Fixed
 
 - **Stopped apps no longer come back after a reboot.** The 15 compose files

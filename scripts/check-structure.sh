@@ -4,13 +4,17 @@
 #
 #   ./scripts/check-structure.sh
 #
-# For every top-level directory holding a setup.sh, this asserts:
+# For every services/<name>/ and app/<name>/ directory holding a setup.sh,
+# this asserts:
 #
 #   - setup.sh, SETUP.md, TROUBLESHOOT.md and tests/run-tests.sh all exist
 #   - setup.sh and tests/run-tests.sh are executable
 #   - tests/stubs/ exists and is non-empty (see STUBS_EXEMPT below)
-#   - README.md's Services table has a row linking [<name>](<name>/)
-#   - DIRECTORY.md has a table row linking [<name>](<name>/)
+#   - README.md's Services table has a row linking to <dir>/
+#   - DIRECTORY.md has a table row linking to <dir>/
+#
+# and that nothing deployable is left at the repo root: a top-level
+# <name>/setup.sh means a service was added in the old flat layout.
 #
 # Plus two repo-wide rules: no .env may ever be tracked by git, and no
 # docker-compose*.yml may set `restart: always`.
@@ -26,7 +30,7 @@ cd "$ROOT" || exit 1
 # Services allowed to ship without tests/stubs/. AGENTS.md documents beszel as
 # the single exception: its default test layer is static analysis of setup.sh
 # rather than a sandboxed run, so there is nothing to stub. The rationale is in
-# beszel/SETUP.md. Keep this list at one entry unless AGENTS.md grows another.
+# services/beszel/SETUP.md. Keep this list at one entry unless AGENTS.md grows another.
 STUBS_EXEMPT="beszel"
 
 FAILURES=0
@@ -57,20 +61,25 @@ links_to() {
   # CI on a branch whose README was byte-identical to main's.
   # The link is matched as a fixed string (index, not a regex), so a service
   # name with a dot or a bracket in it cannot match anything but itself.
-  awk -v link="[$name]($name/)" \
+  awk -v link="]($name/)" \
     '/^\|/ && index($0, link) { found = 1; exit } END { exit !found }' "$file"
 }
 
 # ------------------------------------------------------------- per service
 SERVICES=""
-for setup in */setup.sh; do
+for setup in services/*/setup.sh app/*/setup.sh; do
   [ -e "$setup" ] || continue
   SERVICES="$SERVICES ${setup%/setup.sh}"
 done
 
 if [ -z "$SERVICES" ]; then
-  fail "no <service>/setup.sh found: is this the repo root?"
+  fail "no services/<service>/setup.sh found: is this the repo root?"
 fi
+
+for setup in */setup.sh; do
+  [ -e "$setup" ] || continue
+  fail "${setup%/setup.sh}/ is at the repo root: services go in services/, front ends in app/"
+done
 
 for svc in $SERVICES; do
   [ -x "$svc/setup.sh" ]           || fail "$svc/setup.sh is not executable"
@@ -83,7 +92,7 @@ for svc in $SERVICES; do
     fail "$svc/tests/run-tests.sh is missing"
   fi
 
-  if exempt_from_stubs "$svc"; then
+  if exempt_from_stubs "${svc##*/}"; then
     :
   elif [ ! -d "$svc/tests/stubs" ]; then
     fail "$svc/tests/stubs/ is missing (add stubs, or document an exception in AGENTS.md and add it to STUBS_EXEMPT)"
@@ -92,9 +101,9 @@ for svc in $SERVICES; do
   fi
 
   links_to README.md "$svc" \
-    || fail "README.md has no Services row linking [$svc]($svc/)"
+    || fail "README.md has no Services row linking to ($svc/)"
   links_to DIRECTORY.md "$svc" \
-    || fail "DIRECTORY.md has no table row linking [$svc]($svc/)"
+    || fail "DIRECTORY.md has no table row linking to ($svc/)"
 done
 
 # ------------------------------------------------------------- repo wide
@@ -116,7 +125,8 @@ fi
 # every stopped `always` stack came back after the 2026-10-09 reboot and ran
 # the box out of RAM and swap. `unless-stopped` remembers the stop. Overlays
 # (docker-compose.gpu.yml) are scanned too. Quoted values count.
-for compose in */docker-compose*.yml */docker-compose*.yaml; do
+for compose in services/*/docker-compose*.yml services/*/docker-compose*.yaml \
+               app/*/docker-compose*.yml app/*/docker-compose*.yaml; do
   [ -e "$compose" ] || continue
   bad="$(awk '/^[[:space:]]*restart:[[:space:]]*["'"'"']?always["'"'"']?[[:space:]]*(#.*)?$/ { print NR }' "$compose")"
   for line in $bad; do
