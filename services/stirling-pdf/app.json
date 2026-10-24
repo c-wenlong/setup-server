@@ -1,0 +1,22 @@
+{
+  "key": "stirling-pdf",
+  "name": "Stirling PDF",
+  "tagline": "PDF",
+  "group": "daily",
+  "icon": "stirling-pdf",
+  "author": "Stirling-Tools",
+  "url": "https://HOST:8103/",
+  "health": "http://127.0.0.1:8103/api/v1/info/status",
+  "marker": "~/services/stirling-pdf",
+  "env": ".env",
+  "description": "Locally hosted PDF toolbox: merge, split, compress, OCR, convert, rotate, watermark. One container on :8103 because code-server already owns Stirling's upstream :8080. Loopback-only behind Serve. Login is off — upstream defaults to a well-known admin/stirling pair, and the tailnet is the access boundary. Standard 2.14.3 image, not the fat extra-fonts build.",
+  "control": {
+    "parts": [
+      {
+        "container": "stirling-pdf"
+      }
+    ],
+    "kuma": "stirling-pdf",
+    "_comment": "Single container; nothing to order."
+  }
+}

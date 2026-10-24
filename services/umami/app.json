@@ -1,0 +1,25 @@
+{
+  "key": "umami",
+  "name": "Umami",
+  "tagline": "Analytics",
+  "group": "infra",
+  "icon": "umami",
+  "author": "umami-software",
+  "url": "https://HOST:8106/",
+  "health": "http://127.0.0.1:8106/api/heartbeat",
+  "marker": "~/services/umami",
+  "env": ".env",
+  "description": "Self-hosted web analytics: privacy-respecting pageviews without Google. Umami 3.3.1 plus Postgres, loopback-only behind Serve on :8106 because forgejo already owns Umami's upstream :3000. Upstream seeds admin/umami — a well-known pair — and setup.sh rotates that password on first boot. Tracker snippets on public sites cannot reach this URL; that is the tailnet boundary, not a bug. Health-check /api/heartbeat, never /.",
+  "control": {
+    "parts": [
+      {
+        "container": "umami"
+      },
+      {
+        "container": "umami-db"
+      }
+    ],
+    "kuma": "umami",
+    "_comment": "Stop order: the app first, then the database it talks to. Start is the reverse."
+  }
+}

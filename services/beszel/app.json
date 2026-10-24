@@ -1,0 +1,26 @@
+{
+  "key": "beszel",
+  "name": "Beszel",
+  "tagline": "Metrics",
+  "group": "infra",
+  "icon": "activity",
+  "author": "henrygd",
+  "url": "https://HOST:8092/",
+  "health": "http://127.0.0.1:8092/api/health",
+  "marker": "~/services/beszel",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "unit": "beszel-agent.service"
+      },
+      {
+        "container": "beszel"
+      }
+    ],
+    "primary": "beszel",
+    "kuma": "beszel",
+    "_comment": "Hub and agent move together, or the agent spams a hub that is not there. Stop the agent first, then the hub; start brings the hub up before the agent connects to it. `primary` points at the hub because that is the half with a URL."
+  },
+  "description": "Resource graphs for this box: CPU, RAM, GPU, disk usage and I/O, network and temperatures, with history and threshold alerts. Answers \"why is it slow\", where Uptime Kuma only answers \"is it up\". A hub container on 127.0.0.1:8092 plus a native agent on 127.0.0.1:45876 that reads /proc, hwmon and the docker socket."
+}

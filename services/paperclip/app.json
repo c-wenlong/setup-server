@@ -1,0 +1,21 @@
+{
+  "key": "paperclip",
+  "name": "Paperclip",
+  "tagline": "Agents",
+  "group": "ai",
+  "icon": "workflow",
+  "author": "paperclipai",
+  "url": "https://HOST:3100/",
+  "health": "http://127.0.0.1:3100/api/health",
+  "marker": "~/services/paperclip",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "unit": "paperclipai.service"
+      }
+    ],
+    "kuma": "paperclip"
+  },
+  "description": "Agent control plane: task queue, heartbeats, run history. Official managed CLI under a systemd user unit, authenticated/private, loopback-only behind Serve on :3100. Hires claude_local / codex_local against ~/agent-workspaces/paperclip-test."
+}

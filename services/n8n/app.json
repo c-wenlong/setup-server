@@ -1,0 +1,21 @@
+{
+  "key": "n8n",
+  "name": "n8n",
+  "tagline": "Automation",
+  "group": "ai",
+  "icon": "workflow",
+  "author": "n8n-io",
+  "url": "https://HOST:5678/",
+  "health": "http://127.0.0.1:5678/healthz",
+  "marker": "~/services/n8n",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "n8n"
+      }
+    ],
+    "kuma": "n8n"
+  },
+  "description": "Self-hosted Zapier: visual workflows wiring schedules, webhooks and APIs to everything else here — ollama, ntfy, Seafile, any loopback service. Host-network container on 127.0.0.1:5678 with SQLite storage. Often stopped on purpose; scheduled workflows do not run while it is down. Its .env holds the encryption key that every saved credential is encrypted with, so back that up with the data."
+}

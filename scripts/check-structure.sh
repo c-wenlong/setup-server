@@ -10,6 +10,8 @@
 #   - setup.sh, SETUP.md, TROUBLESHOOT.md and tests/run-tests.sh all exist
 #   - setup.sh and tests/run-tests.sh are executable
 #   - tests/stubs/ exists and is non-empty (see STUBS_EXEMPT below)
+#   - services/<name>/app.json exists: the launcher tile(s), see
+#     scripts/build-registry.py (NO_TILE below lists the exceptions)
 #   - README.md's Services table has a row linking to <dir>/
 #   - DIRECTORY.md has a table row linking to <dir>/
 #
@@ -32,6 +34,10 @@ cd "$ROOT" || exit 1
 # rather than a sandboxed run, so there is nothing to stub. The rationale is in
 # services/beszel/SETUP.md. Keep this list at one entry unless AGENTS.md grows another.
 STUBS_EXEMPT="beszel"
+
+# Services with no launcher tile, so no app.json. ntfy-control has no UI of
+# its own: it is the phone-side twin of the launcher's start/stop buttons.
+NO_TILE="ntfy-control"
 
 FAILURES=0
 
@@ -99,6 +105,13 @@ for svc in $SERVICES; do
   elif [ -z "$(ls -A "$svc/tests/stubs" 2>/dev/null)" ]; then
     fail "$svc/tests/stubs/ is empty"
   fi
+
+  case "$svc" in
+    services/*)
+      if [ ! -f "$svc/app.json" ] && ! case " $NO_TILE " in *" ${svc##*/} "*) true ;; *) false ;; esac; then
+        fail "$svc/app.json is missing (the launcher tile; see scripts/build-registry.py)"
+      fi ;;
+  esac
 
   links_to README.md "$svc" \
     || fail "README.md has no Services row linking to ($svc/)"

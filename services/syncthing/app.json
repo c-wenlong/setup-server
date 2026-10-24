@@ -1,0 +1,22 @@
+{
+  "key": "syncthing",
+  "name": "Syncthing",
+  "tagline": "Sync",
+  "group": "daily",
+  "icon": "syncthing",
+  "author": "syncthing",
+  "url": "https://HOST:8384/",
+  "health": "http://127.0.0.1:8384/rest/noauth/health",
+  "marker": "~/services/syncthing",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "unit": "syncthing.service"
+      }
+    ],
+    "kuma": "syncthing",
+    "_comment": "A single systemd user unit; the binary is native, not a container. Stopping it does not touch the synced files."
+  },
+  "description": "Peer-to-peer folder sync between this box, the laptop and the phone, with this box as the always-on hub that keeps a full copy. Not a Drive: Seafile is the Drive, with a web file browser and share links; Syncthing keeps chosen folders identical device-to-device — dotfiles, a notes vault, project directories. A single native binary (pinned, checksum-verified, no Docker), so synced files are ordinary files owned by this user at any path. The GUI binds loopback behind Serve; the sync port :22000 binds the tailnet IP directly, tcp and quic, because peers dial it and QUIC is UDP. Relays, global discovery, LAN multicast, NAT traversal and all reporting are off, so it talks to no third party at all — which means peers must be added with the explicit address tcp://HOST:22000, never 'dynamic'. Photos stay in Immich; do not sync the camera roll here too."
+}

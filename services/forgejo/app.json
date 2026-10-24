@@ -1,0 +1,22 @@
+{
+  "key": "forgejo",
+  "name": "Forgejo",
+  "tagline": "Git",
+  "group": "knowledge",
+  "icon": "git",
+  "author": "forgejo",
+  "url": "https://HOST:3000/",
+  "health": "http://127.0.0.1:3000/api/healthz",
+  "marker": "~/services/forgejo",
+  "env": ".env",
+  "description": "Self-hosted git forge — repos, pull requests, issues and review, on this box. Pinned to the v15 LTS line (supported to July 2027) rather than v16, which stops getting fixes in October 2026. SQLite rather than Postgres, so it is one container at about 120 MB. Built-in SSH is off because port 22 belongs to the box's own sshd — clone over HTTPS on the tailnet. GitHub is still the canonical copy: until this box has a backup job, treat this as a mirror, not the only home for your code.",
+  "control": {
+    "parts": [
+      {
+        "container": "forgejo"
+      }
+    ],
+    "kuma": "forgejo",
+    "_comment": "Single container with an embedded SQLite database, so there is no ordering to respect — unlike immich, nothing else has to come down first."
+  }
+}

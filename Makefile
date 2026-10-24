@@ -12,7 +12,7 @@ SERVICES := $(patsubst %/tests/run-tests.sh,%,$(wildcard services/*/tests/run-te
 SHELLCHECK_VERSION := 0.10.0
 PY := python3
 
-.PHONY: help test test-live test-python test-scripts lint structure shellcheck actionlint
+.PHONY: help test test-live test-python test-scripts lint structure registry shellcheck actionlint
 
 help:
 	@echo "setup-server"
@@ -23,6 +23,7 @@ help:
 	@echo "  make test-scripts Run the mocked suites for repo tooling under scripts/tests/"
 	@echo "  make lint         shellcheck + structure check + actionlint (if installed)"
 	@echo "  make structure    Per-service contract check (scripts/check-structure.sh)"
+	@echo "  make registry     Check app/web/services.json matches services/*/app.json"
 	@echo "  make shellcheck   shellcheck -S warning over every shell file (*.sh and the PATH stubs)"
 	@echo "  make actionlint   Lint .github/workflows (skipped with a notice if not installed)"
 	@echo
@@ -85,7 +86,7 @@ test-scripts:
 
 # ---------------------------------------------------------------- linting
 
-lint: shellcheck structure actionlint
+lint: shellcheck structure registry actionlint
 
 shellcheck:
 	@command -v shellcheck >/dev/null 2>&1 || { \
@@ -114,6 +115,9 @@ shellcheck:
 
 structure:
 	./scripts/check-structure.sh
+
+registry:
+	$(PY) scripts/build-registry.py --check
 
 actionlint:
 	@# Optional: it only matters to someone editing a workflow, and CI runs a

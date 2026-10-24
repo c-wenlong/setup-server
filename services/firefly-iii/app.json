@@ -1,0 +1,28 @@
+{
+  "key": "firefly-iii",
+  "name": "Firefly III",
+  "tagline": "Finance",
+  "group": "daily",
+  "icon": "firefly-iii",
+  "author": "firefly-iii",
+  "url": "https://HOST:8097/",
+  "health": "http://127.0.0.1:8097/login",
+  "marker": "~/services/firefly-iii",
+  "env": ".env",
+  "description": "Personal finance: accounts, budgets, categories and reports, replacing the manual download-PDFs-then-update-Notion loop. Three containers — the PHP app, its Postgres, and the Data Importer — at about 195 MB together, with Postgres published nowhere at all. Two things to know. The Data Importer on :8099 is deployed but deliberately idle: it needs a personal access token you mint from a logged-in session, so nothing imports until you do that. And only EUR is enabled out of the box — turn on SGD and USD at first login, because a silent 1:1 exchange rate is the failure mode that makes a multi-currency ledger quietly wrong. Health-check /login, never /health: nginx answers /health with 200 even when the PHP behind it is dead. ⚠️ This is a financial record on a box with no backups.",
+  "control": {
+    "parts": [
+      {
+        "container": "firefly-iii-importer"
+      },
+      {
+        "container": "firefly-iii"
+      },
+      {
+        "container": "firefly-iii-db"
+      }
+    ],
+    "kuma": "firefly-iii",
+    "_comment": "Stop order: the importer first, then the app, then the database both were talking to. Start is the reverse."
+  }
+}

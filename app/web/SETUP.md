@@ -225,9 +225,12 @@ curl -s http://127.0.0.1:8093/healthz         # ok
 git -C ~/dev/setup-server pull && ./setup.sh  # upgrade (restarts + re-publishes)
 ```
 
-Adding or editing a tile is a `services.json` edit plus
-`systemctl --user restart launcher.service` (or a full `./setup.sh`, which
-also re-validates the JSON before restarting anything).
+Adding or editing a tile means editing `services/<service>/app.json` (or
+`registry.json` here for groups, order and tiles with no folder in this repo),
+then `python3 scripts/build-registry.py` from the repo root to regenerate
+`services.json`. The server re-reads it when its mtime changes, so no restart
+is needed. Never hand-edit `services.json`: `make lint` fails when it differs
+from the manifests.
 
 ## Tests
 

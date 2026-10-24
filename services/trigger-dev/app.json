@@ -1,0 +1,47 @@
+{
+  "key": "trigger-dev",
+  "name": "Trigger.dev",
+  "tagline": "Jobs",
+  "group": "ai",
+  "icon": "workflow",
+  "author": "triggerdotdev",
+  "url": "https://HOST:8030/",
+  "health": "http://127.0.0.1:8030/healthcheck",
+  "marker": "~/services/trigger-dev",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "trigger-webapp"
+      },
+      {
+        "container": "trigger-supervisor"
+      },
+      {
+        "container": "trigger-electric"
+      },
+      {
+        "container": "trigger-minio"
+      },
+      {
+        "container": "trigger-registry"
+      },
+      {
+        "container": "trigger-docker-proxy"
+      },
+      {
+        "container": "trigger-redis"
+      },
+      {
+        "container": "trigger-clickhouse"
+      },
+      {
+        "container": "trigger-postgres"
+      }
+    ],
+    "primary": "trigger-webapp",
+    "kuma": "trigger-dev",
+    "_comment": "Stop order: dashboard first, then the supervisor that starts runners, then sidecars, redis, postgres last. Start is the reverse."
+  },
+  "description": "TypeScript background jobs and cron — the code-first counterpart to n8n. Trigger.dev v4 combined stack (webapp + supervisor), slimmed for this box: no ClickHouse, no s2-lite, 768 MiB Node heap. Dashboard on 127.0.0.1:8030 behind Serve; task images push to a loopback registry on :5000, not published on the tailnet. Magic-link login, links in docker logs trigger-webapp. ⚠️ Official wants 6+8 GB; this deploy caps idle around 2 GB and will OOM if ollama is loaded."
+}

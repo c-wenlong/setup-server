@@ -1,0 +1,21 @@
+{
+  "key": "openhands",
+  "name": "OpenHands",
+  "tagline": "Canvas",
+  "group": "ai",
+  "icon": "terminal",
+  "author": "All-Hands-AI",
+  "url": "https://HOST:8000/",
+  "health": "http://127.0.0.1:8000/",
+  "marker": "~/services/openhands",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "openhands-agent-canvas"
+      }
+    ],
+    "kuma": "openhands"
+  },
+  "description": "OpenHands Agent Canvas: browser UI over Claude Code and Codex via ACP. Official image, --public plus OPENHANDS_API_KEY from .env, loopback-only behind Serve on :8000. The agent sees only ~/agent-workspaces (as /projects)."
+}

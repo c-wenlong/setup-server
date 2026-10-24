@@ -1,0 +1,22 @@
+{
+  "key": "homepage",
+  "name": "Homepage",
+  "tagline": "Dashboard",
+  "group": "infra",
+  "icon": "web",
+  "author": "gethomepage",
+  "url": "https://HOST:8100/",
+  "health": "http://127.0.0.1:8100/api/healthcheck",
+  "marker": "~/services/homepage",
+  "env": ".env",
+  "description": "A second dashboard for this box, configured entirely in YAML: tiles, live status dots and header widgets, edited in ~/services/homepage/config and reloaded without a restart. It overlaps this launcher on purpose — Homepage is the nicer read-only front door, while the launcher is the only one that can deploy, start and stop things. They share no code and neither knows the other exists, so a service added to one will not appear in the other. Runs on host networking because every service here binds 127.0.0.1: from a bridge network its health probes reach nothing and every tile is a dead link. Its own socket still binds loopback only. No login — the tailnet is the access control, same as code-server.",
+  "control": {
+    "parts": [
+      {
+        "container": "homepage"
+      }
+    ],
+    "kuma": "homepage",
+    "_comment": "Single container, config on a bind mount; nothing to order."
+  }
+}
