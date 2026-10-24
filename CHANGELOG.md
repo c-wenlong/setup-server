@@ -19,10 +19,12 @@ first, dated by merge.
   `app/web/`. `scripts/check-structure.sh` now fails a `setup.sh` left at the
   root. **A deployed box must run `./scripts/migrate-layout.sh` right after
   pulling**: it moves each `.env` and other untracked files to the new
-  folders, rewrites old paths in `.env` files and in the deploy.sh copies
-  the `*-deploy` timers run from `~/services/*/bin/`, re-runs the setup.sh of
-  any unit still pointing at an old folder (the launcher, ntfy-control), and
-  recreates the containers that bind-mount a file from one (appflowy nginx,
+  folders (including an unsplit `paperclip-openhands/`), rewrites old paths
+  in place in `.env` files, the `*-deploy` timers' deploy.sh copies under
+  `~/services/*/bin/` and the systemd units / LaunchAgents, refreshes
+  ntfy-control's bin/ copies, restarts only the units it repointed (it does
+  not re-run setup.sh, which would re-apply default ports), and recreates
+  the containers that bind-mount a file from an old folder (appflowy nginx,
   coolify, trigger-dev webapp and ClickHouse). It has a `--dry-run` and a
   mocked suite (`make test-scripts`, also in CI).
 

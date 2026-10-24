@@ -51,6 +51,8 @@ setup() {
   done
   echo "services: {}" > "$R/services/appflowy/docker-compose.yml"
   echo "services: {}" > "$R/services/appflowy/docker-compose.gpu.yml"
+  echo "new listener" > "$R/services/ntfy-control/control_listener.py"
+  echo "toggle" > "$R/services/ntfy-control/kuma_toggle.py"
   echo "shared" > "$R/services/self-learn/same.txt"
   echo "new" > "$R/services/self-learn/differs.txt"
 
@@ -63,6 +65,13 @@ setup() {
   echo "nested" > "$R/appflowy/data/keep.txt"
   echo "shared" > "$R/self-learn/same.txt"
   echo "old" > "$R/self-learn/differs.txt"
+  # A box that never ran the paperclip/openhands split.
+  mkdir -p "$R/paperclip-openhands"
+  echo "OPENHANDS_PORT=3000" > "$R/paperclip-openhands/.env"
+  # ntfy-control's verbatim bin/ copies, one stale and one current.
+  mkdir -p "$HOME/services/ntfy-control/bin"
+  echo "old listener" > "$HOME/services/ntfy-control/bin/control_listener.py"
+  echo "toggle" > "$HOME/services/ntfy-control/bin/kuma_toggle.py"
 
   # deploy.sh copies a *-deploy timer runs, with paths baked in at install.
   mkdir -p "$HOME/services/self-learn/bin"
@@ -71,11 +80,19 @@ setup() {
   chmod +x "$HOME/services/self-learn/bin/deploy.sh"
   cp "$HOME/services/self-learn/bin/deploy.sh" "$HOME/services/self-learn/bin/deploy.sh.bak-1"
 
-  # Units: launcher points at the old folder; self-learn only in a comment.
-  if [ "$OS" = "Linux" ]; then UD="$HOME/.config/systemd/user"; else UD="$HOME/Library/LaunchAgents"; fi
+  # Units: launcher points at the old folder (one path at end of line, as
+  # WorkingDirectory is); self-learn only in a comment. Linux unit names are
+  # used on both OSes here: the script only cares about the glob it scans.
+  if [ "$OS" = "Linux" ]; then UD="$HOME/.config/systemd/user"; EXT=service; else UD="$HOME/Library/LaunchAgents"; EXT=plist; fi
   mkdir -p "$UD"
-  printf '[Service]\nExecStart=/usr/bin/env python3 %s/launcher/server.py\n' "$R" > "$UD/launcher.service"
-  printf '# edit %s/self-learn/.env and re-run\n[Service]\nExecStart=/bin/true\n' "$R" > "$UD/self-learn.service"
+  printf '[Service]\nWorkingDirectory=%s/launcher\nExecStart=/usr/bin/env python3 %s/launcher/server.py --port=9000\n' "$R" "$R" > "$UD/launcher.$EXT"
+  printf '# edit %s/self-learn/.env and re-run\n[Service]\nExecStart=/bin/true\n' "$R" > "$UD/self-learn.$EXT"
+  if [ "$OS" = "Linux" ]; then NC_UNIT=ntfy-control.service; else NC_UNIT=com.ntfy-control.listener.plist; fi
+
+  for c in systemctl launchctl; do
+    printf '#!/usr/bin/env bash\necho "%s $*" >> "$CALLS_LOG"\n[ -f "$STATE_DIR/fail-restart" ] && [ "$2" = try-restart ] && exit 1\nexit 0\n' "$c" > "$SB/bin/$c"
+    chmod +x "$SB/bin/$c"
+  done
 
   # docker stub: two appflowy containers mount from the old folder (one
   # running, one stopped); immich mounts only ~/services paths.
@@ -142,8 +159,21 @@ check "identical duplicate dropped"         test ! -e "$R/self-learn/same.txt"
 check "differing file not overwritten"      grep -qx new "$R/services/self-learn/differs.txt"
 check "differing old copy left in place"    grep -qx old "$R/self-learn/differs.txt"
 check "warns about the conflict"            out_has "kept both: services/self-learn/differs.txt"
-check "launcher re-deployed"                calls_have "setup app/web"
-check "comment-only unit ignored"           calls_lack "setup services/self-learn"
+check "unit repointed (end of line too)"    grep -qx "WorkingDirectory=$R/app/web" "$UD/launcher.$EXT"
+check "unit keeps its own settings"         grep -qF "$R/app/web/server.py --port=9000" "$UD/launcher.$EXT"
+check "no setup.sh re-run"                  calls_lack "setup "
+check "comment-only unit rewritten"         grep -qF "$R/services/self-learn/.env" "$UD/self-learn.$EXT"
+check "stale listener copy refreshed"       grep -qx "new listener" "$HOME/services/ntfy-control/bin/control_listener.py"
+check "combined legacy folder moved"        grep -qx "OPENHANDS_PORT=3000" "$R/services/paperclip-openhands/.env"
+if [ "$OS" = "Linux" ]; then
+  check "daemon-reload"                     calls_have "systemctl --user daemon-reload"
+  check "launcher restarted"                calls_have "systemctl --user try-restart launcher.service"
+  check "ntfy-control restarted"            calls_have "systemctl --user try-restart ntfy-control.service"
+  check "comment-only unit not restarted"   calls_lack "try-restart self-learn.service"
+else
+  check "launcher reloaded"                 calls_have "launchctl bootstrap gui/$(id -u) $UD/launcher.plist"
+  check "comment-only agent not reloaded"   calls_lack "self-learn.plist"
+fi
 check "running container started"           calls_have "up -d --no-deps nginx"
 check "stopped container left stopped"      calls_have "up --no-start --no-deps worker"
 check "compose files at new paths"          calls_have "-f $R/services/appflowy/docker-compose.yml -f $R/services/appflowy/docker-compose.gpu.yml"
@@ -152,22 +182,24 @@ check "unaffected project untouched"        calls_lack "immich"
 
 echo "• re-run is a no-op"
 : > "$CALLS_LOG"
-printf '[Service]\nExecStart=/usr/bin/env python3 %s/app/web/server.py\n' "$R" > "$UD/launcher.service"
 migrate
 check "exits zero"                          [ "$CODE" -eq 0 ]
 check "nothing moved"                       out_has "0 file(s) moved"
-check "no setup re-run"                     calls_lack "setup "
+check "no restart"                          calls_lack "try-restart"
+check "no launchctl"                        calls_lack "launchctl"
 check "no compose call"                     calls_lack "docker compose"
 teardown
 
-echo "• a failing setup.sh does not stop the container step"
-setup
-printf '#!/usr/bin/env bash\nexit 3\n' > "$R/app/web/setup.sh"
-migrate
-check "exits non-zero"                      [ "$CODE" -ne 0 ]
-check "names the failed setup"              out_has "setup.sh failed for: app/web"
-check "containers still recreated"          calls_have "up -d --no-deps nginx"
-teardown
+if [ "$OS" = "Linux" ]; then
+  echo "• a failed restart does not stop the container step"
+  setup
+  touch "$SB/fail-restart"
+  migrate
+  check "exits non-zero"                    [ "$CODE" -ne 0 ]
+  check "names the unit"                    out_has "did not restart: launcher.service"
+  check "containers still recreated"        calls_have "up -d --no-deps nginx"
+  teardown
+fi
 
 echo "• --dry-run changes nothing"
 setup
@@ -177,7 +209,9 @@ check ".env not moved"                      test -f "$R/immich/.env"
 check "nothing at the new path"             test ! -e "$R/services/immich/.env"
 check "KUMA_ENV_FILE untouched"             grep -qx "KUMA_ENV_FILE=$R/monitoring/.env" "$R/ntfy-control/.env"
 check "deploy.sh untouched"                 grep -qx "COMPOSE_DIR=\"$R/self-learn\"" "$HOME/services/self-learn/bin/deploy.sh"
-check "no setup run"                        calls_lack "setup "
+check "no restart run"                      calls_lack "try-restart"
+check "unit untouched"                      grep -qx "WorkingDirectory=$R/launcher" "$UD/launcher.$EXT"
+check "listener copy untouched"             grep -qx "old listener" "$HOME/services/ntfy-control/bin/control_listener.py"
 check "no compose call"                     calls_lack "docker compose"
 check "bytecode still there"                test -f "$R/launcher/__pycache__/server.cpython-313.pyc"
 check "prints the planned move"             out_has "immich/.env -> services/immich/.env"
