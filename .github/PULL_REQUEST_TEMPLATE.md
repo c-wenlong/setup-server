@@ -19,8 +19,8 @@
 - [ ] Linux and macOS branches both handled, with test assertions gated on `$OS`
 - [ ] No `.env`, credential, token or device identity in the diff (check the staged diff, not just the file list)
 - [ ] README service table and `DIRECTORY.md` updated if the service list, ports or behaviour changed
-- [ ] New service: added to `PUBLISHED` in `monitoring/seed_kuma.py` with a health path that actually fails when the service is broken
-- [ ] Python touched: `python3 launcher/tests/test_server.py` green
+- [ ] New service: added to `PUBLISHED` in `services/monitoring/seed_kuma.py` with a health path that actually fails when the service is broken
+- [ ] Python touched: `python3 app/web/tests/test_server.py` green
 
 ## Test plan
 

@@ -1,7 +1,7 @@
 # teardown.sh — audit and landmines
 
 Audited 2026-09-15 against this repo’s actual `setup.sh` files, per-service
-`TROUBLESHOOT.md` nuke recipes, `launcher/services.json`, and a live
+`TROUBLESHOOT.md` nuke recipes, `app/web/services.json`, and a live
 Paperclip / OpenHands split-and-redeploy on `kai-home-server`.
 
 This is a design note, not a shipped contract. `AGENTS.md` still requires
@@ -15,7 +15,7 @@ pave” the default.
 
 `setup.sh` already deploys, upgrades, and repairs. The launcher and
 ntfy-control already start / stop / restart via `control` in
-`launcher/services.json`. What is missing is the inverse of
+`app/web/services.json`. What is missing is the inverse of
 **publish + run**: stop this service’s process, drop **this** Tailscale
 Serve mapping, keep `.env` and data, then `./setup.sh` can bring it back
 cleanly.
@@ -43,13 +43,13 @@ can copy the first working one.
 
 | Thing | Role |
 |---|---|
-| `<service>/setup.sh` | Deploy / upgrade / repair. Idempotent. Never overwrites a user-edited config. |
-| `<service>/tests/run-tests.sh` | Mocked sandbox by default; `--live` is status + health + Serve + loopback bind. |
-| `<service>/TROUBLESHOOT.md` | Layered triage and a **Nuke and pave** recipe. |
+| `services/<service>/setup.sh` | Deploy / upgrade / repair. Idempotent. Never overwrites a user-edited config. |
+| `services/<service>/tests/run-tests.sh` | Mocked sandbox by default; `--live` is status + health + Serve + loopback bind. |
+| `services/<service>/TROUBLESHOOT.md` | Layered triage and a **Nuke and pave** recipe. |
 | Launcher + ntfy-control | Allowlisted start / stop / restart from `services.json`. |
-| `jellyfin/enable-nvenc.sh` | One-off sudo GPU plumbing. `setup.sh` stays out of it on purpose. |
-| `kaichenpedia/deploy.sh` | Wiki poller, not a deploy. |
-| `monitoring/seed_kuma.py` | Central monitor seeder. |
+| `services/jellyfin/enable-nvenc.sh` | One-off sudo GPU plumbing. `setup.sh` stays out of it on purpose. |
+| `services/kaichenpedia/deploy.sh` | Wiki poller, not a deploy. |
+| `services/monitoring/seed_kuma.py` | Central monitor seeder. |
 
 Nuke recipes exist for every service that has a TROUBLESHOOT.md except
 `beszel` (static-analysis exception) and `remote-desktop` (has a long
@@ -61,7 +61,7 @@ run on autopilot.
 
 | Script | Verdict | Why |
 |---|---|---|
-| **`<service>/teardown.sh`** | Yes, narrow | Inverse of publish+run. Stop unit/container, `tailscale serve --https=$PORT off` (never `reset`), leave `.env` and data. `--purge` only after confirmation. |
+| **`services/<service>/teardown.sh`** | Yes, narrow | Inverse of publish+run. Stop unit/container, `tailscale serve --https=$PORT off` (never `reset`), leave `.env` and data. `--purge` only after confirmation. |
 | **Repo-level backup** | Yes, later | `DIRECTORY.md` already calls out no backup job. One `scripts/backup.sh` that copies named data dirs + `.env` (mode 600) to Seafile beats 22 half-baked `backup.sh` files. Vaultwarden, Immich, Paperless, Forgejo, and Paperclip `master.key` are the ones that hurt to lose. |
 
 ## Do not add per service
@@ -77,8 +77,8 @@ run on autopilot.
 - **An uninstall that also drops lingering, the docker group, or
   `tailscale set --operator`** — those are box-wide, not per-service.
 
-Keep as one-offs, do not generalize: `jellyfin/enable-nvenc.sh`,
-`kaichenpedia/deploy.sh`, `monitoring/seed_kuma.py`.
+Keep as one-offs, do not generalize: `services/jellyfin/enable-nvenc.sh`,
+`services/kaichenpedia/deploy.sh`, `services/monitoring/seed_kuma.py`.
 
 ## Contract if `teardown.sh` ships
 
@@ -139,7 +139,7 @@ tailscale serve --https=443 --set-path=/home off
 ```
 
 That leaves code-server’s `/` alone. If you really take `:443` down,
-re-run `launcher/setup.sh` afterwards. It is idempotent.
+re-run `app/web/setup.sh` afterwards. It is idempotent.
 
 `~/services/launcher` is not just job logs. It holds `overrides.json`
 (edited tile names) and `notes.json` (per-service notes). Neither is in
@@ -314,7 +314,7 @@ teardown might still see:
 
 - compose project label `paperclip-openhands` on an old container (adopt
   by `docker rm -f openhands-agent-canvas` if the label matches, then
-  up from `openhands/`)
+  up from `services/openhands/`)
 - `~/services/paperclip-openhands/` marker (CEO invite already copied to
   `~/services/paperclip/`)
 

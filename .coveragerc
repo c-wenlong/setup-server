@@ -1,22 +1,22 @@
 [run]
 branch = True
 # Store paths relative to the repo root so coverage.xml says
-# "launcher/server.py" rather than a bare "server.py" under an absolute
+# "app/web/server.py" rather than a bare "server.py" under an absolute
 # <source> root. Codecov matches report paths against the repo tree, and the
 # relative form matches without relying on its path-fixing heuristics.
 relative_files = True
-# launcher/server.py is the only Python in this repo with a Python test suite
-# (launcher/tests/test_server.py). The other stdlib programs
-# (monitoring/seed_kuma.py, ntfy-control/control_listener.py,
-# ntfy-control/kuma_toggle.py) are exercised end to end by their services'
+# app/web/server.py is the only Python in this repo with a Python test suite
+# (app/web/tests/test_server.py). The other stdlib programs
+# (services/monitoring/seed_kuma.py, services/ntfy-control/control_listener.py,
+# services/ntfy-control/kuma_toggle.py) are exercised end to end by their services'
 # mocked bash suites, which run them as subprocesses out of a sandbox; putting
 # them in `source` here would only report them as 0% and hide the real signal.
 source =
-    launcher
+    app/web
 
 [report]
 omit =
-    launcher/tests/*
+    app/web/tests/*
 # A backstop a few points under the measured number (92.2% as of this commit),
 # not a target. Raise it when coverage rises; never lower it to make a red run
 # green.

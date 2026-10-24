@@ -1,10 +1,10 @@
 # Agent instructions — setup-server
 
 Repo of one-shot deploy scripts for self-hosted services on Tailscale-private
-home servers. One directory per service; each is self-contained. **One
-directory, one `setup.sh`, one service.** A folder must not deploy two
-products (Paperclip and OpenHands are `paperclip/` and `openhands/`, not
-a combined `paperclip-openhands/`). Complementary tools that share a
+home servers. One directory per service under `services/`; each is
+self-contained. **One directory, one `setup.sh`, one service.** A folder must
+not deploy two products (Paperclip and OpenHands are `services/paperclip/` and
+`services/openhands/`, not a combined `services/paperclip-openhands/`). Complementary tools that share a
 workspace tree still get their own script, `.env`, tests, and docs.
 
 Human-facing contribution rules (branch naming, PR expectations, how to run a
@@ -13,9 +13,21 @@ version and wins where the two overlap on conventions. CI is defined in
 `.github/workflows/ci.yml`; read it before assuming a local pass is enough, and
 keep it in step when you add a service.
 
+## Repo layout
+
+| Path | What lives there |
+|---|---|
+| `services/<service>/` | One deployable service each: everything the launcher can install. |
+| `app/<surface>/` | Front ends for the box itself. `app/web/` is the launcher (Python server plus its static UI in `app/web/static/`); a future desktop app goes in `app/desktop/`. Each one follows the same per-directory contract as a service. |
+| `scripts/` | Repo tooling (`check-structure.sh`, one-off migrations). |
+| `docs/` | Cross-service design notes. |
+
+Runtime state stays at `~/services/<service>/` on the box, which is separate
+from the repo's `services/` folder despite the shared name.
+
 ## Non-negotiable conventions
 
-- **Entrypoint is always `<service>/setup.sh`**, runnable as a regular user.
+- **Entrypoint is always `services/<service>/setup.sh`**, runnable as a regular user.
   Root refusal is a preflight check, not an afterthought. That script
   deploys **exactly one** service. Do not combine two runtimes, compose
   projects, or systemd units in one directory so they can share a
@@ -73,7 +85,7 @@ diverges from one, note the divergence in that document rather than deleting it.
 Every service ships tests in `tests/run-tests.sh` with two layers (the one
 exception is `beszel`, whose default layer is static analysis of `setup.sh` and
 `docker-compose.yml` rather than a PATH-stub sandbox, so it has no
-`tests/stubs/`; the rationale is in `beszel/SETUP.md`):
+`tests/stubs/`; the rationale is in `services/beszel/SETUP.md`):
 
 1. **Mocked suite (default)** — runs the real `setup.sh` in a sandbox: temp
    `$HOME`, and PATH stubs (in `tests/stubs/`) for every external command the
@@ -95,10 +107,10 @@ service is deployed on this machine, run `--live` too.
 
 ## Adding a new service (checklist)
 
-1. `mkdir <service>/tests/stubs`; start `setup.sh` from a reference
+1. `mkdir services/<service>/tests/stubs`; start `setup.sh` from a reference
    implementation (preflight/info/ok/warn/die helpers, section ordering):
-   `code-server/setup.sh` for a native binary under a systemd user unit or a
-   launchd LaunchAgent, `forgejo/setup.sh` for the Docker shape (gitignored
+   `services/code-server/setup.sh` for a native binary under a systemd user unit or a
+   launchd LaunchAgent, `services/forgejo/setup.sh` for the Docker shape (gitignored
    `.env`, `LOCAL_PORT`/`HTTPS_PORT`, Compose restart policy instead of a unit).
    One directory deploys one service — never two products in the same folder.
 2. Write stubs for every external command the script calls; wire the mocked
@@ -106,7 +118,7 @@ service is deployed on this machine, run `--live` too.
 3. Write `SETUP.md` + `TROUBLESHOOT.md` (mirror code-server's structure).
 4. Add the service row to the root `README.md` table and to `DIRECTORY.md`
    (services table plus any loose end it introduces), and add a monitor line in
-   `monitoring/seed_kuma.py`.
+   `services/monitoring/seed_kuma.py`.
 5. Real-machine test: deploy, then `./tests/run-tests.sh --live`.
 
 Only add a service-level `AGENTS.md` if the service has quirks that genuinely

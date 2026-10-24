@@ -49,55 +49,55 @@ one-shot deploy.
 
 | Service | What it gives you | Deploy |
 |---|---|---|
-| <a href="https://docs.immich.app/"><img src="launcher/web/icons/immich.svg" width="20" alt="Immich"></a> [immich](immich/) | Self-hosted Google Photos: timeline, albums, phone background backup, optional face/semantic search (Docker) | `cd immich && ./setup.sh` |
-| <a href="https://manual.seafile.com/latest/"><img src="launcher/web/icons/seafile.svg" width="20" alt="Seafile"></a> [seafile](seafile/) | Self-hosted Drive: file sync + web UI + mobile photo backup (Docker) | `cd seafile && ./setup.sh` |
-| <a href="https://docs.syncthing.net/"><img src="launcher/web/icons/syncthing.svg" width="20" alt="Syncthing"></a> [syncthing](syncthing/) | Peer-to-peer folder sync between this box, laptop and phone — no server-side drive, no third-party relays or discovery; native binary, pinned, systemd user unit | `cd syncthing && ./setup.sh` |
-| <a href="https://github.com/dani-garcia/vaultwarden/wiki"><img src="launcher/web/icons/vaultwarden.svg" width="20" alt="Vaultwarden"></a> [vaultwarden](vaultwarden/) | Password manager — Bitwarden-compatible server for the official Bitwarden apps; SQLite, ~12 MB, admin panel off (Docker) | `cd vaultwarden && ./setup.sh` |
-| <a href="https://coder.com/docs/code-server"><img src="launcher/web/icons/code-server.svg" width="20" alt="code-server"></a> [code-server](code-server/) | VS Code (with terminal) in the browser, tailnet-only over HTTPS | `cd code-server && ./setup.sh` |
-| <a href="https://docs.paperless-ngx.com/"><picture><source media="(prefers-color-scheme: dark)" srcset="launcher/web/icons/paperless-ngx-dark.svg"><img src="launcher/web/icons/paperless-ngx.svg" width="20" alt="Paperless-ngx"></picture></a> [paperless-ngx](paperless-ngx/) | OCR'd, searchable archive of receipts, contracts and tax docs; SQLite + redis, ~654 MiB (Docker) | `cd paperless-ngx && ./setup.sh` |
-| <a href="https://docs.stirlingpdf.com/Installation/Docker%20Install/"><img src="launcher/web/icons/stirling-pdf.svg" width="20" alt="Stirling PDF"></a> [stirling-pdf](stirling-pdf/) | PDF toolbox — merge, split, compress, OCR, convert; single container, login off, loopback-only | `cd stirling-pdf && ./setup.sh` |
-| <a href="https://docs.firefly-iii.org/"><img src="launcher/web/icons/firefly-iii.svg" width="20" alt="Firefly III"></a> [firefly-iii](firefly-iii/) | Personal finance — accounts, budgets, categories, reports; app + Postgres + Data Importer, ~180 MB (Docker) | `cd firefly-iii && ./setup.sh` |
-| <a href="https://developers.plane.so/self-hosting/overview"><img src="launcher/web/icons/plane.svg" width="20" alt="Plane"></a> [plane](plane/) | Project management — issues, cycles, pages (Linear/Jira-shaped); Community stack, loopback-only | `cd plane && ./setup.sh` |
+| <a href="https://docs.immich.app/"><img src="app/web/static/icons/immich.svg" width="20" alt="Immich"></a> [immich](services/immich/) | Self-hosted Google Photos: timeline, albums, phone background backup, optional face/semantic search (Docker) | `cd services/immich && ./setup.sh` |
+| <a href="https://manual.seafile.com/latest/"><img src="app/web/static/icons/seafile.svg" width="20" alt="Seafile"></a> [seafile](services/seafile/) | Self-hosted Drive: file sync + web UI + mobile photo backup (Docker) | `cd services/seafile && ./setup.sh` |
+| <a href="https://docs.syncthing.net/"><img src="app/web/static/icons/syncthing.svg" width="20" alt="Syncthing"></a> [syncthing](services/syncthing/) | Peer-to-peer folder sync between this box, laptop and phone — no server-side drive, no third-party relays or discovery; native binary, pinned, systemd user unit | `cd services/syncthing && ./setup.sh` |
+| <a href="https://github.com/dani-garcia/vaultwarden/wiki"><img src="app/web/static/icons/vaultwarden.svg" width="20" alt="Vaultwarden"></a> [vaultwarden](services/vaultwarden/) | Password manager — Bitwarden-compatible server for the official Bitwarden apps; SQLite, ~12 MB, admin panel off (Docker) | `cd services/vaultwarden && ./setup.sh` |
+| <a href="https://coder.com/docs/code-server"><img src="app/web/static/icons/code-server.svg" width="20" alt="code-server"></a> [code-server](services/code-server/) | VS Code (with terminal) in the browser, tailnet-only over HTTPS | `cd services/code-server && ./setup.sh` |
+| <a href="https://docs.paperless-ngx.com/"><picture><source media="(prefers-color-scheme: dark)" srcset="app/web/static/icons/paperless-ngx-dark.svg"><img src="app/web/static/icons/paperless-ngx.svg" width="20" alt="Paperless-ngx"></picture></a> [paperless-ngx](services/paperless-ngx/) | OCR'd, searchable archive of receipts, contracts and tax docs; SQLite + redis, ~654 MiB (Docker) | `cd services/paperless-ngx && ./setup.sh` |
+| <a href="https://docs.stirlingpdf.com/Installation/Docker%20Install/"><img src="app/web/static/icons/stirling-pdf.svg" width="20" alt="Stirling PDF"></a> [stirling-pdf](services/stirling-pdf/) | PDF toolbox — merge, split, compress, OCR, convert; single container, login off, loopback-only | `cd services/stirling-pdf && ./setup.sh` |
+| <a href="https://docs.firefly-iii.org/"><img src="app/web/static/icons/firefly-iii.svg" width="20" alt="Firefly III"></a> [firefly-iii](services/firefly-iii/) | Personal finance — accounts, budgets, categories, reports; app + Postgres + Data Importer, ~180 MB (Docker) | `cd services/firefly-iii && ./setup.sh` |
+| <a href="https://developers.plane.so/self-hosting/overview"><img src="app/web/static/icons/plane.svg" width="20" alt="Plane"></a> [plane](services/plane/) | Project management — issues, cycles, pages (Linear/Jira-shaped); Community stack, loopback-only | `cd services/plane && ./setup.sh` |
 
 ### AI & automation
 
 | Service | What it gives you | Deploy |
 |---|---|---|
-| <a href="https://docs.openwebui.com/"><picture><source media="(prefers-color-scheme: dark)" srcset="launcher/web/icons/open-webui-dark.svg"><img src="launcher/web/icons/open-webui.svg" width="20" alt="Open WebUI"></picture></a> [open-webui](open-webui/) | ChatGPT-style UI over the host's ollama models (Docker, host net) | `cd open-webui && ./setup.sh` |
-| <a href="https://github.com/paperclipai/paperclip"><picture><source media="(prefers-color-scheme: dark)" srcset="launcher/web/icons/paperclip-dark.svg"><img src="launcher/web/icons/paperclip.svg" width="20" alt="Paperclip"></picture></a> [paperclip](paperclip/) | Paperclip agent control plane (`claude_local` / `codex_local`); official managed CLI, authenticated/private, tailnet-only | `cd paperclip && ./setup.sh` |
-| <a href="https://docs.openhands.dev/"><img src="launcher/web/icons/openhands.svg" width="20" alt="OpenHands"></a> [openhands](openhands/) | OpenHands Agent Canvas (browser UI for Claude Code / Codex via ACP); official image, `--public` + API key, tailnet-only | `cd openhands && ./setup.sh` |
-| [quiver-hub](quiver-hub/) | Quiver's remote-control hub (`swe remote serve`): watch and steer coding-agent sessions from a phone PWA (sessions, inbox, usage), laptops join as satellites; pinned uv install, systemd user unit, tailnet-only | `cd quiver-hub && ./setup.sh` |
-| <a href="https://docs.n8n.io/"><img src="launcher/web/icons/n8n.svg" width="20" alt="n8n"></a> [n8n](n8n/) | Workflow automation (self-hosted Zapier) wired to local services (Docker) | `cd n8n && ./setup.sh` |
-| <a href="https://trigger.dev/docs/self-hosting/overview"><img src="launcher/web/icons/trigger-dev.svg" width="20" alt="Trigger.dev"></a> [trigger-dev](trigger-dev/) | Background jobs and cron (Trigger.dev v4): TypeScript tasks, dashboard, local registry; slim stack, tailnet-only | `cd trigger-dev && ./setup.sh` |
-| <a href="https://github.com/c-wenlong/manimkc"><img src="launcher/web/icons/manimkc.png" width="20" alt="manimkc"></a> manimkc | Narrated ManimGL explainer videos from a JSON brief (HTTP job server; lives in the [manimkc repo](https://github.com/c-wenlong/manimkc) at `server/`) | `~/dev/manimkc/server/setup.sh` |
+| <a href="https://docs.openwebui.com/"><picture><source media="(prefers-color-scheme: dark)" srcset="app/web/static/icons/open-webui-dark.svg"><img src="app/web/static/icons/open-webui.svg" width="20" alt="Open WebUI"></picture></a> [open-webui](services/open-webui/) | ChatGPT-style UI over the host's ollama models (Docker, host net) | `cd services/open-webui && ./setup.sh` |
+| <a href="https://github.com/paperclipai/paperclip"><picture><source media="(prefers-color-scheme: dark)" srcset="app/web/static/icons/paperclip-dark.svg"><img src="app/web/static/icons/paperclip.svg" width="20" alt="Paperclip"></picture></a> [paperclip](services/paperclip/) | Paperclip agent control plane (`claude_local` / `codex_local`); official managed CLI, authenticated/private, tailnet-only | `cd services/paperclip && ./setup.sh` |
+| <a href="https://docs.openhands.dev/"><img src="app/web/static/icons/openhands.svg" width="20" alt="OpenHands"></a> [openhands](services/openhands/) | OpenHands Agent Canvas (browser UI for Claude Code / Codex via ACP); official image, `--public` + API key, tailnet-only | `cd services/openhands && ./setup.sh` |
+| [quiver-hub](services/quiver-hub/) | Quiver's remote-control hub (`swe remote serve`): watch and steer coding-agent sessions from a phone PWA (sessions, inbox, usage), laptops join as satellites; pinned uv install, systemd user unit, tailnet-only | `cd services/quiver-hub && ./setup.sh` |
+| <a href="https://docs.n8n.io/"><img src="app/web/static/icons/n8n.svg" width="20" alt="n8n"></a> [n8n](services/n8n/) | Workflow automation (self-hosted Zapier) wired to local services (Docker) | `cd services/n8n && ./setup.sh` |
+| <a href="https://trigger.dev/docs/self-hosting/overview"><img src="app/web/static/icons/trigger-dev.svg" width="20" alt="Trigger.dev"></a> [trigger-dev](services/trigger-dev/) | Background jobs and cron (Trigger.dev v4): TypeScript tasks, dashboard, local registry; slim stack, tailnet-only | `cd services/trigger-dev && ./setup.sh` |
+| <a href="https://github.com/c-wenlong/manimkc"><img src="app/web/static/icons/manimkc.png" width="20" alt="manimkc"></a> manimkc | Narrated ManimGL explainer videos from a JSON brief (HTTP job server; lives in the [manimkc repo](https://github.com/c-wenlong/manimkc) at `server/`) | `~/dev/manimkc/server/setup.sh` |
 
 ### Knowledge & media
 
 | Service | What it gives you | Deploy |
 |---|---|---|
-| <a href="https://appflowy.com/docs/Step-by-step-Self-Hosting-Guide---From-Zero-to-Production"><img src="launcher/web/icons/appflowy.svg" width="20" alt="AppFlowy"></a> [appflowy](appflowy/) | Notion alternative — docs, databases, wiki; AppFlowy Cloud behind nginx, loopback-only; AI and search indexer left out | `cd appflowy && ./setup.sh` |
-| <a href="https://www.metabase.com/docs/latest/installation-and-operation/running-metabase-on-docker"><img src="launcher/web/icons/metabase.svg" width="20" alt="Metabase"></a> [metabase](metabase/) | BI — dashboards and SQL over databases on this box; OSS + Postgres, first admin seeded | `cd metabase && ./setup.sh` |
-| <a href="https://github.com/c-wenlong/kaichenpedia"><img src="launcher/web/icons/kaichenpedia.png" width="20" alt="kaichenpedia"></a> [kaichenpedia](kaichenpedia/) | Personal wiki (Quartz static site), auto-deploys from GitHub via a daily poller (Docker nginx) | `cd kaichenpedia && ./setup.sh` |
-| <a href="https://github.com/c-wenlong/self-learn"><img src="launcher/web/icons/self-learn.png" width="20" alt="self-learn"></a> [self-learn](self-learn/) | Gnosia study hub — Next.js roadmap + tutoring loop over a Postgres catalog, from the private self-learn repo; native `next start` + Docker Postgres, auto-deploys daily | `cd self-learn && ./setup.sh` |
-| <a href="https://github.com/c-wenlong/sources"><img src="launcher/web/icons/sources.svg" width="20" alt="sources"></a> [sources](sources/) | Encrypted browser for the private sources archive (transcripts, blogs, newsletters, papers) — same build as the GitHub Pages site; Docker nginx + daily poller over the fetch clone at `~/dev/sources` | `cd sources && SITE_PASSPHRASE='...' ./setup.sh` |
-| <a href="https://github.com/c-wenlong/designs"><img src="launcher/web/icons/design-systems.svg" width="20" alt="design-systems"></a> [design-systems](design-systems/) | Gallery + docs site of the private designs repo — every captured design system's tokens, screenshots and scorecard; same build as `make serve`, unencrypted on the tailnet by design; Docker nginx + daily poller over the working clone at `~/dev/design-systems` | `cd design-systems && ./setup.sh` |
-| <a href="https://jellyfin.org/"><img src="launcher/web/icons/jellyfin.svg" width="20" alt="Jellyfin"></a> [jellyfin](jellyfin/) | Media server — films, shows, music to browser/phone/TV; software transcode by default, opt-in NVENC via enable-nvenc.sh, read-only media mount (Docker) | `cd jellyfin && ./setup.sh` |
-| <a href="https://forgejo.org/"><img src="launcher/web/icons/forgejo.svg" width="20" alt="Forgejo"></a> [forgejo](forgejo/) | Self-hosted git forge — repos, PRs, issues; v15 LTS, SQLite, ~100 MB (Docker) | `cd forgejo && ./setup.sh` |
+| <a href="https://appflowy.com/docs/Step-by-step-Self-Hosting-Guide---From-Zero-to-Production"><img src="app/web/static/icons/appflowy.svg" width="20" alt="AppFlowy"></a> [appflowy](services/appflowy/) | Notion alternative — docs, databases, wiki; AppFlowy Cloud behind nginx, loopback-only; AI and search indexer left out | `cd services/appflowy && ./setup.sh` |
+| <a href="https://www.metabase.com/docs/latest/installation-and-operation/running-metabase-on-docker"><img src="app/web/static/icons/metabase.svg" width="20" alt="Metabase"></a> [metabase](services/metabase/) | BI — dashboards and SQL over databases on this box; OSS + Postgres, first admin seeded | `cd services/metabase && ./setup.sh` |
+| <a href="https://github.com/c-wenlong/kaichenpedia"><img src="app/web/static/icons/kaichenpedia.png" width="20" alt="kaichenpedia"></a> [kaichenpedia](services/kaichenpedia/) | Personal wiki (Quartz static site), auto-deploys from GitHub via a daily poller (Docker nginx) | `cd services/kaichenpedia && ./setup.sh` |
+| <a href="https://github.com/c-wenlong/self-learn"><img src="app/web/static/icons/self-learn.png" width="20" alt="self-learn"></a> [self-learn](services/self-learn/) | Gnosia study hub — Next.js roadmap + tutoring loop over a Postgres catalog, from the private self-learn repo; native `next start` + Docker Postgres, auto-deploys daily | `cd services/self-learn && ./setup.sh` |
+| <a href="https://github.com/c-wenlong/sources"><img src="app/web/static/icons/sources.svg" width="20" alt="sources"></a> [sources](services/sources/) | Encrypted browser for the private sources archive (transcripts, blogs, newsletters, papers) — same build as the GitHub Pages site; Docker nginx + daily poller over the fetch clone at `~/dev/sources` | `cd services/sources && SITE_PASSPHRASE='...' ./setup.sh` |
+| <a href="https://github.com/c-wenlong/designs"><img src="app/web/static/icons/design-systems.svg" width="20" alt="design-systems"></a> [design-systems](services/design-systems/) | Gallery + docs site of the private designs repo — every captured design system's tokens, screenshots and scorecard; same build as `make serve`, unencrypted on the tailnet by design; Docker nginx + daily poller over the working clone at `~/dev/design-systems` | `cd services/design-systems && ./setup.sh` |
+| <a href="https://jellyfin.org/"><img src="app/web/static/icons/jellyfin.svg" width="20" alt="Jellyfin"></a> [jellyfin](services/jellyfin/) | Media server — films, shows, music to browser/phone/TV; software transcode by default, opt-in NVENC via enable-nvenc.sh, read-only media mount (Docker) | `cd services/jellyfin && ./setup.sh` |
+| <a href="https://forgejo.org/"><img src="app/web/static/icons/forgejo.svg" width="20" alt="Forgejo"></a> [forgejo](services/forgejo/) | Self-hosted git forge — repos, PRs, issues; v15 LTS, SQLite, ~100 MB (Docker) | `cd services/forgejo && ./setup.sh` |
 
 ### Infrastructure
 
 | Service | What it gives you | Deploy |
 |---|---|---|
-| <a href="launcher/"><img src="launcher/web/icons/launcher.png" width="20" alt="launcher"></a> [launcher](launcher/) | One-tap app launcher for every service on the box — tile grid with live status, and a Deploy button for services not installed yet (Python stdlib, systemd user unit) | `cd launcher && ./setup.sh` |
-| <a href="https://gethomepage.dev/"><img src="launcher/web/icons/homepage.png" width="20" alt="Homepage"></a> [homepage](homepage/) | YAML-configured dashboard of every service, with live status dots and widgets — a read-only front door alongside the launcher (Docker) | `cd homepage && ./setup.sh` |
-| <a href="https://coolify.io/docs/get-started/installation"><img src="launcher/web/icons/coolify.svg" width="20" alt="Coolify"></a> [coolify](coolify/) | Self-hosted PaaS (Heroku/Vercel-style deploys) — dashboard + Postgres + Redis + Soketi; loopback-only, Traefik proxy off | `cd coolify && ./setup.sh` |
-| <a href="https://docs.umami.is/docs/install"><img src="launcher/web/icons/umami.svg" width="20" alt="Umami"></a> [umami](umami/) | Web analytics — privacy-respecting pageviews; Postgres, default admin/umami password rotated on first boot | `cd umami && ./setup.sh` |
-| <a href="https://adguard.com/en/adguard-home/overview.html"><img src="launcher/web/icons/adguard.svg" width="20" alt="AdGuard Home"></a> [adguard](adguard/) | Tailnet-wide DNS ad/tracker blocking — every device, no per-device app; needs one manual step in the Tailscale console to take effect (Docker) | `cd adguard && ./setup.sh` |
-| <a href="https://www.home-assistant.io/"><img src="launcher/web/icons/home-assistant.svg" width="20" alt="Home Assistant"></a> [home-assistant](home-assistant/) | Local-first home automation — lights, plugs, sensors, media players, with LAN device discovery (Docker, host net) | `cd home-assistant && ./setup.sh` |
-| <a href="https://uptime.kuma.pet/"><img src="launcher/web/icons/uptime-kuma.svg" width="20" alt="Uptime Kuma"></a> <a href="https://docs.ntfy.sh/"><img src="launcher/web/icons/ntfy.svg" width="20" alt="ntfy"></a> [monitoring](monitoring/) | Uptime Kuma dashboard + ntfy phone alerts for every service (Docker, host net) | `cd monitoring && ./setup.sh` |
-| [ntfy-control](ntfy-control/) | Start/stop services from the ntfy phone app (allowlisted commands; auto-pauses Kuma monitors) | `cd ntfy-control && ./setup.sh` |
-| <a href="https://beszel.dev/"><img src="launcher/web/icons/beszel.svg" width="20" alt="Beszel"></a> [beszel](beszel/) | Resource monitoring — CPU/RAM/GPU/disk/network/temperature graphs + alerts (Docker hub + native agent) | `cd beszel && ./setup.sh` |
-| <a href="https://guacamole.apache.org/"><img src="launcher/web/icons/guacamole.svg" width="20" alt="Apache Guacamole"></a> [remote-desktop](remote-desktop/) | This box's GNOME desktop in a browser tab — Guacamole + gnome-remote-desktop; **needs sudo** (configures a system daemon) | `cd remote-desktop && ./setup.sh` |
+| <a href="app/web/"><img src="app/web/static/icons/launcher.png" width="20" alt="launcher"></a> [launcher](app/web/) | One-tap app launcher for every service on the box — tile grid with live status, and a Deploy button for services not installed yet (Python stdlib, systemd user unit) | `cd app/web && ./setup.sh` |
+| <a href="https://gethomepage.dev/"><img src="app/web/static/icons/homepage.png" width="20" alt="Homepage"></a> [homepage](services/homepage/) | YAML-configured dashboard of every service, with live status dots and widgets — a read-only front door alongside the launcher (Docker) | `cd services/homepage && ./setup.sh` |
+| <a href="https://coolify.io/docs/get-started/installation"><img src="app/web/static/icons/coolify.svg" width="20" alt="Coolify"></a> [coolify](services/coolify/) | Self-hosted PaaS (Heroku/Vercel-style deploys) — dashboard + Postgres + Redis + Soketi; loopback-only, Traefik proxy off | `cd services/coolify && ./setup.sh` |
+| <a href="https://docs.umami.is/docs/install"><img src="app/web/static/icons/umami.svg" width="20" alt="Umami"></a> [umami](services/umami/) | Web analytics — privacy-respecting pageviews; Postgres, default admin/umami password rotated on first boot | `cd services/umami && ./setup.sh` |
+| <a href="https://adguard.com/en/adguard-home/overview.html"><img src="app/web/static/icons/adguard.svg" width="20" alt="AdGuard Home"></a> [adguard](services/adguard/) | Tailnet-wide DNS ad/tracker blocking — every device, no per-device app; needs one manual step in the Tailscale console to take effect (Docker) | `cd services/adguard && ./setup.sh` |
+| <a href="https://www.home-assistant.io/"><img src="app/web/static/icons/home-assistant.svg" width="20" alt="Home Assistant"></a> [home-assistant](services/home-assistant/) | Local-first home automation — lights, plugs, sensors, media players, with LAN device discovery (Docker, host net) | `cd services/home-assistant && ./setup.sh` |
+| <a href="https://uptime.kuma.pet/"><img src="app/web/static/icons/uptime-kuma.svg" width="20" alt="Uptime Kuma"></a> <a href="https://docs.ntfy.sh/"><img src="app/web/static/icons/ntfy.svg" width="20" alt="ntfy"></a> [monitoring](services/monitoring/) | Uptime Kuma dashboard + ntfy phone alerts for every service (Docker, host net) | `cd services/monitoring && ./setup.sh` |
+| [ntfy-control](services/ntfy-control/) | Start/stop services from the ntfy phone app (allowlisted commands; auto-pauses Kuma monitors) | `cd services/ntfy-control && ./setup.sh` |
+| <a href="https://beszel.dev/"><img src="app/web/static/icons/beszel.svg" width="20" alt="Beszel"></a> [beszel](services/beszel/) | Resource monitoring — CPU/RAM/GPU/disk/network/temperature graphs + alerts (Docker hub + native agent) | `cd services/beszel && ./setup.sh` |
+| <a href="https://guacamole.apache.org/"><img src="app/web/static/icons/guacamole.svg" width="20" alt="Apache Guacamole"></a> [remote-desktop](services/remote-desktop/) | This box's GNOME desktop in a browser tab — Guacamole + gnome-remote-desktop; **needs sudo** (configures a system daemon) | `cd services/remote-desktop && ./setup.sh` |
 
 Future service ideas live in [EXPLORATION.md](EXPLORATION.md).
 The live deployment (every running service, port map, credentials pointers) is
@@ -110,7 +110,7 @@ Clone the repo on the server, pick a service, run its script:
 
 ```bash
 git clone https://github.com/c-wenlong/setup-server.git
-cd setup-server/code-server
+cd setup-server/services/code-server
 ./setup.sh
 ```
 
@@ -131,8 +131,8 @@ Manage it with:
   tailscale serve status        # or: tailscale serve --https=443 off
 ```
 
-Every service follows this shape. [code-server](code-server/setup.sh) is the
-reference implementation for a native service and [forgejo](forgejo/setup.sh)
+Every service follows this shape. [code-server](services/code-server/setup.sh) is the
+reference implementation for a native service and [forgejo](services/forgejo/setup.sh)
 for the Docker shape: read one of those first if you want to see how a script
 is put together. Re-running any `setup.sh` upgrades or repairs the deployment rather
 than rebuilding it, so it is the normal way to apply a change.
@@ -146,10 +146,11 @@ than rebuilding it, so it is the normal way to apply a change.
 
 ## Layout
 
-Every service directory contains:
+Services live in `services/<service>/`. Front ends for the box live in
+`app/`: `app/web/` is the launcher. Every service directory contains:
 
 ```
-<service>/
+services/<service>/
   setup.sh            # idempotent one-shot deploy, the single entrypoint
   SETUP.md            # architecture, security model, dependencies, deploy + ops
   TROUBLESHOOT.md     # layered triage guide for when things break
@@ -176,7 +177,7 @@ Every service directory contains:
 ## Testing
 
 ```bash
-cd code-server
+cd services/code-server
 ./tests/run-tests.sh          # mocked suite, safe on any machine
 ./tests/run-tests.sh --live   # verify the real deployment on this box
 ```

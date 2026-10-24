@@ -16,9 +16,9 @@ Adding an app still means a human or an agent writes a full service directory
 
 - `README.md`
 - `DIRECTORY.md`
-- `monitoring/seed_kuma.py`
-- `launcher/services.json` (`control.parts` by hand)
-- `homepage/config/services.yaml` (seeded once; drifts after)
+- `services/monitoring/seed_kuma.py`
+- `app/web/services.json` (`control.parts` by hand)
+- `services/homepage/config/services.yaml` (seeded once; drifts after)
 
 That will not scale, and it cannot ingest a third-party catalogue. App
 marketplaces that do scale split the problem into four layers. This repo
@@ -28,7 +28,7 @@ collapses them into “a bash program plus a hand-edited registry.”
 
 | Layer | Job | What this repo has today |
 |---|---|---|
-| **Index** | Cheap, searchable list (id, name, version, icon, category, source) | Hand-edited `launcher/services.json` plus README, DIRECTORY, Homepage YAML, and `seed_kuma.py` |
+| **Index** | Cheap, searchable list (id, name, version, icon, category, source) | Hand-edited `app/web/services.json` plus README, DIRECTORY, Homepage YAML, and `seed_kuma.py` |
 | **Package** | Immutable recipe: compose or binary + metadata + pinned images | A full directory: `setup.sh`, compose, docs, tests, stubs |
 | **Instance** | This box’s copy: `.env`, `~/services/<name>`, Serve map, receipt | Created by `setup.sh`; no stored “installed from remote @ revision” |
 | **Runtime / cleanup** | Start, stop, update, uninstall, leftover data | Start/stop via `control.parts`. No uninstall API. Nuke recipes in `TROUBLESHOOT.md` |
@@ -438,7 +438,7 @@ Build in this order:
    dedicated page earn its keep.
 5. **Remove** — stop + un-serve, keep data; `--purge` deletes
    `~/services/<id>` and the receipt. Align with
-   [teardown-sh.md](teardown-sh.md). `launcher/SPEC.md` still lists
+   [teardown-sh.md](teardown-sh.md). `app/web/SPEC.md` still lists
    uninstall as out of scope until this lands.
 6. **Foreign remotes** — extra git URLs, prefixed ids, rewrite-or-refuse
    `0.0.0.0`. After first-party apply is boring.
@@ -457,8 +457,8 @@ index. Do not start (6) until (5) can take it back off.
    before foreign apps can install unattended.
 4. **Homepage and Kuma** — generate from receipts, or keep them manual
    until the receipt path exists. Dual registry is already documented as
-   a drift source in `homepage/SETUP.md`.
-5. **Uninstall API** — `launcher/SPEC.md` currently lists uninstall as
+   a drift source in `services/homepage/SETUP.md`.
+5. **Uninstall API** — `app/web/SPEC.md` currently lists uninstall as
    out of scope. A catalogue without remove is half a marketplace.
    Align with [teardown-sh.md](teardown-sh.md). Sequence is decided:
    after apply, with the catalogue page; see **Build order**.
