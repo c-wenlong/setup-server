@@ -440,3 +440,31 @@ api/services/{key}` carries it as `receipt` (null when absent), and the
 detail page shows Installed / Last deploy / Revision / Ports rows from it.
 Nothing writes receipts for services deployed from a terminal; that, and
 removing a receipt on uninstall, come with the apply and remove steps.
+
+## v6 — catalogue page (2026-10-25)
+
+Step 4 of the build order in `docs/catalogue-architecture.md`. Decided
+2026-10-25: a catalogue app still needs the full service contract
+(`setup.sh`, docs, tests). Install runs that `setup.sh` through the existing
+deploy job; there is no separate compose-only installer.
+
+- **Route** `#/catalogue`, linked from a Catalogue button in the header.
+  `catalogue.js` owns `#view-catalogue`; `app.js` only hides the grid and
+  search row on that route (`showGrid`) and brings them back on `#/`.
+- **Data**: no new endpoint. `GET api/services` gains `receipt` on every
+  entry (null when absent), and `catalogue.js` paints from the list `app.js`
+  already polls, through `window.LauncherApp.services()` / `.groups()`. It
+  repaints on the `launcher:services` event `app.js` fires after each poll,
+  so it never polls on its own.
+- **Cards**, grouped by the registry's `groups`: icon, name, tagline, full
+  description (clamped to four lines), author, a status line (Installed,
+  running / stopped, with "since <date>" from the receipt; Not installed;
+  Coming soon for an entry with no `setup`; Installing now while a job
+  runs) and actions: Install (available), Installing… (running job,
+  reattaches), Open (active with a URL), Details (`#/service/<key>`).
+- **Install** calls `LauncherApp.deploy(key, button)`, which opens the
+  grid's own deploy sheet: same confirm step, same log, same 409/429
+  handling. The sheet closing triggers a poll, which repaints the page.
+- **Search** across key, name, tagline, description and author; filter
+  chips All / Installed / Not installed. Focus stays on the same card's
+  button across a repaint.

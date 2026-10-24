@@ -613,12 +613,13 @@ class ServiceJobFieldTest(SandboxTest):
 
     def test_no_field_beyond_the_contract_was_added(self):
         # The whole list contract in one assertion: the original eight, then
-        # job and control, then the three v3 keys. Anything else appearing
-        # here is a key the frontend was never told about.
+        # job and control, then the three v3 keys, then the v5 receipt.
+        # Anything else appearing here is a key the frontend was never told
+        # about.
         server.start_deploy("alpha")
         for tile in self.tiles().values():
             self.assertEqual(list(tile), self.EIGHT + [
-                "job", "control", "usage", "deployed_at", "resources"])
+                "job", "control", "usage", "deployed_at", "resources", "receipt"])
 
     # ---- restart
 
@@ -753,7 +754,7 @@ class HttpTest(SandboxTest):
         self.assertEqual(sorted(svc), ["active", "author", "control",
                                        "deployed_at", "description", "group",
                                        "icon", "installed", "job", "key",
-                                       "name", "resources", "state",
+                                       "name", "receipt", "resources", "state",
                                        "tagline", "url", "usage"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
         self.assertEqual(svc["author"], "c-wenlong")
@@ -768,7 +769,7 @@ class HttpTest(SandboxTest):
                          ["key", "name", "tagline", "group", "description",
                           "author", "icon", "url", "state", "installed",
                           "active", "job", "control", "usage", "deployed_at",
-                          "resources"])
+                          "resources", "receipt"])
 
     def test_groups_empty_when_the_registry_has_none(self):
         # An older services.json without a catalog still paints a flat grid.
@@ -4921,6 +4922,15 @@ class ReceiptTest(SandboxTest):
         self.assertIsNone(server.service_detail("alpha")["receipt"])
         self.finish("alpha")
         self.assertEqual(server.service_detail("alpha")["receipt"]["deploys"], 1)
+
+    def test_list_payload_carries_the_receipt(self):
+        server.magicdns_host = lambda: "box.ts.net"
+        tiles = {s["key"]: s for s in server.services_payload()["services"]}
+        self.assertIsNone(tiles["alpha"]["receipt"])
+        self.finish("alpha")
+        tiles = {s["key"]: s for s in server.services_payload()["services"]}
+        self.assertEqual(tiles["alpha"]["receipt"]["installed_at"], "2026-10-25T01:00:00.000Z")
+        self.assertIsNone(tiles["bare"]["receipt"])
 
     def test_receipt_does_not_change_tile_state(self):
         server.magicdns_host = lambda: "box.ts.net"

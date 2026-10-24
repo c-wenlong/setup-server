@@ -1060,6 +1060,10 @@ def services_payload():
             "usage": usage_entry(usage, svc.get("key")),
             "deployed_at": deployed_at(svc.get("marker")),
             "resources": service_resources(svc),
+            # The install receipt (see write_receipt), for the catalogue
+            # page's "installed on" line. null when there is none, which is
+            # normal for anything deployed from a terminal.
+            "receipt": load_receipt(svc.get("key")),
         })
     return {"host": host, "groups": load_groups(), "services": services}
 

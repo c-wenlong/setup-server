@@ -440,7 +440,11 @@ Build in this order:
    `compose up` or native hook → Serve (still the one interactive step)
    → receipt. This is `install <id>` with no agent in the loop.
 4. **Catalogue page** — browse the *index*, install through apply, show
-   receipt state (installed / available / planned). Only now does a
+   receipt state (installed / available / planned). *Landed 2026-10-25* at
+   `#/catalogue` (`app/web/SPEC.md` v6). Decided the same day: "apply" is
+   the existing deploy of the app's `setup.sh`, so catalogue apps keep the
+   full service contract and there is no compose-only installer (step 3
+   reduces to the receipt that deploy now writes). Only now does a
    dedicated page earn its keep.
 5. **Remove** — stop + un-serve, keep data; `--purge` deletes
    `~/services/<id>` and the receipt. Align with

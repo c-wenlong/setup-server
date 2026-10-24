@@ -923,6 +923,10 @@
       hideNotice();
       text(elHost, host || ' ');
       render();
+      /* catalogue.js paints from this same list rather than polling twice. */
+      try {
+        document.dispatchEvent(new CustomEvent('launcher:services'));
+      } catch (e) { /* very old browser: the catalogue repaints on its own route */ }
 
       /* Keep an open detail page's status line live too, without refetching
          the detail itself — that would fight whatever is being typed. */
@@ -2276,11 +2280,44 @@
     window.scrollTo(0, gridScroll);
   }
 
+  /* #/catalogue is painted by catalogue.js; this side only gets the grid
+     out of its way and back again. */
+  function isCatalogueRoute() {
+    return String(location.hash || '') === '#/catalogue';
+  }
+
+  function showGrid(on) {
+    elVGrid.hidden = !on;
+    elSearch.hidden = !on;
+    if (elSearchRow) elSearchRow.hidden = !on;
+    setBoardChrome(on && VIEW.mode() === 'board');
+  }
+
   function route() {
     var key = routeKey();
-    if (key) openDetail(key);
-    else closeDetail();
+    if (key) { openDetail(key); return; }
+    closeDetail();
+    showGrid(!isCatalogueRoute());
   }
+
+  /* The small surface catalogue.js needs: the list the grid already polls,
+     and the grid's own deploy sheet, so an install from the catalogue is the
+     same confirm-then-log flow as a tap on a dimmed tile. */
+  window.LauncherApp = {
+    loaded: function () { return loaded; },
+    services: function () { return services.slice(); },
+    groups: function () { return groups.slice(); },
+    refresh: function () { return load(true); },
+    deploy: function (key, opener) {
+      var svc = find(key);
+      if (!svc) return false;
+      var job = liveJob(svc);
+      if (job) { openSheet(svc, opener, job, jobAction(svc)); return true; }
+      if (svc.state !== 'available') return false;
+      openSheet(svc, opener);
+      return true;
+    }
+  };
 
   window.addEventListener('hashchange', function () {
     if (routeKey() && detailKey === null) navDepth++;
