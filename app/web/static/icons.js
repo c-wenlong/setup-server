@@ -2,7 +2,7 @@
  *
  * Two sources, in order:
  *
- *   1. Vendored brand marks in web/icons/ — real app logos, in their own
+ *   1. Vendored brand marks in static/icons/ — real app logos, in their own
  *      colours, keyed by service `key` (immich -> icons/immich.svg). Returned
  *      as an <img>. Files are local; nothing here touches the network, so the
  *      page still renders with the internet down.
@@ -37,7 +37,7 @@
   /* service key -> vendored file basename. `dark: true` means a companion
      "<base>-dark.<ext>" exists and is used when the page theme is dark.
      `ext` defaults to 'svg'.
-     Provenance and licence: web/icons/NOTICE.md */
+     Provenance and licence: static/icons/NOTICE.md */
   var BRANDS = {
     'immich':        { file: 'immich' },
     /* Bespoke mark, not from the icon set: circular-cropped from the original

@@ -64,6 +64,13 @@ setup() {
   echo "shared" > "$R/self-learn/same.txt"
   echo "old" > "$R/self-learn/differs.txt"
 
+  # deploy.sh copies a *-deploy timer runs, with paths baked in at install.
+  mkdir -p "$HOME/services/self-learn/bin"
+  printf 'ENV_FILE="%s/self-learn/.env"\nCOMPOSE_DIR="%s/self-learn"\nOTHER="%s/self-learner"\n' "$R" "$R" "$R" \
+    > "$HOME/services/self-learn/bin/deploy.sh"
+  chmod +x "$HOME/services/self-learn/bin/deploy.sh"
+  cp "$HOME/services/self-learn/bin/deploy.sh" "$HOME/services/self-learn/bin/deploy.sh.bak-1"
+
   # Units: launcher points at the old folder; self-learn only in a comment.
   if [ "$OS" = "Linux" ]; then UD="$HOME/.config/systemd/user"; else UD="$HOME/Library/LaunchAgents"; fi
   mkdir -p "$UD"
@@ -126,6 +133,11 @@ check "old immich/ removed"                 test ! -e "$R/immich"
 check "old launcher/ removed (bytecode)"    test ! -e "$R/launcher"
 check "bytecode not moved"                  test ! -e "$R/app/web/__pycache__"
 check "KUMA_ENV_FILE rewritten"             grep -qx "KUMA_ENV_FILE=$R/services/monitoring/.env" "$R/services/ntfy-control/.env"
+check "deploy.sh ENV_FILE rewritten"        grep -qx "ENV_FILE=\"$R/services/self-learn/.env\"" "$HOME/services/self-learn/bin/deploy.sh"
+check "deploy.sh COMPOSE_DIR rewritten"     grep -qx "COMPOSE_DIR=\"$R/services/self-learn\"" "$HOME/services/self-learn/bin/deploy.sh"
+check "a longer folder name is not matched" grep -qx "OTHER=\"$R/self-learner\"" "$HOME/services/self-learn/bin/deploy.sh"
+check "deploy.sh stays executable"          test -x "$HOME/services/self-learn/bin/deploy.sh"
+check ".bak copies left alone"              grep -qx "COMPOSE_DIR=\"$R/self-learn\"" "$HOME/services/self-learn/bin/deploy.sh.bak-1"
 check "identical duplicate dropped"         test ! -e "$R/self-learn/same.txt"
 check "differing file not overwritten"      grep -qx new "$R/services/self-learn/differs.txt"
 check "differing old copy left in place"    grep -qx old "$R/self-learn/differs.txt"
@@ -148,6 +160,15 @@ check "no setup re-run"                     calls_lack "setup "
 check "no compose call"                     calls_lack "docker compose"
 teardown
 
+echo "• a failing setup.sh does not stop the container step"
+setup
+printf '#!/usr/bin/env bash\nexit 3\n' > "$R/app/web/setup.sh"
+migrate
+check "exits non-zero"                      [ "$CODE" -ne 0 ]
+check "names the failed setup"              out_has "setup.sh failed for: app/web"
+check "containers still recreated"          calls_have "up -d --no-deps nginx"
+teardown
+
 echo "• --dry-run changes nothing"
 setup
 migrate --dry-run
@@ -155,6 +176,7 @@ check "exits zero"                          [ "$CODE" -eq 0 ]
 check ".env not moved"                      test -f "$R/immich/.env"
 check "nothing at the new path"             test ! -e "$R/services/immich/.env"
 check "KUMA_ENV_FILE untouched"             grep -qx "KUMA_ENV_FILE=$R/monitoring/.env" "$R/ntfy-control/.env"
+check "deploy.sh untouched"                 grep -qx "COMPOSE_DIR=\"$R/self-learn\"" "$HOME/services/self-learn/bin/deploy.sh"
 check "no setup run"                        calls_lack "setup "
 check "no compose call"                     calls_lack "docker compose"
 check "bytecode still there"                test -f "$R/launcher/__pycache__/server.cpython-313.pyc"
