@@ -29,7 +29,7 @@
 # gitignored .env (0600); later runs read it from there.
 #
 # Requirements beyond the repo baseline (curl, Docker, Tailscale): git and
-# uv (the build is `uv run scripts/build_site.py`).
+# uv (the build is `uv run apps/web/build/build_site.py`).
 #
 # Idempotent: re-running refreshes the deploy script + poller and repairs any
 # missing piece; an existing .env and nginx.conf are never overwritten.
@@ -59,7 +59,7 @@ command -v curl >/dev/null || die "curl is required."
 command -v git >/dev/null || die "git is required."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
 
-command -v uv >/dev/null || die "uv is required (the site builds with 'uv run scripts/build_site.py'). Install: https://docs.astral.sh/uv/"
+command -v uv >/dev/null || die "uv is required (the site builds with 'uv run apps/web/build/build_site.py'). Install: https://docs.astral.sh/uv/"
 
 if ! command -v docker >/dev/null; then
   [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
@@ -89,7 +89,8 @@ if [ -f "$ENV_FILE" ] && [ -z "${SOURCE_REPO_SET+x}" ]; then
   [ -n "$saved_repo" ] && SOURCE_REPO="$saved_repo"
 fi
 [ -d "$SOURCE_REPO/.git" ] || die "Sources repo not found at $SOURCE_REPO (set SOURCE_REPO=... or clone it first)."
-[ -f "$SOURCE_REPO/scripts/build_site.py" ] || die "$SOURCE_REPO does not look like the sources repo (no scripts/build_site.py)."
+[ -f "$SOURCE_REPO/apps/web/build/build_site.py" ] || [ -f "$SOURCE_REPO/scripts/build_site.py" ] \
+  || die "$SOURCE_REPO does not look like the sources repo (no apps/web/build/build_site.py or scripts/build_site.py)."
 
 # First run needs the passphrase up front (it is written into .env below);
 # on re-runs the existing .env supplies it.

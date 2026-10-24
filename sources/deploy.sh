@@ -23,7 +23,7 @@
 #   git -C $SOURCE_REPO pull --ff-only     # best effort; a dirty or offline
 #                                          # repo just builds its local HEAD
 #   uv sync --quiet                        # in the repo, like run_web.sh
-#   uv run scripts/build_site.py --out www/next
+#   uv run apps/web/build/build_site.py --out www/next   # scripts/ before 2026-10
 #   repoint www/current -> releases/<sha>  # atomic: one rename over the old symlink
 
 set -euo pipefail
@@ -100,10 +100,16 @@ echo "deploying $local_sha (was: $built_sha)"
 echo "syncing deps (uv sync)"
 ( cd "$REPO_DIR" && uv sync --quiet )
 
-echo "building site (build_site.py — encrypts the corpus, takes a moment)"
+# The sources repo moved the build from scripts/ to apps/web/build/ (2026-10).
+# Pick whichever the pulled tree has, so a deploy on either side of that
+# change builds.
+BUILD_SCRIPT=apps/web/build/build_site.py
+[ -f "$REPO_DIR/$BUILD_SCRIPT" ] || BUILD_SCRIPT=scripts/build_site.py
+
+echo "building site ($BUILD_SCRIPT — encrypts the corpus, takes a moment)"
 rm -rf "$WWW_DIR/next"
 mkdir -p "$WWW_DIR"
-( cd "$REPO_DIR" && uv run scripts/build_site.py --out "$WWW_DIR/next" )
+( cd "$REPO_DIR" && uv run "$BUILD_SCRIPT" --out "$WWW_DIR/next" )
 
 # --------------------------------------------------------------------- swap
 # nginx serves the `current` symlink inside the parent mount. Repoint it with
