@@ -74,11 +74,41 @@ from the repo's `services/` folder despite the shared name.
 | `SETUP.md` | Architecture diagram, security model, dependency table, what the script does step-by-step, client-side setup, ops commands. |
 | `TROUBLESHOOT.md` | Layered triage (service → local health → publish → client), symptom-keyed fixes, nuke-and-pave recipe. |
 | `tests/run-tests.sh` | See below. |
+| `teardown.sh` | Optional, see below. When present, the launcher offers a Remove button for the service. |
 | `docker-compose.yml` | Docker-based services only (most of them). Ports published to `127.0.0.1` only, `restart: unless-stopped` on every service (never `always`, so a stopped app stays stopped across reboots), so no systemd unit is needed. Jellyfin adds a second overlay file, `docker-compose.gpu.yml`, for its opt-in NVENC path. |
 
 Planning documents (`PLAN.md`, `SPEC.md`, `COMPETITIVE-ANALYSIS.md`, a `docs/`
 folder) are optional and kept after a service ships; when the shipped service
 diverges from one, note the divergence in that document rather than deleting it.
+
+## teardown.sh (optional)
+
+The inverse of `setup.sh`'s run + publish, per `docs/teardown-sh.md`, which
+also lists each service's landmines. `services/stirling-pdf/teardown.sh` is
+the reference. When a service ships one:
+
+- Same preflight as `setup.sh` (regular user, Linux + macOS). Reads ports
+  and paths from `.env` the way Compose does (quotes, `export`, inline
+  comments) without sourcing it, and dies when `.env` is missing rather
+  than guessing. Dies if `tailscale serve status` cannot be read, before
+  anything changes.
+- Default (no flags, what the launcher runs): unpublish **every** Serve port
+  whose handlers all proxy to this service's local port, found from `serve
+  status` rather than from `.env` (a re-run can publish a second port); a
+  port shared with another handler is left on with a warning; never
+  `tailscale serve reset`. Then stop the service (`compose down` without
+  `-v`, or stop + disable its unit). Data dir and `.env` stay, so
+  `./setup.sh` restores it.
+- `--purge`: asks for the service name typed back before changing anything,
+  then also deletes the data dir named in `.env` (trailing slashes stripped,
+  `..` refused, and its real path must be a strict child of the real
+  `~/services`) and `.env`. Never touches `~/.claude`, `~/.codex`, another
+  service's port, lingering, the docker group or the Tailscale operator.
+  The launcher never passes it.
+- Mocked tests in the service's suite: the right port goes off and
+  neighbours do not, data kept without `--purge`, a wrong confirmation
+  changes nothing, odd data paths refused.
+- The service's TROUBLESHOOT.md "Nuke and pave" points at the script.
 
 ## Testing requirements
 

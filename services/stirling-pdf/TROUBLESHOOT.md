@@ -87,13 +87,16 @@ have the disk and RAM.
 
 ## Nuke and pave
 
-Stops the stack, deletes data, keeps `.env` unless you remove it too.
-There is no undo.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down`, and refuses to delete a
+data dir that is not really inside `~/services/`.
 
 ```bash
 cd ~/dev/setup-server/services/stirling-pdf
-docker compose --project-directory . down
-rm -rf ~/services/stirling-pdf
-# optional: rm .env
-./setup.sh
+./teardown.sh            # remove, keep data + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete STIRLING_DATA and .env; type the name
+./setup.sh               # back, fresh if you purged
 ```
+
+There is no undo for `--purge`. From a terminal, pause the `stirling-pdf`
+monitor in Uptime Kuma first, or it pages; the launcher's Remove does that.

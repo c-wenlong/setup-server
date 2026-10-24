@@ -33,7 +33,8 @@
     deploy:  { label: 'Deploy',  busy: 'Starting…',    gerund: 'Deploying'   },
     start:   { label: 'Start',   busy: 'Starting…',    gerund: 'Starting'    },
     stop:    { label: 'Stop',    busy: 'Stopping…',    gerund: 'Stopping'    },
-    restart: { label: 'Restart', busy: 'Restarting…',  gerund: 'Restarting'  }
+    restart: { label: 'Restart', busy: 'Restarting…',  gerund: 'Restarting'  },
+    remove:  { label: 'Remove',  busy: 'Removing…',    gerund: 'Removing'    }
   };
 
   function actionDef(name) {
@@ -946,6 +947,7 @@
           detailSvc.state = fresh.state;
           detailSvc.job = fresh.job;
           if (fresh.control !== undefined) detailSvc.control = fresh.control;
+          if (fresh.removable !== undefined) detailSvc.removable = fresh.removable;
           if (detailSvc.url == null) detailSvc.url = fresh.url;
           paintHead(detailSvc);
           /* Resources ride the same poll — cpu_pct is null until the server
@@ -1152,6 +1154,14 @@
              'the seconds in between, and anything mid-request is dropped. ' +
              'Nothing happens until you confirm.';
     }
+    if (action === 'remove') {
+      return 'This takes ' + name + ' off the box: its uptime monitor is paused, ' +
+             'then its teardown.sh stops it and takes its address off the tailnet. ' +
+             'Its data and .env stay where they are, so Install brings it back as ' +
+             'it was. Deleting the data is deliberately not here: run ' +
+             'teardown.sh --purge in a terminal for that. Nothing happens until ' +
+             'you confirm.';
+    }
     return 'This stops ' + name + ' on the server. Its containers and units go ' +
            'down in order; nothing is deleted, and Start brings it back. Until ' +
            'then anything pointed at it — a phone app, a backup, another ' +
@@ -1213,7 +1223,8 @@
     elConfirm.disabled = false;
     elConfirm.hidden = false;
     /* The one confirm that takes something down is not the accent colour. */
-    elConfirm.className = 'btn btn-primary' + (action === 'stop' ? ' is-danger' : '');
+    elConfirm.className = 'btn btn-primary' +
+      (action === 'stop' || action === 'remove' ? ' is-danger' : '');
     text(elCancel, 'Cancel');
     text(elConfirm, def.label);
 
@@ -1316,7 +1327,10 @@
             attachJob(live, fresh, jobAction(fresh));
             return;
           }
-          actionRetry('Something is already running for this service. Wait for it to finish, then try again.');
+          /* No job holds the slot, so the 409 is the server refusing for a
+             reason that will not clear by retrying (e.g. already removed
+             from another tab). Say its sentence and stop offering. */
+          actionRefused(msgFrom(res, 'The server will not ' + action + ' this service right now.'));
         });
         return;
       }
@@ -1515,7 +1529,8 @@
   function actionButton(svc, action) {
     var def = ACTIONS[action];
     var b = ctlButton(def.label,
-      action === 'start' ? 'is-primary' : (action === 'stop' ? 'is-danger' : ''),
+      action === 'start' ? 'is-primary'
+        : (action === 'stop' || action === 'remove' ? 'is-danger' : ''),
       function (node) { openActionSheet(svc, action, node); });
     b.setAttribute('aria-label', def.label + ' ' + nameOf(svc));
     return b;
@@ -1554,7 +1569,8 @@
     var installed = state === 'active' || state === 'stopped';
     var ctl = controlState(svc);
     var job = liveJob(svc);
-    var sig = [state, ctl.on, ctl.reason, job, jobAction(svc), actionBusy].join('|');
+    var sig = [state, ctl.on, ctl.reason, job, jobAction(svc), actionBusy,
+               svc && svc.removable === true].join('|');
     if (sig === ctlSig) return;
     ctlSig = sig;
 
@@ -1592,6 +1608,8 @@
     var buttons = state === 'active'
       ? [actionButton(svc, 'restart'), actionButton(svc, 'stop')]
       : [actionButton(svc, 'start')];
+    /* Only when the service ships a teardown.sh: the server says so. */
+    if (svc.removable === true) buttons.push(actionButton(svc, 'remove'));
 
     for (var i = 0; i < buttons.length; i++) {
       if (actionBusy) buttons[i].disabled = true;   // a POST is already out
@@ -2193,7 +2211,8 @@
       job:     d.job !== undefined ? d.job : known.job,
       /* {controllable, reason} — whether this service gets start/stop buttons
          at all. Undefined on a backend that has no lifecycle endpoint. */
-      control: d.control !== undefined ? d.control : known.control
+      control: d.control !== undefined ? d.control : known.control,
+      removable: d.removable !== undefined ? d.removable : known.removable
     };
     detailSvc = view;
     paintHead(view);
@@ -2329,6 +2348,14 @@
       if (job) { openSheet(svc, opener, job, jobAction(svc)); return true; }
       if (svc.state !== 'available') return false;
       openSheet(svc, opener);
+      return true;
+    },
+    remove: function (key, opener) {
+      var svc = find(key);
+      if (!svc || svc.removable !== true) return false;
+      var job = liveJob(svc);
+      if (job) { openSheet(svc, opener, job, jobAction(svc)); return true; }
+      openActionSheet(svc, 'remove', opener);
       return true;
     }
   };

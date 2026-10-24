@@ -475,3 +475,30 @@ deploy job; there is no separate compose-only installer.
   `LauncherApp.error()`; with nothing loaded the page shows the error and a
   Retry. Board chrome (which locks page scroll) is never applied on this
   route, even though `render()` re-applies it after each poll.
+
+## v7 — Remove (2026-10-25)
+
+Step 5 of the build order. `remove` is a fourth lifecycle action on the
+existing `POST api/services/{key}/action` (`{"action": "remove"}`), with the
+same job, sheet, log and 403/409/429 handling as start/stop/restart.
+
+- **Offered only** when the service is controllable and a `teardown.sh`
+  sits beside its `setup.sh` (`removable` on the list and detail payloads).
+  403 without one, and for locked services (launcher, ntfy, ollama). 409
+  when the service is not installed (or already removed).
+- **Steps**: pause the service's Kuma monitor (best effort), then run its
+  `teardown.sh` with **no arguments** through the same docker-group wrapper
+  as a deploy, then (only if the teardown failed, so the service is still
+  up) resume the monitor. `--purge` is never sent; deleting data is
+  terminal-only. The resume a reinstall does is appended to that deploy's
+  job log, with a warning line when it fails.
+- **On success** the receipt gets `removed_at`. While that is set and the
+  health probe does not answer, `installed` is false and the tile and
+  catalogue read Not installed ("Removed <date> · data kept"), even though
+  the data dir that serves as the marker is still there. A deploy writes a
+  fresh receipt with no `removed_at`, and resumes the monitor the remove
+  paused.
+- **UI**: a red Remove button on the detail page beside start/stop/restart
+  and a Remove link on installed catalogue cards; the confirm sheet says the
+  data and `.env` stay and that `teardown.sh --purge` is the terminal-only
+  way to delete them.

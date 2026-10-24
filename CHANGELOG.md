@@ -10,6 +10,17 @@ first, dated by merge.
 
 ### Added
 
+- **Remove an app from the launcher.** Services that ship a `teardown.sh`
+  get a Remove button (detail page and catalogue): it pauses the app's Kuma
+  monitor, runs `teardown.sh` with no flags (unpublish only that app's Serve
+  port, stop it), and records `removed_at` in its receipt so it reads Not
+  installed while its data and `.env` stay. Installing it again resumes the
+  monitor. `teardown.sh --purge` (typed confirmation) is the terminal-only
+  way to delete the data. First teardown: `services/stirling-pdf`; the
+  contract is in `AGENTS.md`, spec in `app/web/SPEC.md` (v7).
+
+### Added
+
 - **Catalogue page in the launcher.** `#/catalogue` (Catalogue button in the
   header) lists every app by category with its description, author and
   status, from the same `api/services` poll as the grid, which now carries

@@ -1024,7 +1024,9 @@ def services_payload():
     for svc in registry:
         health = svc.get("health")
         active = bool(health) and probes.get(health, False)
-        installed = active or marker_exists(svc.get("marker"))
+        receipt = load_receipt(svc.get("key"))
+        installed = ((active or marker_exists(svc.get("marker")))
+                     and not is_removed(receipt, active))
         name, description = effective(svc, overrides)
         gid = svc.get("group")
         services.append({
@@ -1063,7 +1065,10 @@ def services_payload():
             # The install receipt (see write_receipt), for the catalogue
             # page's "installed on" line. null when there is none, which is
             # normal for anything deployed from a terminal.
-            "receipt": load_receipt(svc.get("key")),
+            "receipt": receipt,
+            # Whether the Remove action is on offer (a teardown.sh exists and
+            # the service is controllable). Never offers --purge.
+            "removable": removable(svc),
         })
     return {"host": host, "groups": load_groups(), "services": services}
 
@@ -1093,7 +1098,9 @@ def service_detail(key):
     health = svc.get("health")
     probes = probe_all([health]) if health else {}
     active = bool(health) and probes.get(health, False)
-    installed = active or marker_exists(svc.get("marker"))
+    receipt = load_receipt(key)
+    installed = ((active or marker_exists(svc.get("marker")))
+                 and not is_removed(receipt, active))
     overrides = load_overrides()
     name, description = effective(svc, overrides)
     edited = sorted(overrides.get(key, {}))
@@ -1129,7 +1136,8 @@ def service_detail(key):
             "edited": edited,
         },
         "env": env_payload(svc),
-        "receipt": load_receipt(key),
+        "receipt": receipt,
+        "removable": removable(svc),
     }
 
 
@@ -1832,10 +1840,13 @@ def _reap(job, proc, logfile):
     if code == 0:
         # Best effort: a receipt that cannot be written must not turn a
         # successful deploy into a failed job.
+        previous = load_receipt(job["key"])
         try:
             write_receipt(job["key"], job["id"], job.get("source"))
         except Exception as exc:
             log("receipt for %s not written: %s" % (job["key"], exc))
+        if previous and previous.get("removed_at"):
+            _resume_after_reinstall(job)
     _finish(job, code)
 
 
@@ -1975,6 +1986,62 @@ def deploy_source(svc, script):
     }
 
 
+def mark_removed(key):
+    """Record that a launcher Remove succeeded: the service is off the box
+    but its data is kept. The tile then reads as not installed until a deploy
+    writes a fresh receipt (which carries no removed_at)."""
+    path = receipt_path(key)
+    if path is None:
+        raise DeployError(404, "unknown service")
+    with _receipts_lock:
+        doc = load_receipt(key) or {"version": RECEIPT_VERSION, "key": key}
+        doc["removed_at"] = _now_iso()
+        _write_json_atomically(path, doc, ".%s." % key)
+    return doc
+
+
+def is_removed(receipt, active):
+    """True when a launcher Remove is the latest thing that happened.
+
+    A health probe that answers wins: something brought it back from a
+    terminal, and calling a running service "not installed" would be a lie.
+    """
+    return bool(isinstance(receipt, dict) and receipt.get("removed_at")
+                and not active)
+
+
+def _resume_after_reinstall(job):
+    """A Remove paused the service's Kuma monitor; a reinstall resumes it.
+
+    Best effort, but never silent: the outcome is appended to the deploy's
+    job log, so a monitor left paused shows up where the deploy is read.
+    """
+    key = job["key"]
+    svc = find_service(key)
+    monitor = control_monitor(control_block(svc)) if svc else None
+    step = kuma_step("resume", monitor) if monitor else None
+    if not step:
+        return
+    try:
+        with open(job["log_path"], "ab", buffering=0) as logfile:
+            logfile.write(("$ %s\n" % " ".join(step["argv"])).encode())
+            try:
+                proc = subprocess.Popen(step["argv"], stdout=logfile,
+                                        stderr=subprocess.STDOUT,
+                                        stdin=subprocess.DEVNULL, env=step["env"])
+                code = proc.wait()
+            except Exception as exc:
+                code = -1
+                logfile.write(("could not run: %s\n" % exc).encode())
+            if code != 0:
+                logfile.write(("[warning: Kuma monitor %s is still paused "
+                               "(exited %d); resume it in Uptime Kuma]\n"
+                               % (monitor, code)).encode())
+                log("kuma resume for %s exited %d" % (key, code))
+    except OSError as exc:
+        log("kuma resume for %s not run: %s" % (key, exc))
+
+
 def write_receipt(key, job_id, source=None):
     """Record a successful deploy of `key`. Returns the receipt written.
 
@@ -2028,7 +2095,7 @@ def write_receipt(key, job_id, source=None):
 #     "locked": "why this one is deliberately not controllable"
 #   }
 
-CONTROL_ACTIONS = ("start", "stop", "restart")
+CONTROL_ACTIONS = ("start", "stop", "restart", "remove")
 
 # Container and unit names, as they may appear in the registry. Everything
 # outside this shape is dropped rather than executed — the same instinct as
@@ -2103,6 +2170,24 @@ def control_status(svc):
         return {"controllable": False,
                 "reason": "this service has no start/stop configuration"}
     return {"controllable": True, "reason": None}
+
+
+def teardown_script(svc):
+    """Absolute path of the teardown.sh beside the service's setup.sh, or None.
+
+    Derived from the registry's setup path only (the same allowed-roots gate
+    as a deploy), so nothing about it can come from a request.
+    """
+    try:
+        script = resolve_script(svc)
+    except DeployError:
+        return None
+    path = os.path.join(os.path.dirname(script), "teardown.sh")
+    return path if os.path.isfile(path) else None
+
+
+def removable(svc):
+    return bool(control_status(svc)["controllable"] and teardown_script(svc))
 
 
 def _find_uv():
@@ -2200,6 +2285,29 @@ def plan_action(svc, action):
     monitor = control_monitor(block)
     steps = []
 
+    if action == "remove":
+        # Pause first, so taking it off the box does not page the phone; a
+        # reinstall resumes it (_resume_after_reinstall). Then the service's
+        # own teardown.sh, with no arguments: the safe remove that keeps data.
+        # --purge is never sent from here; it is terminal-only on purpose.
+        teardown = teardown_script(svc)
+        if not teardown:
+            return []
+        if monitor:
+            step = kuma_step("pause", monitor)
+            if step:
+                steps.append(step)
+        steps.append({"argv": build_command(teardown), "optional": False,
+                      "always": False, "env": None})
+        # A teardown that fails leaves the service up, so its monitor must
+        # not stay paused. Runs only after a failure (see _run_steps).
+        if monitor:
+            step = kuma_step("resume", monitor)
+            if step:
+                step["on_failure"] = True
+                steps.append(step)
+        return steps
+
     if action in ("stop", "restart"):
         if monitor:
             step = kuma_step("pause", monitor)
@@ -2249,6 +2357,8 @@ def _run_steps(job, steps):
 
     try:
         for index, step in enumerate(steps):
+            if step.get("on_failure"):
+                continue
             result = run_one(step)
             if result == 0:
                 continue
@@ -2259,7 +2369,7 @@ def _run_steps(job, steps):
             logfile.write(("[failed: exited %d]\n" % result).encode())
             code = result
             for tail in steps[index + 1:]:
-                if tail.get("always"):
+                if tail.get("always") or tail.get("on_failure"):
                     run_one(tail)
             break
     finally:
@@ -2267,6 +2377,11 @@ def _run_steps(job, steps):
             logfile.close()
         except Exception:
             pass
+    if code == 0 and job.get("action") == "remove":
+        try:
+            mark_removed(job["key"])
+        except Exception as exc:
+            log("removal of %s not recorded: %s" % (job["key"], exc))
     _finish(job, code)
 
 
@@ -2285,6 +2400,16 @@ def start_action(key, action):
     status = control_status(svc)
     if not status["controllable"]:
         raise DeployError(403, status["reason"])
+    if action == "remove":
+        if not teardown_script(svc):
+            raise DeployError(403, "this service has no teardown.sh yet, so "
+                                   "it can only be removed by hand (see its "
+                                   "TROUBLESHOOT.md)")
+        health = svc.get("health")
+        active = bool(health) and probe_all([health]).get(health, False)
+        if not ((active or marker_exists(svc.get("marker")))
+                and not is_removed(load_receipt(key), active)):
+            raise DeployError(409, "this service is not installed")
 
     steps = plan_action(svc, action)
     if not steps:

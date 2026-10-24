@@ -619,7 +619,8 @@ class ServiceJobFieldTest(SandboxTest):
         server.start_deploy("alpha")
         for tile in self.tiles().values():
             self.assertEqual(list(tile), self.EIGHT + [
-                "job", "control", "usage", "deployed_at", "resources", "receipt"])
+                "job", "control", "usage", "deployed_at", "resources", "receipt",
+                "removable"])
 
     # ---- restart
 
@@ -754,8 +755,8 @@ class HttpTest(SandboxTest):
         self.assertEqual(sorted(svc), ["active", "author", "control",
                                        "deployed_at", "description", "group",
                                        "icon", "installed", "job", "key",
-                                       "name", "receipt", "resources", "state",
-                                       "tagline", "url", "usage"])
+                                       "name", "receipt", "removable", "resources",
+                                       "state", "tagline", "url", "usage"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
         self.assertEqual(svc["author"], "c-wenlong")
         self.assertIsNone(svc["job"])
@@ -769,7 +770,7 @@ class HttpTest(SandboxTest):
                          ["key", "name", "tagline", "group", "description",
                           "author", "icon", "url", "state", "installed",
                           "active", "job", "control", "usage", "deployed_at",
-                          "resources", "receipt"])
+                          "resources", "receipt", "removable"])
 
     def test_groups_empty_when_the_registry_has_none(self):
         # An older services.json without a catalog still paints a flat grid.
@@ -1061,7 +1062,7 @@ class DetailTest(SandboxTest):
         self.assertEqual(sorted(detail), [
             "active", "control", "deployed_at", "description", "env", "group",
             "icon", "installed", "job", "key", "meta", "name", "receipt",
-            "resources", "state", "tagline", "url", "usage"])
+            "removable", "resources", "state", "tagline", "url", "usage"])
         self.assertEqual(detail["key"], "alpha")
         self.assertEqual(detail["name"], "Alpha")
         self.assertEqual(detail["description"], "Shipped description.")
@@ -4979,6 +4980,152 @@ class ReceiptTest(SandboxTest):
         home = os.path.expanduser("~")
         self.assertEqual(server._collapse_home(os.path.join(home, "dev", "x")), "~/dev/x")
         self.assertEqual(server._collapse_home(home + "-other/x"), home + "-other/x")
+
+
+
+class RemoveTest(ControlTestBase):
+    """The Remove action: Kuma pause, then the service's teardown.sh."""
+
+    def control_registry(self):
+        self.marker = os.path.join(self.tmp, "data", "n8n")
+        os.makedirs(self.marker)
+        for key in ("n8n", "bare", "launcher", "ntfy"):
+            self.make_script("%s/setup.sh" % key)
+        for key in ("n8n", "launcher", "ntfy"):
+            self.make_script("%s/teardown.sh" % key)
+
+        def svc(key, control, marker=None, health=None):
+            return {"key": key, "name": key, "tagline": "t", "icon": "code",
+                    "url": None, "health": health, "marker": marker,
+                    "setup": "%s/setup.sh" % key, "env": None, "control": control}
+        return {"services": [
+            svc("n8n", {"parts": [{"container": "n8n"}], "kuma": "n8n"},
+                marker=self.marker),
+            svc("bare", {"parts": [{"container": "bare"}], "kuma": None},
+                marker=self.marker),
+            svc("launcher", {"parts": [{"unit": "launcher.service"}]},
+                marker=self.marker),
+            svc("ntfy", {"locked": "ntfy is how you start things again"},
+                marker=self.marker),
+        ]}
+
+    def tiles(self):
+        return {s["key"]: s for s in server.services_payload()["services"]}
+
+    def test_removable_needs_a_teardown_and_control(self):
+        tiles = self.tiles()
+        self.assertTrue(tiles["n8n"]["removable"])
+        self.assertFalse(tiles["bare"]["removable"])       # no teardown.sh
+        self.assertFalse(tiles["launcher"]["removable"])   # hard-locked
+        self.assertFalse(tiles["ntfy"]["removable"])       # registry-locked
+        self.assertTrue(server.service_detail("n8n")["removable"])
+
+    def test_plan_pauses_kuma_then_runs_teardown_without_purge(self):
+        self.enable_kuma()
+        argvs = self.plan("n8n", "remove")
+        self.assertEqual(argvs[0][-2:], ["pause", "n8n"])
+        teardown = os.path.realpath(os.path.join(self.repo, "n8n", "teardown.sh"))
+        self.assertEqual(argvs[1], [teardown])
+        self.assertEqual(argvs[2][-2:], ["resume", "n8n"])   # failure-only
+        self.assertEqual(len(argvs), 3)
+        steps = server.plan_action(server.find_service("n8n"), "remove")
+        self.assertTrue(steps[2]["on_failure"])
+        self.assertNotIn("--purge", " ".join(" ".join(a) for a in argvs))
+
+    def test_plan_without_kuma_is_just_teardown(self):
+        argvs = self.plan("n8n", "remove")
+        self.assertEqual(len(argvs), 1)
+        self.assertTrue(argvs[0][0].endswith("teardown.sh"))
+
+    def test_no_teardown_is_403(self):
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_action("bare", "remove")
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertIn("teardown.sh", ctx.exception.message)
+
+    def test_locked_services_are_403(self):
+        for key in ("launcher", "ntfy"):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.start_action(key, "remove")
+            self.assertEqual(ctx.exception.status, 403, key)
+
+    def test_not_installed_is_409(self):
+        os.rmdir(self.marker)
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_action("n8n", "remove")
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_success_marks_removed_and_tile_reads_not_installed(self):
+        self.assertEqual(self.tiles()["n8n"]["state"], "stopped")
+        job = self.run_action("n8n", "remove")
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["action"], "remove")
+        self.assertTrue(server.load_receipt("n8n")["removed_at"])
+        tile = self.tiles()["n8n"]
+        self.assertFalse(tile["installed"])
+        self.assertEqual(tile["state"], "available")
+        self.assertTrue(os.path.isdir(self.marker))       # data kept
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_action("n8n", "remove")          # already removed
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_success_does_not_resume_kuma(self):
+        self.enable_kuma()
+        job = self.run_action("n8n", "remove")
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(self.argvs()[0][-2:], ["pause", "n8n"])
+        self.assertFalse(any(a[-2:] == ["resume", "n8n"] for a in self.argvs()))
+
+    def test_failed_teardown_resumes_kuma(self):
+        self.enable_kuma()
+        job = self.run_action("n8n", "remove", failures={"teardown.sh": 3})
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(self.argvs()[-1][-2:], ["resume", "n8n"])
+
+    def test_failed_reinstall_resume_is_logged(self):
+        self.enable_kuma()
+        self.run_action("n8n", "remove")
+        self.record_popen(failures={"resume": 2})
+        job = server.register_job("n8n", "deploy")
+        with open(job["log_path"], "wb") as fh:
+            fh.write(b"deploy output\n")
+        server._reap(job, ExitedProc(0), open(os.devnull, "wb"))
+        with open(job["log_path"], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("deploy output", text)
+        self.assertIn("still paused", text)
+        self.assertNotIn(SECRET_VALUE, text)
+
+    def test_failed_teardown_records_nothing(self):
+        job = self.run_action("n8n", "remove", failures={"teardown.sh": 3})
+        self.assertEqual(job["status"], "failed")
+        self.assertIsNone(server.load_receipt("n8n"))
+        self.assertTrue(self.tiles()["n8n"]["installed"])
+
+    def test_a_running_service_is_never_called_removed(self):
+        self.run_action("n8n", "remove")
+        self.assertTrue(server.is_removed(server.load_receipt("n8n"), False))
+        self.assertFalse(server.is_removed(server.load_receipt("n8n"), True))
+        self.assertFalse(server.is_removed(None, False))
+
+    def test_reinstall_clears_removal_and_resumes_kuma(self):
+        self.enable_kuma()
+        self.run_action("n8n", "remove")
+        self.spawned = []
+        job = server.register_job("n8n", "deploy")
+        server._reap(job, ExitedProc(0), open(os.devnull, "wb"))
+        r = server.load_receipt("n8n")
+        self.assertNotIn("removed_at", r)
+        self.assertEqual(r["deploys"], 1)
+        self.assertEqual(self.argvs()[-1][-2:], ["resume", "n8n"])
+        self.assertTrue(self.tiles()["n8n"]["installed"])
+
+    def test_plain_redeploy_does_not_touch_kuma(self):
+        self.enable_kuma()
+        self.record_popen()
+        job = server.register_job("n8n", "deploy")
+        server._reap(job, ExitedProc(0), open(os.devnull, "wb"))
+        self.assertEqual(self.argvs(), [])
 
 
 if __name__ == "__main__":

@@ -4,9 +4,11 @@ Audited 2026-09-15 against this repo’s actual `setup.sh` files, per-service
 `TROUBLESHOOT.md` nuke recipes, `app/web/services.json`, and a live
 Paperclip / OpenHands split-and-redeploy on `kai-home-server`.
 
-This is a design note, not a shipped contract. `AGENTS.md` still requires
-only `setup.sh`. Per-service **Nuke and pave** sections remain the
-authority for the exact commands until a `teardown.sh` exists.
+*Status 2026-10-25:* the contract below shipped as an optional file
+(`AGENTS.md` → "teardown.sh"), with `services/stirling-pdf/teardown.sh` as
+the reference and the launcher's Remove action running it without
+`--purge`. Services without one keep their **Nuke and pave** recipe as the
+authority.
 
 ## Recommendation
 
