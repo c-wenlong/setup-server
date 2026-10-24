@@ -488,7 +488,10 @@ same job, sheet, log and 403/409/429 handling as start/stop/restart.
   when the service is not installed (or already removed).
 - **Steps**: pause the service's Kuma monitor (best effort), then run its
   `teardown.sh` with **no arguments** through the same docker-group wrapper
-  as a deploy. `--purge` is never sent; deleting data is terminal-only.
+  as a deploy, then (only if the teardown failed, so the service is still
+  up) resume the monitor. `--purge` is never sent; deleting data is
+  terminal-only. The resume a reinstall does is appended to that deploy's
+  job log, with a warning line when it fails.
 - **On success** the receipt gets `removed_at`. While that is set and the
   health probe does not answer, `installed` is false and the tile and
   catalogue read Not installed ("Removed <date> · data kept"), even though

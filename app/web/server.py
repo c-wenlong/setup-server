@@ -1846,7 +1846,7 @@ def _reap(job, proc, logfile):
         except Exception as exc:
             log("receipt for %s not written: %s" % (job["key"], exc))
         if previous and previous.get("removed_at"):
-            _resume_after_reinstall(job["key"])
+            _resume_after_reinstall(job)
     _finish(job, code)
 
 
@@ -2010,20 +2010,36 @@ def is_removed(receipt, active):
                 and not active)
 
 
-def _resume_after_reinstall(key):
-    """A Remove paused the service's Kuma monitor; a reinstall resumes it."""
+def _resume_after_reinstall(job):
+    """A Remove paused the service's Kuma monitor; a reinstall resumes it.
+
+    Best effort, but never silent: the outcome is appended to the deploy's
+    job log, so a monitor left paused shows up where the deploy is read.
+    """
+    key = job["key"]
     svc = find_service(key)
     monitor = control_monitor(control_block(svc)) if svc else None
     step = kuma_step("resume", monitor) if monitor else None
     if not step:
         return
     try:
-        proc = subprocess.Popen(step["argv"], stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                stdin=subprocess.DEVNULL, env=step["env"])
-        proc.wait()
-    except Exception as exc:
-        log("kuma resume for %s failed: %s" % (key, exc))
+        with open(job["log_path"], "ab", buffering=0) as logfile:
+            logfile.write(("$ %s\n" % " ".join(step["argv"])).encode())
+            try:
+                proc = subprocess.Popen(step["argv"], stdout=logfile,
+                                        stderr=subprocess.STDOUT,
+                                        stdin=subprocess.DEVNULL, env=step["env"])
+                code = proc.wait()
+            except Exception as exc:
+                code = -1
+                logfile.write(("could not run: %s\n" % exc).encode())
+            if code != 0:
+                logfile.write(("[warning: Kuma monitor %s is still paused "
+                               "(exited %d); resume it in Uptime Kuma]\n"
+                               % (monitor, code)).encode())
+                log("kuma resume for %s exited %d" % (key, code))
+    except OSError as exc:
+        log("kuma resume for %s not run: %s" % (key, exc))
 
 
 def write_receipt(key, job_id, source=None):
@@ -2283,6 +2299,13 @@ def plan_action(svc, action):
                 steps.append(step)
         steps.append({"argv": build_command(teardown), "optional": False,
                       "always": False, "env": None})
+        # A teardown that fails leaves the service up, so its monitor must
+        # not stay paused. Runs only after a failure (see _run_steps).
+        if monitor:
+            step = kuma_step("resume", monitor)
+            if step:
+                step["on_failure"] = True
+                steps.append(step)
         return steps
 
     if action in ("stop", "restart"):
@@ -2334,6 +2357,8 @@ def _run_steps(job, steps):
 
     try:
         for index, step in enumerate(steps):
+            if step.get("on_failure"):
+                continue
             result = run_one(step)
             if result == 0:
                 continue
@@ -2344,7 +2369,7 @@ def _run_steps(job, steps):
             logfile.write(("[failed: exited %d]\n" % result).encode())
             code = result
             for tail in steps[index + 1:]:
-                if tail.get("always"):
+                if tail.get("always") or tail.get("on_failure"):
                     run_one(tail)
             break
     finally:

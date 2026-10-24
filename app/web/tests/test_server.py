@@ -5026,7 +5026,10 @@ class RemoveTest(ControlTestBase):
         self.assertEqual(argvs[0][-2:], ["pause", "n8n"])
         teardown = os.path.realpath(os.path.join(self.repo, "n8n", "teardown.sh"))
         self.assertEqual(argvs[1], [teardown])
-        self.assertEqual(len(argvs), 2)
+        self.assertEqual(argvs[2][-2:], ["resume", "n8n"])   # failure-only
+        self.assertEqual(len(argvs), 3)
+        steps = server.plan_action(server.find_service("n8n"), "remove")
+        self.assertTrue(steps[2]["on_failure"])
         self.assertNotIn("--purge", " ".join(" ".join(a) for a in argvs))
 
     def test_plan_without_kuma_is_just_teardown(self):
@@ -5065,6 +5068,33 @@ class RemoveTest(ControlTestBase):
         with self.assertRaises(server.DeployError) as ctx:
             server.start_action("n8n", "remove")          # already removed
         self.assertEqual(ctx.exception.status, 409)
+
+    def test_success_does_not_resume_kuma(self):
+        self.enable_kuma()
+        job = self.run_action("n8n", "remove")
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(self.argvs()[0][-2:], ["pause", "n8n"])
+        self.assertFalse(any(a[-2:] == ["resume", "n8n"] for a in self.argvs()))
+
+    def test_failed_teardown_resumes_kuma(self):
+        self.enable_kuma()
+        job = self.run_action("n8n", "remove", failures={"teardown.sh": 3})
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(self.argvs()[-1][-2:], ["resume", "n8n"])
+
+    def test_failed_reinstall_resume_is_logged(self):
+        self.enable_kuma()
+        self.run_action("n8n", "remove")
+        self.record_popen(failures={"resume": 2})
+        job = server.register_job("n8n", "deploy")
+        with open(job["log_path"], "wb") as fh:
+            fh.write(b"deploy output\n")
+        server._reap(job, ExitedProc(0), open(os.devnull, "wb"))
+        with open(job["log_path"], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("deploy output", text)
+        self.assertIn("still paused", text)
+        self.assertNotIn(SECRET_VALUE, text)
 
     def test_failed_teardown_records_nothing(self):
         job = self.run_action("n8n", "remove", failures={"teardown.sh": 3})

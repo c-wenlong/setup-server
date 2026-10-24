@@ -87,9 +87,9 @@ have the disk and RAM.
 
 ## Nuke and pave
 
-Use `teardown.sh`, not a hand recipe: it unpublishes only this service's
-Serve port (and only if Serve really points it here), runs `compose down`,
-and refuses to delete a data dir outside `~/services/`.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down`, and refuses to delete a
+data dir that is not really inside `~/services/`.
 
 ```bash
 cd ~/dev/setup-server/services/stirling-pdf

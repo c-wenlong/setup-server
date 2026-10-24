@@ -88,15 +88,21 @@ also lists each service's landmines. `services/stirling-pdf/teardown.sh` is
 the reference. When a service ships one:
 
 - Same preflight as `setup.sh` (regular user, Linux + macOS). Reads ports
-  and paths from `.env` and dies when `.env` is missing rather than guessing.
-- Default (no flags, what the launcher runs): unpublish **only this
-  service's** Serve port, and only if `tailscale serve status` shows it
-  pointing at this service's local port; never `tailscale serve reset`;
-  stop the service (`compose down` without `-v`, or stop + disable its
-  unit). Data dir and `.env` stay, so `./setup.sh` restores it.
+  and paths from `.env` the way Compose does (quotes, `export`, inline
+  comments) without sourcing it, and dies when `.env` is missing rather
+  than guessing. Dies if `tailscale serve status` cannot be read, before
+  anything changes.
+- Default (no flags, what the launcher runs): unpublish **every** Serve port
+  whose handlers all proxy to this service's local port, found from `serve
+  status` rather than from `.env` (a re-run can publish a second port); a
+  port shared with another handler is left on with a warning; never
+  `tailscale serve reset`. Then stop the service (`compose down` without
+  `-v`, or stop + disable its unit). Data dir and `.env` stay, so
+  `./setup.sh` restores it.
 - `--purge`: asks for the service name typed back before changing anything,
-  then also deletes the data dir named in `.env` (refused unless it is under
-  `~/services/`) and `.env`. Never touches `~/.claude`, `~/.codex`, another
+  then also deletes the data dir named in `.env` (trailing slashes stripped,
+  `..` refused, and its real path must be a strict child of the real
+  `~/services`) and `.env`. Never touches `~/.claude`, `~/.codex`, another
   service's port, lingering, the docker group or the Tailscale operator.
   The launcher never passes it.
 - Mocked tests in the service's suite: the right port goes off and

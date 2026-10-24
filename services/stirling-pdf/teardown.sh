@@ -3,8 +3,8 @@
 # teardown.sh — take Stirling PDF off this box. Linux + macOS.
 #
 # The inverse of setup.sh's run + publish, and nothing more:
-#   1. unpublish THIS service's Tailscale Serve port (never `serve reset`,
-#      and only if that port really points at this service)
+#   1. unpublish the Tailscale Serve ports that point at THIS service, found
+#      from `tailscale serve status` (never `serve reset`)
 #   2. `docker compose down` — the container and its network go, the data
 #      directory stays
 #   3. keep .env and the data dir, so ./setup.sh brings it back as it was
@@ -57,30 +57,57 @@ else
   die "Tailscale is not installed: https://tailscale.com/download"
 fi
 
-# .env is the authority for ports and paths. Read the values we need without
-# sourcing it into this shell's environment wholesale.
-env_get() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
+# .env is the authority for ports and paths. Values are read the way Docker
+# Compose reads them (an optional `export `, matching single or double quotes,
+# an inline ` #` comment after an unquoted value) without executing the file.
+env_get() {
+  local line value tail
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}" ;;
+  esac
+  printf '%s' "$value"
+}
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 DATA_DIR="$(env_get STIRLING_DATA)"
-FRONTEND="$(env_get SYSTEM_FRONTENDURL)"
-case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric";; esac
-# setup.sh does not store HTTPS_PORT; it is the port in SYSTEM_FRONTENDURL,
-# and follows LOCAL_PORT when that is absent.
-HTTPS_PORT="${HTTPS_PORT:-$(printf '%s' "$FRONTEND" | sed -n 's#^https://[^/:]*:\([0-9][0-9]*\)/*$#\1#p')}"
-HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-case "$HTTPS_PORT" in *[!0-9]*) die "Could not work out the HTTPS port (got: $HTTPS_PORT)";; esac
-ok "$NAME: local :$LOCAL_PORT, published :$HTTPS_PORT, data $DATA_DIR"
+case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric (got: $LOCAL_PORT)";; esac
+TARGET="http://127.0.0.1:$LOCAL_PORT"
+ok "$NAME: local :$LOCAL_PORT, data ${DATA_DIR:-(not set)}"
+
+# Read Serve before changing anything: if it cannot be read, an empty answer
+# would look like "already off" and the mapping would come back with the
+# daemon. Stop instead.
+SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
+  || die "Could not read Tailscale Serve status (is tailscaled running?): $SERVE_STATUS — nothing was changed."
 
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was.
+PURGE_DIR=""
 if [ "$PURGE" -eq 1 ]; then
   [ -n "$DATA_DIR" ] || die "STIRLING_DATA is missing from $ENV_FILE — refusing to guess what to delete."
+  while :; do case "$DATA_DIR" in */) DATA_DIR="${DATA_DIR%/}" ;; *) break ;; esac; done
+  case "$DATA_DIR" in *..*) die "STIRLING_DATA=$DATA_DIR contains '..' — refusing." ;; esac
   case "$DATA_DIR" in
     "$HOME/services/"?*) ;;
-    *) die "STIRLING_DATA=$DATA_DIR is not under $HOME/services/ — refusing to delete it. Remove it by hand if you are sure." ;;
+    *) die "STIRLING_DATA=$DATA_DIR is not a folder inside $HOME/services/ — refusing to delete it. Remove it by hand if you are sure." ;;
   esac
-  case "$DATA_DIR" in *..*) die "STIRLING_DATA=$DATA_DIR contains '..' — refusing." ;; esac
-  warn "--purge deletes $DATA_DIR and $ENV_FILE. This cannot be undone."
+  # And where it really is, symlinks and all: it must be a strict child of
+  # the real ~/services, never ~/services itself or anything above it.
+  if [ -e "$DATA_DIR" ]; then
+    [ -d "$DATA_DIR" ] || die "STIRLING_DATA=$DATA_DIR is not a directory — refusing."
+    root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
+    PURGE_DIR="$(cd "$DATA_DIR" && pwd -P)" || die "Cannot resolve $DATA_DIR."
+    case "$PURGE_DIR" in
+      "$root"/?*) ;;
+      *) die "STIRLING_DATA=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;
+    esac
+  fi
+  warn "--purge deletes ${PURGE_DIR:-nothing (no data dir on disk)} and $ENV_FILE. This cannot be undone."
   printf 'Type %s to confirm: ' "$NAME"
   answer=""
   read -r answer || true
@@ -88,21 +115,42 @@ if [ "$PURGE" -eq 1 ]; then
 fi
 
 # ------------------------------------------------------- tailscale serve
-# Only this port, and only if Serve really sends it to this service: a stale
-# or hand-edited .env must never unpublish a neighbour.
-info "Unpublishing Tailscale Serve HTTPS :$HTTPS_PORT"
-serve_target="$("$TAILSCALE" serve status 2>/dev/null \
-  | awk -v p=":$HTTPS_PORT" '
-      index($0, "https://") == 1 { split($1, a, " "); cur = (substr(a[1], length(a[1]) - length(p) + 1) == p); next }
-      cur && /proxy / { print $NF; exit }' || true)"
-if [ -z "$serve_target" ]; then
-  ok "HTTPS :$HTTPS_PORT is not published (already off)"
-elif [ "$serve_target" = "http://127.0.0.1:$LOCAL_PORT" ]; then
-  "$TAILSCALE" serve --https="$HTTPS_PORT" off >/dev/null
-  ok "Tailscale Serve: HTTPS :$HTTPS_PORT off"
-else
-  warn "HTTPS :$HTTPS_PORT points at $serve_target, not this service (127.0.0.1:$LOCAL_PORT) — leaving it alone."
-fi
+# Every HTTPS port whose handlers all proxy to this service's local port, and
+# nothing else: ports are found from what Serve actually publishes, not from
+# what .env says was published (a re-run can publish a second port). A port
+# shared with another handler (e.g. :443 with the launcher's /home) is left
+# alone with a warning. Never `serve reset`.
+info "Unpublishing Tailscale Serve ports that point at $TARGET"
+SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
+  function flush() {
+    if (port != "") {
+      if (n > 0 && mine == n) print "off " port
+      else if (mine > 0) print "mixed " port
+    }
+    port = ""; n = 0; mine = 0
+  }
+  index($0, "https://") == 1 {
+    flush()
+    u = $1; sub(/\/$/, "", u)
+    port = match(u, /:[0-9]+$/) ? substr(u, RSTART + 1) : "443"
+    next
+  }
+  port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
+  END { flush() }')"
+unpublished=0
+while read -r verdict port; do
+  [ -n "${verdict:-}" ] || continue
+  if [ "$verdict" = "off" ]; then
+    "$TAILSCALE" serve --https="$port" off >/dev/null
+    ok "Tailscale Serve: HTTPS :$port off"
+    unpublished=$((unpublished + 1))
+  else
+    warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+  fi
+done <<EOF
+$SERVE_PLAN
+EOF
+[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
 
 # ---------------------------------------------------------------- stop
 info "Stopping and removing the container (docker compose down)"
@@ -112,9 +160,9 @@ ok "Container removed; data in $DATA_DIR kept"
 # ---------------------------------------------------------------- purge
 if [ "$PURGE" -eq 1 ]; then
   info "Purging data"
-  rm -rf -- "$DATA_DIR"
+  [ -z "$PURGE_DIR" ] || rm -rf -- "$PURGE_DIR"
   rm -f -- "$ENV_FILE"
-  ok "Deleted $DATA_DIR and $ENV_FILE"
+  ok "Deleted ${PURGE_DIR:-(no data dir)} and $ENV_FILE"
 fi
 
 echo

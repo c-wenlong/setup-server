@@ -1327,7 +1327,10 @@
             attachJob(live, fresh, jobAction(fresh));
             return;
           }
-          actionRetry('Something is already running for this service. Wait for it to finish, then try again.');
+          /* No job holds the slot, so the 409 is the server refusing for a
+             reason that will not clear by retrying (e.g. already removed
+             from another tab). Say its sentence and stop offering. */
+          actionRefused(msgFrom(res, 'The server will not ' + action + ' this service right now.'));
         });
         return;
       }

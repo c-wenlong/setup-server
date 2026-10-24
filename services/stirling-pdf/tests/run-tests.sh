@@ -429,7 +429,7 @@ test_teardown_port_owned_by_someone_else() {
   run_teardown
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "no serve off"                no_call " off"
-  check "warns whose it is"           out_has "points at http://127.0.0.1:9999"
+  check "says nothing points here"    out_has "already off"
   teardown
 }
 
@@ -491,6 +491,86 @@ test_teardown_purge_refuses_odd_paths() {
   teardown
 }
 
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:8103
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8103
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /pdf proxy http://127.0.0.1:8103
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8110 off"                   calls_have "serve --https=8110 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8103'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8103 off"                   calls_have "serve --https=8103 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8103"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8103 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$HOME/services//#" "$SVC/.env"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "stirling-pdf"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$HOME/services/alias#" "$SVC/.env"
+  run_teardown --purge "stirling-pdf"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: a data dir already gone is fine"
+  deployed
+  rm -rf "$(data_dir)"
+  run_teardown --purge "stirling-pdf"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/stirling-pdf/setup.sh or docker-compose.yml is missing — nothing to test."
@@ -518,6 +598,11 @@ test_teardown_port_owned_by_someone_else
 test_teardown_preflight
 test_teardown_purge
 test_teardown_purge_refuses_odd_paths
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_quoted_env
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_data_dir
 
 if [ "${1:-}" = "--live" ]; then
   echo
