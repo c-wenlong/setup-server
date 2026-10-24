@@ -90,7 +90,7 @@ setup() {
   if [ "$OS" = "Linux" ]; then NC_UNIT=ntfy-control.service; else NC_UNIT=com.ntfy-control.listener.plist; fi
 
   for c in systemctl launchctl; do
-    printf '#!/usr/bin/env bash\necho "%s $*" >> "$CALLS_LOG"\n[ -f "$STATE_DIR/fail-restart" ] && [ "$2" = try-restart ] && exit 1\nexit 0\n' "$c" > "$SB/bin/$c"
+    printf '#!/usr/bin/env bash\necho "%s $*" >> "$CALLS_LOG"\n[ -f "$STATE_DIR/fail-restart" ] && [ "$2" = try-restart ] && exit 1\n[ "$1" = print ] && case "$2" in */self-learn|*/com.ntfy-control.listener) exit 113 ;; esac\nexit 0\n' "$c" > "$SB/bin/$c"
     chmod +x "$SB/bin/$c"
   done
 
@@ -173,6 +173,7 @@ if [ "$OS" = "Linux" ]; then
 else
   check "launcher reloaded"                 calls_have "launchctl bootstrap gui/$(id -u) $UD/launcher.plist"
   check "comment-only agent not reloaded"   calls_lack "self-learn.plist"
+  check "loaded state checked first"        calls_have "launchctl print gui/$(id -u)/launcher"
 fi
 check "running container started"           calls_have "up -d --no-deps nginx"
 check "stopped container left stopped"      calls_have "up --no-start --no-deps worker"
@@ -200,6 +201,20 @@ if [ "$OS" = "Linux" ]; then
   check "containers still recreated"        calls_have "up -d --no-deps nginx"
   teardown
 fi
+
+echo "• macOS: LaunchAgents reloaded only if loaded"
+REAL_OS="$OS"; OS=Darwin
+setup
+printf '#!/usr/bin/env bash\necho Darwin\n' > "$SB/bin/uname"; chmod +x "$SB/bin/uname"
+migrate
+check "exits zero"                          [ "$CODE" -eq 0 ]
+check "agent repointed"                     grep -qx "WorkingDirectory=$R/app/web" "$UD/launcher.plist"
+check "loaded agent reloaded"               calls_have "launchctl bootstrap gui/$(id -u) $UD/launcher.plist"
+check "unloaded ntfy-control left off"      calls_lack "bootstrap gui/$(id -u) $UD/com.ntfy-control.listener.plist"
+check "its bin copy still refreshed"        grep -qx "new listener" "$HOME/services/ntfy-control/bin/control_listener.py"
+check "no systemctl on macOS"               calls_lack "systemctl"
+teardown
+OS="$REAL_OS"
 
 echo "• --dry-run changes nothing"
 setup

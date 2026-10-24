@@ -211,6 +211,9 @@ if [ -n "$changed_units" ]; then
   else
     for u in $changed_units; do
       label="${u%.plist}"
+      # Reload only agents that are loaded now; an unloaded one stays off,
+      # as try-restart does on Linux (these plists set RunAtLoad).
+      launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || continue
       run launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
       run launchctl bootstrap "gui/$(id -u)" "$UNIT_DIR/$u" || restart_failed "$u"
     done
