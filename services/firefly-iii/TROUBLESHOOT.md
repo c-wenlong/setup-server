@@ -474,51 +474,35 @@ cd ~/dev/setup-server/services/firefly-iii
 docker compose --project-directory . exec -T db \
   pg_dump -U firefly firefly | gzip > ~/firefly-$(date +%F).sql.gz
 ls -lh ~/firefly-$(date +%F).sql.gz      # a few KB on an empty ledger; NOT 0 bytes
+grep '^FIREFLY_APP_KEY=' .env            # keep this with the dump: --purge deletes .env
 
-# 2. Confirm the paths before deleting them. A `rm -rf` of a path that never
-#    existed is a silent no-op that leaves you thinking you started clean.
-ls -ld ~/services/firefly-iii ~/services/firefly-iii/db \
-       ~/services/firefly-iii/upload ~/services/firefly-iii/importer
-grep -E '^(FIREFLY_DB_DIR|FIREFLY_UPLOAD_DIR|FIREFLY_IMPORTER_DIR)=' .env
+# 2. Remove, or remove and wipe. Use teardown.sh, not a hand recipe: it
+#    unpublishes only the Serve ports that point at this service (the app AND
+#    the Data Importer), runs `compose down`, and refuses to delete a state dir
+#    that is not really inside ~/services/.
+./teardown.sh            # remove, keep ledger + uploads + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete FIREFLY_DB_DATA, FIREFLY_UPLOAD,
+                         # FIREFLY_IMPORTER_CONFIG and .env; type "firefly-iii"
 
-# 3. Tear down. -v also removes any named volumes the compose file declares.
-docker compose --project-directory . down -v
-
-# 4. Delete the state. sudo: Postgres runs as its own uid inside the container,
-#    so ~/services/firefly-iii/db is not owned by you even though the parent
-#    directory is. A plain rm -rf fails partway and a half-deleted data
-#    directory is worse than either extreme.
-sudo rm -rf ~/services/firefly-iii
-
-# 5. New secrets: a fresh APP_KEY, DB password and admin password.
-rm -f .env
-
-# 6. Un-publish the two ports. NOT `serve reset` — that clears every port on
-#    this node, for every service.
-tailscale serve --https=8097 off
-tailscale serve --https=8099 off
-
-# 7. Redeploy.
+# 3. Redeploy. After --purge this is a clean install with new secrets.
 ./setup.sh
 ```
 
-Two things that make this recipe safe rather than superstitious:
+What `--purge` does and does not touch:
 
-- **The `.env` paths in step 2 are the authority.** If `setup.sh` was ever run
-  with the state directories pointed elsewhere, `~/services/firefly-iii` is not
-  where the data is, and the `rm -rf` is a silent no-op that leaves you
-  convinced you started clean while the old ledger is still on disk. Check
-  before you delete, not after — that is why step 2 prints the `.env` values
-  next to the paths.
-- **`sudo` on the `rm -rf`.** The directory is yours; the Postgres data
-  directory's contents are not, because the container runs as its own uid.
-
-If you would rather not use sudo, delete the contents from inside a container
-that is already root:
-
-```bash
-docker run --rm -v ~/services/firefly-iii:/x --entrypoint rm alpine -rf /x/db /x/upload /x/importer
-```
+- **Deletes** the three directories named in `.env` (`FIREFLY_DB_DATA`,
+  `FIREFLY_UPLOAD`, `FIREFLY_IMPORTER_CONFIG`, by default
+  `~/services/firefly-iii/{db,upload,importer}`) and `.env` itself. Postgres and
+  Firefly write as their own uids, so files in those directories are often not
+  yours; when a plain `rm` leaves any behind, it empties them from a throwaway
+  container, so no `sudo` is needed. The compose file has no named volumes, so
+  there is no `down -v` step.
+- **Keeps** anything else in `~/services/firefly-iii/` that you put there, and
+  every other service's directory.
+- **Does not** read `.env` for anything to delete except those three paths. If
+  `setup.sh` was ever run with the state dirs pointed elsewhere, `.env` is the
+  authority, and any path outside `~/services/` (or containing `..`, or a
+  symlink out of it) is refused before anything is stopped.
 
 ### Smaller hammers, in order
 
@@ -546,13 +530,13 @@ docker compose --project-directory . exec -T db \
 Do not nuke it. Restore into a fresh database instead of starting from empty:
 
 ```bash
-# after step 7 above brings a clean instance up, before registering anything:
+# after step 3 above brings a clean instance up, before registering anything:
 gunzip -c ~/firefly-YYYY-MM-DD.sql.gz \
   | docker compose --project-directory . exec -T db psql -U firefly -d firefly
 ```
 
 ⚠️ A restore only works with the **`APP_KEY` that was in use when the dump was
-taken** — Firefly encrypts some stored values with it. If you deleted `.env` in
-step 5 without recording the old key, encrypted fields in the restored dump are
+taken** — Firefly encrypts some stored values with it. If `--purge` deleted `.env` in
+step 2 without recording the old key, encrypted fields in the restored dump are
 unrecoverable. Save the old `APP_KEY` alongside the dump, or do not delete
 `.env`.

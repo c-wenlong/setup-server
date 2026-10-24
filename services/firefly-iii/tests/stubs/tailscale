@@ -3,6 +3,9 @@
 #   backend_state     — override BackendState (default Running)
 #   operator          — exists => serve allowed without sudo
 #   serve_fails_left  — countdown of forced serve failures (approval-link flow)
+#   serve_status      — text `tailscale serve status` prints (teardown tests);
+#                       absent => the two-port default below
+#   serve_status_fails — exists => `serve status` fails like a stopped daemon
 #
 # The reported hostname is test-host.tailfake.ts.net, NOT this box's real
 # kai-home-server.taild6a23f.ts.net, and the IP is 100.77.77.77 rather than the
@@ -10,6 +13,16 @@
 # docker-compose.yml cannot pass by coincidence. FIREFLY_APP_URL has to be
 # built from what this command reports.
 echo "tailscale $*" >> "$CALLS_LOG"
+
+if [ "$1" = "serve" ] && [ "${2:-}" = "status" ] && [ -f "$STATE_DIR/serve_status_fails" ]; then
+  echo "failed to connect to local tailscaled" >&2
+  exit 1
+fi
+if [ "$1" = "serve" ] && [ "${2:-}" = "status" ] && [ -f "$STATE_DIR/serve_status" ]; then
+  cat "$STATE_DIR/serve_status"
+  exit 0
+fi
+case " $* " in *" off "*) [ "$1" = "serve" ] && exit 0 ;; esac
 
 case "$1" in
   status)

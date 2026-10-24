@@ -91,7 +91,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
   cp -R "$SERVICE_DIR/config" "$SVC/config"
   CFG="$HOME/services/homepage/config"
 }
@@ -955,6 +955,208 @@ $f absent"
   done
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps this port to this service,
+# and neighbours sit on other ports (one a lookalike suffix).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo keep > "$CFG/custom.yaml"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8100 (tailnet only)
+|-- / proxy http://127.0.0.1:8100
+
+https://test-host.tailfake.ts.net:18100 (tailnet only)
+|-- / proxy http://127.0.0.1:18100
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps config and .env, unpublishes only its port"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8100"         calls_have "tailscale serve --https=8100 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18100 untouched"  no_call "https=18100"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "config kept"                 [ -f "$CFG/custom.yaml" ]
+  check "services.yaml kept"          [ -f "$CFG/services.yaml" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8100 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then config and .env go"
+  deployed
+  local repo_before; repo_before="$(ls "$SVC/config" | tr '\n' ' ')"
+  run_teardown --purge "home"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: config kept"     [ -f "$CFG/custom.yaml" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge "homepage"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "warns the YAML is deleted"   out_has "hand-edited YAML"
+  check "config dir gone"             [ ! -e "$CFG" ]
+  check "state dir gone"              [ ! -e "$HOME/services/homepage" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "serve off for :8100"         calls_have "tailscale serve --https=8100 off"
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "repo templates kept"         [ "$(ls "$SVC/config" | tr '\n' ' ')" = "$repo_before" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a config dir outside ~/services"
+  deployed
+  sed -i.bak "s#^HOMEPAGE_CONFIG=.*#HOMEPAGE_CONFIG=$HOME#" "$SVC/.env"
+  run_teardown --purge "homepage"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^HOMEPAGE_CONFIG=.*#HOMEPAGE_CONFIG=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "homepage"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^HOMEPAGE_CONFIG=.*#HOMEPAGE_CONFIG=$HOME/services#" "$SVC/.env"
+  run_teardown --purge "homepage"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^HOMEPAGE_CONFIG=.*#HOMEPAGE_CONFIG=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "homepage"
+  check "services/ refused"           [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:8100
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /home proxy http://127.0.0.1:8100
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8110 off"                   calls_have "serve --https=8110 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8100'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8100 off"                   calls_have "serve --https=8100 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8100"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8100 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: symlinks cannot reach ~/services; missing dir is fine"
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  ln -s "$HOME/services" "$HOME/services/alias"
+  sed -i.bak "s#^HOMEPAGE_CONFIG=.*#HOMEPAGE_CONFIG=$HOME/services/alias#" "$SVC/.env"
+  run_teardown --purge "homepage"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  rm -rf "$CFG"
+  sed -i.bak "s#^HOMEPAGE_CONFIG=.*#HOMEPAGE_CONFIG=$CFG#" "$SVC/.env"
+  run_teardown --purge "homepage"
+  check "config already gone: zero"   [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+}
+
 test_sandbox_was_hermetic() {
   echo "• the mocked suite changed nothing on this host"
   local before="$HOST_SNAPSHOT"
@@ -1239,6 +1441,16 @@ test_allowlist_drift_warns_without_rewriting
 test_operator_escalation
 test_serve_approval_prompt
 test_macos_warning
+test_teardown_safe
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_refuses_odd_paths
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_quoted_env
+test_teardown_purge_trailing_slashes
 test_sandbox_was_hermetic
 
 if [ "${1:-}" = "--live" ]; then

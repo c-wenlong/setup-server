@@ -97,7 +97,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
 
 teardown() {
@@ -863,6 +863,288 @@ test_no_secrets_leak_into_the_environment() {
   teardown
 }
 
+# ------------------------------------------------------------- teardown.sh
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps both ports to this service,
+# and a neighbour plus a lookalike port sit alongside.
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  mkdir -p "$HOME/services/firefly-iii/db/base" "$HOME/services/firefly-iii/upload" \
+           "$HOME/services/firefly-iii/importer"
+  echo ledger > "$HOME/services/firefly-iii/db/base/pgdata"
+  echo att > "$HOME/services/firefly-iii/upload/a.pdf"
+  echo cfg > "$HOME/services/firefly-iii/importer/c.json"
+  cat > "$STATE_DIR/serve_status" <<SERVE_END
+https://test-host.tailfake.ts.net:8097 (tailnet only)
+|-- / proxy http://127.0.0.1:8097
+
+https://test-host.tailfake.ts.net:8099 (tailnet only)
+|-- / proxy http://127.0.0.1:8099
+
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:18097 (tailnet only)
+|-- / proxy http://127.0.0.1:18097
+SERVE_END
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps ledger and .env, unpublishes both its ports"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for app :8097"     calls_have "tailscale serve --https=8097 off"
+  check "serve off for importer :8099" calls_have "tailscale serve --https=8099 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18097 untouched"  no_call "https=18097"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "ledger kept"                 [ -f "$HOME/services/firefly-iii/db/base/pgdata" ]
+  check "uploads kept"                [ -f "$HOME/services/firefly-iii/upload/a.pdf" ]
+  check "importer config kept"        [ -f "$HOME/services/firefly-iii/importer/c.json" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_custom_ports() {
+  echo "• teardown: ports come from .env and Serve, not from the defaults"
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=8100 IMPORTER_PORT=8101 HTTPS_PORT=9443
+  run_deploy
+  unset LOCAL_PORT IMPORTER_PORT HTTPS_PORT
+  cat > "$STATE_DIR/serve_status" <<SERVE_END
+https://test-host.tailfake.ts.net:9443 (tailnet only)
+|-- / proxy http://127.0.0.1:8100
+
+https://test-host.tailfake.ts.net:8101 (tailnet only)
+|-- / proxy http://127.0.0.1:8101
+
+https://test-host.tailfake.ts.net:8097 (tailnet only)
+|-- / proxy http://127.0.0.1:8097
+SERVE_END
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "app on :9443 off"            calls_have "tailscale serve --https=9443 off"
+  check "importer on :8101 off"       calls_have "tailscale serve --https=8101 off"
+  check "default :8097 (not ours) untouched" no_call "https=8097"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8097 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<SERVE_END
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:8097
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8099
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /ff proxy http://127.0.0.1:8097
+SERVE_END
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8110 off"                   calls_have "serve --https=8110 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then exactly the state dirs and .env go"
+  deployed
+  local st="$HOME/services/firefly-iii"
+  echo mine > "$HOME/services/firefly-iii/notes.txt"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "firefly"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: ledger kept"     [ -f "$st/db/base/pgdata" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge "firefly-iii"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "ledger dir gone"             [ ! -e "$st/db" ]
+  check "uploads gone"                [ ! -e "$st/upload" ]
+  check "importer config gone"        [ ! -e "$st/importer" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "serve off for :8097 and :8099" calls_have "serve --https=8099 off"
+  check "no -v: no named volumes"     no_call "down -v"
+  check "unrelated file in the state parent kept" [ -f "$st/notes.txt" ]
+  check "neighbour service kept"      [ -f "$HOME/services/neighbour/keep" ]
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  teardown
+}
+
+test_teardown_purge_fresh_parent_removed() {
+  echo "• teardown --purge: the empty state parent is tidied up"
+  deployed
+  run_teardown --purge "firefly-iii"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "empty ~/services/firefly-iii removed" [ ! -e "$HOME/services/firefly-iii" ]
+  teardown
+}
+
+test_teardown_purge_root_owned_contents() {
+  echo "• teardown --purge: files another uid owns are cleared from a container"
+  deployed
+  local d="$HOME/services/firefly-iii/db"
+  mkdir -p "$d/locked"; echo x > "$d/locked/f"; chmod 500 "$d/locked"
+  run_teardown --purge "firefly-iii"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "fell back to docker run"     calls_have "docker run --rm --pull=never -v $d:/purge"
+  check "ledger dir gone"             [ ! -e "$d" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a state dir outside ~/services (each of the three)"
+  local var
+  for var in FIREFLY_DB_DATA FIREFLY_UPLOAD FIREFLY_IMPORTER_CONFIG; do
+    deployed
+    sed -i.bak "s#^$var=.*#$var=$HOME#" "$SVC/.env"
+    run_teardown --purge "firefly-iii"
+    check "$var=\$HOME: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  home untouched"             [ -d "$HOME" ]
+    check "  nothing stopped"            [ ! -f "$STATE_DIR/compose_down" ]
+    check "  nothing unpublished"        no_call " off"
+    check "  ledger kept"                [ -f "$HOME/services/firefly-iii/db/base/pgdata" ]
+    sed -i.bak "s#^$var=.*#$var=$HOME/services/../x#" "$SVC/.env"
+    run_teardown --purge "firefly-iii"
+    check "$var with '..' refused"       [ "$CODE" -ne 0 ]
+    sed -i.bak "s#^$var=.*#$var=$HOME/services/#" "$SVC/.env"
+    run_teardown --purge "firefly-iii"
+    check "$var=~/services itself refused" [ "$CODE" -ne 0 ]
+    sed -i.bak "s#^$var=.*#$var=#" "$SVC/.env"
+    run_teardown --purge "firefly-iii"
+    check "$var empty refused"           [ "$CODE" -ne 0 ]
+    teardown
+  done
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  sed -i.bak "s#^FIREFLY_UPLOAD=.*#FIREFLY_UPLOAD=$HOME/services//#" "$SVC/.env"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "firefly-iii"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  check "ledger kept"                 [ -f "$HOME/services/firefly-iii/db/base/pgdata" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  sed -i.bak "s#^FIREFLY_UPLOAD=.*#FIREFLY_UPLOAD=$HOME/services/alias#" "$SVC/.env"
+  run_teardown --purge "firefly-iii"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+}
+
+test_teardown_purge_missing_state_dirs() {
+  echo "• teardown --purge: state dirs already gone is fine"
+  deployed
+  rm -rf "$HOME/services/firefly-iii/db" "$HOME/services/firefly-iii/upload" "$HOME/services/firefly-iii/importer"
+  run_teardown --purge "firefly-iii"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8097'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8097 off"                   calls_have "serve --https=8097 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8097"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  check ":8097 off"                   calls_have "serve --https=8097 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^IMPORTER_PORT=.*/IMPORTER_PORT=8099 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  check ":8099 off"                   calls_have "serve --https=8099 off"
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -1080,7 +1362,7 @@ host_fingerprint() {
 }
 
 # ------------------------------------------------------------------ main
-for f in setup.sh docker-compose.yml; do
+for f in setup.sh teardown.sh docker-compose.yml; do
   [ -f "$SERVICE_DIR/$f" ] || { red "services/firefly-iii/$f is missing — nothing to test."; exit 1; }
 done
 
@@ -1114,6 +1396,20 @@ test_operator_escalation
 test_serve_approval_prompt
 test_importer_is_deployed_but_idle
 test_no_secrets_leak_into_the_environment
+test_teardown_safe
+test_teardown_custom_ports
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_fresh_parent_removed
+test_teardown_purge_root_owned_contents
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_state_dirs
+test_teardown_quoted_env
 
 echo "• sandbox isolation: the mocked suite changed nothing on this host"
 AFTER_FP="$(host_fingerprint)"

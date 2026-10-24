@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # docker stub. State in $STATE_DIR:
 #   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   compose_up / compose_down — touched by `compose ... up` / `down`
+#   docker_run_fails — exists => `docker run --entrypoint sh` (purge cleanup) fails
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -17,9 +19,28 @@ case "$1" in
         # compose --project-directory <dir> up -d  (and ps/logs/etc.)
         for a in "$@"; do
           [ "$a" = "up" ] && touch "$STATE_DIR/compose_up"
+          [ "$a" = "down" ] && touch "$STATE_DIR/compose_down"
         done
         ;;
     esac
+    ;;
+  run)
+    # teardown --purge's root-owned-file cleanup. The real container is root,
+    # so it can delete what the host user cannot; model that by making the
+    # mounted tree writable, then running the real `find ... -delete`.
+    mount_host=""; entry=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -v) mount_host="${2%%:*}"; shift 2 ;;
+        --entrypoint) entry="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ "$entry" = "sh" ] || exit 0
+    [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+    chmod -R u+rwX "$mount_host" 2>/dev/null
+    find "$mount_host" -mindepth 1 -delete
+    exit $?
     ;;
 esac
 exit 0

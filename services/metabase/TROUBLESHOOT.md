@@ -62,13 +62,21 @@ rewritten.
 
 ## Nuke and pave
 
-Stops the stack, deletes data, keeps `.env` unless you remove it too.
-There is no undo.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down`, and refuses to delete a
+marker dir that is not really inside `~/services/`.
 
 ```bash
 cd ~/dev/setup-server/services/metabase
-docker compose --project-directory . down -v
-rm -rf ~/services/metabase
-# optional: rm .env
-./setup.sh
+./teardown.sh            # remove, keep the database + .env (the launcher's Remove)
+./teardown.sh --purge    # also drop the Postgres volume, METABASE_DATA and .env; type the name
+./setup.sh               # back, fresh if you purged
 ```
+
+The live database is the named volume `metabase-postgres`, not
+`METABASE_DATA` (only a marker dir). Plain `teardown.sh` keeps the volume;
+`--purge` runs `down -v` and deletes every question, dashboard and user. The
+`.env` holds the generated DB and admin passwords, so a purge removes it and
+the next `./setup.sh` seeds a new admin. There is no undo. From a terminal,
+pause the `metabase` monitor in Uptime Kuma first, or it pages; the
+launcher's Remove does that.

@@ -666,17 +666,25 @@ device you have added, all automations, and the entire recorder history. There
 is no undo. While the instance is young this is genuinely the cheapest fix for
 a wedged `.storage/`; once you have automations in it, it is not.
 
-The container runs as root and owns the files under `config/`, so `sudo` is
-needed for the removal.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down`, and refuses to delete a
+config dir that is not really inside `~/services/`. The container runs as root
+and owns most of `config/`, so `--purge` empties it with a throwaway container
+of the pinned image (already on this box, no pull) instead of `sudo`; if that
+fails it stops, keeps `.env`, and prints the `sudo rm -rf` to run.
 
 ```bash
 cd ~/dev/setup-server/services/home-assistant
-docker compose --project-directory . down
-sudo rm -rf ~/services/home-assistant     # config/, .storage/, the recorder DB
-rm -f .env                                # forces a newly generated admin password
-tailscale serve --https=8123 off          # NOT `serve reset`
-./setup.sh
+./teardown.sh            # remove, keep config/ + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete the whole HA_CONFIG dir and .env; type the name
+./setup.sh               # back; a true first boot if you purged
 ```
+
+`--purge` removes `.storage/` with everything else, which is the point: HA
+persists config entries there, so only a full wipe gives the next `setup.sh` a
+real first boot. It also removes `config/backups`, so copy any backup off the
+box first. There is no undo. Pause the `home-assistant` monitor in Uptime Kuma
+first from a terminal, or it pages; the launcher's Remove does that.
 
 Then log in with the freshly printed credentials and finish the location step
 in the UI (SETUP.md → First login).

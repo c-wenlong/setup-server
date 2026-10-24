@@ -96,11 +96,21 @@ The Tailscale Serve mapping stays in place while the container is stopped, so
   `clear`) but is what Tailscale prints after a successful serve, and is
   verified working here.
 
-## Nuke and pave (destroys workflows + credentials)
+## Nuke and pave (--purge destroys workflows + credentials)
 
-```sh
-docker compose --project-directory . down
-rm -rf ~/services/n8n .env
-tailscale serve --https=5678 off
-./setup.sh
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down`, and refuses to delete a
+data dir that is not really inside `~/services/`.
+
+```bash
+cd ~/dev/setup-server/services/n8n
+./teardown.sh            # remove, keep data + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete N8N_VOLUME and .env; type "n8n"
+./setup.sh               # back, fresh if you purged
 ```
+
+There is no undo for `--purge`. It deletes the workflows and the
+`N8N_ENCRYPTION_KEY` in `.env`, so every saved credential is unrecoverable:
+back up `.env` and the data dir first if you might want them. From a
+terminal, pause the `n8n` monitor in Uptime Kuma first, or it pages; the
+launcher's Remove does that.

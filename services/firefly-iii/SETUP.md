@@ -358,6 +358,12 @@ tailscale serve status | grep -E ':(8097|8099)'            # publish config
 ./tests/run-tests.sh --live                                # everything at once
 ```
 
+**Remove**: `./teardown.sh` (or Remove in the launcher) unpublishes both Serve
+ports (the app and the Data Importer) and runs `compose down`; the ledger,
+uploads and `.env` stay, so `./setup.sh` brings it back. `./teardown.sh --purge`
+also deletes the ledger, uploads, importer config and `.env` after you type
+`firefly-iii`. It destroys the ledger and the `APP_KEY`: dump first.
+
 **Upgrade** — read the release notes first; Firefly's migrations are one-way:
 
 ```bash

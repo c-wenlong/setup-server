@@ -94,11 +94,21 @@ one's `setup.sh` to be re-run. The single-port removal is
 `clear`) but is what Tailscale prints after a successful serve, and is
 verified working here.
 
-## Nuke and pave (destroys chats, accounts, uploaded docs — not ollama models)
+## Nuke and pave (destroys chats, accounts, uploaded docs, not ollama models)
+
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service (the current one and a leftover `:10000`), runs
+`compose down`, and refuses to delete a data dir that is not really inside
+`~/services/`. It never touches ollama or its models.
 
 ```sh
-docker compose --project-directory . down
-rm -rf ~/services/open-webui .env
-tailscale serve --https=3001 off
-./setup.sh
+cd ~/dev/setup-server/services/open-webui
+./teardown.sh            # remove, keep data + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete WEBUI_VOLUME and .env; type the name
+./setup.sh               # back, fresh if you purged
 ```
+
+There is no undo for `--purge`: chats, accounts and uploads go, and the first
+account registered afterwards becomes the admin. From a terminal, pause the
+`open-webui` monitor in Uptime Kuma first, or it pages; the launcher's Remove
+does that.

@@ -7,8 +7,9 @@ Paperclip / OpenHands split-and-redeploy on `kai-home-server`.
 *Status 2026-10-25:* the contract below shipped as an optional file
 (`AGENTS.md` → "teardown.sh"), with `services/stirling-pdf/teardown.sh` as
 the reference and the launcher's Remove action running it without
-`--purge`. Services without one keep their **Nuke and pave** recipe as the
-authority.
+`--purge`. Since then: firefly-iii, home-assistant, homepage, jellyfin,
+metabase, n8n, open-webui, umami. Services without one keep their **Nuke
+and pave** recipe as the authority.
 
 ## Recommendation
 

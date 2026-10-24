@@ -4,6 +4,7 @@
 #   compose_up      — touched by `compose ... up`
 #   compose_pull    — touched by `compose ... pull`
 #   compose_down    — touched by `compose ... down`
+#   docker_run_fails — exists => `docker run --entrypoint sh` (purge cleanup) fails
 #
 # THE IMPORTANT PART: on `compose ... up` this stub freezes the state of the
 # sandbox $HOME. Home Assistant turns what it finds in configuration.yaml at
@@ -103,6 +104,15 @@ case "$1" in
         *) shift ;;
       esac
     done
+    if [ "$entry" = "sh" ]; then
+      # teardown --purge's root-owned-file cleanup: the real container is root,
+      # so it can delete what the host user cannot. Model that by making the
+      # tree writable first, then running the real `find ... -delete`.
+      [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+      chmod -R u+rwX "$mount_host" 2>/dev/null
+      find "$mount_host" -mindepth 1 -delete
+      exit $?
+    fi
     [ "$entry" = "python3" ] || exit 0
     [ -n "$mount_host" ] || exit 0
     script="$(cat)"                       # the heredoc on stdin

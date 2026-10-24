@@ -460,34 +460,28 @@ its own.
 There is no ordering hazard here (unlike adguard, whose removal order matters).
 Nothing depends on Homepage being up.
 
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down`, and refuses to delete a
+config dir that is not really inside `~/services/`.
+
 ```bash
-# 1. Confirm the paths before deleting them. A `rm -rf` of a path that never
-#    existed is a silent no-op that leaves you thinking you started clean.
-#    .env is the authority — HOMEPAGE_CONFIG is where the data actually is,
-#    and it need not be the default.
-grep -E '^(HOMEPAGE_CONFIG|LOCAL_PORT)=' ~/dev/setup-server/services/homepage/.env
-ls -ld  ~/services/homepage ~/services/homepage/config
-ls -l   ~/services/homepage/config/services.yaml
-
-# 2. Keep the config if you have edited it. This is a plain text directory and
-#    it is small; there is no reason not to.
-cp -a ~/services/homepage/config ~/homepage-config-$(date +%F).bak
-
-# 3. Tear down.
 cd ~/dev/setup-server/services/homepage
-docker compose --project-directory . down
-
-#    No sudo: PUID/PGID make everything under config/ owned by you. If this
-#    fails with "Permission denied", the ownership drifted — see the
-#    Permissions section above rather than reaching for sudo.
-rm -rf ~/services/homepage
-
-rm -f .env                        # regenerates with a fresh allowlist
-tailscale serve --https=8100 off  # NOT `serve reset` — that clears every port
-
-# 4. Redeploy.
-./setup.sh
+./teardown.sh            # remove, keep config + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete HOMEPAGE_CONFIG and .env; type "homepage"
+./setup.sh               # back, reseeded from this repo if you purged
 ```
+
+`--purge` deletes your hand-edited YAML (`services.yaml`, `settings.yaml`,
+`widgets.yaml`, `bookmarks.yaml`) with no undo, and removes `~/services/homepage`
+if it is then empty. Keep a copy first if you edited anything:
+
+```bash
+cp -a ~/services/homepage/config ~/homepage-config-$(date +%F).bak
+```
+
+The repo's own templates in `services/homepage/config/` are never touched.
+From a terminal, pause the `homepage` monitor in Uptime Kuma first, or it
+pages; the launcher's Remove does that.
 
 Verified against this deploy's actual layout, which is:
 

@@ -29,7 +29,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
 
 teardown() {
@@ -194,6 +194,246 @@ test_operator_escalation() {
   teardown
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+data_dir() { sed -n 's/^WEBUI_VOLUME=//p' "$SVC/.env"; }
+
+# A deployed sandbox: setup.sh has run, Serve maps :3001 (current) and
+# :10000 (legacy) to this service, and neighbours sit on other ports, one a
+# lookalike suffix. ollama's state is faked so "never touched" is checkable.
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  mkdir -p "$(data_dir)/uploads"
+  echo keep > "$(data_dir)/webui.db"
+  mkdir -p "$HOME/.ollama/models"; echo model > "$HOME/.ollama/models/m"
+  cat > "$STATE_DIR/served" <<EOF
+3001 http://127.0.0.1:3001
+10000 http://127.0.0.1:3001
+5678 http://127.0.0.1:5678
+13001 http://127.0.0.1:13001
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps data and .env, unpublishes current + legacy port only"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :3001"         calls_have "tailscale serve --https=3001 off"
+  check "legacy :10000 off too"       calls_have "tailscale serve --https=10000 off"
+  check "neighbour :5678 untouched"   no_call "https=5678"
+  check "lookalike :13001 untouched"  no_call "https=13001"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "data kept"                   [ -f "$(data_dir)/webui.db" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "ollama never touched"        no_call "ollama"
+  check "ollama models kept"          [ -f "$HOME/.ollama/models/m" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_moved_port() {
+  echo "• teardown: a moved HTTPS port comes from Serve, not from guessing"
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=3005 HTTPS_PORT=8443
+  run_deploy
+  unset LOCAL_PORT HTTPS_PORT
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8443"         calls_have "tailscale serve --https=8443 off"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/served"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf '3001 http://127.0.0.1:9999\n10000 http://127.0.0.1:9999\n' > "$STATE_DIR/served"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then data and .env go"
+  deployed
+  local dir; dir="$(data_dir)"
+  run_teardown --purge "open-web"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: data kept"       [ -f "$dir/webui.db" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge "open-webui"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "data dir gone"               [ ! -e "$dir" ]
+  check "empty ~/services/open-webui gone" [ ! -e "$HOME/services/open-webui" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "serve off for :3001"         calls_have "tailscale serve --https=3001 off"
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "ollama models kept"          [ -f "$HOME/.ollama/models/m" ]
+  check "ollama never touched"        no_call "ollama"
+  teardown
+}
+
+test_teardown_purge_keeps_unknown_siblings() {
+  echo "• teardown --purge: other files next to the data dir survive"
+  deployed
+  echo mine > "$HOME/services/open-webui/notes.txt"
+  run_teardown --purge "open-webui"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "data dir gone"               [ ! -e "$HOME/services/open-webui/data" ]
+  check "sibling file kept"           [ -f "$HOME/services/open-webui/notes.txt" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a data dir outside ~/services"
+  deployed
+  sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$HOME#" "$SVC/.env"
+  run_teardown --purge "open-webui"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "open-webui"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "open-webui"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=#" "$SVC/.env"
+  run_teardown --purge "open-webui"
+  check "empty value refused"         [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; others stay"
+  deployed
+  cat > "$STATE_DIR/served" <<EOF
+3001 http://127.0.0.1:3001
+8443 http://127.0.0.1:3001
+EOF
+  # a port that belongs to another service
+  cat >> "$STATE_DIR/served" <<EOF
+443 http://127.0.0.1:8080
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":3001 off"                   calls_have "serve --https=3001 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "other :443 untouched"        no_call "https=443 off"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='3001'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":3001 off"                   calls_have "serve --https=3001 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="3001"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  check "double quotes: :3001 off"    calls_have "serve --https=3001 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=3001 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  check "inline comment: :3001 off"   calls_have "serve --https=3001 off"
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$HOME/services//#" "$SVC/.env"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "open-webui"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$HOME/services/alias#" "$SVC/.env"
+  run_teardown --purge "open-webui"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: a data dir already gone is fine"
+  deployed
+  rm -rf "$(data_dir)"
+  run_teardown --purge "open-webui"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -278,6 +518,35 @@ test_live() {
   live_check "tailnet HTTPS responds"         curl -fsS -o /dev/null --max-time 30 "$url:$https_port/health"
 }
 
+test_teardown_purge_root_owned() {
+  echo "• teardown --purge: root-owned files are cleared by the image, not sudo"
+  deployed
+  local dir; dir="$(sed -n 's/^WEBUI_VOLUME=//p' "$SVC/.env")"
+  # Stand-in for root-owned files: a read-only dir the host user cannot empty.
+  mkdir -p "$dir/vector_db/locked"; echo x > "$dir/vector_db/locked/chroma.sqlite3"
+  chmod 500 "$dir/vector_db/locked"
+  run_teardown --purge "open-webui"
+  chmod -R u+rwX "$dir" 2>/dev/null
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "used the app image"          calls_have "ghcr.io/open-webui/open-webui"
+  check "never pulled for it"         calls_have "pull never"
+  check "no sudo"                     no_call "^sudo"
+  check "data dir gone"               [ ! -e "$dir" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  dir="$(sed -n 's/^WEBUI_VOLUME=//p' "$SVC/.env")"
+  mkdir -p "$dir/vector_db/locked"; echo x > "$dir/vector_db/locked/chroma.sqlite3"
+  chmod 500 "$dir/vector_db/locked"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "open-webui"
+  chmod -R u+rwX "$dir" 2>/dev/null
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $dir"
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
@@ -288,6 +557,20 @@ test_idempotent_rerun
 test_https_port_follows_local_port
 test_legacy_10000_mapping_is_withdrawn
 test_operator_escalation
+test_teardown_safe
+test_teardown_moved_port
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_root_owned
+test_teardown_purge_keeps_unknown_siblings
+test_teardown_purge_refuses_odd_paths
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_quoted_env
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_data_dir
 
 if [ "${1:-}" = "--live" ]; then
   echo

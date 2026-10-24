@@ -39,14 +39,14 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" \
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" \
      "$SERVICE_DIR/docker-compose.gpu.yml" "$SVC/"
 }
 
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT JELLYFIN_ADMIN_USERNAME JELLYFIN_NVENC \
+  unset FAKE_UID LOCAL_PORT HTTPS_PORT JELLYFIN_ADMIN_USERNAME JELLYFIN_NVENC MEDIA_DIR \
         STATE_DIR CALLS_LOG
 }
 
@@ -816,6 +816,262 @@ test_live() {
     sh -c "curl -fsS --max-time 30 'http://127.0.0.1:$port/System/Info/Public' | grep -q '\"Version\":\"12'"
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps this port to this service,
+# and neighbours sit on other ports (one a lookalike suffix). State files are
+# planted in config, cache and the wizard marker's directory.
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  seed_state
+}
+
+seed_state() {
+  local st="$HOME/services/jellyfin"
+  mkdir -p "$st/config/data" "$st/cache" "$(env_val MEDIA_DIR)"
+  echo keep > "$st/config/data/jellyfin.db"
+  echo keep > "$st/cache/img.jpg"
+  echo film > "$(env_val MEDIA_DIR)/film.mkv"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8096 (tailnet only)
+|-- / proxy http://127.0.0.1:8096
+
+https://test-host.tailfake.ts.net:8103 (tailnet only)
+|-- / proxy http://127.0.0.1:8103
+
+https://test-host.tailfake.ts.net:18096 (tailnet only)
+|-- / proxy http://127.0.0.1:18096
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps everything on disk, unpublishes only its port"
+  deployed
+  local st="$HOME/services/jellyfin"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8096"         calls_have "tailscale serve --https=8096 off"
+  check "neighbour :8103 untouched"   no_call "https=8103"
+  check "lookalike :18096 untouched"  no_call "https=18096"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "no GPU overlay when off"     no_call "docker-compose.gpu.yml"
+  check "config kept"                 [ -f "$st/config/data/jellyfin.db" ]
+  check "cache kept"                  [ -f "$st/cache/img.jpg" ]
+  check "wizard marker kept"          [ -f "$st/.wizard-complete" ]
+  check "media kept"                  [ -f "$(env_val MEDIA_DIR)/film.mkv" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8096 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:8096
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- /      proxy http://127.0.0.1:8080
+|-- /jelly proxy http://127.0.0.1:8096
+
+https://test-host.tailfake.ts.net:8096 (tailnet only)
+|-- / proxy http://127.0.0.1:8096
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "second port :8110 off"       calls_have "tailscale serve --https=8110 off"
+  check "own port :8096 off"          calls_have "tailscale serve --https=8096 off"
+  check "shared :443 left alone"      no_call "https=443"
+  check "warns about shared port"     out_has "also serves something else"
+  teardown
+}
+
+test_teardown_serve_unreadable() {
+  echo "• teardown: unreadable Serve status stops before changing anything"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "explains"                    out_has "Could not read Tailscale Serve status"
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "no serve off"                no_call " off"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then state and .env go, media stays"
+  deployed
+  local st="$HOME/services/jellyfin" media; media="$(env_val MEDIA_DIR)"
+  run_teardown --purge "jelly"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: config kept"     [ -f "$st/config/data/jellyfin.db" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge "jellyfin"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "config gone"                 [ ! -e "$st/config" ]
+  check "cache gone"                  [ ! -e "$st/cache" ]
+  check "wizard marker gone"          [ ! -e "$st/.wizard-complete" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "media survives (inside state root)" [ -f "$media/film.mkv" ]
+  check "serve off for :8096"         calls_have "tailscale serve --https=8096 off"
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  teardown
+}
+
+test_teardown_purge_media_outside() {
+  echo "• teardown --purge: media outside ~/services survives"
+  setup
+  touch "$STATE_DIR/operator"
+  export MEDIA_DIR="$SANDBOX/disk/media"
+  mkdir -p "$MEDIA_DIR"
+  run_deploy
+  seed_state
+  run_teardown --purge "jellyfin"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "config gone"                 [ ! -e "$HOME/services/jellyfin/config" ]
+  check "media survives"              [ -f "$SANDBOX/disk/media/film.mkv" ]
+  teardown
+}
+
+test_teardown_purge_media_beside_state() {
+  echo "• teardown --purge: MEDIA_DIR is the state root itself; only config/cache go"
+  setup
+  touch "$STATE_DIR/operator"
+  export MEDIA_DIR="$HOME/services/jellyfin"
+  run_deploy
+  seed_state
+  run_teardown --purge "jellyfin"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "config gone"                 [ ! -e "$HOME/services/jellyfin/config" ]
+  check "cache gone"                  [ ! -e "$HOME/services/jellyfin/cache" ]
+  check "media root kept"             [ -d "$HOME/services/jellyfin" ]
+  check "media file kept"             [ -f "$HOME/services/jellyfin/film.mkv" ]
+  teardown
+}
+
+test_teardown_purge_refuses_parent_of_media() {
+  echo "• teardown --purge: refuses a state dir that contains the media"
+  deployed
+  local st="$HOME/services/jellyfin" media; media="$(env_val MEDIA_DIR)"
+  sed -i.bak "s#^JELLYFIN_CONFIG=.*#JELLYFIN_CONFIG=$st#" "$SVC/.env"
+  run_teardown --purge "jellyfin"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "explains the library rule"   out_has "contains your media library"
+  check "media untouched"             [ -f "$media/film.mkv" ]
+  check "config untouched"            [ -f "$st/config/data/jellyfin.db" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "serve untouched"             no_call " off"
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  # A symlink to a parent of the media is caught by the real-path comparison.
+  ln -s "$st" "$HOME/services/link"
+  sed -i.bak "s#^JELLYFIN_CONFIG=.*#JELLYFIN_CONFIG=$HOME/services/link#" "$SVC/.env"
+  run_teardown --purge "jellyfin"
+  check "symlinked parent refused"    [ "$CODE" -ne 0 ]
+  check "media still untouched"       [ -f "$media/film.mkv" ]
+  # No MEDIA_DIR in .env: no way to prove anything is safe.
+  sed -i.bak "s#^JELLYFIN_CONFIG=.*#JELLYFIN_CONFIG=$st/config#; /^MEDIA_DIR=/d" "$SVC/.env"
+  run_teardown --purge "jellyfin"
+  check "missing MEDIA_DIR refused"   [ "$CODE" -ne 0 ]
+  check "config untouched again"      [ -f "$st/config/data/jellyfin.db" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses state dirs outside ~/services"
+  deployed
+  sed -i.bak "s#^JELLYFIN_CACHE=.*#JELLYFIN_CACHE=$HOME#" "$SVC/.env"
+  run_teardown --purge "jellyfin"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^JELLYFIN_CACHE=.*#JELLYFIN_CACHE=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "jellyfin"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^JELLYFIN_CACHE=.*#JELLYFIN_CACHE=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "jellyfin"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  check "config untouched"            [ -f "$HOME/services/jellyfin/config/data/jellyfin.db" ]
+  teardown
+}
+
+test_teardown_gpu_overlay() {
+  echo "• teardown: GPU overlay is used for down when setup used it"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/nvidia_runtime"
+  export JELLYFIN_NVENC=on
+  run_deploy
+  unset JELLYFIN_NVENC
+  seed_state
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "down with the overlay"       calls_have "docker-compose.gpu.yml.* down"
+  check "down with the base file"     calls_have "-f $SVC/docker-compose.yml"
+  check "compose down ran"            [ -f "$STATE_DIR/compose_down" ]
+  check "no host GPU plumbing touched" no_call "nvidia-ctk"
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/jellyfin/setup.sh or services/jellyfin/docker-compose.yml is missing — nothing to test."
@@ -853,6 +1109,18 @@ test_nvenc_off_overrides_env
 test_wizard_race_on_restart
 test_wizard_genuinely_wiped
 test_nvenc_env_predates_flag
+test_teardown_safe
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_unreadable
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_media_outside
+test_teardown_purge_media_beside_state
+test_teardown_purge_refuses_parent_of_media
+test_teardown_purge_refuses_odd_paths
+test_teardown_gpu_overlay
 
 if [ "${1:-}" = "--live" ]; then
   echo
