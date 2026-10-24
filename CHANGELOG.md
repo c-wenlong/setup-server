@@ -10,6 +10,17 @@ first, dated by merge.
 
 ### Added
 
+- **Launcher install receipts.** A deploy run from the launcher that exits 0
+  now writes `~/services/launcher/instances/<key>.json`: the repo and git
+  revision it came from (read from `.git`, no subprocess), the registry's
+  setup path and data dir, the non-secret `*_PORT` values from its `.env`,
+  first-install and latest-deploy times and a deploy count. The detail page
+  shows them as Installed / Last deploy / Revision / Ports. Tile state still
+  comes from the marker and health probe. Step 2 of the catalogue build
+  order; schema in `app/web/SPEC.md` (v5).
+
+### Added
+
 - **Launcher tiles come from per-service manifests.** Each service folder
   now has an `app.json` holding its tile (monitoring has two: Uptime Kuma
   and ntfy), and `app/web/registry.json` holds groups, control plumbing,

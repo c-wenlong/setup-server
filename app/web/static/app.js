@@ -1587,8 +1587,39 @@
   var META_LABELS = {
     setup: 'Setup script', health: 'Health probe', marker: 'Marker path',
     url: 'URL', port: 'Port', ports: 'Ports', icon: 'Icon', key: 'Key',
-    env: 'Env file', unit: 'systemd unit', dir: 'Directory', log: 'Log'
+    env: 'Env file', unit: 'systemd unit', dir: 'Directory', log: 'Log',
+    installed: 'Installed', last_deploy: 'Last deploy', revision: 'Revision'
   };
+
+  /* The install receipt (written by the server on each successful deploy
+     from here) as extra meta rows. Absent receipt: no rows, which is the
+     normal case for anything deployed from a terminal. */
+  function shortDate(iso) {
+    return typeof iso === 'string' && iso.length >= 10 ? iso.slice(0, 10) : null;
+  }
+
+  function withReceipt(meta, r) {
+    var out = {}, k;
+    if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+      for (k in meta) if (Object.prototype.hasOwnProperty.call(meta, k)) out[k] = meta[k];
+    }
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return out;
+    out.installed = shortDate(r.installed_at);
+    var last = shortDate(r.deployed_at);
+    if (last) {
+      out.last_deploy = last + (typeof r.deploys === 'number'
+        ? ' (' + r.deploys + (r.deploys === 1 ? ' deploy)' : ' deploys)') : '');
+    }
+    if (typeof r.revision === 'string' && r.revision) {
+      out.revision = r.revision.slice(0, 7) + (r.repo ? ' in ' + r.repo : '');
+    }
+    var ports = [], p = r.ports;
+    if (p && typeof p === 'object' && !Array.isArray(p)) {
+      for (k in p) if (Object.prototype.hasOwnProperty.call(p, k)) ports.push(k + ' ' + p[k]);
+    }
+    if (ports.length) out.ports = ports.join(', ');
+    return out;
+  }
 
   function humanize(k) {
     if (Object.prototype.hasOwnProperty.call(META_LABELS, k)) return META_LABELS[k];
@@ -2159,7 +2190,7 @@
     autoGrow(elDDesc);
 
     paintEnv(d.env, view.key);
-    paintMeta(d.meta);
+    paintMeta(withReceipt(d.meta, d.receipt));
     VIEW.detail(view.key, d);
   }
 

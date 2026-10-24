@@ -106,6 +106,7 @@ class SandboxTest(unittest.TestCase):
             "OVERRIDES_PATH": server.OVERRIDES_PATH,
             "NOTES_PATH": server.NOTES_PATH,
             "USAGE_PATH": server.USAGE_PATH,
+            "INSTANCES_DIR": server.INSTANCES_DIR,
             "CGROUP_ROOT": server.CGROUP_ROOT,
             "RESOURCE_TTL": server.RESOURCE_TTL,
             "DOCKER_MAP_TTL": server.DOCKER_MAP_TTL,
@@ -129,6 +130,7 @@ class SandboxTest(unittest.TestCase):
         server.OVERRIDES_PATH = os.path.join(self.tmp, "state", "overrides.json")
         server.NOTES_PATH = os.path.join(self.tmp, "state", "notes.json")
         server.USAGE_PATH = os.path.join(self.tmp, "state", "usage.json")
+        server.INSTANCES_DIR = os.path.join(self.tmp, "state", "instances")
         # Never the real /sys/fs/cgroup either: a tree under the sandbox that
         # a test builds if it cares, and that otherwise simply does not
         # exist, so resources measure nothing rather than this box.
@@ -1057,8 +1059,8 @@ class DetailTest(SandboxTest):
         detail = server.service_detail("alpha")
         self.assertEqual(sorted(detail), [
             "active", "control", "deployed_at", "description", "env", "group",
-            "icon", "installed", "job", "key", "meta", "name", "resources",
-            "state", "tagline", "url", "usage"])
+            "icon", "installed", "job", "key", "meta", "name", "receipt",
+            "resources", "state", "tagline", "url", "usage"])
         self.assertEqual(detail["key"], "alpha")
         self.assertEqual(detail["name"], "Alpha")
         self.assertEqual(detail["description"], "Shipped description.")
@@ -4744,6 +4746,207 @@ class ResourcePayloadTest(ResourceTestBase):
         tiles = {t["key"]: t for t in doc["services"]}
         self.assertIsNone(tiles["svc"]["resources"]["rss_bytes"])
         self.assertEqual(tiles["svc"]["state"], "planned")
+
+
+
+class ExitedProc:
+    """A deploy that has already finished with `code`."""
+
+    def __init__(self, code):
+        self.code = code
+
+    def wait(self):
+        return self.code
+
+
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+
+
+class ReceiptTest(SandboxTest):
+
+    def setUp(self):
+        super().setUp()
+        self.make_script("alpha/setup.sh")
+        self.make_env("alpha/.env", "\n".join([
+            "LOCAL_PORT=2283",
+            "HTTPS_PORT=8443",
+            "SECRET_PORT=9999",        # looks secret: never copied
+            "ODD_PORT=not-a-number",
+            "BIG_PORT=70000",
+            "DB_PASSWORD=%s" % SECRET_VALUE,
+            "",
+        ]))
+        self.make_script("bare/setup.sh")
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "camera",
+             "url": None, "health": None, "marker": "~/services/alpha",
+             "setup": "alpha/setup.sh", "env": "alpha/.env"},
+            {"key": "bare", "name": "Bare", "tagline": "t", "icon": "cpu",
+             "url": None, "health": None, "marker": None,
+             "setup": "bare/setup.sh", "env": None},
+        ]})
+        self.times = iter(["2026-10-25T01:00:00.000Z", "2026-10-26T02:00:00.000Z",
+                           "2026-10-27T03:00:00.000Z"])
+        server._now_iso = lambda: next(self.times)
+
+    def make_git(self, root, head="ref: refs/heads/main", refs=None, packed=None):
+        git = os.path.join(root, ".git")
+        os.makedirs(git, exist_ok=True)
+        with open(os.path.join(git, "HEAD"), "w") as fh:
+            fh.write(head + "\n")
+        for ref, sha in (refs or {}).items():
+            path = os.path.join(git, ref)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(sha + "\n")
+        if packed:
+            with open(os.path.join(git, "packed-refs"), "w") as fh:
+                fh.write("# pack-refs with: peeled fully-peeled sorted\n")
+                for ref, sha in packed.items():
+                    fh.write("%s %s\n" % (sha, ref))
+        return git
+
+    def finish(self, key, code=0):
+        job = server.register_job(key, "deploy")
+        logfile = open(job["log_path"], "wb")
+        server._reap(job, ExitedProc(code), logfile)
+        return job
+
+    def test_success_writes_a_receipt(self):
+        self.make_git(self.repo, refs={"refs/heads/main": SHA_A})
+        job = self.finish("alpha")
+        r = server.load_receipt("alpha")
+        self.assertEqual(r["version"], 1)
+        self.assertEqual(r["key"], "alpha")
+        self.assertEqual(r["repo"], os.path.realpath(self.repo))
+        self.assertEqual(r["revision"], SHA_A)
+        self.assertEqual(r["setup"], "alpha/setup.sh")
+        self.assertEqual(r["data_dir"], "~/services/alpha")
+        self.assertEqual(r["installed_at"], "2026-10-25T01:00:00.000Z")
+        self.assertEqual(r["deployed_at"], r["installed_at"])
+        self.assertEqual(r["deploys"], 1)
+        self.assertEqual(r["last_job"], job["id"])
+        self.assertEqual(server._jobs[job["id"]]["status"], "done")
+
+    def test_ports_are_whole_numbers_and_never_secret(self):
+        self.finish("alpha")
+        self.assertEqual(server.load_receipt("alpha")["ports"],
+                         {"LOCAL_PORT": 2283, "HTTPS_PORT": 8443})
+        with open(server.receipt_path("alpha"), encoding="utf-8") as fh:
+            self.assertNotIn(SECRET_VALUE, fh.read())
+
+    def test_no_env_means_no_ports(self):
+        self.finish("bare")
+        self.assertEqual(server.load_receipt("bare")["ports"], {})
+
+    def test_failed_deploy_writes_nothing(self):
+        job = self.finish("alpha", code=1)
+        self.assertIsNone(server.load_receipt("alpha"))
+        self.assertEqual(server._jobs[job["id"]]["status"], "failed")
+
+    def test_redeploy_keeps_first_install_and_counts(self):
+        self.finish("alpha")
+        self.finish("alpha")
+        r = server.load_receipt("alpha")
+        self.assertEqual(r["installed_at"], "2026-10-25T01:00:00.000Z")
+        self.assertEqual(r["deployed_at"], "2026-10-26T02:00:00.000Z")
+        self.assertEqual(r["deploys"], 2)
+
+    def test_garbage_deploy_count_restarts_at_one(self):
+        os.makedirs(server.INSTANCES_DIR)
+        with open(server.receipt_path("alpha"), "w") as fh:
+            json.dump({"key": "alpha", "deploys": "lots", "installed_at": "2026-01-01"}, fh)
+        self.finish("alpha")
+        r = server.load_receipt("alpha")
+        self.assertEqual(r["deploys"], 1)
+        self.assertEqual(r["installed_at"], "2026-01-01")
+
+    def test_unwritable_receipt_does_not_fail_the_deploy(self):
+        os.makedirs(os.path.dirname(server.INSTANCES_DIR), exist_ok=True)
+        with open(server.INSTANCES_DIR, "w") as fh:   # a file where the dir goes
+            fh.write("x")
+        job = self.finish("alpha")
+        self.assertEqual(server._jobs[job["id"]]["status"], "done")
+        self.assertIsNone(server.load_receipt("alpha"))
+
+    def test_no_git_means_null_repo_and_revision(self):
+        self.finish("alpha")
+        r = server.load_receipt("alpha")
+        # The sandbox may sit inside some other checkout; either way no sha
+        # from this sandbox repo can appear.
+        self.assertNotEqual(r["revision"], SHA_A)
+
+    def test_unreadable_receipts_are_none(self):
+        os.makedirs(server.INSTANCES_DIR)
+        with open(server.receipt_path("alpha"), "w") as fh:
+            fh.write("{not json")
+        self.assertIsNone(server.load_receipt("alpha"))
+        with open(server.receipt_path("alpha"), "w") as fh:
+            json.dump({"key": "someone-else"}, fh)
+        self.assertIsNone(server.load_receipt("alpha"))
+        with open(server.receipt_path("alpha"), "w") as fh:
+            json.dump(["alpha"], fh)
+        self.assertIsNone(server.load_receipt("alpha"))
+
+    def test_path_shaped_keys_have_no_receipt_path(self):
+        for evil in ("../alpha", "a/b", "", "Alpha", ".hidden", None, 3):
+            self.assertIsNone(server.receipt_path(evil), evil)
+            self.assertIsNone(server.load_receipt(evil))
+
+    def test_detail_carries_the_receipt(self):
+        server.magicdns_host = lambda: "box.ts.net"
+        self.assertIsNone(server.service_detail("alpha")["receipt"])
+        self.finish("alpha")
+        self.assertEqual(server.service_detail("alpha")["receipt"]["deploys"], 1)
+
+    def test_receipt_does_not_change_tile_state(self):
+        server.magicdns_host = lambda: "box.ts.net"
+        self.finish("alpha")
+        tiles = {s["key"]: s for s in server.services_payload()["services"]}
+        self.assertFalse(tiles["alpha"]["installed"])
+        self.assertEqual(tiles["alpha"]["state"], "available")
+
+    # ---- git_revision
+
+    def test_revision_from_a_loose_ref(self):
+        self.make_git(self.repo, refs={"refs/heads/main": SHA_A})
+        self.assertEqual(server.git_revision(self.repo), SHA_A)
+
+    def test_revision_from_packed_refs(self):
+        self.make_git(self.repo, packed={"refs/heads/main": SHA_B})
+        self.assertEqual(server.git_revision(self.repo), SHA_B)
+
+    def test_revision_of_a_detached_head(self):
+        self.make_git(self.repo, head=SHA_B)
+        self.assertEqual(server.git_revision(self.repo), SHA_B)
+
+    def test_revision_of_a_worktree(self):
+        main = os.path.join(self.tmp, "main")
+        git = self.make_git(main, refs={"refs/heads/feature": SHA_B})
+        wt_git = os.path.join(git, "worktrees", "wt")
+        os.makedirs(wt_git)
+        with open(os.path.join(wt_git, "HEAD"), "w") as fh:
+            fh.write("ref: refs/heads/feature\n")
+        with open(os.path.join(wt_git, "commondir"), "w") as fh:
+            fh.write("../..\n")
+        wt = os.path.join(self.tmp, "wt")
+        os.makedirs(wt)
+        with open(os.path.join(wt, ".git"), "w") as fh:
+            fh.write("gitdir: %s\n" % wt_git)
+        self.assertEqual(server.git_revision(wt), SHA_B)
+
+    def test_revision_garbage_is_none(self):
+        self.make_git(self.repo, head="ref: refs/heads/main", refs={"refs/heads/main": "zzz"})
+        self.assertIsNone(server.git_revision(self.repo))
+        self.make_git(self.repo, head="nonsense")
+        self.assertIsNone(server.git_revision(self.repo))
+        self.assertIsNone(server.git_revision(os.path.join(self.tmp, "nowhere")))
+
+    def test_collapse_home(self):
+        home = os.path.expanduser("~")
+        self.assertEqual(server._collapse_home(os.path.join(home, "dev", "x")), "~/dev/x")
+        self.assertEqual(server._collapse_home(home + "-other/x"), home + "-other/x")
 
 
 if __name__ == "__main__":

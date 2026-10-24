@@ -89,6 +89,13 @@ NOTES_PATH = os.path.expanduser("~/services/launcher/notes.json")
 # by deleting the file.
 USAGE_PATH = os.path.expanduser("~/services/launcher/usage.json")
 
+# One install receipt per service, written when a deploy from this launcher
+# exits 0: which repo and revision it came from, when, and the ports and data
+# dir it left behind. Per-box state like usage.json, never in git. Tile state
+# still comes from the marker and the health probe, so a stale receipt can
+# never make a removed service look installed.
+INSTANCES_DIR = os.path.expanduser("~/services/launcher/instances")
+
 # Deploy scripts may only live under one of these roots. The repo is the
 # normal case; ~/dev is needed because some services keep their code in
 # their own repo (manimkc lives at ~/dev/manimkc/server/setup.sh) while
@@ -1118,6 +1125,7 @@ def service_detail(key):
             "edited": edited,
         },
         "env": env_payload(svc),
+        "receipt": load_receipt(key),
     }
 
 
@@ -1814,7 +1822,168 @@ def _reap(job, proc, logfile):
         logfile.close()
     except Exception:
         pass
+    if code == 0:
+        # Best effort: a receipt that cannot be written must not turn a
+        # successful deploy into a failed job.
+        try:
+            write_receipt(job["key"], job["id"])
+        except Exception as exc:
+            log("receipt for %s not written: %s" % (job["key"], exc))
     _finish(job, code)
+
+
+# ------------------------------------------------------------------ receipts
+#
+# ~/services/launcher/instances/<key>.json, the "instance" layer of
+# docs/catalogue-architecture.md. Written on every successful deploy:
+#
+#   {"version": 1, "key": "immich", "repo": "~/dev/setup-server",
+#    "revision": "<40-hex commit or null>", "setup": "services/immich/setup.sh",
+#    "data_dir": "~/services/immich", "ports": {"LOCAL_PORT": 2283},
+#    "installed_at": first success, "deployed_at": latest success,
+#    "deploys": count, "last_job": job id}
+#
+# The revision is read straight from .git rather than by running git: no
+# subprocess, and nothing to put on the unit's PATH.
+
+RECEIPT_VERSION = 1
+_RECEIPT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_receipts_lock = threading.Lock()
+
+
+def _read_text(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+def _git_root(path):
+    """The nearest directory at or above `path` that holds a .git, or None."""
+    current = os.path.realpath(path)
+    while True:
+        if os.path.exists(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def git_revision(root):
+    """HEAD of the checkout at `root` as a 40-hex sha, or None.
+
+    Handles a normal checkout, a worktree (.git is a "gitdir:" file whose refs
+    live in the common dir), a detached HEAD, and refs only in packed-refs.
+    """
+    try:
+        dot_git = os.path.join(root, ".git")
+        gitdir = dot_git
+        if os.path.isfile(dot_git):
+            line = _read_text(dot_git)
+            if not line.startswith("gitdir:"):
+                return None
+            gitdir = os.path.normpath(os.path.join(root, line[len("gitdir:"):].strip()))
+        common = gitdir
+        if os.path.isfile(os.path.join(gitdir, "commondir")):
+            common = os.path.normpath(os.path.join(
+                gitdir, _read_text(os.path.join(gitdir, "commondir"))))
+        head = _read_text(os.path.join(gitdir, "HEAD"))
+        if not head.startswith("ref:"):
+            return head if _SHA_RE.match(head) else None
+        ref = head[len("ref:"):].strip()
+        for base in (gitdir, common):
+            path = os.path.join(base, ref)
+            if os.path.isfile(path):
+                sha = _read_text(path)
+                return sha if _SHA_RE.match(sha) else None
+        packed = os.path.join(common, "packed-refs")
+        if os.path.isfile(packed):
+            with open(packed, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) == 2 and parts[1] == ref and _SHA_RE.match(parts[0]):
+                        return parts[0]
+    except (OSError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def _collapse_home(path):
+    home = os.path.expanduser("~")
+    if path == home or path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+
+def _receipt_ports(svc):
+    """{NAME: int} for every *_PORT variable in the service's .env.
+
+    Names come off the same parser the detail page uses; a variable that
+    looks secret is skipped even if it ends in _PORT, and only whole numbers
+    in the TCP range are kept, so nothing sensitive can reach the receipt.
+    """
+    try:
+        env = read_env(svc)
+    except DeployError:
+        return {}
+    ports = {}
+    for name, value in env.items():
+        if not name.endswith("_PORT") or is_secret(name):
+            continue
+        text = str(value).strip()
+        if text.isdigit() and 0 < int(text) < 65536:
+            ports[name] = int(text)
+    return ports
+
+
+def receipt_path(key):
+    if not isinstance(key, str) or not _RECEIPT_KEY_RE.match(key):
+        return None
+    return os.path.join(INSTANCES_DIR, "%s.json" % key)
+
+
+def load_receipt(key):
+    """The service's receipt as a dict, or None if absent or unreadable."""
+    path = receipt_path(key)
+    if path is None:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("key") != key:
+        return None
+    return doc
+
+
+def write_receipt(key, job_id):
+    """Record a successful deploy of `key`. Returns the receipt written."""
+    svc = find_service(key)
+    path = receipt_path(key)
+    if svc is None or path is None:
+        raise DeployError(404, "unknown service")
+    script = resolve_script(svc)
+    root = _git_root(os.path.dirname(script))
+    with _receipts_lock:
+        previous = load_receipt(key) or {}
+        now = _now_iso()
+        deploys = previous.get("deploys")
+        doc = {
+            "version": RECEIPT_VERSION,
+            "key": key,
+            "repo": _collapse_home(root) if root else None,
+            "revision": git_revision(root) if root else None,
+            "setup": svc.get("setup"),
+            "data_dir": svc.get("marker"),
+            "ports": _receipt_ports(svc),
+            "installed_at": previous.get("installed_at") or now,
+            "deployed_at": now,
+            "deploys": (deploys if isinstance(deploys, int) and deploys > 0 else 0) + 1,
+            "last_job": job_id,
+        }
+        _write_json_atomically(path, doc, ".%s." % key)
+    return doc
 
 
 # ------------------------------------------------------------------ control

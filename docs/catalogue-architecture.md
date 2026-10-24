@@ -432,7 +432,9 @@ Build in this order:
    are not in the manifest yet. Official remote = this repo. Port allocator can
    land here or with apply.
 2. **Receipt** — write `~/services/launcher/instances/<id>.json` on
-   install (remote, revision, ports, image digests, data dir). Derive
+   install (remote, revision, ports, image digests, data dir). *Landed
+   2026-10-25* for launcher deploys (repo, revision, ports, data dir; no
+   image digests yet), see `app/web/SPEC.md` v5. Derive
    tiles (and later Homepage / Kuma) from receipts plus the index.
 3. **Apply** — fetch → allocate ports → write `.env` if absent →
    `compose up` or native hook → Serve (still the one interactive step)
