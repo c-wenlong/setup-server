@@ -156,6 +156,9 @@ env_val()    { sed -n "s/^$1=//p" "$SVC/.env" | sed 's/^"//; s/"$//'; }
 # .env explains at length why the version is pinned and must not float to
 # `stable`, so assertions about the values have to ignore the prose.
 env_body()   { sed 's/#.*//' "$SVC/.env"; }
+# A whole helper rather than `check ... ! env_body | grep`: in that form the
+# pipe takes `check` itself into a subshell, so the result was never counted.
+env_lacks()  { ! env_body | grep -q -- "$1"; }
 
 # No `stat -c` without a `stat -f` fallback (macOS).
 file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
@@ -433,7 +436,7 @@ test_image_is_pinned() {
   check "  with a pinned default"          compose_has 'HA_VERSION:-2026\.9\.1'
   check "  and never :stable"              compose_lacks ':stable'
   check ".env pins the version"            [ "$(env_val HA_VERSION)" = "2026.9.1" ]
-  check ".env's values never say stable"   ! env_body | grep -q 'stable'
+  check ".env's values never say stable"   env_lacks 'stable'
   check "no :latest either"                compose_lacks ':latest'
   teardown
 }
