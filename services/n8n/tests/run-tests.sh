@@ -401,6 +401,7 @@ test_teardown_purge_missing_data_dir() {
   run_teardown --purge "n8n"
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "empty marker dir still removed" [ ! -e "$HOME/services/n8n" ]
   teardown
 }
 

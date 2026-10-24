@@ -571,6 +571,24 @@ test_teardown_purge_missing_data_dir() {
   teardown
 }
 
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a $HOME reference in .env is expanded like Compose does"
+  deployed
+  local dir; dir="$(data_dir)"
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=\"\${HOME}${dir#"$HOME"}\"#" "$SVC/.env"
+  run_teardown --purge "stirling-pdf"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(data_dir)"
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA='\$HOME${dir#"$HOME"}'#" "$SVC/.env"
+  run_teardown --purge "stirling-pdf"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  dir kept"                  [ -e "$dir" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/stirling-pdf/setup.sh or docker-compose.yml is missing — nothing to test."
@@ -603,6 +621,7 @@ test_teardown_serve_status_fails
 test_teardown_quoted_env
 test_teardown_purge_trailing_slashes
 test_teardown_purge_missing_data_dir
+test_teardown_home_variable_in_env
 
 if [ "${1:-}" = "--live" ]; then
   echo

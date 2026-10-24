@@ -1434,6 +1434,24 @@ host_fingerprint() {
   } | sort
 }
 
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a $HOME reference in .env is expanded like Compose does"
+  deployed
+  local dir; dir="$(config_dir)"
+  sed -i.bak "s#^HA_CONFIG=.*#HA_CONFIG=\"\${HOME}${dir#"$HOME"}\"#" "$SVC/.env"
+  run_teardown --purge "home-assistant"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(config_dir)"
+  sed -i.bak "s#^HA_CONFIG=.*#HA_CONFIG='\$HOME${dir#"$HOME"}'#" "$SVC/.env"
+  run_teardown --purge "home-assistant"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  dir kept"                  [ -e "$dir" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 for f in setup.sh docker-compose.yml configuration.yaml; do
   [ -f "$SERVICE_DIR/$f" ] || { red "services/home-assistant/$f is missing — nothing to test."; exit 1; }
@@ -1487,6 +1505,7 @@ test_teardown_serve_status_fails
 test_teardown_quoted_env
 test_teardown_purge_trailing_slashes
 test_teardown_purge_missing_config_dir
+test_teardown_home_variable_in_env
 
 echo "• sandbox isolation: the mocked suite changed nothing on this host"
 AFTER_FP="$(host_fingerprint)"

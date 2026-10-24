@@ -464,19 +464,21 @@ Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
 that point at this service, runs `compose down`, and refuses to delete a
 config dir that is not really inside `~/services/`.
 
+`--purge` deletes your hand-edited YAML (`services.yaml`, `settings.yaml`,
+`widgets.yaml`, `bookmarks.yaml`) with no undo, and removes `~/services/homepage`
+if it is then empty. **Keep a copy first** if you edited anything:
+
+```bash
+cp -a ~/services/homepage/config ~/homepage-config-$(date +%F).bak
+```
+
+Then:
+
 ```bash
 cd ~/dev/setup-server/services/homepage
 ./teardown.sh            # remove, keep config + .env (the launcher's Remove)
 ./teardown.sh --purge    # also delete HOMEPAGE_CONFIG and .env; type "homepage"
 ./setup.sh               # back, reseeded from this repo if you purged
-```
-
-`--purge` deletes your hand-edited YAML (`services.yaml`, `settings.yaml`,
-`widgets.yaml`, `bookmarks.yaml`) with no undo, and removes `~/services/homepage`
-if it is then empty. Keep a copy first if you edited anything:
-
-```bash
-cp -a ~/services/homepage/config ~/homepage-config-$(date +%F).bak
 ```
 
 The repo's own templates in `services/homepage/config/` are never touched.

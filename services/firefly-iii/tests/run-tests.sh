@@ -1069,6 +1069,17 @@ test_teardown_purge_root_owned_contents() {
   check "fell back to docker run"     calls_have "docker run --rm --pull=never -v $d:/purge"
   check "ledger dir gone"             [ ! -e "$d" ]
   teardown
+  # Postgres owns the data dir itself (uid 70, mode 700): this user cannot
+  # even enter it, so resolving its path must not need to.
+  deployed
+  d="$HOME/services/firefly-iii/db"
+  chmod 000 "$d"
+  run_teardown --purge "firefly-iii"
+  chmod -R u+rwX "$d" 2>/dev/null
+  check "unenterable dir: exits zero" [ "$CODE" -eq 0 ]
+  check "  cleared from a container"  calls_have "docker run --rm --pull=never -v $d:/purge"
+  check "  ledger dir gone"           [ ! -e "$d" ]
+  teardown
 }
 
 test_teardown_purge_refuses_odd_paths() {

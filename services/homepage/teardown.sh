@@ -62,17 +62,35 @@ fi
 # Compose reads them (an optional `export `, matching single or double quotes,
 # an inline ` #` comment after an unquoted value) without executing the file.
 env_get() {
-  local line value tail
+  local line value tail quote=""
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
   [ -n "$line" ] || return 0
   value="${line#*=}"
   tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
   case "$value" in
-    \"*) value="${value#\"}"; value="${value%%\"*}" ;;
-    \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
     *) value="${value%%[[:space:]]#*}" ;;
   esac
+  # Compose interpolates $HOME / ${HOME} in unquoted and double-quoted values
+  # (single quotes are literal). That one variable is all a path here may
+  # use; anything else is left as written and then fails the path checks.
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
   printf '%s' "$value"
+}
+
+# Real path of a directory WITHOUT entering it: a Postgres- or root-owned
+# data dir may be unreadable to this user, which is exactly when the purge
+# needs the cleanup container. Resolve the parent, append the name; a
+# symlinked leaf is refused rather than followed.
+real_dir() {
+  local d="$1" parent
+  [ ! -L "$d" ] || return 1
+  parent="$(cd "$(dirname "$d")" && pwd -P)" || return 1
+  printf '%s/%s' "$parent" "$(basename "$d")"
 }
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 DATA_DIR="$(env_get HOMEPAGE_CONFIG)"
@@ -102,7 +120,7 @@ if [ "$PURGE" -eq 1 ]; then
   if [ -e "$DATA_DIR" ]; then
     [ -d "$DATA_DIR" ] || die "HOMEPAGE_CONFIG=$DATA_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    PURGE_DIR="$(cd "$DATA_DIR" && pwd -P)" || die "Cannot resolve $DATA_DIR."
+    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "Cannot resolve $DATA_DIR (or it is a symlink)."
     case "$PURGE_DIR" in
       "$root"/?*) ;;
       *) die "HOMEPAGE_CONFIG=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;
@@ -166,6 +184,10 @@ if [ "$PURGE" -eq 1 ]; then
   # config dir). Remove it only if it is now empty; rmdir never deletes content.
   rmdir -- "$HOME/services/homepage" 2>/dev/null || true
   rm -f -- "$ENV_FILE"
+  # ~/services/<name> is the launcher's install marker. Try it even when the
+  # data dir was already gone, so a purged app never reads as installed;
+  # rmdir only ever removes an empty directory.
+  [ -L "$HOME/services/$NAME" ] || rmdir -- "$HOME/services/$NAME" 2>/dev/null || true
   ok "Deleted ${PURGE_DIR:-(no config dir)} and $ENV_FILE"
 fi
 

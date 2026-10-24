@@ -974,6 +974,7 @@ test_teardown_purge() {
   check "wizard marker gone"          [ ! -e "$st/.wizard-complete" ]
   check ".env gone"                   [ ! -f "$SVC/.env" ]
   check "media survives (inside state root)" [ -f "$media/film.mkv" ]
+  check "marker kept while media is in it" [ -d "$st" ]
   check "serve off for :8096"         calls_have "tailscale serve --https=8096 off"
   check "services dir itself kept"    [ -d "$HOME/services" ]
   teardown
@@ -991,6 +992,7 @@ test_teardown_purge_media_outside() {
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "config gone"                 [ ! -e "$HOME/services/jellyfin/config" ]
   check "media survives"              [ -f "$SANDBOX/disk/media/film.mkv" ]
+  check "empty marker dir removed"    [ ! -e "$HOME/services/jellyfin" ]
   teardown
 }
 

@@ -70,17 +70,35 @@ fi
 # Compose reads them (an optional `export `, matching single or double quotes,
 # an inline ` #` comment after an unquoted value) without executing the file.
 env_get() {
-  local line value tail
+  local line value tail quote=""
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
   [ -n "$line" ] || return 0
   value="${line#*=}"
   tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
   case "$value" in
-    \"*) value="${value#\"}"; value="${value%%\"*}" ;;
-    \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
     *) value="${value%%[[:space:]]#*}" ;;
   esac
+  # Compose interpolates $HOME / ${HOME} in unquoted and double-quoted values
+  # (single quotes are literal). That one variable is all a path here may
+  # use; anything else is left as written and then fails the path checks.
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
   printf '%s' "$value"
+}
+
+# Real path of a directory WITHOUT entering it: a Postgres- or root-owned
+# data dir may be unreadable to this user, which is exactly when the purge
+# needs the cleanup container. Resolve the parent, append the name; a
+# symlinked leaf is refused rather than followed.
+real_dir() {
+  local d="$1" parent
+  [ ! -L "$d" ] || return 1
+  parent="$(cd "$(dirname "$d")" && pwd -P)" || return 1
+  printf '%s/%s' "$parent" "$(basename "$d")"
 }
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 CONFIG_DIR="$(env_get JELLYFIN_CONFIG)"
@@ -122,7 +140,7 @@ guard_dir() {  # guard_dir VARNAME VALUE
   if [ -e "$dir" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    RESOLVED="$(cd "$dir" && pwd -P)" || die "Cannot resolve $dir."
+    RESOLVED="$(real_dir "$dir")" || die "Cannot resolve $dir (or it is a symlink)."
     case "$RESOLVED" in
       "$root"/?*) ;;
       *) die "$var=$dir resolves to $RESOLVED, which is not a folder inside $root — refusing." ;;
@@ -216,6 +234,13 @@ if [ "$PURGE" -eq 1 ]; then
   done
   rm -f -- "$STATE/.wizard-complete"
   rm -f -- "$ENV_FILE"
+  # The default library folder setup.sh makes: removed only when it is
+  # empty, so the marker below can go. Anything with media in it stays.
+  [ -L "$STATE/media" ] || rmdir -- "$STATE/media" 2>/dev/null || true
+  # ~/services/<name> is the launcher's install marker. Try it even when the
+  # data dir was already gone, so a purged app never reads as installed;
+  # rmdir only ever removes an empty directory.
+  [ -L "$HOME/services/$NAME" ] || rmdir -- "$HOME/services/$NAME" 2>/dev/null || true
   ok "Deleted the wizard marker and $ENV_FILE; media in $LIBRARY_DIR untouched"
 fi
 
