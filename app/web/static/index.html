@@ -32,6 +32,7 @@
 <link rel="stylesheet" href="notes.css">
 <link rel="stylesheet" href="tooltip.css">
 <link rel="stylesheet" href="view.css">
+<link rel="stylesheet" href="catalogue.css">
 </head>
 <body>
 
@@ -74,6 +75,8 @@
         </button>
         <div class="gfilter-menu" id="gfilter-menu" hidden role="group" aria-label="Categories"></div>
       </div>
+
+      <a class="iconbtn cat-link" id="cat-link" href="#/catalogue">Catalogue</a>
 
       <button class="iconbtn theme-btn" id="theme-btn" type="button" aria-label="Theme: System">
       </button>
@@ -212,6 +215,11 @@
      </div><!-- /.d-cols -->
 
    </section>
+
+   <!-- Catalogue view (#/catalogue). Painted entirely by catalogue.js from
+        the list app.js already polls; installs go through app.js's own
+        deploy sheet. -->
+   <section class="cat" id="view-catalogue" aria-labelledby="cat-title" hidden></section>
   </main>
 
 </div>
@@ -253,6 +261,7 @@
 <script src="view.js"></script>
 <script src="app.js"></script>
 <script src="notes.js"></script>
+<script src="catalogue.js"></script>
 <script src="tooltip.js"></script>
 </body>
 </html>

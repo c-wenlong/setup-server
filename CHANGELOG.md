@@ -10,6 +10,17 @@ first, dated by merge.
 
 ### Added
 
+- **Catalogue page in the launcher.** `#/catalogue` (Catalogue button in the
+  header) lists every app by category with its description, author and
+  status, from the same `api/services` poll as the grid, which now carries
+  each app's install receipt. Install opens the grid's existing deploy
+  sheet, so it is the same confirm-then-log flow; installed apps show
+  "since <date>" from the receipt, apps with no setup.sh show Coming soon.
+  Search plus All / Installed / Not installed filters. Step 4 of the
+  catalogue build order; spec in `app/web/SPEC.md` (v6).
+
+### Added
+
 - **Launcher install receipts.** A deploy run from the launcher that exits 0
   now writes `~/services/launcher/instances/<key>.json`: the repo and git
   revision it came from (read from `.git`, no subprocess), the registry's

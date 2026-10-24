@@ -1,0 +1,148 @@
+/* catalogue.css — the #/catalogue page (catalogue.js).
+ *
+ * Only app.css tokens, so light/dark and the accent follow the rest of the
+ * launcher. Cards are wider than grid tiles: the point of this page is the
+ * description, so it gets room to be read.
+ */
+
+.cat-link { padding: 0 12px; text-decoration: none; color: var(--text); font-size: 14px; }
+.cat-link[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
+
+.cat { padding-bottom: 48px; }
+
+.cat-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin: 4px 0 18px;
+}
+.cat-back { flex: none; padding: 0 12px; text-decoration: none; color: var(--text); font-size: 14px; }
+.cat-titles { min-width: 0; }
+.cat-titles h2 {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.15;
+  font-weight: 640;
+  letter-spacing: var(--tight);
+}
+.cat-summary { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
+
+.cat-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.cat-search {
+  flex: 1 1 240px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 14px;
+  font: inherit;
+  font-size: 15px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.cat-search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.cat-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cat-chip {
+  -webkit-appearance: none;
+  appearance: none;
+  min-height: 36px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.cat-chip.is-on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.cat-chip:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); border-color: var(--accent); }
+@media (hover: hover) and (pointer: fine) {
+  .cat-chip:hover { color: var(--text); }
+}
+
+.cat-group + .cat-group { margin-top: 28px; }
+.cat-group-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cat-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+@media (min-width: 640px)  { .cat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1040px) { .cat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+.cat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+.cat-card-planned { opacity: .7; }
+
+.cat-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.cat-icon { flex: none; width: 36px; height: 36px; color: var(--text); }
+.cat-icon > * { width: 36px; height: 36px; display: block; }
+.cat-names { min-width: 0; display: flex; flex-direction: column; }
+.cat-name { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.cat-tag { font-size: 13px; color: var(--muted); }
+
+.cat-desc {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cat-author { margin: 0; font-size: 12.5px; color: var(--faint); overflow-wrap: anywhere; }
+
+.cat-status { margin: 2px 0 0; font-size: 13px; font-weight: 520; }
+.cat-status-installed { color: var(--ok); }
+.cat-status-available { color: var(--muted); }
+.cat-status-planned   { color: var(--faint); }
+.cat-status-run       { color: var(--accent); }
+
+.cat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+.cat-btn { min-height: 40px; padding: 0 16px; text-decoration: none; }
+.cat-more { font-size: 13.5px; color: var(--accent); text-decoration: none; }
+.cat-more:hover { text-decoration: underline; }
+
+.cat-empty { color: var(--muted); font-size: 14px; }
+
+.cat-error {
+  padding: 16px;
+  background: var(--warn-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.cat-error-title { margin: 0 0 4px; font-weight: 600; }
+.cat-error-text { margin: 0 0 12px; color: var(--muted); font-size: 13.5px; }
