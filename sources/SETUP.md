@@ -3,7 +3,7 @@
 The passphrase-encrypted static build of the private
 [c-wenlong/sources](https://github.com/c-wenlong/sources) archive (YouTube
 transcripts, blogs, newsletters, papers, personas), served by nginx and
-published tailnet-only. It is the same build `scripts/run_web.sh` serves
+published tailnet-only. It is the same build `apps/web/build/run_web.sh` serves
 locally and the `site` workflow pushes to GitHub Pages — same passphrase
 unlocks all three. A commit on the fetch clone's `main` (the weekly fetch,
 or a push from any device) goes live on the daily poll — or immediately
@@ -26,7 +26,7 @@ weekly fetch timer ──┐                     push from any device
                      │                                │     no build over a half-fetched tree)
                      │                                │ 2. git pull --ff-only (best effort)
                      │                                │ 3. uv sync --quiet
-                     │                                │ 4. uv run scripts/build_site.py --out www/next
+                     │                                │ 4. uv run apps/web/build/build_site.py --out www/next
                      │                                │    (gzip + AES-256-GCM per file;
                      │                                │     SITE_PASSPHRASE from .env)
                      │                                │ 5. atomic repoint  current -> releases/<sha>
@@ -67,7 +67,7 @@ next poll without GitHub being involved at all.
 - The site is static files — no app code, no database, no accounts.
 - Every corpus file (`d/*.bin`) is gzip + AES-256-GCM under a key derived
   from `SITE_PASSPHRASE` (PBKDF2-SHA256, fixed salt in
-  `scripts/build_site.py`). Only the app shell is plaintext. The passphrase
+  `apps/web/build/build_site.py`). Only the app shell is plaintext. The passphrase
   is the same one as the sources repo's GitHub secret and what you type to
   unlock the site; use the same value so one passphrase opens both sites.
 - `.env` holds the passphrase, so it is written `0600` and is gitignored —
@@ -81,8 +81,8 @@ next poll without GitHub being involved at all.
 | Dependency | Why | Checked in preflight |
 |---|---|---|
 | git | pull the fetch clone forward | presence |
-| uv | `uv run scripts/build_site.py` | presence |
-| the sources clone at `SOURCE_REPO` | the build's entire input | `.git/` + `scripts/build_site.py` exist |
+| uv | `uv run apps/web/build/build_site.py` | presence |
+| the sources clone at `SOURCE_REPO` | the build's entire input | `.git/` + `apps/web/build/build_site.py` (or the older `apps/web/build/build_site.py`) exist |
 | `SITE_PASSPHRASE` (first run) | encryption key; lands in `.env` | non-empty |
 | Docker + Compose v2 | nginx container | daemon reachable |
 | Tailscale (running) | HTTPS publish | backend state |

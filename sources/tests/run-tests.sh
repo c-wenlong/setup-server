@@ -200,6 +200,21 @@ test_force_rebuild_same_sha() {
   teardown
 }
 
+test_new_layout_build_path() {
+  echo "• repo with the apps/web layout: setup accepts it, deploy builds from apps/web/build/"
+  setup
+  rm -rf "$SOURCE_REPO/scripts"
+  mkdir -p "$SOURCE_REPO/apps/web/build"
+  echo "# build stub" > "$SOURCE_REPO/apps/web/build/build_site.py"
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "built from apps/web"     calls_have "uv run apps/web/build/build_site.py --out"
+  check "no old-path build"       no_call "uv run scripts/build_site.py"
+  check "site swapped into current" [ -f "$HOME/services/sources/www/current/index.html" ]
+  teardown
+}
+
 test_poll_lock() {
   echo "• poller: concurrent run skips cleanly while the lock is held"
   setup
@@ -311,6 +326,7 @@ test_fresh_deploy
 test_idempotent_rerun
 test_push_triggers_redeploy
 test_force_rebuild_same_sha
+test_new_layout_build_path
 test_poll_lock
 test_fetch_lock
 test_port_override
