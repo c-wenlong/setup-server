@@ -137,3 +137,12 @@
 .cat-more:hover { text-decoration: underline; }
 
 .cat-empty { color: var(--muted); font-size: 14px; }
+
+.cat-error {
+  padding: 16px;
+  background: var(--warn-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.cat-error-title { margin: 0 0 4px; font-weight: 600; }
+.cat-error-text { margin: 0 0 12px; color: var(--muted); font-size: 13.5px; }

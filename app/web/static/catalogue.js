@@ -53,6 +53,26 @@
     return !!(job && typeof job === 'object' && job.id && job.status === 'running');
   }
 
+  /* A running job may be a deploy or a start/stop/restart from elsewhere;
+     say which, as the grid does. A backend with no `action` only deploys. */
+  var RUNNING = {
+    deploy:  { button: 'Installing…', line: 'Installing now' },
+    start:   { button: 'Starting…', line: 'Starting now' },
+    stop:    { button: 'Stopping…', line: 'Stopping now' },
+    restart: { button: 'Restarting…', line: 'Restarting now' }
+  };
+  function running(svc) {
+    var act = svc.job && svc.job.action;
+    return RUNNING[Object.prototype.hasOwnProperty.call(RUNNING, act) ? act : 'deploy'];
+  }
+
+  /* Every focusable control carries "<key>:<kind>", so a repaint can put
+     focus back on the very same control. */
+  function tag(el, svc, kind) {
+    el.setAttribute('data-act', svc.key + ':' + kind);
+    return el;
+  }
+
   /* installed | available | planned, from the same state the grid uses. */
   function bucket(svc) {
     if (svc.installed || svc.state === 'active' || svc.state === 'stopped') return 'installed';
@@ -134,27 +154,25 @@
     var wrap = make('div', 'cat-actions');
 
     if (isRunningJob(svc)) {
-      var watch = make('button', 'btn cat-btn', 'Installing…');
+      var watch = tag(make('button', 'btn cat-btn', running(svc).button), svc, 'watch');
       watch.type = 'button';
-      watch.setAttribute('data-act', svc.key);
       watch.addEventListener('click', function () { if (app()) app().deploy(svc.key, watch); });
       wrap.appendChild(watch);
     } else if (b === 'available') {
-      var install = make('button', 'btn btn-primary cat-btn', 'Install');
+      var install = tag(make('button', 'btn btn-primary cat-btn', 'Install'), svc, 'install');
       install.type = 'button';
-      install.setAttribute('data-act', svc.key);
       install.setAttribute('aria-label', 'Install ' + (svc.name || svc.key));
       install.addEventListener('click', function () { if (app()) app().deploy(svc.key, install); });
       wrap.appendChild(install);
     } else if (b === 'installed' && svc.state === 'active' && typeof svc.url === 'string' && svc.url) {
-      var open = make('a', 'btn cat-btn', 'Open');
+      var open = tag(make('a', 'btn cat-btn', 'Open'), svc, 'open');
       open.href = svc.url;
       open.target = '_blank';
       open.rel = 'noopener noreferrer';
       wrap.appendChild(open);
     }
 
-    var more = make('a', 'cat-more', 'Details');
+    var more = tag(make('a', 'cat-more', 'Details'), svc, 'details');
     more.href = '#/service/' + encodeURIComponent(svc.key);
     wrap.appendChild(more);
     return wrap;
@@ -165,7 +183,7 @@
     var line = make('p', 'cat-status cat-status-' + b);
     if (isRunningJob(svc)) {
       line.className = 'cat-status cat-status-run';
-      line.textContent = 'Installing now';
+      line.textContent = running(svc).line;
       return line;
     }
     if (b === 'installed') {
@@ -220,10 +238,24 @@
       chip.setAttribute('aria-pressed', on ? 'true' : 'false');
     }
 
-    if (!a || !a.loaded()) {
+    var err = a && typeof a.error === 'function' ? a.error() : null;
+    if (!a || !a.loaded() || (err && !a.services().length)) {
       elSummary.textContent = '';
       elBody.textContent = '';
-      elBody.appendChild(make('p', 'cat-empty', 'Loading the catalogue…'));
+      if (err) {
+        var box = make('div', 'cat-error');
+        box.setAttribute('role', 'alert');
+        box.appendChild(make('p', 'cat-error-title', 'Can\u2019t reach the launcher API'));
+        box.appendChild(make('p', 'cat-error-text', err));
+        var retry = make('button', 'btn', 'Retry');
+        retry.type = 'button';
+        retry.setAttribute('data-act', ':retry');
+        retry.addEventListener('click', function () { a.refresh(); });
+        box.appendChild(retry);
+        elBody.appendChild(box);
+      } else {
+        elBody.appendChild(make('p', 'cat-empty', 'Loading the catalogue…'));
+      }
       return;
     }
 
@@ -272,7 +304,10 @@
     if (!any) elBody.appendChild(make('p', 'cat-empty', 'No app matches that.'));
 
     if (focusKey) {
-      var again = root.querySelector('[data-act="' + focusKey.replace(/["\\]/g, '') + '"]');
+      var again = null, all = root.querySelectorAll('[data-act]');
+      for (var f = 0; f < all.length; f++) {
+        if (all[f].getAttribute('data-act') === focusKey) { again = all[f]; break; }
+      }
       if (again) { try { again.focus({ preventScroll: true }); } catch (e) { again.focus(); } }
     }
   }

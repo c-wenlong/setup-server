@@ -466,5 +466,12 @@ deploy job; there is no separate compose-only installer.
   grid's own deploy sheet: same confirm step, same log, same 409/429
   handling. The sheet closing triggers a poll, which repaints the page.
 - **Search** across key, name, tagline, description and author; filter
-  chips All / Installed / Not installed. Focus stays on the same card's
-  button across a repaint.
+  chips All / Installed / Not installed. Every control carries
+  `data-act="<key>:<kind>"`, so focus returns to the same control after a
+  repaint.
+- **Running jobs** are labelled by `job.action` (Installing / Starting /
+  Stopping / Restarting), as on the grid.
+- **Failures**: `app.js` fires the same event when a poll fails and exposes
+  `LauncherApp.error()`; with nothing loaded the page shows the error and a
+  Retry. Board chrome (which locks page scroll) is never applied on this
+  route, even though `render()` re-applies it after each poll.
