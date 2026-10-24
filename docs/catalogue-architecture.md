@@ -447,7 +447,10 @@ Build in this order:
    reduces to the receipt that deploy now writes). Only now does a
    dedicated page earn its keep.
 5. **Remove** — stop + un-serve, keep data; `--purge` deletes
-   `~/services/<id>` and the receipt. Align with
+   `~/services/<id>` and the receipt. *Landed 2026-10-25* as the launcher
+   Remove action over per-service `teardown.sh` (`app/web/SPEC.md` v7);
+   `--purge` stays terminal-only, and the receipt records `removed_at`
+   instead of being deleted. Align with
    [teardown-sh.md](teardown-sh.md). `app/web/SPEC.md` still lists
    uninstall as out of scope until this lands.
 6. **Foreign remotes** — extra git URLs, prefixed ids, rewrite-or-refuse

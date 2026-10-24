@@ -107,6 +107,10 @@ docker compose --project-directory ~/dev/setup-server/services/stirling-pdf rest
 
 Upgrade: bump `STIRLING_PDF_VERSION` in `.env`, then `./setup.sh`.
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes `:HTTPS_PORT`
+and runs `compose down`; data and `.env` stay, so `./setup.sh` brings it back.
+`./teardown.sh --purge` also deletes them, after you type `stirling-pdf`.
+
 To turn login on later: set `SECURITY_ENABLELOGIN=true` and
 `SECURITY_INITIALLOGIN_USERNAME` / `SECURITY_INITIALLOGIN_PASSWORD` in
 `.env` (not the upstream `stirling` default), then `./setup.sh`.

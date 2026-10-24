@@ -92,6 +92,10 @@ for svc in $SERVICES; do
   [ -f "$svc/SETUP.md" ]           || fail "$svc/SETUP.md is missing"
   [ -f "$svc/TROUBLESHOOT.md" ]    || fail "$svc/TROUBLESHOOT.md is missing"
 
+  if [ -e "$svc/teardown.sh" ] && [ ! -x "$svc/teardown.sh" ]; then
+    fail "$svc/teardown.sh is not executable"
+  fi
+
   if [ -f "$svc/tests/run-tests.sh" ]; then
     [ -x "$svc/tests/run-tests.sh" ] || fail "$svc/tests/run-tests.sh is not executable"
   else

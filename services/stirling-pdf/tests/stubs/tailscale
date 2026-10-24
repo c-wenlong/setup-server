@@ -3,7 +3,14 @@
 #   backend_state       — override BackendState (default Running)
 #   operator            — exists => serve allowed without sudo
 #   serve_fails_left    — countdown of forced serve failures (approval-link flow)
+#   serve_status        — text `tailscale serve status` prints (teardown tests)
 echo "tailscale $*" >> "$CALLS_LOG"
+
+if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then
+  [ -f "$STATE_DIR/serve_status" ] && cat "$STATE_DIR/serve_status"
+  exit 0
+fi
+case " $* " in *" off "*) [ "$1" = "serve" ] && exit 0 ;; esac
 
 case "$1" in
   status)

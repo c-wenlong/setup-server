@@ -29,7 +29,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
 
 teardown() {
@@ -346,6 +346,151 @@ test_live() {
   live_check "state dir exists"                sh -c "test -d \"\$(sed -n 's/^STIRLING_DATA=//p' '$SERVICE_DIR/.env')\""
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps this port to this service,
+# and neighbours sit on other ports (one a lookalike suffix).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  mkdir -p "$(data_dir)/configs"
+  echo keep > "$(data_dir)/configs/settings.yml"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8103 (tailnet only)
+|-- / proxy http://127.0.0.1:8103
+
+https://test-host.tailfake.ts.net:18103 (tailnet only)
+|-- / proxy http://127.0.0.1:18103
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps data and .env, unpublishes only its port"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8103"         calls_have "tailscale serve --https=8103 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18103 untouched"  no_call "https=18103"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "data kept"                   [ -f "$(data_dir)/configs/settings.yml" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_https_port_from_frontend_url() {
+  echo "• teardown: HTTPS port comes from SYSTEM_FRONTENDURL"
+  setup
+  touch "$STATE_DIR/operator"
+  export HTTPS_PORT=9443
+  run_deploy
+  unset HTTPS_PORT
+  printf 'https://test-host.tailfake.ts.net:9443 (tailnet only)\n|-- / proxy http://127.0.0.1:8103\n' \
+    > "$STATE_DIR/serve_status"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :9443"         calls_have "tailscale serve --https=9443 off"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8103 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "warns whose it is"           out_has "points at http://127.0.0.1:9999"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then data and .env go"
+  deployed
+  local dir; dir="$(data_dir)"
+  run_teardown --purge "stirling"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: data kept"       [ -f "$dir/configs/settings.yml" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge "stirling-pdf"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "data dir gone"               [ ! -e "$dir" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "serve off for :8103"         calls_have "tailscale serve --https=8103 off"
+  check "services dir itself kept"   [ -d "$HOME/services" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a data dir outside ~/services"
+  deployed
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$HOME#" "$SVC/.env"
+  run_teardown --purge "stirling-pdf"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "stirling-pdf"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "stirling-pdf"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/stirling-pdf/setup.sh or docker-compose.yml is missing — nothing to test."
@@ -366,6 +511,13 @@ test_idempotent_rerun
 test_frontend_url_drift
 test_operator_escalation
 test_serve_approval_prompt
+test_teardown_safe
+test_teardown_https_port_from_frontend_url
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_refuses_odd_paths
 
 if [ "${1:-}" = "--live" ]; then
   echo

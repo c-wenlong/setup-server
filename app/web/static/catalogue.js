@@ -59,7 +59,8 @@
     deploy:  { button: 'Installing…', line: 'Installing now' },
     start:   { button: 'Starting…', line: 'Starting now' },
     stop:    { button: 'Stopping…', line: 'Stopping now' },
-    restart: { button: 'Restarting…', line: 'Restarting now' }
+    restart: { button: 'Restarting…', line: 'Restarting now' },
+    remove:  { button: 'Removing…', line: 'Removing now' }
   };
   function running(svc) {
     var act = svc.job && svc.job.action;
@@ -172,6 +173,14 @@
       wrap.appendChild(open);
     }
 
+    if (b === 'installed' && svc.removable === true && !isRunningJob(svc)) {
+      var rm = tag(make('button', 'cat-remove', 'Remove'), svc, 'remove');
+      rm.type = 'button';
+      rm.setAttribute('aria-label', 'Remove ' + (svc.name || svc.key));
+      rm.addEventListener('click', function () { if (app()) app().remove(svc.key, rm); });
+      wrap.appendChild(rm);
+    }
+
     var more = tag(make('a', 'cat-more', 'Details'), svc, 'details');
     more.href = '#/service/' + encodeURIComponent(svc.key);
     wrap.appendChild(more);
@@ -192,7 +201,9 @@
       line.textContent = (svc.state === 'active' ? 'Installed, running' : 'Installed, stopped') +
         (when ? ' · since ' + when : '');
     } else if (b === 'available') {
-      line.textContent = 'Not installed';
+      line.textContent = svc.receipt && svc.receipt.removed_at
+        ? 'Removed ' + (shortDate(svc.receipt.removed_at) || '') + ' · data kept'
+        : 'Not installed';
     } else {
       line.textContent = 'Coming soon';
     }
