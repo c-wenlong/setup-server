@@ -148,8 +148,12 @@ def main(argv):
         print("registry OK: %s matches the manifests" % OUT)
         return 0
     if current != text:
-        with open(out, "w", encoding="utf-8") as fh:
+        # Temp file + rename: the launcher re-reads services.json on every
+        # request, so it must never see a truncated or half-written file.
+        tmp = out + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(text)
+        os.replace(tmp, out)
         print("wrote %s" % OUT)
     else:
         print("%s already up to date" % OUT)

@@ -70,6 +70,7 @@ gen --check
 check "--check passes right after"          [ "$CODE" -eq 0 ]
 gen
 check "second run is a no-op"               out_has "already up to date"
+check "no temp file left behind"            test ! -e "$R/app/web/services.json.tmp"
 
 echo "• --check catches drift"
 printf '{"key": "alpha", "name": "Renamed", "group": "daily"}\n' > "$R/services/alpha/app.json"
@@ -112,6 +113,16 @@ p = sys.argv[1]; d = json.load(open(p)); d["order"].append("ghost"); json.dump(d
 PY
 gen
 check "unknown key in order fails"          out_has "names keys with no entry: ghost"
+teardown
+
+setup
+python3 - "$R/app/web/registry.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["order"].append("duo-b"); json.dump(d, open(p, "w"))
+PY
+gen
+check "repeated key in order fails"         [ "$CODE" -ne 0 ]
+check "names the repeated key"              out_has '"order" in app/web/registry.json repeats: duo-b'
 teardown
 
 setup
