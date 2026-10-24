@@ -1,0 +1,21 @@
+{
+  "key": "open-webui",
+  "name": "Open WebUI",
+  "tagline": "Chat",
+  "group": "ai",
+  "icon": "chat",
+  "author": "open-webui",
+  "url": "https://HOST:3001/",
+  "health": "http://127.0.0.1:3001/health",
+  "marker": "~/services/open-webui",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "open-webui"
+      }
+    ],
+    "kuma": "open-webui"
+  },
+  "description": "ChatGPT-style chat over the ollama models already running on this box, with conversation history, model switching and document upload. Host-network container bound to 127.0.0.1:3001. The first account registered (Kai's) is the admin; nothing leaves the tailnet."
+}

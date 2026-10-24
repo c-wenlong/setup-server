@@ -1,0 +1,31 @@
+{
+  "key": "coolify",
+  "name": "Coolify",
+  "tagline": "PaaS",
+  "group": "infra",
+  "icon": "coolify",
+  "author": "coollabsio",
+  "url": "https://HOST:8101/",
+  "health": "http://127.0.0.1:8101/api/health",
+  "marker": "~/services/coolify",
+  "env": ".env",
+  "description": "Self-hosted PaaS — push a repo, get a running app, from a dashboard on this box. Four containers (Coolify, Postgres, Redis, Soketi) with the dashboard on :8101 because OpenHands already owns Coolify's upstream :8000. Loopback-only behind Serve. The first admin is seeded from .env so /register is never an open 'whoever loads the page first is root' window. Coolify's Traefik proxy is off: upstream binds :80/:443 on every interface, which would put this box on the LAN. Apps you deploy through it should publish a loopback port and get their own tailscale serve. In-app auto-update is off too — it rewrites compose and would undo those binds. Upgrade by bumping COOLIFY_VERSION in .env and re-running setup.sh.",
+  "control": {
+    "parts": [
+      {
+        "container": "coolify"
+      },
+      {
+        "container": "coolify-realtime"
+      },
+      {
+        "container": "coolify-redis"
+      },
+      {
+        "container": "coolify-db"
+      }
+    ],
+    "kuma": "coolify",
+    "_comment": "Stop order: the dashboard first, then Soketi, then Redis, then Postgres. Start is the reverse."
+  }
+}

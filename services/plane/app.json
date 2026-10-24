@@ -1,0 +1,55 @@
+{
+  "key": "plane",
+  "name": "Plane",
+  "tagline": "Projects",
+  "group": "daily",
+  "icon": "plane",
+  "author": "makeplane",
+  "url": "https://HOST:8105/",
+  "health": "http://127.0.0.1:8105/api/instances/",
+  "marker": "~/services/plane",
+  "env": ".env",
+  "description": "Self-hosted Linear/Jira: issues, cycles and pages. Plane Community v1.4.2 behind an HTTP-only proxy on :8105 (Serve terminates TLS; we do not publish :443). First instance admin is seeded from .env. Eleven long-running containers plus a one-shot migrator — RAM-heavy on this 7.7 GB box. MinIO comes from quay.io because Docker Hub froze minio/minio. This is our compose, not a wrap of Plane's interactive setup.sh.",
+  "control": {
+    "parts": [
+      {
+        "container": "plane-proxy"
+      },
+      {
+        "container": "plane-web"
+      },
+      {
+        "container": "plane-space"
+      },
+      {
+        "container": "plane-admin"
+      },
+      {
+        "container": "plane-live"
+      },
+      {
+        "container": "plane-worker"
+      },
+      {
+        "container": "plane-beat-worker"
+      },
+      {
+        "container": "plane-api"
+      },
+      {
+        "container": "plane-minio"
+      },
+      {
+        "container": "plane-mq"
+      },
+      {
+        "container": "plane-redis"
+      },
+      {
+        "container": "plane-db"
+      }
+    ],
+    "kuma": "plane",
+    "_comment": "Stop order: proxy first, then the UI/API tier, then MinIO/RabbitMQ/Valkey, then Postgres. Migrator is one-shot and is not in this list. Start is the reverse."
+  }
+}

@@ -8,6 +8,21 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Added
+
+- **Launcher tiles come from per-service manifests.** Each service folder
+  now has an `app.json` holding its tile (monitoring has two: Uptime Kuma
+  and ntfy), and `app/web/registry.json` holds groups, control plumbing,
+  tile order and the three tiles with no folder here (manimkc, ollama,
+  karakeep). `scripts/build-registry.py` merges them into
+  `app/web/services.json`, which the launcher and ntfy-control read as
+  before; the generated file is identical in content to the hand-written
+  one it replaces. `make lint` runs `build-registry.py --check`,
+  `check-structure.sh` requires an `app.json` per service (ntfy-control has
+  no tile), and `scripts/tests/test-build-registry.sh` covers the generator.
+  First step of the catalogue build order in
+  `docs/catalogue-architecture.md`.
+
 ### Changed
 
 - **Repo layout: services in `services/`, the launcher in `app/web/`.** All

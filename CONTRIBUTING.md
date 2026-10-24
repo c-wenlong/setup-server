@@ -63,13 +63,14 @@ Every service directory contains the same four things:
 | `TROUBLESHOOT.md` | Layered triage (service, local health, publish, client), symptom-keyed fixes, nuke-and-pave recipe. |
 | `tests/run-tests.sh` | Mocked suite by default, real-deployment checks under `--live`. Stubs live in `tests/stubs/`. |
 
-Three files at the root are shared, and a new service touches all three:
+These shared files are touched by every new service, plus its own `app.json` (see below):
 
 | File | Role |
 | --- | --- |
 | [README.md](README.md) | The Services table: one row per service, what it gives you, how to deploy it |
 | [DIRECTORY.md](DIRECTORY.md) | What is actually running on the deployed box: ports, runtime, credentials pointers, loose ends |
 | [services/monitoring/seed_kuma.py](services/monitoring/seed_kuma.py) | The Uptime Kuma monitors, seeded from the `PUBLISHED` list |
+| [app/web/registry.json](app/web/registry.json) | Launcher tile order, groups, and tiles with no folder here; `scripts/build-registry.py` merges it with every `app.json` into `app/web/services.json` |
 
 ## What to contribute
 
@@ -111,7 +112,10 @@ Three files at the root are shared, and a new service touches all three:
 6. **Register a new service everywhere.** A row in the README table, a row in
    `DIRECTORY.md`, and an entry in `PUBLISHED` in `services/monitoring/seed_kuma.py` so
    Uptime Kuma probes it. Pick the health path carefully: several services here
-   answer 200 or 302 on `/` while being broken underneath.
+   answer 200 or 302 on `/` while being broken underneath. Its launcher tile is
+   `services/<service>/app.json` plus a key in `order` in
+   `app/web/registry.json`; run `python3 scripts/build-registry.py` and commit
+   the regenerated `app/web/services.json`.
 7. **Never commit a `.env`.** `*/.env` is gitignored because `setup.sh`
    generates real credentials into it. Check the staged diff before committing.
 8. **One concern per PR.** A real bug found outside the current scope gets its

@@ -147,9 +147,9 @@ that on :443 on this box.
   generated `.env`).
 - **`ollama` never opens** — correct: `url` is `null` because it has no web UI.
   It reports status only.
-- **A service is missing entirely** — it is not in `services.json`. Add it,
-  then `./setup.sh` (which re-validates the JSON) or
-  `systemctl --user restart launcher.service`.
+- **A service is missing entirely** — it is not in `services.json`. Give it a
+  `services/<service>/app.json` and a key in `order` in `registry.json`, then
+  run `python3 scripts/build-registry.py` from the repo root.
 - **The launcher has no tile of its own** — deliberate; it is not in
   `services.json` at all. (It is still in `HARD_LOCKED`, belt and braces, in
   case someone adds it.)
@@ -180,7 +180,8 @@ other things are broken.
   currently differ.
 - **A rename came back after a restart** — you edited `services.json` instead
   of letting the UI write `overrides.json`. `services.json` is the shipped
-  default and is in git; overrides layer on top of it. Never hand-edit
+  default, generated from the `app.json` manifests and in git; overrides layer
+  on top of it. Never hand-edit
   overrides for a rename — use the UI, or delete the file to start clean.
 - **Notes vanished / "too many notes"** — the cap is 100 notes per service
   (`MAX_NOTES_PER_SERVICE`), 8000 characters each; past that the POST is a

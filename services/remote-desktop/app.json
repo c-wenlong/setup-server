@@ -1,0 +1,25 @@
+{
+  "key": "remote-desktop",
+  "name": "Remote Desktop",
+  "tagline": "Desktop",
+  "group": "infra",
+  "icon": "remote-desktop",
+  "author": "apache",
+  "url": "https://HOST:8094/",
+  "health": "http://127.0.0.1:8094/guacamole/",
+  "marker": "~/services/remote-desktop",
+  "env": ".env",
+  "description": "This box's own GNOME desktop, in a browser tab on the tailnet — Apache Guacamole translating HTML5 to RDP, backed by gnome-remote-desktop's system daemon. Two containers, file authentication, no database. Unlike everything else here it needs a login of its own, because Guacamole has no anonymous mode; that is auth-by-necessity, not a substitute for the tailnet. Two things make this service unusual. It is the only one that needs sudo, because it configures a system daemon. And its RDP port genuinely cannot be bound to one address — the daemon imports only GLib listener helpers that take no address — so :3389 sits on the wildcard and a packet filter is the only thing keeping it off the LAN. That filter is verified by behaviour, not by reading config: measured on this box, :3389 refuses on both LAN addresses and on the tailnet, accepts on loopback, and accepts from the Guacamole bridge, which is the one route guacd needs. There is no file transfer — this backend has no rdpdr channel.",
+  "control": {
+    "parts": [
+      {
+        "container": "guacamole"
+      },
+      {
+        "container": "guacd"
+      }
+    ],
+    "kuma": "remote-desktop",
+    "_comment": "Stop order: the webapp first, then the guacd it proxies through. Stopping these leaves the RDP backend and its packet filter running — a full rollback needs two sudo commands, see SETUP.md."
+  }
+}

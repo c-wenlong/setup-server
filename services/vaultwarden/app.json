@@ -1,0 +1,22 @@
+{
+  "key": "vaultwarden",
+  "name": "Vaultwarden",
+  "tagline": "Passwords",
+  "group": "daily",
+  "icon": "lock",
+  "author": "dani-garcia",
+  "url": "https://HOST:8222/",
+  "health": "http://127.0.0.1:8222/alive",
+  "marker": "~/services/vaultwarden",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "vaultwarden"
+      }
+    ],
+    "kuma": "vaultwarden",
+    "_comment": "Single container, embedded SQLite vault; nothing to order."
+  },
+  "description": "Self-hosted password vault, Bitwarden-compatible — the official Bitwarden browser extension, desktop and mobile apps all work, pointed at this server instead of Bitwarden's. One container, SQLite, tiny. The admin panel ships OFF (no ADMIN_TOKEN): it is an unnecessary surface on a vault, and enabling it needs an interactive terminal because `vaultwarden hash` will not run without a TTY. The setup script cannot create your account — the master password derives the vault key in the browser and must never reach the server — so signups stay open until you register, and re-running setup.sh closes them. ⚠️ Nothing backs this box up: losing ~/services/vaultwarden loses every password. Keep a client-side encrypted export somewhere else."
+}

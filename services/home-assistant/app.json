@@ -1,0 +1,22 @@
+{
+  "key": "home-assistant",
+  "name": "Home Assistant",
+  "tagline": "Home",
+  "group": "infra",
+  "icon": "home",
+  "author": "home-assistant",
+  "url": "https://HOST:8123/",
+  "health": "http://127.0.0.1:8123/manifest.json",
+  "marker": "~/services/home-assistant",
+  "env": ".env",
+  "description": "Local-first home automation: one place for smart lights, plugs, sensors and media players, with automations that keep running when the internet does not. Runs on host networking so it can discover devices on the LAN (zeroconf, SSDP, DHCP, USB), while the web UI itself still binds 127.0.0.1 and is published through Tailscale Serve like everything else. Bluetooth is deliberately switched off: this box's own bluetoothd owns the adapter, and letting Home Assistant fight it for hci0 produced an error every two seconds, forever. setup.sh creates the admin account and opts out of analytics, but deliberately leaves the location step to you — completing it automatically would pin the box to latitude 0 and UTC, and sunrise/sunset automations would silently be wrong.",
+  "control": {
+    "parts": [
+      {
+        "container": "home-assistant"
+      }
+    ],
+    "kuma": "home-assistant",
+    "_comment": "Single container on host networking; no sidecar to order."
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "key": "paperless-ngx",
+  "name": "Paperless-ngx",
+  "tagline": "Documents",
+  "group": "daily",
+  "icon": "paperless-ngx",
+  "author": "paperless-ngx",
+  "url": "https://HOST:8095/",
+  "health": "http://127.0.0.1:8095/accounts/login/",
+  "marker": "~/services/paperless-ngx",
+  "env": ".env",
+  "description": "OCR'd, searchable archive of receipts, contracts and tax documents — drop a PDF or a photo in the consume directory and it comes back indexed, tagged and full-text searchable. Two containers on SQLite: the webserver and a redis queue that is published nowhere, because anything able to reach it could drive the workers. Tika and Gotenberg (Office formats) are left out as a commented opt-in — the webserver alone idles at about 650 MB, which makes this the heaviest service here after Immich. OCR is CPU-only on this Ryzen, so imports being slow is expected rather than broken. Health-check /accounts/login/, never / or /healthz: both are 302s, and /healthz is the trap because it looks like a health endpoint and is not. Your password is created on first boot and never touched again, so if you change it in the UI the copy in .env is simply stale — that is normal. ⚠️ This becomes the archive of record for tax and legal documents on a box with no backups; use document_exporter and keep a copy elsewhere.",
+  "control": {
+    "parts": [
+      {
+        "container": "paperless-ngx"
+      },
+      {
+        "container": "paperless-redis"
+      }
+    ],
+    "kuma": "paperless-ngx",
+    "_comment": "Stop order: the webserver first, then the redis queue it feeds from. Start is the reverse."
+  }
+}

@@ -425,7 +425,11 @@ duplicate that list and lock the UI to `services.json`.
 Build in this order:
 
 1. **Index** — `launcher.yml` / `index.json` so an app is data, not a new
-   `setup.sh` folder. Official remote = this repo. Port allocator can
+   `setup.sh` folder. *Started 2026-10-25:* the tile half landed as
+   `services/<id>/app.json` (JSON, not YAML, to stay stdlib-only) plus
+   `app/web/registry.json`, merged by `scripts/build-registry.py` into the
+   `services.json` the launcher already reads. Ports, env schema and images
+   are not in the manifest yet. Official remote = this repo. Port allocator can
    land here or with apply.
 2. **Receipt** — write `~/services/launcher/instances/<id>.json` on
    install (remote, revision, ports, image digests, data dir). Derive

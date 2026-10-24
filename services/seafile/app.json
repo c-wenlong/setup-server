@@ -1,0 +1,27 @@
+{
+  "key": "seafile",
+  "name": "Seafile",
+  "tagline": "Files",
+  "group": "daily",
+  "icon": "folder",
+  "author": "haiwen",
+  "url": "https://HOST:8443/",
+  "health": "http://127.0.0.1:8081/api2/ping/",
+  "marker": "~/services/seafile",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "seafile"
+      },
+      {
+        "container": "seafile-mysql"
+      },
+      {
+        "container": "seafile-redis"
+      }
+    ],
+    "kuma": "seafile"
+  },
+  "description": "The Drive: file sync between laptop, phone and this box, plus a web UI, with desktop and mobile clients. Seafile plus MariaDB and Redis on a Docker network; only the web tier is published, on 127.0.0.1:8081. Camera upload stays off here on purpose — Immich owns photos, so nothing is stored twice. Also the destination manimkc uploads its finished videos to."
+}

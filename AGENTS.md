@@ -119,7 +119,12 @@ service is deployed on this machine, run `--live` too.
 4. Add the service row to the root `README.md` table and to `DIRECTORY.md`
    (services table plus any loose end it introduces), and add a monitor line in
    `services/monitoring/seed_kuma.py`.
-5. Real-machine test: deploy, then `./tests/run-tests.sh --live`.
+5. Write `services/<service>/app.json` (its launcher tile: copy a similar
+   service's, leave out `setup`), add its key to `order` in
+   `app/web/registry.json`, then run `python3 scripts/build-registry.py` and
+   commit the regenerated `app/web/services.json`. Never edit that file by
+   hand; `make lint` fails when it drifts from the manifests.
+6. Real-machine test: deploy, then `./tests/run-tests.sh --live`.
 
 Only add a service-level `AGENTS.md` if the service has quirks that genuinely
 deviate from these conventions.

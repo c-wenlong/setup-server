@@ -1,0 +1,21 @@
+{
+  "key": "code-server",
+  "name": "code-server",
+  "tagline": "Code",
+  "group": "daily",
+  "icon": "code",
+  "author": "coder",
+  "url": "https://HOST/",
+  "health": "http://127.0.0.1:8080/healthz",
+  "marker": "~/.config/code-server",
+  "env": null,
+  "control": {
+    "parts": [
+      {
+        "unit": "code-server.service"
+      }
+    ],
+    "kuma": "code-server"
+  },
+  "description": "Full VS Code, integrated terminal included, in any browser on the tailnet — the way to work on this box from a phone or a borrowed laptop. A systemd user unit with auth disabled, because the tailnet is the access-control layer. It owns / on :443, which is why the launcher hangs off /home/ instead; its state lives in ~/.config/code-server rather than ~/services."
+}

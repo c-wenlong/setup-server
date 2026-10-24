@@ -1,0 +1,32 @@
+{
+  "key": "immich",
+  "name": "Immich",
+  "tagline": "Photos",
+  "group": "daily",
+  "icon": "camera",
+  "author": "immich-app",
+  "url": "https://HOST:2283/",
+  "health": "http://127.0.0.1:2283/api/server/ping",
+  "marker": "~/services/immich",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "immich_server"
+      },
+      {
+        "container": "immich_machine_learning",
+        "optional": true
+      },
+      {
+        "container": "immich_redis"
+      },
+      {
+        "container": "immich_postgres"
+      }
+    ],
+    "kuma": "immich",
+    "_comment": "Stop order matters: the API server first, then the ML container (which only exists when the `ml` compose profile is active, hence optional), then the datastores it was talking to. Start is the reverse."
+  },
+  "description": "Self-hosted Google Photos: timeline, albums, sharing, and background camera backup from the phone to this box. Four containers on a bridge network, of which only the server is published, on 127.0.0.1:2283."
+}

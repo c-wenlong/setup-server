@@ -1,0 +1,25 @@
+{
+  "key": "metabase",
+  "name": "Metabase",
+  "tagline": "BI",
+  "group": "knowledge",
+  "icon": "metabase",
+  "author": "metabase",
+  "url": "https://HOST:8104/",
+  "health": "http://127.0.0.1:8104/api/health",
+  "marker": "~/services/metabase",
+  "env": ".env",
+  "description": "Self-hosted BI: dashboards and SQL over databases already on this box. OSS image v0.63.17.3 plus Postgres, loopback-only behind Serve on :8104 because forgejo already owns Metabase's upstream :3000. First admin is seeded from .env via POST /api/setup. Anonymous usage tracking is off. Health-check /api/health, never / — the UI is a SPA.",
+  "control": {
+    "parts": [
+      {
+        "container": "metabase"
+      },
+      {
+        "container": "metabase-db"
+      }
+    ],
+    "kuma": "metabase",
+    "_comment": "Stop order: the app first, then the database it talks to. Start is the reverse."
+  }
+}

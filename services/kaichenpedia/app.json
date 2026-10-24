@@ -1,0 +1,21 @@
+{
+  "key": "kaichenpedia",
+  "name": "kaichenpedia",
+  "tagline": "Wiki",
+  "group": "knowledge",
+  "icon": "book",
+  "author": "c-wenlong",
+  "url": "https://HOST:8091/",
+  "health": "http://127.0.0.1:8091/",
+  "marker": "~/services/kaichenpedia",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "kaichenpedia"
+      }
+    ],
+    "kuma": "kaichenpedia"
+  },
+  "description": "Personal wiki: a Quartz static build of the private kaichenpedia GitHub repo, served by nginx. A systemd user timer polls GitHub daily and redeploys on new commits, so pushing from any device is the publish step; ~/services/kaichenpedia/bin/deploy.sh --force does it now. The poller only runs while the container is up, so an amber tile means the wiki is frozen at its last build."
+}

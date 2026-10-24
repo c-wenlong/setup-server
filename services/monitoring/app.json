@@ -1,0 +1,40 @@
+[
+  {
+    "key": "uptime-kuma",
+    "name": "Uptime Kuma",
+    "tagline": "Status",
+    "group": "infra",
+    "icon": "heartbeat",
+    "author": "louislam",
+    "url": "https://HOST:3002/",
+    "health": "http://127.0.0.1:3002/",
+    "marker": "~/services/monitoring",
+    "env": ".env",
+    "control": {
+      "parts": [
+        {
+          "container": "uptime-kuma"
+        }
+      ],
+      "kuma": null,
+      "_comment": "Kuma has no monitor of itself to pause, so `kuma` is null. Stopping it cannot break any other service's stop: the pause step is best-effort everywhere and its failure never fails the action."
+    },
+    "description": "The status dashboard: probes every service on this box every 60 seconds and pushes to ntfy when one goes down or recovers. Monitors are seeded from services/monitoring/seed_kuma.py, so a new service gets its monitor by editing that file and re-running setup. Shares a compose file and .env with ntfy."
+  },
+  {
+    "key": "ntfy",
+    "name": "ntfy",
+    "tagline": "Alerts",
+    "group": "infra",
+    "icon": "bell",
+    "author": "binwiederhier",
+    "url": "https://HOST:3003/",
+    "health": "http://127.0.0.1:3003/v1/health",
+    "marker": "~/services/monitoring",
+    "env": ".env",
+    "control": {
+      "locked": "stopping ntfy would remove the only way to start anything again from the phone"
+    },
+    "description": "Push notifications to the phone. Kuma's alerts land on topic `alerts`, and anything on the box can post one with curl -d msg .../alerts. It also carries the `control` topic that ntfy-control listens on, which is how services get started and stopped from the phone. Open to the whole tailnet — no per-topic auth. Deployed together with Uptime Kuma from services/monitoring/."
+  }
+]
