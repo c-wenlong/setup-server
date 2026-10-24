@@ -1342,6 +1342,13 @@ test_teardown_purge_refuses_odd_paths() {
   sed -i.bak "s#^HA_CONFIG=.*#HA_CONFIG=$HOME/services/#" "$SVC/.env"
   run_teardown --purge "home-assistant"
   check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./home-assistant" "$HOME/services/home-assistant/.."; do
+    sed -i.bak "s#^HA_CONFIG=.*#HA_CONFIG=$dotted#" "$SVC/.env"
+    run_teardown --purge "home-assistant"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
   teardown
 }
 

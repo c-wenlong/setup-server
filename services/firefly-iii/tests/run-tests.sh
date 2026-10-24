@@ -1100,6 +1100,12 @@ test_teardown_purge_refuses_odd_paths() {
     sed -i.bak "s#^$var=.*#$var=$HOME/services/#" "$SVC/.env"
     run_teardown --purge "firefly-iii"
     check "$var=~/services itself refused" [ "$CODE" -ne 0 ]
+    mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+    sed -i.bak "s#^$var=.*#$var=$HOME/services/.#" "$SVC/.env"
+    run_teardown --purge "firefly-iii"
+    check "$var=~/services/. refused"    [ "$CODE" -ne 0 ]
+    check "  neighbour never touched"    [ -f "$HOME/services/neighbour/keep" ]
+    check "  no cleanup container"       no_call "docker run"
     sed -i.bak "s#^$var=.*#$var=#" "$SVC/.env"
     run_teardown --purge "firefly-iii"
     check "$var empty refused"           [ "$CODE" -ne 0 ]
@@ -1372,6 +1378,18 @@ host_fingerprint() {
   } | sort
 }
 
+test_teardown_commented_paths() {
+  echo "• teardown --purge: a path with a spaced inline comment is still the path"
+  deployed
+  local d="$HOME/services/firefly-iii/db"
+  sed -i.bak "s#^FIREFLY_DB_DATA=.*#FIREFLY_DB_DATA=$d   \# ledger#" "$SVC/.env"
+  run_teardown --purge "firefly-iii"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "ledger dir gone (not skipped)" [ ! -e "$d" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 for f in setup.sh teardown.sh docker-compose.yml; do
   [ -f "$SERVICE_DIR/$f" ] || { red "services/firefly-iii/$f is missing — nothing to test."; exit 1; }
@@ -1417,6 +1435,7 @@ test_teardown_preflight
 test_teardown_purge
 test_teardown_purge_fresh_parent_removed
 test_teardown_purge_root_owned_contents
+test_teardown_commented_paths
 test_teardown_purge_refuses_odd_paths
 test_teardown_purge_trailing_slashes
 test_teardown_purge_missing_state_dirs

@@ -89,8 +89,10 @@ the reference. When a service ships one:
 
 - Same preflight as `setup.sh` (regular user, Linux + macOS). Reads ports
   and paths from `.env` the way Compose does (quotes, `export`, inline
-  comments) without sourcing it, and dies when `.env` is missing rather
-  than guessing. Dies if `tailscale serve status` cannot be read, before
+  comments, `$HOME`/`${HOME}`) without sourcing it, and dies when `.env` is
+  missing rather than guessing, or when it has anything Compose could read
+  differently (a key set twice, a quoted value spanning lines, a backslash
+  escape, a line that is not `KEY=value`). Dies if `tailscale serve status` cannot be read, before
   anything changes.
 - Default (no flags, what the launcher runs): unpublish **every** Serve port
   whose handlers all proxy to this service's local port, found from `serve
@@ -100,9 +102,13 @@ the reference. When a service ships one:
   `-v`, or stop + disable its unit). Data dir and `.env` stay, so
   `./setup.sh` restores it.
 - `--purge`: asks for the service name typed back before changing anything,
-  then also deletes the data dir named in `.env` (trailing slashes stripped,
-  `..` refused, and its real path must be a strict child of the real
-  `~/services`) and `.env`. Never touches `~/.claude`, `~/.codex`, another
+  then also deletes the data dir named in `.env` and `.env`. Every deleted
+  path goes through `real_dir`: no `.`/`..` component, newline or colon, no
+  symlinked leaf, resolved without entering it (so container-owned dirs
+  still reach the cleanup container), and the result must be
+  `~/services/<service>` itself or inside it, with `~/services` a real
+  directory under `$HOME`. Afterwards it `rmdir`s the empty
+  `~/services/<service>` marker. Never touches `~/.claude`, `~/.codex`, another
   service's port, lingering, the docker group or the Tailscale operator.
   The launcher never passes it.
 - Mocked tests in the service's suite: the right port goes off and

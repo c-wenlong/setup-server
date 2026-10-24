@@ -350,6 +350,13 @@ test_teardown_purge_refuses_odd_paths() {
   sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$HOME/services/#" "$SVC/.env"
   run_teardown --purge "open-webui"
   check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./open-webui" "$HOME/services/open-webui/.."; do
+    sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$dotted#" "$SVC/.env"
+    run_teardown --purge "open-webui"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
   sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=#" "$SVC/.env"
   run_teardown --purge "open-webui"
   check "empty value refused"         [ "$CODE" -ne 0 ]

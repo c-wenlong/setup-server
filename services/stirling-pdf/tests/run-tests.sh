@@ -488,6 +488,13 @@ test_teardown_purge_refuses_odd_paths() {
   sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$HOME/services/#" "$SVC/.env"
   run_teardown --purge "stirling-pdf"
   check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./stirling-pdf" "$HOME/services/stirling-pdf/.."; do
+    sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$dotted#" "$SVC/.env"
+    run_teardown --purge "stirling-pdf"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
   teardown
 }
 
@@ -589,6 +596,60 @@ test_teardown_home_variable_in_env() {
   teardown
 }
 
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/stirling-pdf itself or inside it"
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$HOME/services/neighbour#" "$SVC/.env"
+  run_teardown --purge "stirling-pdf"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"             [ -f "$HOME/services/neighbour/keep" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$HOME/services/stirling-pdf/a:b#" "$SVC/.env"
+  mkdir -p "$HOME/services/stirling-pdf/a:b"
+  run_teardown --purge "stirling-pdf"
+  check "a colon in the path refused" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  local dir; dir="$(data_dir)"
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/stirling-pdf"; echo x > "$HOME/stirling-pdf/keep"
+  run_teardown --purge "stirling-pdf"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"    [ -f "$HOME/stirling-pdf/keep" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'STIRLING_DATA=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "STIRLING_DATA is set more than once"
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nSTIRLING_DATA=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/stirling-pdf/setup.sh or docker-compose.yml is missing — nothing to test."
@@ -622,6 +683,9 @@ test_teardown_quoted_env
 test_teardown_purge_trailing_slashes
 test_teardown_purge_missing_data_dir
 test_teardown_home_variable_in_env
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_env_lint
 
 if [ "${1:-}" = "--live" ]; then
   echo

@@ -71,7 +71,8 @@ env_get() {
   case "$value" in
     \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
     \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
-    *) value="${value%%[[:space:]]#*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
   esac
   # Compose interpolates $HOME / ${HOME} in unquoted and double-quoted values
   # (single quotes are literal). That one variable is all a path here may
@@ -83,16 +84,57 @@ env_get() {
   printf '%s' "$value"
 }
 
-# Real path of a directory WITHOUT entering it: a Postgres- or root-owned
+# Real path of a purge target WITHOUT entering it: a Postgres- or root-owned
 # data dir may be unreadable to this user, which is exactly when the purge
-# needs the cleanup container. Resolve the parent, append the name; a
-# symlinked leaf is refused rather than followed.
+# needs the cleanup container. Resolve the parent, append the name. Refused
+# (non-zero) unless the result is ~/services/$NAME itself or inside it, with
+# ~/services a real directory under $HOME; a symlinked leaf, a `.`/`..`
+# component, a newline or a colon (which would split a list or a -v mount)
+# is never accepted.
 real_dir() {
-  local d="$1" parent
+  local d="$1" parent leaf home services own nl
+  nl='
+'
+  case "$d" in *"$nl"*|*:*) return 1 ;; esac
+  case "/$d/" in */./*|*/../*) return 1 ;; esac
+  leaf="$(basename "$d")"
+  case "$leaf" in ''|.|..) return 1 ;; esac
   [ ! -L "$d" ] || return 1
   parent="$(cd "$(dirname "$d")" && pwd -P)" || return 1
-  printf '%s/%s' "$parent" "$(basename "$d")"
+  case "$parent" in *"$nl"*|*:*) return 1 ;; esac
+  home="$(cd "$HOME" && pwd -P)" || return 1
+  services="$(cd "$HOME/services" && pwd -P)" || return 1
+  case "$services" in "$home"/?*) ;; *) return 1 ;; esac
+  [ ! -L "$HOME/services/$NAME" ] || return 1
+  own="$services/$NAME"
+  case "$parent/$leaf" in "$own"|"$own"/*) ;; *) return 1 ;; esac
+  printf '%s/%s' "$parent" "$leaf"
 }
+
+# teardown reads .env without running it, so it refuses anything it could
+# read differently from Docker Compose: a key set twice, a quoted value that
+# does not close on its own line (multi-line values), a backslash escape in
+# double quotes, or a line that is not KEY=value. Prints key names only.
+env_lint() {
+  local problem
+  problem="$(awk '
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      line = $0; sub(/\r$/, "", line)
+      sub(/^[[:space:]]*(export[[:space:]]+)?/, "", line)
+      if (!match(line, /^[A-Za-z_][A-Za-z0-9_]*=/)) { print "line " NR " is not KEY=value"; exit }
+      key = substr(line, 1, RLENGTH - 1); val = substr(line, RLENGTH + 1)
+      if (seen[key]++) { print key " is set more than once"; exit }
+      q = substr(val, 1, 1)
+      if (q == "\"" || q == "\047") {
+        rest = substr(val, 2); end = index(rest, q)
+        if (end == 0) { print "the quoted value of " key " does not close on its line"; exit }
+        if (q == "\"" && index(substr(rest, 1, end - 1), "\\") > 0) { print "the value of " key " uses a backslash escape"; exit }
+      }
+    }' "$ENV_FILE")"
+  [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
+}
+env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 DATA_DIR="$(env_get METABASE_DATA)"
 case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric (got: $LOCAL_PORT)";; esac
@@ -121,7 +163,7 @@ if [ "$PURGE" -eq 1 ]; then
   if [ -e "$DATA_DIR" ]; then
     [ -d "$DATA_DIR" ] || die "METABASE_DATA=$DATA_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "Cannot resolve $DATA_DIR (or it is a symlink)."
+    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "DATA_DIR=$DATA_DIR is not a real directory inside $HOME/services/$NAME — refusing."
     case "$PURGE_DIR" in
       "$root"/?*) ;;
       *) die "METABASE_DATA=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;
