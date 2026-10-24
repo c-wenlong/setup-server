@@ -496,6 +496,11 @@ $EDITOR .env                    # bump HOMEPAGE_VERSION
 docker compose --project-directory . pull && ./setup.sh
 ```
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes `:HTTPS_PORT`
+and runs `compose down`; the config and `.env` stay, so `./setup.sh` brings it
+back. `./teardown.sh --purge` also deletes `HOMEPAGE_CONFIG` (your hand-edited
+YAML) and `.env`, after you type `homepage`.
+
 Re-read the allowlist notes in `docker-compose.yml` before a major bump — the
 host-validation middleware is exactly where upstream changes bite, and it
 already changed once (it did not exist before v1.x).

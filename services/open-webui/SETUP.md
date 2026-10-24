@@ -64,6 +64,11 @@ ollama list                                          # models the UI can offer
 ollama pull <model>                                  # add models (UI picks up automatically)
 ```
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes the Serve
+port(s) pointing at this service and runs `compose down`; data and `.env`
+stay, so `./setup.sh` brings it back. `./teardown.sh --purge` also deletes
+them, after you type `open-webui`. ollama and its models are never touched.
+
 RAM note: the UI itself is light (~300–400 MB); it's ollama that claims
 ~5 GB while a 7–8B model is loaded. Ollama unloads idle models after a few
 minutes by default.

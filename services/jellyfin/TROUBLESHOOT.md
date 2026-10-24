@@ -394,24 +394,29 @@ an unreachable address".
 
 ## Nuke and pave
 
-Destroys every user, library definition and all watch state. **It does not
-touch your media** — `MEDIA_DIR` is a read-only mount and is not deleted
-here — but everything about *who watched what, and how far in* is gone, and
-on this box there is no backup of it.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down` with the same files setup.sh
+used (the GPU overlay too when NVENC is on), and refuses to delete a state
+dir that is not really inside `~/services/`.
 
 ```bash
 cd ~/dev/setup-server/services/jellyfin
-docker compose --project-directory . down -v
-rm -rf ~/services/jellyfin/config ~/services/jellyfin/cache
-rm -f  ~/services/jellyfin/.wizard-complete   # or the wizard is skipped
-rm -f .env                         # forces new generated credentials
-tailscale serve --https=8096 off
-./setup.sh
+./teardown.sh            # remove, keep config + cache + media + .env
+./teardown.sh --purge    # also delete JELLYFIN_CONFIG, JELLYFIN_CACHE, the
+                         # wizard marker and .env; type "jellyfin" to confirm
+./setup.sh               # back, fresh if you purged
 ```
 
-Deliberately **not** in that list: `rm -rf ~/services/jellyfin/media`. Add it
-only if you are certain, and only after remembering that this machine has no
-backup of it.
+`--purge` destroys every user, library definition and all watch state, and
+on this box there is no backup of it. **It never deletes the media library**:
+`MEDIA_DIR` is left alone even when it sits inside `~/services/jellyfin`, and
+purge stops with an error if `JELLYFIN_CONFIG` or `JELLYFIN_CACHE` would
+contain it. To remove the media, do it by hand, after remembering this
+machine has no backup of it. `enable-nvenc.sh`'s host changes
+(nvidia-container-toolkit, the Docker runtime) are not undone either.
+
+From a terminal, pause the `jellyfin` monitor in Uptime Kuma first, or it
+pages; the launcher's Remove does that.
 
 To keep watch state and rebuild only the container, `docker compose down`
 without `-v` and `./setup.sh` — `config/` survives and the wizard is skipped

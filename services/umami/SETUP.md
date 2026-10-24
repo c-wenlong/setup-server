@@ -74,5 +74,11 @@ docker compose --project-directory ~/dev/setup-server/services/umami restart
 
 Upgrade: bump `UMAMI_VERSION` in `.env`, then `./setup.sh`.
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes the Serve
+port(s) pointing at `LOCAL_PORT` and runs `compose down`; the `umami-postgres`
+volume and `.env` stay, so `./setup.sh` brings it back. `./teardown.sh --purge`
+also deletes the volume (all analytics), the marker dir and `.env`, after you
+type `umami`. From a terminal, pause the `umami` monitor in Uptime Kuma first.
+
 Backup target: `docker compose exec -T db pg_dump -U umami umami`.
 Nothing on this box backs itself up.

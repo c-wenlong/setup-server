@@ -3,6 +3,7 @@
 #   backend_state       — override BackendState (default Running)
 #   operator            — exists => serve allowed without sudo
 #   serve_fails_left    — countdown of forced serve failures (approval-link flow)
+#   serve_status_fails — exists => `serve status` fails (tailscaled down)
 #   served: one "PORT TARGET" line per live mapping. Seed it to
 #                         model a box that was published before this run (the
 #                         legacy :10000 mapping the migration has to remove);
@@ -27,6 +28,10 @@ EOF
   serve)
     # `serve status` reports the live mappings, in tailscaled's own format.
     if [ "${2:-}" = "status" ]; then
+      if [ -f "$STATE_DIR/serve_status_fails" ]; then
+        echo "failed to connect to local tailscaled" >&2
+        exit 1
+      fi
       [ -s "$STATE_DIR/served" ] || { echo "No serve config"; exit 0; }
       while read -r sport starget; do
         [ -n "$sport" ] || continue

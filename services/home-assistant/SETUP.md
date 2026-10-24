@@ -537,6 +537,10 @@ Broad shape, in the order it matters:
 - Is the timezone/location actually set (needs a token):
   Developer Tools → Template → `{{ state_attr('sun.sun','next_dawn') }}` —
   a plausible local time means the location step was done.
+- Remove: `./teardown.sh` (or Remove in the launcher) unpublishes `:HTTPS_PORT`
+  and runs `compose down`; `config/` and `.env` stay, so `./setup.sh` brings it
+  back. `./teardown.sh --purge` also deletes the whole config dir (`.storage/`,
+  recorder DB, `config/backups`) and `.env`, after you type `home-assistant`.
 - Recorder size: `du -h ~/services/home-assistant/config/home-assistant_v2.db`
 - Prune history: add a `recorder:` block with `purge_keep_days` to
   `configuration.yaml`, then Developer Tools → Actions →

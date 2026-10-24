@@ -26,6 +26,7 @@
 #   docker_no_perm    — `docker ps` fails (user not in the docker group)
 #   pull_fail         — `compose pull` fails (a warning, not fatal)
 #   up_fail           — `compose up` fails; contents become the stderr text
+#   compose_down      — touched by `compose ... down`
 #   container_status  — what `docker inspect` reports (default: running)
 echo "docker $*" >> "$CALLS_LOG"
 
@@ -206,6 +207,8 @@ YAML
       touch "$STATE_DIR/compose_up"
       echo "Container homepage  Started"
       exit 0 ;;
+
+    down) touch "$STATE_DIR/compose_down"; exit 0 ;;
 
     *) exit 0 ;;
   esac

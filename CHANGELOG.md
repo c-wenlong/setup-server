@@ -10,6 +10,22 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for eight more services**: firefly-iii, home-assistant,
+  homepage, jellyfin, metabase, n8n, open-webui and umami, so each gets the
+  launcher's Remove button. Same contract as stirling-pdf's (only the Serve
+  ports pointing at the service go off, `compose down` without `-v`, data
+  and `.env` kept; `--purge` behind a typed name and the real-path guard).
+  Service-specific: metabase and umami purge their Postgres named volume
+  with `down -v`; home-assistant, firefly-iii and open-webui clear
+  root/uid-owned files with a throwaway container of the image already on
+  the box instead of sudo; jellyfin's purge never deletes `MEDIA_DIR` and
+  refuses if a state dir would contain it; firefly-iii unpublishes both the
+  app and the Data Importer ports. Purges also remove the now-empty
+  `~/services/<name>` marker, and jellyfin's marker moved to its config dir
+  (its media folder stays), so a purged app reads as not installed.
+
+### Added
+
 - **Remove an app from the launcher.** Services that ship a `teardown.sh`
   get a Remove button (detail page and catalogue): it pauses the app's Kuma
   monitor, runs `teardown.sh` with no flags (unpublish only that app's Serve

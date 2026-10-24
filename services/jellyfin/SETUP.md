@@ -585,6 +585,12 @@ should not see.
   transcode segments live under `config/transcodes/` instead and are cleaned
   up by Dashboard → Scheduled Tasks → **Clean Transcode Directory**.
 - Disk usage: `du -sh ~/services/jellyfin/*`
+- Remove: `./teardown.sh` (or Remove in the launcher) unpublishes the Serve
+  port(s) that point here and runs `compose down` (with the GPU overlay when
+  NVENC is on); config, cache, media and `.env` stay, so `./setup.sh` brings
+  it back. `./teardown.sh --purge` also deletes `JELLYFIN_CONFIG`,
+  `JELLYFIN_CACHE`, the wizard marker and `.env`, after you type `jellyfin`.
+  It never deletes `MEDIA_DIR`, even inside `~/services/jellyfin`.
 - What is transcoding right now: Dashboard → **Activity**. A session showing
   "Transcode" instead of "Direct Play" is the CPU cost described above.
 

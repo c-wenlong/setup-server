@@ -57,13 +57,18 @@ bind `0.0.0.0` as a shortcut.
 
 ## Nuke and pave
 
-Stops the stack, deletes data, keeps `.env` unless you remove it too.
-There is no undo.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down`, and refuses to delete a
+marker dir that is not really inside `~/services/`. Postgres lives in the
+named volume `umami-postgres`, not under `~/services/umami`, so only
+`--purge` (which runs `down -v`) removes the analytics data.
 
 ```bash
 cd ~/dev/setup-server/services/umami
-docker compose --project-directory . down -v
-rm -rf ~/services/umami
-# optional: rm .env
-./setup.sh
+./teardown.sh            # remove, keep volume + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete the Postgres volume, marker dir and .env; type the name
+./setup.sh               # back, fresh if you purged (new admin password)
 ```
+
+There is no undo for `--purge`. Dump first if you want the data:
+`docker compose --project-directory . exec -T db pg_dump -U umami umami > umami.sql`.

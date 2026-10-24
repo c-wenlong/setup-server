@@ -74,5 +74,10 @@ docker compose --project-directory ~/dev/setup-server/services/metabase restart
 Upgrade: bump `METABASE_VERSION` in `.env`, then `./setup.sh`. Dump the
 app DB first.
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes `:HTTPS_PORT`
+and runs `compose down`; the Postgres volume and `.env` stay, so `./setup.sh`
+brings it back. `./teardown.sh --purge` also drops the volume (`down -v`),
+the `METABASE_DATA` marker dir and `.env`, after you type `metabase`.
+
 Backup target: `docker compose exec -T db pg_dump -U metabase metabase`.
 Nothing on this box backs itself up.

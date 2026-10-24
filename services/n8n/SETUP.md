@@ -55,6 +55,12 @@ docker compose $D pull && docker compose $D up -d   # upgrade
 Kuma monitors `/healthz` (services/monitoring/seed_kuma.py). Backup = `~/services/n8n/data`
 plus this directory's `.env` (encryption key!).
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes the Serve port
+that points at `LOCAL_PORT` and runs `compose down`; data and `.env` stay, so
+`./setup.sh` brings it back. `./teardown.sh --purge` also deletes `N8N_VOLUME`
+and `.env` (workflows and the encryption key, so saved credentials are lost),
+after you type `n8n`.
+
 ## Tests
 
 ```sh

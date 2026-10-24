@@ -139,6 +139,14 @@ case "$1" in
     esac
     ;;
 
+  run)
+    # teardown --purge fallback: `docker run --rm -v DIR:/purge ... find -delete`.
+    # Model it by making DIR removable again and emptying it.
+    for a in "$@"; do
+      case "$a" in *:/purge) d="${a%:/purge}"; chmod -R u+rwX "$d" 2>/dev/null; find "$d" -mindepth 1 -delete ;; esac
+    done
+    ;;
+
   exec)
     # Nothing in the deploy needs `docker exec`; if a future setup.sh grows a
     # dependency on it, the call is logged and this is where to model it.
