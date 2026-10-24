@@ -1790,6 +1790,9 @@ def start_deploy(key):
 
     job = register_job(key, "deploy")
     job_id, log_path = job["id"], job["log_path"]
+    # What is about to run, frozen now: a pull or a registry edit while the
+    # deploy runs must not change which revision and script the receipt names.
+    job["source"] = deploy_source(svc, script)
 
     argv = build_command(script)
     cwd = os.path.dirname(script)
@@ -1826,7 +1829,7 @@ def _reap(job, proc, logfile):
         # Best effort: a receipt that cannot be written must not turn a
         # successful deploy into a failed job.
         try:
-            write_receipt(job["key"], job["id"])
+            write_receipt(job["key"], job["id"], job.get("source"))
         except Exception as exc:
             log("receipt for %s not written: %s" % (job["key"], exc))
     _finish(job, code)
@@ -1957,14 +1960,30 @@ def load_receipt(key):
     return doc
 
 
-def write_receipt(key, job_id):
-    """Record a successful deploy of `key`. Returns the receipt written."""
+def deploy_source(svc, script):
+    """Repo, revision, setup and data dir of a deploy, taken as it starts."""
+    root = _git_root(os.path.dirname(script))
+    return {
+        "repo": _collapse_home(root) if root else None,
+        "revision": git_revision(root) if root else None,
+        "setup": svc.get("setup"),
+        "data_dir": svc.get("marker"),
+    }
+
+
+def write_receipt(key, job_id, source=None):
+    """Record a successful deploy of `key`. Returns the receipt written.
+
+    `source` is the deploy_source() captured when the job started; without
+    one (a caller outside the deploy path) it is taken now. Ports are read
+    after the deploy on purpose: setup.sh is what writes them.
+    """
     svc = find_service(key)
     path = receipt_path(key)
     if svc is None or path is None:
         raise DeployError(404, "unknown service")
-    script = resolve_script(svc)
-    root = _git_root(os.path.dirname(script))
+    if source is None:
+        source = deploy_source(svc, resolve_script(svc))
     with _receipts_lock:
         previous = load_receipt(key) or {}
         now = _now_iso()
@@ -1972,10 +1991,10 @@ def write_receipt(key, job_id):
         doc = {
             "version": RECEIPT_VERSION,
             "key": key,
-            "repo": _collapse_home(root) if root else None,
-            "revision": git_revision(root) if root else None,
-            "setup": svc.get("setup"),
-            "data_dir": svc.get("marker"),
+            "repo": source.get("repo"),
+            "revision": source.get("revision"),
+            "setup": source.get("setup"),
+            "data_dir": source.get("data_dir"),
             "ports": _receipt_ports(svc),
             "installed_at": previous.get("installed_at") or now,
             "deployed_at": now,

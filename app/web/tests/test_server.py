@@ -4813,6 +4813,28 @@ class ReceiptTest(SandboxTest):
         server._reap(job, ExitedProc(code), logfile)
         return job
 
+    def test_receipt_names_what_ran_not_what_is_there_now(self):
+        # start_deploy freezes revision + setup; a pull and a registry edit
+        # before the job finishes must not leak into the receipt.
+        self.make_git(self.repo, refs={"refs/heads/main": SHA_A})
+        # FakeProc never exits, so the only reap is the one below.
+        subprocess.Popen = lambda argv, **kw: FakeProc(argv, **kw)
+        job_id = server.start_deploy("alpha")
+        self.make_git(self.repo, refs={"refs/heads/main": SHA_B})
+        self.make_script("moved/setup.sh")
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "camera",
+             "url": None, "health": None, "marker": "~/elsewhere",
+             "setup": "moved/setup.sh", "env": "alpha/.env"}]})
+        job = server._jobs[job_id]
+        server._reap(job, ExitedProc(0), open(os.devnull, "wb"))
+        r = server.load_receipt("alpha")
+        self.assertEqual(r["revision"], SHA_A)
+        self.assertEqual(r["setup"], "alpha/setup.sh")
+        self.assertEqual(r["data_dir"], "~/services/alpha")
+        self.assertEqual(r["ports"]["LOCAL_PORT"], 2283)
+        self.assertEqual(r["deploys"], 1)
+
     def test_success_writes_a_receipt(self):
         self.make_git(self.repo, refs={"refs/heads/main": SHA_A})
         job = self.finish("alpha")
