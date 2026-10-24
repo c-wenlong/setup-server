@@ -161,12 +161,17 @@ the same `index.html` and works identically at `:8093/` and `/home/`. If a
 tile opens the app instead of the detail page, that is the tile's link, not
 the router.
 
-Two files under `~/services/launcher/` back everything editable here:
+Two files under `~/services/launcher/` back everything editable here, and a
+third directory records installs:
 
 | File | Holds | Reset by |
 |---|---|---|
 | `overrides.json` | edited tile name / description | deleting the file |
 | `notes.json` | per-service notes | deleting the file |
+| `instances/<key>.json` | install receipt: repo, revision, ports, first and last successful deploy from the launcher | deleting the file (the next deploy writes a fresh one) |
+
+A missing receipt is normal for anything deployed from a terminal: only a
+deploy run by the launcher writes one, and tile state never depends on it.
 
 Both are written atomically (temp file in the same directory, then rename) and
 are read defensively: a mangled file logs a line and serves *defaults*, so the

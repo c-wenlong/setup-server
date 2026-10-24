@@ -411,3 +411,32 @@ next to it. Same allowed-roots gate as reveal and deploy, same single lock
 plus temp-file-and-`os.replace` discipline as `overrides.json`. The value
 goes into the file and back to the caller; the log line carries the
 variable name only.
+
+## v5 — install receipts (2026-10-25)
+
+Step 2 of the build order in `docs/catalogue-architecture.md`: the
+**instance** layer. When a deploy started from the launcher exits 0, the
+server writes `~/services/launcher/instances/<key>.json`:
+
+| Field | Value |
+|---|---|
+| `version` | `1` |
+| `key` | the registry key; the file is refused unless it matches |
+| `repo` | git root holding the setup script, `~`-collapsed, or null |
+| `revision` | that checkout's HEAD as 40 hex, read from `.git` directly (loose ref, packed-refs, worktree, detached), or null |
+| `setup`, `data_dir` | the registry's `setup` and `marker`, verbatim |
+| `ports` | `{NAME: int}` for every `*_PORT` in the service's `.env` that is a whole number in 1–65535 and not secret-looking |
+| `installed_at` | first successful deploy (kept across redeploys) |
+| `deployed_at`, `deploys`, `last_job` | latest success, running count, its job id |
+
+Same atomic temp-file-and-`os.replace` write as `overrides.json`, under its
+own lock. A write failure is logged and never fails the job. Keys must match
+`^[a-z0-9][a-z0-9._-]{0,63}$` to have a receipt path at all.
+
+The receipt is metadata, not state: `installed` and the tile state still
+come from the marker and the health probe, so a receipt left behind by a
+hand-removed service cannot make it look installed. `GET
+api/services/{key}` carries it as `receipt` (null when absent), and the
+detail page shows Installed / Last deploy / Revision / Ports rows from it.
+Nothing writes receipts for services deployed from a terminal; that, and
+removing a receipt on uninstall, come with the apply and remove steps.
