@@ -82,7 +82,7 @@ next poll without GitHub being involved at all.
 |---|---|---|
 | git | pull the fetch clone forward | presence |
 | uv | `uv run apps/web/build/build_site.py` | presence |
-| the sources clone at `SOURCE_REPO` | the build's entire input | `.git/` + `apps/web/build/build_site.py` (or the older `apps/web/build/build_site.py`) exist |
+| the sources clone at `SOURCE_REPO` | the build's entire input | `.git/` + `apps/web/build/build_site.py` (or the older `scripts/build_site.py`) exist |
 | `SITE_PASSPHRASE` (first run) | encryption key; lands in `.env` | non-empty |
 | Docker + Compose v2 | nginx container | daemon reachable |
 | Tailscale (running) | HTTPS publish | backend state |
