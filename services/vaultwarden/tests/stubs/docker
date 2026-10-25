@@ -22,6 +22,10 @@
 #                      setup.sh has a distinct "unconfirmed" branch for it.
 #   docker_cp_fails  — exists => `docker cp` fails, so the fallback account
 #                      count is unavailable too
+#   docker_run_fails — exists => `docker run --entrypoint sh` (teardown
+#                      --purge's root-owned-file cleanup) fails
+#   cleanup_run      — the argv of that cleanup run, so the suite can assert
+#                      it never pulls and mounts only the real_dir path
 echo "docker $*" >> "$CALLS_LOG"
 
 # Rebuild the fake container environment from the project .env, exactly as
@@ -99,6 +103,26 @@ case "$1" in
     ;;
 
   run)
+    # teardown --purge's root-owned-file cleanup:
+    #   docker run --rm --pull never -v DIR:/data --entrypoint sh <image> \
+    #     -c 'find /data -mindepth 1 -delete'
+    # The real container is root, so it can delete what the host user
+    # cannot. Model that by making the tree writable first, then running the
+    # real `find ... -delete` on the host side of the mount.
+    entry=""; mount_host=""
+    for a in "$@"; do
+      [ "${prev:-}" = "--entrypoint" ] && entry="$a"
+      [ "${prev:-}" = "-v" ] && mount_host="${a%%:*}"
+      prev="$a"
+    done
+    if [ "$entry" = "sh" ]; then
+      printf '%s\n' "$*" >> "$STATE_DIR/cleanup_run"
+      [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+      [ -n "$mount_host" ] || exit 1
+      chmod -R u+rwX "$mount_host" 2>/dev/null
+      find "$mount_host" -mindepth 1 -delete
+      exit $?
+    fi
     # `docker run -it ... /vaultwarden hash` is documented but never
     # automated: it panics without a TTY, which is precisely why the admin
     # panel is not set up by the script. Nothing in setup.sh may call this.

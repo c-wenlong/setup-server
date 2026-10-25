@@ -92,7 +92,9 @@ the reference. When a service ships one:
   comments, `$HOME`/`${HOME}`) without sourcing it, and dies when `.env` is
   missing rather than guessing, or when it has anything Compose could read
   differently (a key set twice, a quoted value spanning lines, a backslash
-  escape, a line that is not `KEY=value`). Dies if `tailscale serve status` cannot be read, before
+  escape, a line that is not `KEY=value`), or when `COMPOSE_FILE`,
+  `COMPOSE_PROJECT_NAME`, `COMPOSE_ENV_FILES` or `COMPOSE_PROFILES` is set
+  in `.env` or the shell and setup.sh does not set it itself. Dies if `tailscale serve status` cannot be read, before
   anything changes.
 - Default (no flags, what the launcher runs): unpublish **every** Serve port
   whose handlers all proxy to this service's local port, found from `serve

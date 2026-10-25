@@ -191,6 +191,13 @@ upload finishes. A long queue is not a broken server.
 - Stop / start: `docker compose --project-directory . down` / `up -d`
   — note that a bare `up -d` respects `COMPOSE_PROFILES` in `.env`, so it
   starts the ML container iff ML is on.
+- Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
+  port pointing at `:LOCAL_PORT`, stops the server and ML container before
+  Redis and Postgres, then `down`. Photos, database, the model-cache volume and
+  `.env` stay, so `./setup.sh` brings it back. `./teardown.sh --purge` also
+  deletes the library, the database, the model-cache volume (`down -v`),
+  `.ml-mode` and `.env`, after you type `immich`. Nothing backs the photos up:
+  copy them out first. It refuses a library outside `~/services/immich`.
 - Back up: `~/services/immich/library` (the photos) plus a database dump.
   Copying `~/services/immich/postgres` while Postgres is running is not a
   valid backup — use Immich's own database backups (Administration →

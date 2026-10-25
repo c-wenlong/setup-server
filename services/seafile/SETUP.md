@@ -88,6 +88,12 @@ docker compose $D down             # stop (data persists in ~/services/seafile)
 docker compose $D pull && docker compose $D up -d   # upgrade minor versions
 ```
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
+port that points at `127.0.0.1:LOCAL_PORT` and runs `compose down`; data and
+`.env` stay, so `./setup.sh` brings it back. `./teardown.sh --purge` also
+deletes `~/services/seafile/{data,mysql}` and `.env`, after you type
+`seafile`. Back up first (below): it is the whole Drive.
+
 Major-version upgrades (13 → 14): read Seafile's upgrade notes first, then
 bump `SEAFILE_IMAGE` in `.env` and `up -d`.
 

@@ -168,15 +168,30 @@ should have caught it — start by running the mocked suite.
 
 ## Nuke and pave
 
-Destroys the library and database — export anything you care about first.
+Destroys the library and database. Nothing on this box backs them up, so
+**copy the photos out first** (and take a database dump if you want albums,
+people and shared links back):
+
+```bash
+cp -a ~/services/immich/library /path/on/another/disk/immich-library
+docker exec immich_postgres pg_dumpall -U postgres > ~/immich-db.sql   # while it is still running
+```
+
+Then use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, stops the server and ML container before Redis
+and Postgres, and refuses to delete a library or database that is not really
+inside `~/services/immich` (a photo folder you pointed `UPLOAD_LOCATION` at
+elsewhere is never deleted). Postgres and the server own most of those files,
+so `--purge` empties them with a throwaway container of the pinned Postgres
+image (already on this box, no pull) instead of `sudo`; if that fails it
+stops, keeps `.env`, and prints the `sudo rm -rf` to run.
 
 ```bash
 cd ~/dev/setup-server/services/immich
-docker compose --project-directory . --profile ml down -v
-rm -rf ~/services/immich          # photos AND database
-rm -f .env                        # forces new generated credentials
-tailscale serve --https=2283 off
-./setup.sh
+./teardown.sh            # remove, keep photos + database + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete the library, database, model-cache volume,
+                         # .ml-mode and .env; type "immich" to confirm
+./setup.sh               # back, fresh (new credentials) if you purged
 ```
 
 To keep the photos and rebuild only the database, delete

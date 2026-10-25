@@ -51,7 +51,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
 
 teardown() {
@@ -765,6 +765,438 @@ test_live() {
   printf '      password you own. See SETUP.md → Backups.\n'
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+data_dir() { sed -n 's/^VAULTWARDEN_DATA=//p' "$SVC/.env"; }
+
+# A deployed sandbox: setup.sh has run, there is a vault on disk, Serve maps
+# this port to this service, and neighbours sit on other ports (one a
+# lookalike suffix).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  mkdir -p "$(data_dir)/attachments"
+  echo vault > "$(data_dir)/db.sqlite3"
+  echo key > "$(data_dir)/rsa_key.pem"
+  echo blob > "$(data_dir)/attachments/a1"
+  cat > "$STATE_DIR/serve_status" <<EOT
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8222 (tailnet only)
+|-- / proxy http://127.0.0.1:8222
+
+https://test-host.tailfake.ts.net:18222 (tailnet only)
+|-- / proxy http://127.0.0.1:18222
+EOT
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down" "$STATE_DIR/cleanup_run"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps the vault and .env, unpublishes only its port"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8222"         calls_have "tailscale serve --https=8222 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18222 untouched"  no_call "https=18222"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "down uses --project-directory" grep -q -- "--project-directory $SVC down" "$STATE_DIR/compose_cmds"
+  check "vault kept"                  [ -f "$(data_dir)/db.sqlite3" ]
+  check "rsa key kept"                [ -f "$(data_dir)/rsa_key.pem" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "signup state kept in .env"   env_has "^VAULTWARDEN_SIGNUPS_ALLOWED="
+  check "no cleanup container"        [ ! -f "$STATE_DIR/cleanup_run" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8222 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "no docker: vault kept"       [ -f "$(data_dir)/db.sqlite3" ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then the vault, .env and marker go"
+  deployed
+  local dir; dir="$(data_dir)"
+  echo x > "$HOME/services/neighbour-keep"
+  run_teardown --purge "Vaultwarden"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: vault kept"      [ -f "$dir/db.sqlite3" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge ""
+  check "empty answer: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  vault kept"                [ -f "$dir/db.sqlite3" ]
+  run_teardown --purge "vaultwarden"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "warned there is no backup"   out_has "NOTHING BACKS THIS BOX UP"
+  check "suggested an encrypted export" out_has "Export vault"
+  check "vault data dir gone"         [ ! -e "$dir" ]
+  check ".env gone (signup door resets)" [ ! -f "$SVC/.env" ]
+  check "services/vaultwarden marker gone" [ ! -e "$HOME/services/vaultwarden" ]
+  check "serve off for :8222"         calls_have "tailscale serve --https=8222 off"
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "sibling file kept"           [ -f "$HOME/services/neighbour-keep" ]
+  check "compose file kept"           [ -f "$SVC/docker-compose.yml" ]
+  run_teardown --purge "vaultwarden"
+  check "re-run with no .env refuses" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_marker_kept_if_not_empty() {
+  echo "• teardown --purge: the marker is only rmdir'd when empty, never followed if a link"
+  deployed
+  echo mine > "$HOME/services/vaultwarden/cold-backup.tgz"
+  run_teardown --purge "vaultwarden"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "data dir gone"               [ ! -e "$HOME/services/vaultwarden/data" ]
+  check "user file beside it kept"    [ -f "$HOME/services/vaultwarden/cold-backup.tgz" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"
+  mv "$HOME/services/vaultwarden" "$HOME/elsewhere/vaultwarden"
+  ln -s "$HOME/elsewhere/vaultwarden" "$HOME/services/vaultwarden"
+  run_teardown --purge "vaultwarden"
+  check "symlinked marker: purge refused" [ "$CODE" -ne 0 ]
+  check "  link kept"                 [ -L "$HOME/services/vaultwarden" ]
+  check "  vault behind it kept"      [ -f "$HOME/elsewhere/vaultwarden/data/db.sqlite3" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  rm -f "$HOME/services/vaultwarden"
+  teardown
+}
+
+test_teardown_purge_root_owned() {
+  echo "• teardown --purge: root-owned vault files are cleared by the pinned image, not sudo"
+  deployed
+  local dir; dir="$(data_dir)"
+  # Stand-in for a root-owned file: a read-only dir the host user cannot empty.
+  mkdir -p "$dir/sends/locked"; echo x > "$dir/sends/locked/f"
+  chmod 500 "$dir/sends/locked"
+  run_teardown --purge "vaultwarden"
+  chmod -R u+rwX "$dir" 2>/dev/null
+  if [ "$(id -u)" -ne 0 ]; then
+    check "used the pinned image"     grep -q "vaultwarden/server:1.37.2" "$STATE_DIR/cleanup_run"
+    check "never pulled for it"       grep -q -- "--pull never" "$STATE_DIR/cleanup_run"
+    check "mounted the real data dir" grep -q -- "-v $dir:/data" "$STATE_DIR/cleanup_run"
+  fi
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no sudo"                     no_call "^sudo"
+  check "vault dir gone"              [ ! -e "$dir" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "marker gone"                 [ ! -e "$HOME/services/vaultwarden" ]
+  teardown
+  if [ "$(id -u)" -ne 0 ]; then
+    deployed
+    dir="$(data_dir)"
+    mkdir -p "$dir/sends/locked"; echo x > "$dir/sends/locked/f"
+    chmod 500 "$dir/sends/locked"
+    touch "$STATE_DIR/docker_run_fails"
+    run_teardown --purge "vaultwarden"
+    chmod -R u+rwX "$dir" 2>/dev/null
+    check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+    check "  names the sudo command"  out_has "sudo rm -rf $dir"
+    check "  .env kept for the retry" [ -f "$SVC/.env" ]
+    teardown
+  fi
+  deployed
+  sed -i.bak "s#^VAULTWARDEN_VERSION=.*#VAULTWARDEN_VERSION=1.36.0#" "$SVC/.env"
+  dir="$(data_dir)"
+  mkdir -p "$dir/sends/locked"; echo x > "$dir/sends/locked/f"
+  chmod 500 "$dir/sends/locked"
+  run_teardown --purge "vaultwarden"
+  chmod -R u+rwX "$dir" 2>/dev/null
+  check "image tag follows VAULTWARDEN_VERSION" [ "$CODE" -eq 0 ]
+  if [ "$(id -u)" -ne 0 ]; then
+    check "  cleanup used :1.36.0"    grep -q "vaultwarden/server:1.36.0" "$STATE_DIR/cleanup_run"
+  fi
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a data dir outside ~/services"
+  deployed
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./vaultwarden" "$HOME/services/vaultwarden/.." "$HOME/services/vaultwarden/data/.."; do
+    sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$dotted#" "$SVC/.env"
+    run_teardown --purge "vaultwarden"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
+  check "vault never touched"         [ -f "$HOME/services/vaultwarden/data/db.sqlite3" ]
+  check "never stopped"               [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOT
+https://test-host.tailfake.ts.net:8223 (tailnet only)
+|-- / proxy http://127.0.0.1:8222
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8222
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /vault proxy http://127.0.0.1:8222
+EOT
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8223 off"                   calls_have "serve --https=8223 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  run_teardown --purge "vaultwarden"
+  check "purge: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "purge: vault kept"           [ -f "$(data_dir)/db.sqlite3" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8222'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8222 off"                   calls_have "serve --https=8222 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8222"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  check ":8222 off"                   calls_have "serve --https=8222 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8222 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  # The documented admin-panel recipe: a single-quoted argon2 PHC string full
+  # of '$'. It must not trip the lint, and it goes with .env on --purge.
+  printf "VAULTWARDEN_ADMIN_TOKEN='\$argon2id\$v=19\$m=65540,t=3,p=4\$c2FsdA\$aGFzaA'\n" >> "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "admin token line accepted"   [ "$CODE" -eq 0 ]
+  check "  and deleted with .env"     [ ! -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services//#" "$SVC/.env"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "vaultwarden"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/alias#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  ln -s "$HOME/services/neighbour" "$HOME/services/vaultwarden/linked"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/vaultwarden/linked#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "symlinked leaf inside own dir refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  rm -f "$HOME/services/vaultwarden/linked"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/vaultwarden/data///#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "own dir with trailing slashes: exits zero" [ "$CODE" -eq 0 ]
+  check "  vault gone"                [ ! -e "$HOME/services/vaultwarden/data" ]
+  check "  neighbour kept"            [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: a data dir already gone is fine, marker still goes"
+  deployed
+  rm -rf "$(data_dir)"
+  run_teardown --purge "vaultwarden"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "marker gone"                 [ ! -e "$HOME/services/vaultwarden" ]
+  check "no cleanup container"        [ ! -f "$STATE_DIR/cleanup_run" ]
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  local dir; dir="$(data_dir)"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=\"\${HOME}${dir#"$HOME"}\"#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(data_dir)"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=\$HOME${dir#"$HOME"}#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "unquoted \$HOME form: exits zero" [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(data_dir)"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA='\$HOME${dir#"$HOME"}'#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  dir kept"                  [ -f "$dir/db.sqlite3" ]
+  teardown
+}
+
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/vaultwarden itself or inside it"
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/neighbour#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"             [ -f "$HOME/services/neighbour/keep" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  mkdir -p "$HOME/services/vaultwarden-old"; echo x > "$HOME/services/vaultwarden-old/keep"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/vaultwarden-old#" "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "prefix lookalike dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"             [ -f "$HOME/services/vaultwarden-old/keep" ]
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/vaultwarden/a:b#" "$SVC/.env"
+  mkdir -p "$HOME/services/vaultwarden/a:b"
+  run_teardown --purge "vaultwarden"
+  check "a colon in the path refused" [ "$CODE" -ne 0 ]
+  check "vault never touched"         [ -f "$HOME/services/vaultwarden/data/db.sqlite3" ]
+  teardown
+  deployed
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$HOME/services/vaultwarden#" "$SVC/.env"
+  echo x > "$HOME/services/vaultwarden/extra"
+  run_teardown --purge "vaultwarden"
+  check "services/vaultwarden itself accepted" [ "$CODE" -eq 0 ]
+  check "  it is gone"                [ ! -e "$HOME/services/vaultwarden" ]
+  check "  ~/services kept"           [ -d "$HOME/services" ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/vaultwarden/data"; echo x > "$HOME/vaultwarden/data/keep"
+  run_teardown --purge "vaultwarden"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"    [ -f "$HOME/vaultwarden/data/keep" ]
+  check "moved vault untouched"       [ -f "$HOME/real-services/vaultwarden/data/db.sqlite3" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'VAULTWARDEN_DATA=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "VAULTWARDEN_DATA is set more than once"
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nVAULTWARDEN_DATA=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+  deployed
+  printf 'not a key value line\n' >> "$SVC/.env"
+  run_teardown --purge "vaultwarden"
+  check "garbage line: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  vault kept"                [ -f "$(data_dir)/db.sqlite3" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/vaultwarden/setup.sh or services/vaultwarden/docker-compose.yml is missing — nothing to test."
@@ -793,6 +1225,23 @@ test_port_override
 test_https_port_follows_local_port
 test_operator_escalation
 test_serve_approval_prompt
+test_teardown_safe
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_marker_kept_if_not_empty
+test_teardown_purge_root_owned
+test_teardown_purge_refuses_odd_paths
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_quoted_env
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_data_dir
+test_teardown_home_variable_in_env
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_env_lint
 
 if [ "${1:-}" = "--live" ]; then
   echo

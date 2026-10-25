@@ -90,7 +90,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
 
 teardown() {
@@ -822,6 +822,423 @@ test_https_port_follows_local_port() {
   teardown
 }
 
+# ===========================================================================
+# teardown.sh
+# ===========================================================================
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+pl_root() { sed -n 's/^PAPERLESS_ROOT=//p' "$SVC/.env"; }
+set_root() { sed -i.bak "s#^PAPERLESS_ROOT=.*#PAPERLESS_ROOT=$1#" "$SVC/.env"; }
+
+# A deployed sandbox: setup.sh has run, an archive exists under every state
+# dir, Serve maps this port to this service, and neighbours sit on other
+# ports (one a lookalike suffix).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  local r; r="$(pl_root)"
+  echo db > "$r/data/db.sqlite3"
+  mkdir -p "$r/media/documents/originals"
+  echo pdf > "$r/media/documents/originals/0000001.pdf"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:$PORT (tailnet only)
+|-- / proxy http://127.0.0.1:$PORT
+
+https://test-host.tailfake.ts.net:1$PORT (tailnet only)
+|-- / proxy http://127.0.0.1:1$PORT
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps the archive and .env, unpublishes only its port"
+  deployed
+  local r; r="$(pl_root)"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :$PORT"        calls_have "tailscale serve --https=$PORT off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :1$PORT untouched" no_call "https=1$PORT"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "no container cleanup run"    no_call "entrypoint sh"
+  check "database kept"               [ -f "$r/data/db.sqlite3" ]
+  check "documents kept"              [ -f "$r/media/documents/originals/0000001.pdf" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:%s (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' "$PORT" \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:$PORT
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:$PORT
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /paperless proxy http://127.0.0.1:$PORT
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8110 off"                   calls_have "serve --https=8110 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "no serve off"                no_call " off"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "root: no compose down"       [ ! -f "$STATE_DIR/compose_down" ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  rm -f "$STATE_DIR/docker_no_perm"
+  sed -i.bak 's/^LOCAL_PORT=.*/LOCAL_PORT=abc/' "$SVC/.env"
+  run_teardown
+  check "bad LOCAL_PORT: exits non-zero" [ "$CODE" -ne 0 ]
+  check "bad LOCAL_PORT: no serve off"   no_call " off"
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then data/, media/, .env and the marker go"
+  deployed
+  local r; r="$(pl_root)"
+  run_teardown --purge "paperless"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: database kept"   [ -f "$r/data/db.sqlite3" ]
+  check "wrong name: documents kept"  [ -f "$r/media/documents/originals/0000001.pdf" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  check "warning names data/"         out_has "$r/data"
+  check "warning names media/"        out_has "$r/media"
+  check "warning says no backup"      out_has "NO BACKUP"
+  check "warning suggests the exporter first" out_has "document_exporter ../export"
+  check "warning names export/ as kept"  out_has "Kept: $r/export"
+  check "warning names consume/ as kept" out_has "$r/consume (0 files"
+  run_teardown --purge "paperless-ngx"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "data/ gone"                  [ ! -e "$r/data" ]
+  check "media/ gone"                 [ ! -e "$r/media" ]
+  check "empty consume/ gone"         [ ! -e "$r/consume" ]
+  check "empty export/ gone"          [ ! -e "$r/export" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "services/paperless-ngx marker gone" [ ! -e "$HOME/services/paperless-ngx" ]
+  check "down -v on the purge path"   calls_have "down -v"
+  check "serve off for :$PORT"        calls_have "tailscale serve --https=$PORT off"
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "no container cleanup needed" no_call "entrypoint sh"
+  teardown
+}
+
+test_teardown_purge_keeps_export_and_consume() {
+  echo "• teardown --purge: an export and unfiled scans are kept"
+  deployed
+  local r; r="$(pl_root)"
+  mkdir -p "$r/export"; echo m > "$r/export/manifest.json"
+  echo scan > "$r/consume/receipt.pdf"
+  echo mine > "$r/notes.txt"
+  run_teardown --purge "paperless-ngx"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "warning counts the export"   out_has "$r/export (1 files"
+  check "warning counts unfiled scans" out_has "$r/consume (1 files"
+  check "data/ gone"                  [ ! -e "$r/data" ]
+  check "media/ gone"                 [ ! -e "$r/media" ]
+  check "export kept"                 [ -f "$r/export/manifest.json" ]
+  check "unfiled scan kept"           [ -f "$r/consume/receipt.pdf" ]
+  check "a file setup.sh never made is kept" [ -f "$r/notes.txt" ]
+  check "says what was left"          out_has "Left in place: $r"
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_purge_root_owned() {
+  echo "• teardown --purge: files that are not yours are cleared by the pinned image, not sudo"
+  deployed
+  local r; r="$(pl_root)"
+  # Stand-in for files owned by another uid: a read-only dir the host user
+  # cannot empty.
+  mkdir -p "$r/media/locked"; echo x > "$r/media/locked/f"
+  chmod 500 "$r/media/locked"
+  run_teardown --purge "paperless-ngx"
+  chmod -R u+rwX "$r" 2>/dev/null
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "used the pinned image"       calls_have "ghcr.io/paperless-ngx/paperless-ngx:3.1.3"
+  check "never pulled for it"         calls_have "pull never"
+  check "mounted only media/"         calls_have "-v $r/media:/x"
+  check "no sudo"                     no_call "^sudo"
+  check "media/ gone"                 [ ! -e "$r/media" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  r="$(pl_root)"
+  mkdir -p "$r/media/locked"; echo x > "$r/media/locked/f"
+  chmod 500 "$r/media/locked"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "paperless-ngx"
+  chmod -R u+rwX "$r" 2>/dev/null
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $r/media"
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses an archive outside ~/services/paperless-ngx"
+  deployed
+  set_root "$HOME"
+  run_teardown --purge "paperless-ngx"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  set_root "$HOME/services/../x"
+  run_teardown --purge "paperless-ngx"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  set_root "$HOME/services/"
+  run_teardown --purge "paperless-ngx"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./paperless-ngx" "$HOME/services/paperless-ngx/.."; do
+    set_root "$dotted"
+    run_teardown --purge "paperless-ngx"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
+  check "archive never touched"        [ -f "$HOME/services/paperless-ngx/data/db.sqlite3" ]
+  check "nothing ever stopped"         [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  set_root "$HOME/services//"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "paperless-ngx"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  set_root "$HOME/services/alias"
+  run_teardown --purge "paperless-ngx"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+  deployed
+  local r; r="$(pl_root)"
+  set_root "$r///"
+  run_teardown --purge "paperless-ngx"
+  check "own dir with trailing slashes: exits zero" [ "$CODE" -eq 0 ]
+  check "  data/ gone"                [ ! -e "$r/data" ]
+  teardown
+  deployed
+  r="$(pl_root)"
+  # A data/ that is a symlink to someone else's files is never followed.
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  rm -rf "$r/data"; ln -s "$HOME/services/neighbour" "$r/data"
+  run_teardown --purge "paperless-ngx"
+  check "symlinked data/ refused"     [ "$CODE" -ne 0 ]
+  check "  link target kept"          [ -f "$HOME/services/neighbour/keep" ]
+  check "  media/ kept"               [ -f "$r/media/documents/originals/0000001.pdf" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: an archive already gone is fine, and the marker still goes"
+  deployed
+  local r; r="$(pl_root)"
+  rm -rf "$r"
+  mkdir -p "$HOME/services/paperless-ngx"
+  set_root "$HOME/services/paperless-ngx/archive"
+  run_teardown --purge "paperless-ngx"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "empty marker removed anyway" [ ! -e "$HOME/services/paperless-ngx" ]
+  teardown
+  deployed
+  r="$(pl_root)"
+  rm -rf "$HOME/services/paperless-ngx"
+  mkdir -p "$HOME/real-pl"
+  ln -s "$HOME/real-pl" "$HOME/services/paperless-ngx"
+  set_root "$HOME/services/paperless-ngx/gone"
+  run_teardown --purge "paperless-ngx"
+  check "symlinked marker: exits zero" [ "$CODE" -eq 0 ]
+  check "  symlinked marker kept"     [ -L "$HOME/services/paperless-ngx" ]
+  check "  its target kept"           [ -d "$HOME/real-pl" ]
+  rm -f "$HOME/services/paperless-ngx"
+  teardown
+}
+
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/paperless-ngx itself or inside it"
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  mkdir -p "$HOME/services/neighbour/data"; echo x > "$HOME/services/neighbour/data/keep"
+  set_root "$HOME/services/neighbour"
+  run_teardown --purge "paperless-ngx"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"             [ -f "$HOME/services/neighbour/data/keep" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  mkdir -p "$HOME/services/paperless-ngx/a:b"
+  set_root "$HOME/services/paperless-ngx/a:b"
+  run_teardown --purge "paperless-ngx"
+  check "a colon in the path refused" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/paperless-ngx/data"; echo x > "$HOME/paperless-ngx/data/keep"
+  run_teardown --purge "paperless-ngx"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"   [ -f "$HOME/paperless-ngx/data/keep" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='$PORT'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":$PORT off"                  calls_have "serve --https=$PORT off"
+  teardown
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/LOCAL_PORT=\"$PORT\"/" "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  check ":$PORT off"                  calls_have "serve --https=$PORT off"
+  teardown
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/LOCAL_PORT=$PORT # inline comment/" "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  check ":$PORT off"                  calls_have "serve --https=$PORT off"
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  local r; r="$(pl_root)"
+  set_root "\"\${HOME}${r#"$HOME"}\""
+  run_teardown --purge "paperless-ngx"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  data/ gone"                [ ! -e "$r/data" ]
+  teardown
+  deployed
+  r="$(pl_root)"
+  set_root "\$HOME${r#"$HOME"}"
+  run_teardown --purge "paperless-ngx"
+  check "unquoted \$HOME form: exits zero" [ "$CODE" -eq 0 ]
+  check "  media/ gone"               [ ! -e "$r/media" ]
+  teardown
+  deployed
+  r="$(pl_root)"
+  set_root "'\$HOME${r#"$HOME"}'"
+  run_teardown --purge "paperless-ngx"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  archive kept"              [ -f "$r/data/db.sqlite3" ]
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'PAPERLESS_ROOT=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "PAPERLESS_ROOT is set more than once"
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nPAPERLESS_ROOT=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
 # ------------------------------------------------- sandbox integrity proof
 # Recorded before the mocked suite runs, checked after it. A mocked suite that
 # quietly wrote to ~/services/paperless-ngx or to the repo's real .env would be
@@ -831,7 +1248,7 @@ HOST_SNAPSHOT=""
 snapshot_host() {
   local f
   HOST_SNAPSHOT=""
-  for f in "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" \
+  for f in "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" \
            "$SERVICE_DIR/SETUP.md" "$SERVICE_DIR/TROUBLESHOOT.md" \
            "$SERVICE_DIR/.env" "$ORIG_HOME/services/paperless-ngx"; do
     if [ -f "$f" ]; then
@@ -1040,7 +1457,7 @@ test_live() {
 }
 
 # ------------------------------------------------------------------ main
-for f in setup.sh docker-compose.yml; do
+for f in setup.sh teardown.sh docker-compose.yml; do
   [ -f "$SERVICE_DIR/$f" ] || { red "services/paperless-ngx/$f is missing — nothing to test."; exit 1; }
 done
 
@@ -1074,6 +1491,23 @@ test_serve_approval_prompt
 test_https_front_door_slow
 test_port_override
 test_https_port_follows_local_port
+test_teardown_safe
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_keeps_export_and_consume
+test_teardown_purge_root_owned
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_data_dir
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_quoted_env
+test_teardown_home_variable_in_env
+test_teardown_env_lint
 test_sandbox_was_hermetic
 
 if [ "${1:-}" = "--live" ]; then

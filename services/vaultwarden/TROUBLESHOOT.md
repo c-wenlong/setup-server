@@ -393,19 +393,33 @@ and there is no undo.** Unless you have a client-side encrypted export or a
 cold copy in hand, do not run this — read the Backups section of SETUP.md
 first and make one.
 
-`sudo` is needed because the container runs as root and owns the data files.
+**Step 1, before anything destructive: make the export.** Any Bitwarden
+client → Settings → Vault → Export vault → File format `.json (Encrypted)` →
+**Password protected** (not "Account restricted"). Exports skip attachments,
+so download those separately. Optionally take the cold copy from SETUP.md too.
+Move both off this box.
+
+**Step 2: purge.** `teardown.sh --purge` asks you to type `vaultwarden`, then
+unpublishes every Serve port that points only at this vault, runs
+`docker compose down` (the vault is a bind mount, there is no volume), deletes
+the data dir named by `VAULTWARDEN_DATA` and `.env`, and removes the empty
+`~/services/vaultwarden` marker. The data files are root-owned; it clears them
+with the pinned `vaultwarden/server` image already on the box, so no `sudo`.
+If that fails it stops, keeps `.env`, and prints the `sudo rm -rf` to run.
 
 ```bash
 cd ~/dev/setup-server/services/vaultwarden
-docker compose --project-directory . down -v
-sudo rm -rf ~/services/vaultwarden      # THE VAULT. Every password.
-rm -f .env                              # fresh DOMAIN + VAULTWARDEN_SIGNUPS_ALLOWED=true
-tailscale serve --https=8222 off
-./setup.sh
+./teardown.sh --purge                   # THE VAULT. Every password. Type: vaultwarden
+./setup.sh                              # fresh .env: new DOMAIN, SIGNUPS_ALLOWED=true
 ```
 
+Deleting `.env` is what resets the signup door: the next `setup.sh` writes
+`VAULTWARDEN_SIGNUPS_ALLOWED=true` and finds 0 accounts, exactly like a first
+deploy. Nothing else on disk remembers the old instance.
+
 Then register again in the browser, and run `./setup.sh` once more to close
-signups. If you are restoring, do it between the `rm -rf` and the `setup.sh`:
+signups. If you are restoring, do it between the `teardown.sh --purge` and the
+`setup.sh`:
 
 ```bash
 sudo mkdir -p ~/services/vaultwarden/data

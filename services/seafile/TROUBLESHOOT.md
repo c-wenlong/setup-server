@@ -143,12 +143,32 @@ photo twice.
 
 ## Nuke and pave (destroys all Seafile data)
 
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down` (never `-v`), and refuses to
+delete a data dir that is not really inside `~/services/seafile`. The MariaDB
+and Seafile files are container-owned; `--purge` clears them with the
+MariaDB image already on the box, so it needs no sudo.
+
+`--purge` deletes the whole Drive on this server: every library, synced file
+and phone photo backup stored here, plus all accounts. Clients keep their
+local copies. self-learn (reads this `.env` at install time, syncs into a
+Seafile library) and manimkc (uploads videos to a Seafile library) lose
+their target. Back up first, per SETUP.md "Backups":
+
 ```sh
-docker compose --project-directory . down -v
-rm -rf ~/services/seafile .env
-tailscale serve --https=8443 off
-./setup.sh
+cd ~/dev/setup-server/services/seafile
+# 1. backup BEFORE purging (DB dump + data dir + .env, same set)
+docker exec seafile-mysql mysqldump -uroot -p"$(sed -n 's/^INIT_SEAFILE_MYSQL_ROOT_PASSWORD=//p' .env)" --all-databases > ~/seafile-db.sql
+rsync -a ~/services/seafile/data/ /path/to/backup/seafile-data/
+cp .env /path/to/backup/seafile.env
+# 2. then
+./teardown.sh            # remove, keep data + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete SEAFILE_VOLUME, SEAFILE_MYSQL_VOLUME and .env; type the name
+./setup.sh               # back, fresh if you purged
 ```
+
+After a plain `./teardown.sh`, `.env` may hold a stale admin password if it
+was changed in the web UI (see Login problems); the data keeps the real one.
 
 ## Restore from backup
 

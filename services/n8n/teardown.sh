@@ -96,7 +96,7 @@ env_get() {
 # component, a newline or a colon (which would split a list or a -v mount)
 # is never accepted.
 real_dir() {
-  local d="$1" parent leaf home services own nl
+  local d="$1" parent leaf home services own nl checkout
   nl='
 '
   case "$d" in *"$nl"*|*:*) return 1 ;; esac
@@ -112,6 +112,10 @@ real_dir() {
   [ ! -L "$HOME/services/$NAME" ] || return 1
   own="$services/$NAME"
   case "$parent/$leaf" in "$own"|"$own"/*) ;; *) return 1 ;; esac
+  # Never a directory that holds this checkout (and so every other service's
+  # .env): a repo cloned inside ~/services/<name> must survive a purge.
+  checkout="$(cd "$SERVICE_DIR" && pwd -P)" || return 1
+  case "$checkout/" in "$parent/$leaf"/*) return 1 ;; esac
   printf '%s/%s' "$parent" "$leaf"
 }
 
@@ -145,6 +149,15 @@ case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or no
 TARGET="http://127.0.0.1:$LOCAL_PORT"
 ok "$NAME: local :$LOCAL_PORT, data ${DATA_DIR:-(not set)}"
 
+# Compose reads COMPOSE_FILE / COMPOSE_PROJECT_NAME / COMPOSE_ENV_FILES from
+# .env and the shell, and any of them would change which stack `down` (and,
+# on --purge, `down -v`) acts on. setup.sh never sets them, so refuse rather
+# than tear down something it did not start.
+for v in COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+  [ -z "$(env_get "$v")" ] && [ -z "$(printenv "$v" 2>/dev/null || true)" ] \
+    || die "$v is set (in $ENV_FILE or the shell); setup.sh never sets it, so teardown will not guess which stack or volumes it means. Unset it and re-run."
+done
+
 # Read Serve before changing anything: if it cannot be read, an empty answer
 # would look like "already off" and the mapping would come back with the
 # daemon. Stop instead.
@@ -167,7 +180,7 @@ if [ "$PURGE" -eq 1 ]; then
   if [ -e "$DATA_DIR" ]; then
     [ -d "$DATA_DIR" ] || die "N8N_VOLUME=$DATA_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "DATA_DIR=$DATA_DIR is not a real directory inside $HOME/services/$NAME — refusing."
+    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "DATA_DIR=$DATA_DIR is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
     case "$PURGE_DIR" in
       "$root"/?*) ;;
       *) die "N8N_VOLUME=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;

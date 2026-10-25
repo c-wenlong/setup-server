@@ -561,6 +561,12 @@ boundary, so the requirement is not negotiable, and it has real consequences:
 - Status: `docker compose --project-directory . ps`
 - Logs: `docker compose --project-directory . logs -f vaultwarden`
 - Restart: `docker compose --project-directory . restart`
+- Remove: `./teardown.sh` unpublishes this vault's Serve port(s) and runs
+  `docker compose down`; the vault and `.env` stay, so `./setup.sh` brings it
+  back as it was. `./teardown.sh --purge` (typed `vaultwarden` to confirm) also
+  deletes the vault data dir, `.env` and the `~/services/vaultwarden` marker.
+  **Nothing backs this box up**: make a password-protected encrypted export
+  from a Bitwarden client first (see Backups).
 - Health: `curl -s http://127.0.0.1:8222/alive` → an ISO timestamp
 - Signup state (authoritative — the running container, not `.env`):
   ```bash
