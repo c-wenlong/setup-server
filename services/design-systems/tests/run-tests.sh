@@ -278,6 +278,7 @@ test_path_restored_from_env() {
   grep -v '^UV_BIN=' "$SVC/.env" > "$SVC/.env.tmp" && mv "$SVC/.env.tmp" "$SVC/.env"
   printf "UV_BIN='%s'\n" "$uvbin" >> "$SVC/.env"
   OUT="$(printf '\n' | PATH="$nouv:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  echo "DEBUG CODE=$CODE"; echo "$OUT" | tail -25   # TEMP: CI failure diagnosis
   check "exits zero without stub uv" [ "$CODE" -eq 0 ]
   check "found uv via .env"          out_has "Preflight checks"
   teardown
