@@ -142,7 +142,9 @@ check "rest of control kept"                py 'd["services"][1]["control"]["par
 check "manifest itself untouched"           grep -qF '"stop_guard": ["teardown.sh", "--check-dns"]' "$R/services/alpha/app.json"
 teardown
 for bad in '"teardown.sh"' '[]' '["teardown.sh", 3]' '["teardown.sh", ""]' '["missing.sh"]' \
-    '["../duo/app.json"]' '["/bin/sh"]' '["~/x.sh"]' '["."]'; do
+    '["../duo/app.json"]' '["/bin/sh"]' '["~/x.sh"]' '["."]' \
+    '["teardown.sh", "--reason=DNS maintenance"]' '["teardown.sh", "--x;rm"]' \
+    '["teardown.sh", "--x\n"]'; do
   setup
   touch "$R/services/alpha/teardown.sh"
   printf '{"key": "alpha", "name": "A", "group": "daily", "control": {"stop_guard": %s}}\n' "$bad" > "$R/services/alpha/app.json"

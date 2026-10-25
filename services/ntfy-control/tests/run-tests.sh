@@ -517,6 +517,71 @@ test_handle_stop_guard() {
   done
 }
 
+# One listener process handling several messages, as the subscribe loop
+# does, so the registry cache is live between them. $1 is Python run with
+# the module imported as `cl`.
+run_py_fixture() {
+  OUT="$(NTFY_BASE_URL=http://127.0.0.1:3003 CONTROL_TOPIC=control REPLY_TOPIC=alerts \
+    CONTROL_REGISTRY="$GREPO/app/web/services.json" \
+    KUMA_ENV_FILE="$SANDBOX/kuma.env" \
+    PATH="$STUBS:$PATH" python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("cl", sys.argv[1])
+cl = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cl)
+exec(sys.argv[2])' "$SERVICE_DIR/control_listener.py" "$1" 2>&1)"
+  CODE=$?
+}
+
+test_handle_stop_guard_resolved_at_stop_time() {
+  echo "• handler: a guard file restored after a refused stop counts at once"
+  setup
+  echo "KUMA_PORT=3002" > "$SANDBOX/kuma.env"
+  guard_repo '["services/adguard/guard.sh", "--check-dns"]'
+  mv "$GREPO/services/adguard/guard.sh" "$SANDBOX/guard.sh.away"
+  export SANDBOX_AWAY="$SANDBOX/guard.sh.away" GUARD_HOME="$GREPO/services/adguard/guard.sh"
+  run_py_fixture '
+import os, shutil
+cl.handle("stop adguard")
+with open(os.environ["CALLS_LOG"], "a") as fh:
+    fh.write("--- restored ---\n")
+shutil.move(os.environ["SANDBOX_AWAY"], os.environ["GUARD_HOME"])
+cl.handle("stop adguard")'
+  unset SANDBOX_AWAY GUARD_HOME
+  check "first stop refused (guard missing)" calls_in_order "adguard: stop refused" "--- restored ---"
+  check "second stop ran the restored guard"  calls_in_order "--- restored ---" "^guard --check-dns$" "docker stop adguard"
+  check "  and reported ok"                   calls_have "adguard: stop ok"
+  teardown
+}
+
+test_handle_stop_guard_timeout() {
+  echo "• handler: a hung guard is killed with its children and the stop refused"
+  setup
+  echo "KUMA_PORT=3002" > "$SANDBOX/kuma.env"
+  guard_repo '["services/adguard/guard.sh", "--check-dns"]'
+  cat > "$GREPO/services/adguard/guard.sh" <<'SH'
+#!/usr/bin/env bash
+echo "guard $*" >> "$CALLS_LOG"
+sleep 60 &
+echo $! > "$STATE_DIR/child.pid"
+wait
+SH
+  chmod +x "$GREPO/services/adguard/guard.sh"
+  local started=$SECONDS
+  run_py_fixture 'cl.GUARD_TIMEOUT = 1
+cl.handle("stop adguard")'
+  check "returned within a few seconds"   [ $((SECONDS - started)) -lt 10 ]
+  check "guard ran"                       calls_have "^guard --check-dns$"
+  check "replies refused"                 calls_have "adguard: stop refused, nothing was changed"
+  check "  and says why"                  calls_have "ran past 1s"
+  check "container not stopped"           no_call "docker stop"
+  check "kuma never paused"               no_call "kuma_toggle.py pause"
+  local child; child="$(cat "$STATE_DIR/child.pid" 2>/dev/null)"
+  check "the guard's child was killed too" sh -c "[ -n '$child' ] && ! kill -0 '$child' 2>/dev/null"
+  [ -n "$child" ] && kill "$child" 2>/dev/null
+  teardown
+}
+
 test_shipped_adguard_guard() {
   echo "• allowlist: the shipped registry guards adguard's stop with teardown.sh --check-dns"
   check "registry carries the guard" python3 -c '
@@ -551,6 +616,8 @@ test_handle_pick_empty
 test_handle_status
 test_handle_rejects_unknown
 test_handle_stop_guard
+test_handle_stop_guard_resolved_at_stop_time
+test_handle_stop_guard_timeout
 test_shipped_adguard_guard
 
 if [ "${1:-}" = "--live" ]; then

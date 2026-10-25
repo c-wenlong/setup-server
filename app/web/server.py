@@ -44,6 +44,7 @@ import mimetypes
 import os
 import re
 import shlex
+import signal
 import socket
 import socketserver
 import stat
@@ -2198,8 +2199,24 @@ def control_status(svc):
 
 
 # A stop_guard's flags go into an argv (and, through sg, a shlex-quoted
-# string), so they get the same shape gate as part names.
+# string), so they get the same shape gate as part names. The same pattern
+# and the same check live in scripts/build-registry.py and ntfy-control's
+# control_listener.py; app/web/tests asserts all three agree on a table.
 _GUARD_ARG_RE = re.compile(r"^[A-Za-z0-9._=:/@+-]{1,128}$")
+
+# Seconds a stop_guard may run. It is a read-only check (AdGuard's asks
+# `tailscale dns status`), so anything slower is hung: its whole process
+# group is killed and the stop refused, rather than the job (and with it
+# every later action on the service) waiting forever.
+GUARD_TIMEOUT = 30.0
+
+
+def guard_shape_ok(raw):
+    """True when a stop_guard is a non-empty list of non-empty strings whose
+    flags (every item after the script) match _GUARD_ARG_RE."""
+    return (isinstance(raw, list) and bool(raw)
+            and all(isinstance(a, str) and a for a in raw)
+            and all(_GUARD_ARG_RE.fullmatch(a) for a in raw[1:]))
 
 
 def stop_guard(svc):
@@ -2215,9 +2232,7 @@ def stop_guard(svc):
     if "stop_guard" not in block:
         return None
     raw = block.get("stop_guard")
-    if (not isinstance(raw, list) or not raw
-            or not all(isinstance(a, str) and a for a in raw)
-            or not all(_GUARD_ARG_RE.match(a) for a in raw[1:])):
+    if not guard_shape_ok(raw):
         raise DeployError(403, "this service's stop_guard is malformed, so "
                                "it cannot be stopped from here")
     script = resolve_registry_path(raw[0], "stop_guard")
@@ -2423,12 +2438,28 @@ def _run_steps(job, steps):
     def run_one(step):
         # The argv, and only the argv: `env` may carry Kuma credentials.
         logfile.write(("$ %s\n" % " ".join(step["argv"])).encode())
+        guard = bool(step.get("guard"))
         try:
+            # A guard gets its own session so a timeout can kill everything
+            # it started (sg, bash, tailscale), not just the first process.
             proc = subprocess.Popen(
                 step["argv"], stdout=logfile, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, shell=False, env=step.get("env"),
+                **({"start_new_session": True} if guard else {}),
             )
-            return proc.wait()
+            if not guard:
+                return proc.wait()
+            try:
+                return proc.wait(timeout=GUARD_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                proc.wait()
+                logfile.write(("[the stop guard ran past %ds and was killed]\n"
+                               % GUARD_TIMEOUT).encode())
+                return 124
         except Exception as exc:
             logfile.write(("could not run: %s\n" % exc).encode())
             return -1

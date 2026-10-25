@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -2949,9 +2950,26 @@ class RecordedProc:
 
     def __init__(self, code):
         self.code = code
+        self.pid = 4242
 
-    def wait(self):
+    def wait(self, timeout=None):
         return self.code
+
+
+class HungProc:
+    """A stop guard that never answers: wait(timeout) always times out, and
+    only a plain wait() (after the group kill) returns."""
+
+    def __init__(self, argv):
+        self.argv = argv
+        self.pid = 31337
+        self.timeouts = []
+
+    def wait(self, timeout=None):
+        if timeout is not None:
+            self.timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        return -9
 
 
 class ControlTestBase(SandboxTest):
@@ -3823,6 +3841,48 @@ class ControlStopGuardTest(ControlTestBase):
             self.assertEqual(self.spawned, [], guard)
             self.assertEqual(server._jobs, {}, guard)
 
+    def test_a_hung_guard_is_killed_and_the_stop_refused(self):
+        self.enable_kuma()
+        hung = []
+        killed = []
+
+        def fake(argv, **kwargs):
+            self.spawned.append((list(argv), kwargs))
+            if "--check-dns" in argv:
+                hung.append(HungProc(argv))
+                return hung[-1]
+            return RecordedProc(0)
+
+        real_killpg = os.killpg
+        subprocess.Popen = fake
+        os.killpg = lambda pid, sig: killed.append((pid, sig))
+        try:
+            job_id = server.start_action("adguard", "stop")
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                with server._jobs_lock:
+                    if server._jobs[job_id]["status"] != "running":
+                        break
+                time.sleep(0.01)
+            payload = server.job_payload(job_id)
+        finally:
+            os.killpg = real_killpg
+        self.assertEqual(payload["status"], "failed")
+        self.assertTrue(payload["refused"])
+        self.assertEqual(payload["exit_code"], 124)
+        self.assertEqual(hung[0].timeouts, [server.GUARD_TIMEOUT])
+        self.assertEqual(killed, [(31337, signal.SIGKILL)])
+        self.assertTrue(self.spawned[0][1].get("start_new_session"))
+        # Nothing after the guard ran: no Kuma pause, no docker stop.
+        self.assertEqual(self.argvs(),
+                         [[self.path("adguard/teardown.sh"), "--check-dns"]])
+        self.assertIn("killed", payload["log"])
+
+    def test_only_the_guard_gets_its_own_session(self):
+        self.run_action("adguard", "stop")
+        sessions = [bool(kw.get("start_new_session")) for _, kw in self.spawned]
+        self.assertEqual(sessions, [True] + [False] * (len(sessions) - 1))
+
     def test_an_unusable_guard_does_not_block_restart_or_start(self):
         self.set_guard("adguard", ["adguard/missing.sh"])
         self.run_action("adguard", "restart")
@@ -4054,16 +4114,55 @@ class SharedControlRegistryTest(unittest.TestCase):
         try:
             for key, control in phone.items():
                 web = server.stop_guard(self.services[key])
-                self.assertIsNone(control["guard_error"], key)
+                guard, guard_error = listener.resolve_guard(control)
+                self.assertIsNone(guard_error, key)
                 if web is None:
-                    self.assertIsNone(control["guard"], key)
+                    self.assertIsNone(guard, key)
                 else:
                     # The phone may prefix /bin/bash; the rest must match.
                     want = [web[0]] + list(web[1])
-                    self.assertEqual(control["guard"][-len(want):], want, key)
+                    self.assertEqual(guard[-len(want):], want, key)
         finally:
             server.REPO_ROOT, server.ALLOWED_ROOTS = saved
-        self.assertTrue(phone["adguard"]["guard"])
+        self.assertTrue(listener.resolve_guard(phone["adguard"])[0])
+
+    def test_all_three_agree_on_which_stop_guards_are_well_formed(self):
+        """The generator, the launcher and ntfy-control each carry their own
+        copy of the guard shape rule; this table keeps the copies identical."""
+        import importlib.util
+        listener = self._ntfy_control()
+        os.environ.pop("CONTROL_REGISTRY", None)
+        spec = importlib.util.spec_from_file_location(
+            "build_registry", os.path.join(self.repo, "scripts", "build-registry.py"))
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        self.assertEqual(server._GUARD_ARG_RE.pattern, listener.GUARD_ARG_RE.pattern)
+        self.assertEqual(server._GUARD_ARG_RE.pattern, generator.GUARD_ARG_RE.pattern)
+        table = [
+            (["teardown.sh"], True),
+            (["teardown.sh", "--check-dns"], True),
+            (["teardown.sh", "--reason=DNS_maintenance", "-v", "a/b:c@d+e"], True),
+            (["teardown.sh", "x" * 128], True),
+            (["teardown.sh", "x" * 129], False),
+            (["teardown.sh", "--reason=DNS maintenance"], False),
+            (["teardown.sh", "--x;rm"], False),
+            (["teardown.sh", "$(id)"], False),
+            (["teardown.sh", "a\nb"], False),
+            (["teardown.sh", "--x\n"], False),
+            (["teardown.sh", "caf\u00e9"], False),
+            (["teardown.sh", "'q'"], False),
+            (["teardown.sh", ""], False),
+            (["teardown.sh", 3], False),
+            ([""], False),
+            ([], False),
+            ("teardown.sh", False),
+            (None, False),
+            ({"0": "teardown.sh"}, False),
+        ]
+        for raw, want in table:
+            got = (server.guard_shape_ok(raw), listener.guard_shape_ok(raw),
+                   generator.guard_shape_ok(raw))
+            self.assertEqual(got, (want, want, want), raw)
 
     def test_neither_front_end_will_touch_the_locked_three(self):
         listener = self._ntfy_control()
@@ -4966,9 +5065,26 @@ class ExitedProc:
 
     def __init__(self, code):
         self.code = code
+        self.pid = 4242
 
-    def wait(self):
+    def wait(self, timeout=None):
         return self.code
+
+
+class HungProc:
+    """A stop guard that never answers: wait(timeout) always times out, and
+    only a plain wait() (after the group kill) returns."""
+
+    def __init__(self, argv):
+        self.argv = argv
+        self.pid = 31337
+        self.timeouts = []
+
+    def wait(self, timeout=None):
+        if timeout is not None:
+            self.timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        return -9
 
 
 SHA_A = "a" * 40

@@ -24,6 +24,7 @@ Python 3.9 like the launcher.
 
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -50,6 +51,21 @@ def _load(path):
         raise RegistryError("%s is not valid JSON: %s" % (path, exc))
 
 
+# A stop_guard's flags become argv words in the launcher and ntfy-control,
+# which both refuse anything outside this pattern. The same pattern and the
+# same check live in app/web/server.py and ntfy-control's
+# control_listener.py; app/web/tests asserts all three agree on a table.
+GUARD_ARG_RE = re.compile(r"^[A-Za-z0-9._=:/@+-]{1,128}$")
+
+
+def guard_shape_ok(raw):
+    """True when a stop_guard is a non-empty list of non-empty strings whose
+    flags (every item after the script) match GUARD_ARG_RE."""
+    return (isinstance(raw, list) and bool(raw)
+            and all(isinstance(a, str) and a for a in raw)
+            and all(GUARD_ARG_RE.fullmatch(a) for a in raw[1:]))
+
+
 def _stop_guard(folder, key, guard):
     """control.stop_guard: argv relative to the service folder -> repo-relative.
 
@@ -59,9 +75,9 @@ def _stop_guard(folder, key, guard):
     `env` is rewritten, so both front ends resolve it from the repo root.
     """
     where = "services/%s/%s (%s): control.stop_guard" % (folder, MANIFEST, key)
-    if (not isinstance(guard, list) or not guard
-            or not all(isinstance(a, str) and a for a in guard)):
-        raise RegistryError("%s must be a non-empty list of non-empty strings" % where)
+    if not guard_shape_ok(guard):
+        raise RegistryError("%s must be a non-empty list of non-empty strings, "
+                            "each flag matching %s" % (where, GUARD_ARG_RE.pattern))
     script = guard[0]
     base = os.path.realpath(os.path.join(ROOT, "services", folder))
     path = os.path.realpath(os.path.join(base, script))

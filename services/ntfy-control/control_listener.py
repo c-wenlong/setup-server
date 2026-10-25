@@ -47,6 +47,7 @@ Config via env (systemd EnvironmentFile= / launchd EnvironmentVariables):
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -71,8 +72,22 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 # hand the phone a button that stops the thing you would start things with.
 HARD_LOCKED = ("ntfy", "launcher", "ollama")
 
-# A stop_guard's flags become argv words: the same kind of shape gate.
+# A stop_guard's flags become argv words: the same kind of shape gate. The
+# same pattern and check live in app/web/server.py and
+# scripts/build-registry.py; app/web/tests asserts all three agree.
 GUARD_ARG_RE = re.compile(r"^[A-Za-z0-9._=:/@+-]{1,128}$")
+
+# Seconds a stop guard may run before its process group is killed and the
+# stop refused. It is a read-only check, so anything slower is hung.
+GUARD_TIMEOUT = 30
+
+
+def guard_shape_ok(raw):
+    """True when a stop_guard is a non-empty list of non-empty strings whose
+    flags (every item after the script) match GUARD_ARG_RE."""
+    return (isinstance(raw, list) and bool(raw)
+            and all(isinstance(a, str) and a for a in raw)
+            and all(GUARD_ARG_RE.fullmatch(a) for a in raw[1:]))
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -142,9 +157,7 @@ def _guard(block, registry_path):
         return None, None
     raw = block.get("stop_guard")
     bad = "its stop_guard in services.json is malformed"
-    if (not isinstance(raw, list) or not raw
-            or not all(isinstance(a, str) and a for a in raw)
-            or not all(GUARD_ARG_RE.match(a) for a in raw[1:])):
+    if not guard_shape_ok(raw):
         return None, bad
     repo = os.path.realpath(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(registry_path)))))
@@ -156,6 +169,18 @@ def _guard(block, registry_path):
     return head + raw[1:], None
 
 
+def resolve_guard(control):
+    """(argv, None), (None, reason) or (None, None) for one registry entry.
+
+    Resolved on every call rather than at load time: the registry is cached
+    on services.json's mtime, and a cached "file missing" would keep Stop
+    refused after the guard file came back.
+    """
+    if "stop_guard" not in control:
+        return None, None
+    return _guard({"stop_guard": control["stop_guard"]}, control["registry"])
+
+
 def run_guard(argv):
     """Run a stop guard. (0, "") when it passes, else (code, its reason).
 
@@ -163,21 +188,40 @@ def run_guard(argv):
     codes and the cross mark stripped, falling back to its last stdout line.
     """
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        # Its own session, so a timeout kills everything it started
+        # (bash, tailscale), not just the first process.
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                text=True, start_new_session=True)
+    except OSError as e:
         return 1, f"the safety check could not run: {e}"
-    if r.returncode == 0:
+    try:
+        out, err = proc.communicate(timeout=GUARD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass  # a child that left the group still holds a pipe; give up on it
+        return 124, f"the safety check ran past {GUARD_TIMEOUT}s and was stopped"
+    if proc.returncode == 0:
         return 0, ""
-    for stream in (r.stderr, r.stdout):
+    for stream in (err, out):
         lines = [ANSI_RE.sub("", ln).strip(" \t\u2717") for ln in stream.splitlines()]
         lines = [ln for ln in lines if ln]
         if lines:
-            return r.returncode, lines[-1]
-    return r.returncode, f"the safety check exited {r.returncode}"
+            return proc.returncode, lines[-1]
+    return proc.returncode, f"the safety check exited {proc.returncode}"
 
 
 def load_registry():
-    """key -> {parts, primary, kuma, guard, guard_error} per controllable service.
+    """key -> {parts, primary, kuma, stop_guard?, registry} per controllable service.
+
+    A stop_guard is carried raw and resolved by resolve_guard at stop time,
+    so a guard file restored after a failed lookup counts straight away.
 
     Re-read only when the file changes, so editing services.json takes
     effect without restarting the listener — the same live-reload the
@@ -209,10 +253,10 @@ def load_registry():
             parts = _parts(block)
             if not parts:
                 continue
-            guard, guard_error = _guard(block, path)
             services[key] = {"parts": parts, "kuma": _monitors(block),
-                             "primary": block.get("primary"),
-                             "guard": guard, "guard_error": guard_error}
+                             "primary": block.get("primary"), "registry": path}
+            if "stop_guard" in block:
+                services[key]["stop_guard"] = block["stop_guard"]
         _registry.update(path=path, mtime=mtime, services=services)
         print(f"control registry: {len(services)} services from {path}",
               flush=True)
@@ -461,11 +505,12 @@ def handle(text):
     # The stop guard runs first, before even the Kuma pause, and only for
     # stop. Restart is not guarded: it is the usual fix for a stuck service,
     # and for AdGuard it costs a few seconds of DNS rather than an outage.
-    if cmd == "stop" and (control.get("guard") or control.get("guard_error")):
-        if control.get("guard_error"):
-            code, why = 1, control["guard_error"]
+    guard, guard_error = resolve_guard(control) if cmd == "stop" else (None, None)
+    if guard or guard_error:
+        if guard_error:
+            code, why = 1, guard_error
         else:
-            code, why = run_guard(control["guard"])
+            code, why = run_guard(guard)
         if code != 0:
             _, acts = context_buttons(target)
             notify(f"{target}: stop refused, nothing was changed. {why[:600]}",
