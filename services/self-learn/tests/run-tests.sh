@@ -400,6 +400,46 @@ test_poll_lock() {
   teardown
 }
 
+test_poll_lock_identity() {
+  echo "• poller lock: pid+start identifies the holder — old live lock kept, reused pid reclaimed"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  lock="$HOME/services/self-learn/.deploy.lock"
+  # A recorded holder is pid + start identity: however old the lock, it is
+  # not raced (the 60-min bound only guards locks whose owner cannot be
+  # verified).
+  mkdir "$lock"
+  start_of $$ > "$lock/started"
+  echo $$ > "$lock/pid"
+  touch -t 202001010000 "$lock"
+  : > "$CALLS_LOG"
+  run_poll
+  check "verifiable live owner, old lock: skips" out_has "another deploy is running"
+  check "  its lock is kept"               [ -d "$lock" ]
+  # A pid that now belongs to another process is not the holder.
+  echo bogus > "$lock/started"
+  : > "$CALLS_LOG"
+  run_poll
+  check "reused pid: reclaimed"          out_has "pid $$ now belongs to another process"
+  check "deploy proceeds"                calls_have "fetch --quiet"
+  # A lock whose owner was never recorded past the write window is stale.
+  rm -rf "$lock"; mkdir "$lock"; touch -t 202001010000 "$lock"
+  : > "$CALLS_LOG"
+  run_poll
+  check "unrecorded owner: reclaimed"    out_has "owner never recorded"
+  check "deploy proceeds again"          calls_have "fetch --quiet"
+  teardown
+  # ps -o lstart honours the caller's TZ: a deploy started by launchd and a
+  # manual one would print different strings for the same process and the
+  # identity check would steal a live lock. Every script pins TZ (and
+  # LC_ALL) on its read — this runs on Linux too, since it only greps.
+  for f in deploy.sh sync.sh teardown.sh; do
+    check "$f lstart pins TZ=UTC0" \
+      grep -qF 'TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"' "$SERVICE_DIR/$f"
+  done
+}
+
 test_skip_seed() {
   echo "• SKIP_SEED=1: catalog left empty for a dump restore, no import/flips"
   setup
@@ -997,6 +1037,10 @@ run_teardown() {
 
 SVC_HOME() { printf '%s' "$HOME/services/self-learn"; }
 UNIT_DIR() { printf '%s' "$HOME/.config/systemd/user"; }
+# The identity deploy.sh records in .deploy.lock/started for a live pid.
+start_of() {
+  if [ "$OS" = "Linux" ]; then sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; else TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"; fi
+}
 # Point SERVICE_HOME in .env somewhere else (odd-path tests).
 set_service_home() { sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME=$1#" "$SVC/.env"; }
 # Two call lines in order (both present, first before second).
@@ -1548,6 +1592,11 @@ test_teardown_holds_lock() {
   check "  says it cleared it"          out_has "stale deploy lock"
   check "  taken over during down"      grep -q "^live " "$STATE_DIR/lock_at_down"
   check "  gone after the run"          [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  mkdir -p "$(SVC_HOME)/.deploy.lock"
+  echo 999999 > "$(SVC_HOME)/.deploy.lock/pid"; echo x > "$(SVC_HOME)/.deploy.lock/started"
+  run_teardown
+  check "stale lock with started file: exits zero" [ "$CODE" -eq 0 ]
+  check "  whole lock dir cleared"      [ ! -e "$(SVC_HOME)/.deploy.lock" ]
   run_teardown --purge "self-lear"
   check "a run that dies (wrong name) exits non-zero" [ "$CODE" -ne 0 ]
   check "  still drops the lock"        [ ! -e "$(SVC_HOME)/.deploy.lock" ]
@@ -1828,6 +1877,7 @@ test_lockfile_change_triggers_ci
 test_stopped_app_stays_stopped
 test_stopped_stack_stays_stopped
 test_poll_lock
+test_poll_lock_identity
 test_skip_seed
 test_port_override
 test_persisted_https_port
