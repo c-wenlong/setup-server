@@ -150,11 +150,13 @@ env_lint() {
 env_lint
 
 # Where an absolute path really lands, symlinks and all, whether or not it
-# exists yet: the deepest part that exists is resolved with `pwd -P` and the
-# missing rest is appended (the parent-resolve idea of real_dir, applied
-# upwards). A symlinked file leaf is followed hop by hop. Refused (non-zero)
-# for a relative path, a `.`/`..` component, a newline, a path that runs
-# through a file, or a symlink that points nowhere.
+# exists yet, WITHOUT entering it: the deepest part that exists is resolved
+# the way real_dir resolves a data dir (its parent with `pwd -P`, then its
+# name), following a symlinked leaf hop by hop, and the missing rest is
+# appended. So a dir the container user owns and this user cannot enter
+# still resolves. Refused (non-zero) for a relative path, a `.`/`..`
+# component, a newline, a path that runs through a file, or a symlink that
+# points nowhere.
 phys_path() {
   local p="$1" rest="" dir leaf t hops=0 nl
   nl='
@@ -166,10 +168,10 @@ phys_path() {
     rest="/$(basename "$p")$rest"
     p="$(dirname "$p")"
   done
-  if [ -d "$p" ]; then
-    dir="$(cd "$p" && pwd -P)" || return 1
+  [ -z "$rest" ] || [ -d "$p" ] || return 1
+  if [ "$p" = / ]; then
+    dir=/
   else
-    [ -z "$rest" ] || return 1
     dir="$(cd "$(dirname "$p")" && pwd -P)" || return 1
     leaf="$(basename "$p")"
     while [ -L "$dir/$leaf" ]; do
@@ -178,9 +180,10 @@ phys_path() {
       case "$t" in /*) ;; *) t="$dir/$t" ;; esac
       dir="$(cd "$(dirname "$t")" && pwd -P)" || return 1
       leaf="$(basename "$t")"
+      case "$leaf" in .|..) return 1 ;; esac
     done
     [ -e "$dir/$leaf" ] || return 1
-    rest="/$leaf"
+    rest="/$leaf$rest"
   fi
   case "$dir$rest" in *"$nl"*) return 1 ;; esac
   if [ "$dir" = / ]; then printf '%s' "${rest:-/}"; else printf '%s%s' "$dir" "$rest"; fi
@@ -369,8 +372,14 @@ $binds"
       src="$(expand_src "$src")"
       case "$src" in *'$'*) die "Mount source $src (at $target) uses a variable teardown does not expand. Refusing --purge; nothing was changed." ;; esac
       [ -e "$src" ] || continue
+      # The data mount itself is what --purge is for. Checked first, and
+      # against real_dir's answer, so a data dir this user cannot enter
+      # (container-owned) still reaches the cleanup container below.
+      if [ "$target" = /home/openhands/.openhands ] \
+         && [ "$(real_dir "$src" 2>/dev/null || true)" = "$PURGE_DIR" ]; then
+        continue
+      fi
       sreal="$(phys_path "$src")" || die "Cannot resolve mount source $src (at $target). Refusing --purge; nothing was changed."
-      # The data mount itself is what --purge is for.
       [ "$target" = /home/openhands/.openhands ] && [ "$sreal" = "$PURGE_DIR" ] && continue
       case "$sreal/" in
         "$PURGE_DIR"/*) die "$src (mounted into the container at $target) resolves to $sreal, inside $PURGE_DIR. Refusing to delete it; move it out first. Nothing was changed." ;;

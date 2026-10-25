@@ -594,6 +594,22 @@ test_teardown_purge_container_owned() {
   check "  names the sudo command"    out_has "sudo rm -rf $dir"
   check "  .env kept for the retry"   [ -f "$SVC/.env" ]
   teardown
+  # A data dir this user cannot even enter (uid 10001 owns it, mode 0),
+  # listed by compose config as the data mount: resolving the mounts must
+  # not cd into it, so the purge still reaches the cleanup container.
+  deployed
+  dir="$(data_dir)"
+  local T='	'
+  config_json "$dir${T}/home/openhands/.openhands" "$HOME/agent-workspaces${T}/projects" \
+    "$HOME/.claude${T}/home/openhands/.claude" > "$STATE_DIR/compose_config_json"
+  chmod 000 "$dir"
+  run_teardown --purge "openhands"
+  [ ! -e "$dir" ] || chmod -R u+rwX "$dir" 2>/dev/null
+  check "unenterable data dir: exits zero" [ "$CODE" -eq 0 ]
+  check "  reached the cleanup container" calls_have "-v $dir:/x"
+  check "  data dir gone"             [ ! -e "$dir" ]
+  check "  host creds kept"           grep -qx 'host-cred' "$HOME/.claude/.credentials.json"
+  teardown
   deployed
   sed -i.bak 's/^OPENHANDS_VERSION=.*/OPENHANDS_VERSION=latest@evil/' "$SVC/.env"
   run_teardown --purge "openhands"
