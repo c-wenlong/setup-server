@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
-<meta name="theme-color" id="theme-color" content="#f5f5f6">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" id="theme-color" content="#000000">
 <script>
 /* A path mount like /home only prefixes relative URLs when it ends in /.
    On `/home` (no slash) every asset would resolve at the vhost root and
@@ -16,17 +16,14 @@
 if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
   location.replace(location.pathname + '/' + location.search + location.hash);
 }
-/* Paint the chosen theme before CSS so the first frame is not the wrong
-   one. view.js owns the control and the same localStorage key. */
+/* Pinned dark while the theme is redesigned; the attribute stays so
+   icon -dark pairs keep resolving. */
 (function () {
-  var t = 'system';
-  try { t = localStorage.getItem('launcher.theme') || 'system'; } catch (e) {}
-  if (t !== 'light' && t !== 'dark') t = 'system';
-  document.documentElement.setAttribute('data-theme', t);
-  var dark = t === 'dark' || (t === 'system' && window.matchMedia &&
-    window.matchMedia('(prefers-color-scheme: dark)').matches);
+  /* Dark-only while the light theme is redesigned; the attribute stays so
+     icon -dark pairs keep resolving. */
+  document.documentElement.setAttribute('data-theme', 'dark');
   var meta = document.getElementById('theme-color');
-  if (meta) meta.setAttribute('content', dark ? '#0e0e11' : '#f5f5f6');
+  if (meta) meta.setAttribute('content', '#000000');
 })();
 </script>
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -69,8 +66,9 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
           </svg>
         </span>
         <label class="sr-only" for="filter">Filter services</label>
-        <input id="filter" type="search" placeholder="Filter" enterkeyhint="search" inputmode="search"
+        <input id="filter" type="search" placeholder="Search" enterkeyhint="search" inputmode="search"
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        <kbd class="search-kbd" aria-hidden="true">⌘K</kbd>
       </div>
 
       <div class="gfilter" id="gfilter">
@@ -88,7 +86,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 
       <a class="iconbtn cat-link" id="cat-link" href="#/catalogue">Catalogue</a>
 
-      <button class="iconbtn theme-btn" id="theme-btn" type="button" aria-label="Theme: System">
+      <button class="iconbtn theme-btn" id="theme-btn" type="button" aria-label="Theme: System" hidden>
       </button>
     </div>
   </header>

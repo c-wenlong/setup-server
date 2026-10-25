@@ -2406,6 +2406,16 @@
     }
   });
 
+  /* ⌘K / Ctrl-K jumps to the search pill from anywhere on the page — the
+     browser's own find is left alone (it lives on ⌘F). */
+  document.addEventListener('keydown', function (e) {
+    if ((e.key === 'k' || e.key === 'K') && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      elFilter.focus();
+      elFilter.select();
+    }
+  });
+
   elRetry.addEventListener('click', function () {
     text(elRetry, 'Retrying…');
     elRetry.disabled = true;

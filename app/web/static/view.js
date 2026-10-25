@@ -1340,7 +1340,7 @@
   sortMode = stored(SORT_STORE, SORTS, 'used');
   groupByMode = stored(GROUPBY_STORE, GROUP_BYS, 'state');
   loadStars();
-  themeMode = stored(THEME_STORE, THEMES, 'system');
+  themeMode = 'dark';   /* pinned while the light theme is redesigned */
   paintTheme();
   bindThemeButton();
   buildBar();
