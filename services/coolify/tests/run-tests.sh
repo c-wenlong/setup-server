@@ -183,6 +183,12 @@ test_authorized_keys_append() {
   check "commented copy not treated as present" grep -qxF "$pub" "$HOME/.ssh/authorized_keys"
   run_deploy
   check "re-run adds no duplicate"        [ "$(grep -cxF "$pub" "$HOME/.ssh/authorized_keys")" = 1 ]
+  # An operator-restricted entry (options prefix, other comment) is the key.
+  blob="$(printf '%s\n' "$pub" | awk '{ print $2 }')"
+  printf 'from="100.64.0.0/10",no-pty ssh-ed25519 %s locked\n' "$blob" > "$HOME/.ssh/authorized_keys"
+  run_deploy
+  check "restricted entry counts as present" [ "$(wc -l < "$HOME/.ssh/authorized_keys" | tr -d ' ')" = 1 ]
+  check "says the key is already there"   out_has "Coolify pubkey already in"
   teardown
 }
 

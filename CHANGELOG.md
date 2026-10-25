@@ -13,8 +13,10 @@ first, dated by merge.
 - **coolify setup.sh no longer breaks the last line of
   `~/.ssh/authorized_keys`.** When that file did not end in a newline,
   the Coolify key was glued onto the user's last key, breaking both. It now
-  adds the newline first, and only counts the key as present on an exact
-  whole-line match (a commented-out copy no longer counts).
+  adds the newline first, and counts the key as present when any
+  uncommented entry carries the same key data, options included (a
+  commented-out copy no longer counts, and a `from=`-restricted entry is
+  never joined by an unrestricted copy).
 
 ### Added
 
