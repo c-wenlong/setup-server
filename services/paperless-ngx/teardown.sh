@@ -205,7 +205,7 @@ if [ "$PURGE" -eq 1 ]; then
       PURGE_DIRS+=("$d")
     done
   fi
-  if [ "${#PURGE_DIRS[@]}" -gt 0 ]; then
+  if [ -n "${PURGE_DIRS[*]+x}" ]; then
     warn "--purge deletes ${PURGE_DIRS[*]} and $ENV_FILE. This cannot be undone."
     warn "That is the whole document archive: every original and OCR'd PDF (media/), and the"
     warn "  database of tags, correspondents, titles and users (data/). THERE IS NO BACKUP OF THIS BOX."

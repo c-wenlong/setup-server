@@ -138,7 +138,7 @@ for f in "$ROOT"/services/*/.env "$ROOT"/app/*/.env "$HOME"/services/*/bin/*; do
   case "$f" in *.bak*) continue ;; esac
   [ -f "$f" ] && envs+=("$f")
 done
-if [ "${#envs[@]}" -gt 0 ]; then
+if [ -n "${envs[*]+x}" ]; then
   rewrite_paths "${envs[@]}" | sed 's/^/    /'
 fi
 ok "paths checked"
@@ -173,7 +173,7 @@ if [ -d "$UNIT_DIR" ]; then
   for f in "${units[@]+"${units[@]}"}"; do
     live_mention "$f" && restart="$restart $(basename "$f")"
   done
-  if [ "${#units[@]}" -gt 0 ]; then
+  if [ -n "${units[*]+x}" ]; then
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       printf '    %s\n' "$f"

@@ -473,7 +473,7 @@ if [ "$PURGE" -eq 1 ]; then
     esac
     PURGE_DIRS+=("$real")
   done
-  if [ "${#PURGE_DIRS[@]}" -gt 0 ]; then
+  if [ -n "${PURGE_DIRS[*]+x}" ]; then
     warn "--purge deletes ${PURGE_DIRS[*]} and $ENV_FILE. This cannot be undone."
   else
     warn "--purge deletes nothing on disk (no conf/ or work/ there) and $ENV_FILE. This cannot be undone."

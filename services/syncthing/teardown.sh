@@ -429,7 +429,7 @@ EOF_FOLDERS
 
   warn "--purge deletes ${PURGE_DIRS[*]:-nothing (no state dirs on disk)}, $ENV_FILE and the $NAME unit file. This cannot be undone."
   warn "  This is the Device ID: every peer will see a NEW device and must re-add this box. Back up ${CONFIG_DIR} first if you may want it back."
-  if [ "${#KEPT[@]}" -gt 0 ]; then
+  if [ -n "${KEPT[*]+x}" ]; then
     warn "  Synced files are NOT deleted: ${KEPT[*]}"
   fi
   printf 'Type %s to confirm: ' "$NAME"
@@ -566,7 +566,7 @@ fi
 echo
 if [ "$PURGE" -eq 1 ]; then
   printf '\033[1;32mDone.\033[0m %s is removed and this device identity is gone. ./setup.sh starts fresh as a NEW device: re-add it on every peer with the new Device ID.\n' "$NAME"
-  if [ "${#KEPT[@]}" -gt 0 ]; then
+  if [ -n "${KEPT[*]+x}" ]; then
     echo "  Synced files kept: ${KEPT[*]}"
     echo "  They are ordinary files; delete them by hand (rm -rf <path>) if you mean it."
   fi
