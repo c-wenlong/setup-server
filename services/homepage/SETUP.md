@@ -5,7 +5,7 @@ each, a header strip of CPU/RAM/disk/uptime, and a bookmarks block. The whole
 thing is four YAML files you edit by hand; there is no admin UI and no
 database. Editing the YAML **is** the product.
 
-- **URL:** `https://kai-home-server.taild6a23f.ts.net:8100` (tailnet only)
+- **URL:** `https://homeserver.tail-name.ts.net:8100` (tailnet only)
 - **Local port:** `127.0.0.1:8100`
 - **Config:** `~/services/homepage/config/*.yaml` — yours, hand-edited, never
   overwritten by a re-run
@@ -17,7 +17,7 @@ database. Editing the YAML **is** the product.
 > Homepage v1.4.5 checks the HTTP `Host` header of every `/api/*` request
 > against `HOMEPAGE_ALLOWED_HOSTS` and answers **HTTP 400** if it is not on
 > the list. `tailscale serve` forwards the Host verbatim, **including the
-> port**, so `kai-home-server.taild6a23f.ts.net:8100` has to be in that list
+> port**, so `homeserver.tail-name.ts.net:8100` has to be in that list
 > literally.
 >
 > When it is wrong, **`GET /` still returns HTTP 200 with a byte-identical
@@ -78,12 +78,12 @@ What it is not:
 ```
    browser on the tailnet
          │
-         │  https://kai-home-server.taild6a23f.ts.net:8100
+         │  https://homeserver.tail-name.ts.net:8100
          ▼
    tailscaled  (Tailscale Serve, TLS)      ← binds the tailnet IP on :8100
          │
          │  http://127.0.0.1:8100
-         │  Host: kai-home-server.taild6a23f.ts.net:8100   ← forwarded VERBATIM
+         │  Host: homeserver.tail-name.ts.net:8100   ← forwarded VERBATIM
          ▼
    ┌───────────────────────────────────────────────────────────┐
    │ container: homepage                                       │
@@ -154,7 +154,7 @@ The middleware's matcher is `/api/:path*`, so `/` is never validated. And `/`
 is not merely "200 either way" — it is a **build-time static shell**. Measured
 against a correctly configured install with four real groups: the served HTML
 contains **zero** occurrences of `Daily`, `Infrastructure`, `Immich` or
-`kai-home-server`, and still contains the upstream `My First Service`
+`homeserver`, and still contains the upstream `My First Service`
 placeholder, baked into `__NEXT_DATA__.fallback` at image build time. SWR
 replaces it client-side from `/api/*`. The bytes are identical whatever the
 Host header **and** whatever is in `services.yaml`.
@@ -178,7 +178,7 @@ Consequences worth internalising:
 The list this deploy writes:
 
 ```
-HOMEPAGE_ALLOWED_HOSTS=kai-home-server.taild6a23f.ts.net:8100,kai-home-server.taild6a23f.ts.net,127.0.0.1:8100,localhost:8100
+HOMEPAGE_ALLOWED_HOSTS=homeserver.tail-name.ts.net:8100,homeserver.tail-name.ts.net,127.0.0.1:8100,localhost:8100
 ```
 
 Four entries, each earning its place: the tailnet name **with** the Serve
@@ -337,7 +337,7 @@ The shape is: a list of groups, each group a list of services.
 - Daily:                                    # group name — must match settings.yaml
     - Immich:                               # tile title
         icon: immich.png                    # dashboard-icons name, or mdi-<name>
-        href: https://kai-home-server.taild6a23f.ts.net:2283/
+        href: https://homeserver.tail-name.ts.net:2283/
         description: Photos — timeline, albums, phone backup
         siteMonitor: http://127.0.0.1:2283/api/server/ping
 ```
@@ -365,7 +365,7 @@ block — nothing else references it.
 ### `settings.yaml` — title, layout, theme
 
 ```yaml
-title: kai-home-server
+title: homeserver
 layout:
   Daily:                      # keys MUST match the group names in services.yaml
     style: row
@@ -422,7 +422,7 @@ the page — see TROUBLESHOOT.md.
 ## Overlap with the launcher — read this before you edit either
 
 This box already had a dashboard before Homepage: [`app/web/`](../../app/web/),
-at `https://kai-home-server.taild6a23f.ts.net/home/` and `:8093`, a
+at `https://homeserver.tail-name.ts.net/home/` and `:8093`, a
 stdlib-only Python service driven by `app/web/services.json`. Kai asked for
 both. They genuinely overlap, and pretending otherwise would make the next
 person delete the wrong one.
@@ -482,7 +482,7 @@ tail -20 ~/services/homepage/config/logs/homepage.log
 
 # is it really working? (a 200 on / proves nothing — see Host validation)
 curl -sS http://127.0.0.1:8100/api/services | head -c 200
-curl -sS https://kai-home-server.taild6a23f.ts.net:8100/api/services | head -c 200
+curl -sS https://homeserver.tail-name.ts.net:8100/api/services | head -c 200
 
 tailscale serve status | grep -A2 ':8100'
 ./tests/run-tests.sh            # mocked, no side effects
@@ -508,14 +508,14 @@ already changed once (it did not exist before v1.x).
 ### Adding another way in
 
 If you publish Homepage on a second port or path — say `--set-path=/dash` on
-`:443` — the browser's `Host` becomes `kai-home-server.taild6a23f.ts.net`
+`:443` — the browser's `Host` becomes `homeserver.tail-name.ts.net`
 (no port on 443) or whatever the new port is. **Add it to
 `HOMEPAGE_ALLOWED_HOSTS` in `.env` and re-run `setup.sh`,** or every API call
 through the new door 400s while `/` keeps returning 200. The bare hostname is
 already on the list for exactly the `:443` case.
 
 The same applies to a Uptime Kuma monitor: give it
-`https://kai-home-server.taild6a23f.ts.net:8100/api/healthcheck` (a
+`https://homeserver.tail-name.ts.net:8100/api/healthcheck` (a
 host-validated endpoint whose Host is already allowlisted, and which returns
 the literal body `up`) rather than `/`, or the monitor will be green against a
 broken dashboard forever.

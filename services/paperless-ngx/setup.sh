@@ -106,7 +106,7 @@ randhex() {  # randhex <bytes>
 }
 
 # --------------------------------------------------------- stop / down paths
-# Kai's workflow for this round is deploy → verify → stop, and this is the
+# The workflow for this round is deploy → verify → stop, and this is the
 # heaviest service on the box, so the off switch deserves to be a documented
 # first-class path rather than a line in the closing banner.
 #

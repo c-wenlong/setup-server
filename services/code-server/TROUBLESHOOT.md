@@ -18,7 +18,7 @@ curl -fsS https://$(tailscale status --json | grep -o '"DNSName": *"[^"]*"' | he
 Or just: `./tests/run-tests.sh --live`
 
 From a phone or another machine, the launcher at
-`https://kai-home-server.taild6a23f.ts.net/home/` shows code-server's live
+`https://homeserver.tail-name.ts.net/home/` shows code-server's live
 status and has a restart button — and it is served by a *different* backend
 (:8093), so it still works when code-server itself is the thing that's down.
 
@@ -27,7 +27,7 @@ status and has a restart button — and it is served by a *different* backend
 `:443` carries two mounts, added by two different `setup.sh` scripts:
 
 ```
-https://kai-home-server.taild6a23f.ts.net (tailnet only)
+https://homeserver.tail-name.ts.net (tailnet only)
 |-- /     proxy http://127.0.0.1:8080     # code-server (this service)
 |-- /home proxy http://127.0.0.1:8093     # launcher
 ```

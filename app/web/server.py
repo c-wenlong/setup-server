@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""launcher — app launcher + one-tap deploy for kai-home-server.
+"""launcher — app launcher + one-tap deploy for homeserver.
 
 Python 3 standard library only, on purpose: this is meant to be the first
 thing that comes up on the box and the thing you reach for when something

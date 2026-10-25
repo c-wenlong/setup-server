@@ -17,7 +17,7 @@ exposure, replacing code-server for terminal work.
 
 ```
 Mac browser
-  └─ https://kai-home-server.taild6a23f.ts.net:8094   (tailscale serve, TLS)
+  └─ https://homeserver.tail-name.ts.net:8094   (tailscale serve, TLS)
        └─ guacamole webapp  127.0.0.1:8094 → :8080 in container (Tomcat)
             └─ guacd  :4822                (HTML5 ⇄ RDP translation)
                  └─ xrdp  :3389            (host, NOT loopback — see D1)
@@ -153,7 +153,7 @@ in teardown or the live checks read a deleted sandbox.
 
 **Live (`--live`).** Containers up; `xrdp`/`xrdp-sesman` active + enabled;
 webapp answers on 127.0.0.1:8094; **8094 and 3389 refuse connections on
-100.85.87.87**; `tailscale serve status` shows the mount; end-to-end HTTPS
+100.77.77.77**; `tailscale serve status` shows the mount; end-to-end HTTPS
 fetch of the login page returns Guacamole markup.
 
 ## Registration (the step that gets forgotten)

@@ -212,8 +212,8 @@ the local checkout if nothing is mid-transfer.
 
 **`push`/`pull` fails.**
 
-- `cannot ssh kaichen@…` → Tailscale down on either end, or the ssh key
-  isn't installed for BatchMode. `ssh kaichen@<mac> true` must succeed
+- `cannot ssh user@…` → Tailscale down on either end, or the ssh key
+  isn't installed for BatchMode. `ssh user@<mac> true` must succeed
   non-interactively.
 - `a deploy or sync is running` → the shared `.deploy.lock` is held.
   Same rules as deploy: it self-clears when the owner pid dies or after

@@ -16,7 +16,7 @@ docker compose --project-directory . ps                       # up?
 
 # THE question. Not "does it return 200" — see the first section below.
 curl -sS http://127.0.0.1:8100/api/services            | head -c 200
-curl -sS https://kai-home-server.taild6a23f.ts.net:8100/api/services | head -c 200
+curl -sS https://homeserver.tail-name.ts.net:8100/api/services | head -c 200
 
 tail -20 ~/services/homepage/config/logs/homepage.log          # YAML errors land ONLY here
 docker compose --project-directory . logs --tail=30 homepage   # host-validation errors land here
@@ -52,7 +52,7 @@ environment variable, and it is invisible to every check that looks at `/`.
 **Confirm it in five seconds:**
 
 ```bash
-curl -sS https://kai-home-server.taild6a23f.ts.net:8100/api/services
+curl -sS https://homeserver.tail-name.ts.net:8100/api/services
 # {"error":"Host validation failed. See logs for more details."}
 ```
 
@@ -60,7 +60,7 @@ or, from the container's side:
 
 ```bash
 docker logs homepage 2>&1 | grep 'Host validation failed' | tail -5
-# error: Host validation failed for: kai-home-server.taild6a23f.ts.net:8100.
+# error: Host validation failed for: homeserver.tail-name.ts.net:8100.
 #   Hint: Set the HOMEPAGE_ALLOWED_HOSTS environment variable to allow
 #   requests from this host / port.
 ```
@@ -87,7 +87,7 @@ tells you nothing except that a Homepage container answered.
 ```bash
 cd ~/dev/setup-server/services/homepage
 grep HOMEPAGE_ALLOWED_HOSTS .env
-# HOMEPAGE_ALLOWED_HOSTS=kai-home-server.taild6a23f.ts.net:8100,kai-home-server.taild6a23f.ts.net,127.0.0.1:8100,localhost:8100
+# HOMEPAGE_ALLOWED_HOSTS=homeserver.tail-name.ts.net:8100,homeserver.tail-name.ts.net,127.0.0.1:8100,localhost:8100
 
 $EDITOR .env          # add the exact string from the log line
 ./setup.sh            # re-runs compose up, which re-reads .env, and re-verifies

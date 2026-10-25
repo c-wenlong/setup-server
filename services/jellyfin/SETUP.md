@@ -2,7 +2,7 @@
 
 Movies, TV, music and photos with a real client on every screen — TV, phone,
 browser — on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8096`.
+`https://homeserver.tail-name.ts.net:8096`.
 
 Chosen over Plex and Emby, and the reason is ownership rather than features.
 Plex is the polished one, but it authenticates through **plex.tv**: a server
@@ -22,7 +22,7 @@ One container. Nothing else — no database sidecar, no transcoding worker:
 
 ```
   TV / phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8096
+            │  https://homeserver.tail-name.ts.net:8096
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8096
@@ -190,7 +190,7 @@ The real check is to log in. `setup.sh` finishes with:
 ```bash
 curl -fsS -X POST \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: MediaBrowser Client="setup.sh", Device="kai-home-server", DeviceId="setup-sh", Version="1.0"' \
+  -H 'Authorization: MediaBrowser Client="setup.sh", Device="homeserver", DeviceId="setup-sh", Version="1.0"' \
   -d '{"Username":"kai","Pw":"<from .env>"}' \
   http://127.0.0.1:8096/Users/AuthenticateByName
 ```
@@ -370,7 +370,7 @@ next `./setup.sh`.
 
 ## ⚠️ This box has no backup
 
-Nothing on `kai-home-server` is backed up, and Jellyfin has two separately
+Nothing on `homeserver` is backed up, and Jellyfin has two separately
 irreplaceable things:
 
 - **The media itself**, under `MEDIA_DIR`. If it lives only here, it is one
@@ -529,7 +529,7 @@ Every client asks for a server address on first launch. Give it the full
 tailnet URL **including the port**:
 
 ```
-https://kai-home-server.taild6a23f.ts.net:8096
+https://homeserver.tail-name.ts.net:8096
 ```
 
 Then the username and the password from `.env`. Common failures:
@@ -544,7 +544,7 @@ Then the username and the password from `.env`. Common failures:
   tailnet, usually after a reboot; the Tailscale Android TV app does not
   always restart itself.
 
-The tailnet IP `100.85.87.87:8096` works identically if MagicDNS is off, and
+The tailnet IP `100.77.77.77:8096` works identically if MagicDNS is off, and
 is a useful thing to try when a client cannot resolve the name.
 
 ### Adding your media

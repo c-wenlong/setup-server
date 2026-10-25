@@ -5,8 +5,8 @@ and malware domains. Blocking happens at the *name resolution* layer, so it
 works on every device that uses this tailnet's DNS — the phone included,
 inside apps, with no extension to install and nothing to jailbreak.
 
-- Web UI: `https://kai-home-server.taild6a23f.ts.net:3080` (tailnet only)
-- DNS: `100.85.87.87:53`, UDP and TCP, on the **tailscale interface only**
+- Web UI: `https://homeserver.tail-name.ts.net:3080` (tailnet only)
+- DNS: `100.77.77.77:53`, UDP and TCP, on the **tailscale interface only**
 
 > ### ⚠️ Deploying it is only half the job
 >
@@ -61,9 +61,9 @@ What it is not:
          │
          │  ① DNS queries, port 53 (UDP+TCP)
          │     — because the Tailscale admin console lists
-         │       100.85.87.87 as a global nameserver
+         │       100.77.77.77 as a global nameserver
          ▼
-   100.85.87.87:53   ← the tailscale0 interface, NOT 0.0.0.0
+   100.77.77.77:53   ← the tailscale0 interface, NOT 0.0.0.0
          │
    ┌─────┴──────────────────────────────────────────┐
    │ container: adguard                         │
@@ -80,7 +80,7 @@ What it is not:
                                      │
                               tailscaled (Tailscale Serve, TLS)
                                      │
-                     https://kai-home-server.taild6a23f.ts.net:3080
+                     https://homeserver.tail-name.ts.net:3080
 ```
 
 Two published surfaces, published two different ways, and that asymmetry is
@@ -120,7 +120,7 @@ the tailnet sends it a query, because nothing has been told to.
 
 1. Open <https://login.tailscale.com/admin/dns>
 2. Under **Nameservers**, *Add nameserver* → **Custom…**
-3. Enter `100.85.87.87`
+3. Enter `100.77.77.77`
 4. Leave **Override local DNS** as you find it; see the note below.
 5. Leave **MagicDNS** ON.
 
@@ -152,7 +152,7 @@ particular outage.
 ### MagicDNS keeps working (documented, not verified here)
 
 The obvious worry: if the tailnet's global nameserver becomes AdGuard, does
-`kai-home-server.taild6a23f.ts.net` — which every other service on this box is
+`homeserver.tail-name.ts.net` — which every other service on this box is
 reached by — stop resolving?
 
 Per Tailscale's documentation, no. With MagicDNS enabled, the Tailscale client
@@ -183,7 +183,7 @@ cannot**, and the reason is structural:
 - **Tailscale Serve proxies HTTP(S). DNS is UDP** (and TCP, but not HTTP).
   There is no Serve mode that can carry it.
 - Even if there were, the Tailscale nameserver setting takes an **IP address**.
-  Clients must be able to send a DNS packet straight to `100.85.87.87:53`, or
+  Clients must be able to send a DNS packet straight to `100.77.77.77:53`, or
   the whole design has nowhere to point.
 
 So the compose file publishes the DNS ports to the tailscale IP specifically:
@@ -223,7 +223,7 @@ resolved binds only its stub addresses:
 127.0.0.54:53      udp + tcp
 ```
 
-Nothing on `0.0.0.0:53`. AdGuard takes `100.85.87.87:53` — a different
+Nothing on `0.0.0.0:53`. AdGuard takes `100.77.77.77:53` — a different
 address — and the two coexist. Verified by running both at once: resolved
 stayed `active`, `getent hosts github.com` kept working, and AdGuard answered
 on the tailnet IP simultaneously.
@@ -346,7 +346,7 @@ non-negotiable in this repo.
 - **3000 is taken by forgejo**, which is AdGuard's default web port. This
   deploy uses local **3080**, published `127.0.0.1:3080`, Serve on **:3080**.
   Verified free, and free of any existing `tailscale serve` claim.
-- **53/tcp and 53/udp on `100.85.87.87` only.**
+- **53/tcp and 53/udp on `100.77.77.77` only.**
 - The container still uses `:3000` *inside* its own namespace; only the host
   side moved.
 
@@ -413,11 +413,11 @@ webapi: serving url=http://127.0.0.1:3000
 ```
 
 and that is the entire startup. But the Docker port mapping for `:53` exists
-regardless, so `ss` cheerfully reports `100.85.87.87:53` as LISTEN while
+regardless, so `ss` cheerfully reports `100.77.77.77:53` as LISTEN while
 nothing inside the container is bound to it. Measured:
 
 ```
-dig @100.85.87.87 example.com   ->  ;; communications error ... connection refused
+dig @100.77.77.77 example.com   ->  ;; communications error ... connection refused
 ```
 
 A verify step that only asks "is something listening on :53" therefore passes
@@ -445,10 +445,10 @@ deliberately. There is no fix for that at this layer.
 - Logs: `docker compose --project-directory . logs -f adguard`
 - Is it actually resolving?
   ```bash
-  dig +short @100.85.87.87 example.com        # a real A record
-  dig +short @100.85.87.87 doubleclick.net    # 0.0.0.0 / NXDOMAIN = blocked
+  dig +short @100.77.77.77 example.com        # a real A record
+  dig +short @100.77.77.77 doubleclick.net    # 0.0.0.0 / NXDOMAIN = blocked
   ```
-- Web UI: `https://kai-home-server.taild6a23f.ts.net:3080`, credentials in
+- Web UI: `https://homeserver.tail-name.ts.net:3080`, credentials in
   `services/adguard/.env`.
 - Config: `~/services/adguard/conf/AdGuardHome.yaml`. **Edit it through the
   web UI**, not by hand while the container is running — AdGuard rewrites the
@@ -492,7 +492,7 @@ The live suite is the one that proves the deploy works: container running, web
 UI on loopback, tailnet HTTPS answering, the Serve mapping present, no
 external listener on the web port, `:53` on the tailscale IP and **not** on a
 wildcard or LAN address — and, the check none of the others substitute for, a
-**real DNS query through `100.85.87.87:53` returning an A record**. It also
+**real DNS query through `100.77.77.77:53` returning an A record**. It also
 asserts `systemd-resolved` is still active and the host still resolves, so a
 deploy that broke the box's own DNS cannot report green.
 

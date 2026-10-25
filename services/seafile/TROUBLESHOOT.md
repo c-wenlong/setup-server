@@ -109,7 +109,7 @@ Specific to this service:
   ```
 
   A `{"token": …}` means `.env` is correct; `non_field_errors` means it drifted.
-- **`manimkc@kaichen.local` is a Seafile admin** — known, and deliberate only
+- **`manimkc@macbook.local` is a Seafile admin** — known, and deliberate only
   by accident: self-demotion via the API is rejected, so it has to be demoted
   in the web UI. Tracked in DIRECTORY.md; not a symptom of anything broken.
 

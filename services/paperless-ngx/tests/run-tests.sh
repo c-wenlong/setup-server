@@ -72,8 +72,8 @@ OS="$(uname -s)"   # the mocked suite exercises the current platform's branch
 red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
-# The node the tailscale stub reports — deliberately NOT this box's real
-# kai-home-server / 100.85.87.87. On this service that matters more than
+# The node the tailscale stub reports — deliberately made up. On this service
+# that matters more than
 # usual: the tailnet URL is not decoration, it is the string that becomes
 # CSRF_TRUSTED_ORIGINS. A hostname hardcoded in setup.sh or docker-compose.yml
 # would pass against the real box and lock everyone out of any other one.
@@ -327,9 +327,9 @@ test_reverse_proxy_config() {
   # The tailnet name came from `tailscale status`, not from a literal.
   check "asked tailscale for the node name" calls_have "^tailscale status"
   check "  and no real tailnet name is baked into the compose file" \
-    compose_lacks 'kai-home-server|taild6a23f'
+    compose_lacks 'homeserver|tail-name'
   check "  nor into setup.sh" \
-    sh -c "! sed 's/#.*//' '$SVC/setup.sh' | grep -qE 'kai-home-server|taild6a23f'"
+    sh -c "! sed 's/#.*//' '$SVC/setup.sh' | grep -qE 'homeserver|tail-name'"
 
   # --- ALLOWED_HOSTS is not narrowed into breaking the loopback check -------
   check "loopback health path answers 200" [ "$(probe_local_health)" = "200" ]

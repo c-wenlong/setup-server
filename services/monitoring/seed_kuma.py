@@ -9,7 +9,7 @@ import os
 
 from uptime_kuma_api import MonitorType, NotificationType, UptimeKumaApi
 
-HOST = os.environ.get("TAILNET_HOST", "kai-home-server.taild6a23f.ts.net")
+HOST = os.environ.get("TAILNET_HOST", "homeserver.tail-name.ts.net")
 
 # Monitors probe the tailnet HTTPS URL, not loopback, so that the dashboard
 # shows the address you actually open and each check exercises the whole
@@ -191,7 +191,7 @@ else:
 # check that fails when the thing AdGuard exists to do has stopped.
 DNS_MONITORS = [
     ("adguard-dns", "example.com",
-     os.environ.get("ADGUARD_DNS_IP", "100.85.87.87"), 53),
+     os.environ.get("ADGUARD_DNS_IP", "100.77.77.77"), 53),
 ]
 
 have = {m["name"]: m for m in api.get_monitors()}

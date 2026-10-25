@@ -4,7 +4,7 @@ A real double-entry ledger for the six accounts listed in
 [COMPETITIVE-ANALYSIS.md](COMPETITIVE-ANALYSIS.md): asset/expense/revenue
 accounts, budgets, categories, multi-currency with a live FX source, and a REST
 API that the future pullers will post to. Web UI:
-`https://kai-home-server.taild6a23f.ts.net:8097`.
+`https://homeserver.tail-name.ts.net:8097`.
 
 **What is built here is Phase 1 of [PLAN.md](PLAN.md) and nothing else** — the
 deploy. Phases 2–6 (the Wise / Tiger / DBS pullers, statement parsing, the
@@ -17,7 +17,7 @@ imports itself.
 
 Say it plainly, because everything else in this document is downstream of it.
 Once transactions live in Firefly III and Notion stops being updated, this
-Postgres volume *is* Kai's financial history. Nothing on `kai-home-server`
+Postgres volume *is* Kai's financial history. Nothing on `homeserver`
 backs it up — there is no snapshot schedule, no offsite copy, no Seafile sync
 of `~/services/firefly-iii`, and a disk failure or a careless
 `docker compose down -v` loses the lot with no recovery path. That is not a
@@ -110,7 +110,7 @@ touching the compose file, because getting either wrong produces a **200 that
 looks fine to `curl` and a blank, unstyled page in the browser**:
 
 ```yaml
-APP_URL: https://kai-home-server.taild6a23f.ts.net:8097   # the EXTERNAL url
+APP_URL: https://homeserver.tail-name.ts.net:8097   # the EXTERNAL url
 TRUSTED_PROXIES: '**'
 ```
 
@@ -138,11 +138,11 @@ unfinished deploy.
 until it holds a Firefly III **personal access token**. Minting one requires a
 logged-in browser session:
 
-> `https://kai-home-server.taild6a23f.ts.net:8097` → **Options → Profile →
+> `https://homeserver.tail-name.ts.net:8097` → **Options → Profile →
 > OAuth → Personal Access Tokens → Create New Token**
 
 Copy the token (it is shown once), then either paste it into the importer's
-first-run form at `https://kai-home-server.taild6a23f.ts.net:8099`, or put it
+first-run form at `https://homeserver.tail-name.ts.net:8099`, or put it
 in `.env` as `FIREFLY_III_ACCESS_TOKEN` and re-run `./setup.sh`.
 
 **Automating this was deliberately not attempted.** Creating a token means
@@ -321,7 +321,7 @@ failure cannot be run twice, and idempotency is non-negotiable here.
 ## First login
 
 ```
-URL:      https://kai-home-server.taild6a23f.ts.net:8097
+URL:      https://homeserver.tail-name.ts.net:8097
 Email:    see FIREFLY_ADMIN_EMAIL in .env
 Password: see FIREFLY_ADMIN_PASSWORD in .env
 ```

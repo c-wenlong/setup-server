@@ -71,7 +71,7 @@ EOF
     "deploymentMode": "authenticated",
     "exposure": "private",
     "bind": "tailnet",
-    "host": "100.85.87.87",
+    "host": "100.77.77.77",
     "port": 3100,
     "allowedHostnames": []
   }

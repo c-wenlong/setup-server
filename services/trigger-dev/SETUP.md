@@ -1,7 +1,7 @@
 # trigger-dev — background jobs and cron (Trigger.dev v4)
 
 TypeScript tasks with cron schedules, retries and a dashboard, on the
-tailnet: `https://kai-home-server.taild6a23f.ts.net:8030`.
+tailnet: `https://homeserver.tail-name.ts.net:8030`.
 
 This is the job runner next to [n8n](../n8n/). n8n is visual workflows
 that call other services; Trigger.dev is code you write (`schedules.task`,
@@ -31,7 +31,7 @@ events still live in Postgres (`RUN_REPLICATION_ENABLED=0`).
 
 ```
   phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8030
+            │  https://homeserver.tail-name.ts.net:8030
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8030
@@ -104,7 +104,7 @@ OOM-killed.
 and `ghcr.io/triggerdotdev/supervisor`. The CLI must match:
 
 ```
-npx trigger.dev@4.6.0 login -a https://kai-home-server.taild6a23f.ts.net:8030
+npx trigger.dev@4.6.0 login -a https://homeserver.tail-name.ts.net:8030
 ```
 
 v3 is end of life. 4.5.0 was the last release that would run v3 tasks;
@@ -168,7 +168,7 @@ the file alone.
 3. In a project directory on this box (code-server is fine):
 
 ```
-npx trigger.dev@4.6.0 login -a https://kai-home-server.taild6a23f.ts.net:8030
+npx trigger.dev@4.6.0 login -a https://homeserver.tail-name.ts.net:8030
 npx trigger.dev@4.6.0 init
 npx trigger.dev@4.6.0 deploy
 ```

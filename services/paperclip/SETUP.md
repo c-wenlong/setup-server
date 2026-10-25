@@ -1,7 +1,7 @@
 # paperclip — Paperclip
 
 Agent control plane (task queue, heartbeats, `claude_local` / `codex_local`)
-at `https://kai-home-server.taild6a23f.ts.net:3100`. Tailnet only. Not on
+at `https://homeserver.tail-name.ts.net:3100`. Tailnet only. Not on
 the LAN or the public internet.
 
 OpenHands Agent Canvas is a **separate** service (`../openhands/`). This
@@ -11,7 +11,7 @@ script deploys Paperclip only.
 
 ```
   Mac / phone on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:3100
+            │  https://homeserver.tail-name.ts.net:3100
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │
@@ -123,7 +123,7 @@ From any tailnet device:
    `setup.sh` adds editable ones on that page. Re-run `./setup.sh`
    after `paperclipai update` so the overlay is put back.
 3. Hire a `claude_local` agent with cwd
-   `/home/kaichen/agent-workspaces/paperclip-test` (or the equivalent on
+   `/home/user/agent-workspaces/paperclip-test` (or the equivalent on
    another machine). Repeat for `codex_local` once Codex is installed.
 
 ## Ops

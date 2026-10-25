@@ -23,7 +23,7 @@ report a healthy container as not running. Re-run under
 `sg docker -c './tests/run-tests.sh --live'`.
 
 From a phone, the launcher at
-`https://kai-home-server.taild6a23f.ts.net/home/` shows this service's live
+`https://homeserver.tail-name.ts.net/home/` shows this service's live
 status and has a restart button, which is quicker than any of the above.
 
 ## Container won't start

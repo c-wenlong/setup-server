@@ -32,9 +32,9 @@ cd "$(dirname "$0")"
 SERVICE_DIR="$PWD"
 
 PORT="${BESZEL_PORT:-8092}"
-ADMIN_EMAIL="${BESZEL_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+ADMIN_EMAIL="${BESZEL_ADMIN_EMAIL:-admin@example.com}"
 AGENT_PORT=45876
-SYSTEM_NAME="kai-home-server"
+SYSTEM_NAME="homeserver"
 STATE="$HOME/services/beszel"
 ENV_FILE="$SERVICE_DIR/.env"
 BIN="$HOME/.local/bin/beszel-agent"

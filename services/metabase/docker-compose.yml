@@ -42,7 +42,7 @@ services:
       MB_DB_PASS: ${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing from .env}
       MB_DB_HOST: db
       MB_SITE_URL: ${MB_SITE_URL:?MB_SITE_URL missing from .env}
-      MB_SITE_NAME: ${MB_SITE_NAME:-kai-home-server}
+      MB_SITE_NAME: ${MB_SITE_NAME:-homeserver}
       MB_ANON_TRACKING_ENABLED: "false"
       JAVA_TIMEZONE: ${TZ:-Etc/UTC}
       JAVA_TOOL_OPTIONS: ${METABASE_JAVA_OPTS:--Xmx1g}

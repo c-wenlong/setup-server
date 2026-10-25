@@ -41,7 +41,7 @@ LOCAL_PORT="${LOCAL_PORT:-3000}"
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 ADMIN_USERNAME="${FORGEJO_ADMIN_USERNAME:-kai}"
-ADMIN_EMAIL="${FORGEJO_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+ADMIN_EMAIL="${FORGEJO_ADMIN_EMAIL:-admin@example.com}"
 CONTAINER="forgejo"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"

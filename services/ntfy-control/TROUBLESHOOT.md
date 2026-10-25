@@ -15,7 +15,7 @@ without restarting the listener. On startup (and on each reload) it logs which
 file won:
 
 ```
-control registry: 19 services from /home/kaichen/dev/setup-server/app/web/services.json
+control registry: 19 services from /home/user/dev/setup-server/app/web/services.json
 ```
 
 Trust that line over this one — controllable as of 2026-09-12 (19, up from
@@ -80,9 +80,9 @@ either `no control registry found — nothing is controllable` or
 ## Layer 0 — phone can't reach ntfy at all
 
 - Tailscale app installed, logged in, and **connected**? Test by opening
-  `https://kai-home-server.taild6a23f.ts.net:3002` (Kuma) in the phone
+  `https://homeserver.tail-name.ts.net:3002` (Kuma) in the phone
   browser.
-- Service URL must be exactly `https://kai-home-server.taild6a23f.ts.net:3003`
+- Service URL must be exactly `https://homeserver.tail-name.ts.net:3003`
   — https, port included, no trailing path.
 - Username/password: leave empty. If the app version insists on
   credentials on that screen, you're likely in "Manage users / default
@@ -124,7 +124,7 @@ either `no control registry found — nothing is controllable` or
 - Kuma still red for a service you stopped from here → the pause step
   failed (see Layer 2). Pause it by hand in the Kuma UI, or the monitor will
   page about downtime you asked for.
-- The launcher's web UI at `https://kai-home-server.taild6a23f.ts.net/home/`
+- The launcher's web UI at `https://homeserver.tail-name.ts.net/home/`
   drives the same registry and the same allowlist, so it is a useful
   cross-check: if a service starts there but not from the phone, the fault is
   in the ntfy path, not in lifecycle control.

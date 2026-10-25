@@ -103,7 +103,7 @@ without a recreate: `docker compose --project-directory . up -d
 ## Desktop app cannot connect
 
 The cloud URL in the app must be the **HTTPS Serve URL including the
-port** (`https://kai-home-server.taild6a23f.ts.net:8102`), not
+port** (`https://homeserver.tail-name.ts.net:8102`), not
 `http://127.0.0.1:8102` and not the origin without a port. The phone
 or laptop must be on the tailnet.
 

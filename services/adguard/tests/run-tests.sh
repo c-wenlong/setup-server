@@ -36,7 +36,7 @@
 #    publish would put an open recursive resolver on the LAN.
 #
 # 4. THE TAILNET IP IS RESOLVED, NOT HARDCODED. The tailscale stub reports
-#    100.77.77.77 — deliberately NOT this box's real 100.85.87.87 — so a
+#    100.77.77.77 — a made-up address, never a real deployment's — so a
 #    literal baked into docker-compose.yml or setup.sh cannot pass by
 #    coincidence.
 #
@@ -56,8 +56,8 @@ OS="$(uname -s)"   # the mocked suite exercises the current platform's branch
 red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
-# The address the tailscale stub reports. Not this box's real tailnet IP, on
-# purpose — see note 4 above.
+# The address the tailscale stub reports. Made up, on purpose — a real
+# deployment's tailnet IP must come from `tailscale ip -4`, never a literal.
 FAKE_TS_IP=100.77.77.77
 
 # --------------------------------------------------------------- harness
@@ -244,8 +244,8 @@ test_fresh_deploy() {
   # --- the tailnet IP is RESOLVED, never assumed -------------------------
   check "asked tailscale for the v4 address" calls_have "^tailscale ip -4"
   check ".env records the resolved IP"   [ "$(env_val ADGUARD_DNS_IP)" = "$FAKE_TS_IP" ]
-  check "  and it is not this box's real one" \
-    [ "$(env_val ADGUARD_DNS_IP)" != "100.85.87.87" ]
+  check "  and no tailnet IP is baked in" \
+    sh -c "! sed 's/#.*//' '$SVC/setup.sh' | grep -qE '100\.[0-9]+\.[0-9]+\.[0-9]+'"
 
   # --- .env
   check ".env generated"                 [ -f "$SVC/.env" ]
@@ -1525,7 +1525,7 @@ test_teardown_dns_gate_clear() {
   nothing_changed "real-box shape, compact, listed"
   check "  says the tailnet still uses it" out_has "still uses $FAKE_TS_IP for DNS"
   teardown
-  # Verbatim from kai-home-server (tailscale 1.10x, 2026-10-25), addresses
+  # Verbatim from homeserver (tailscale 1.10x, 2026-10-25), addresses
   # swapped: the CLI omits empty resolver keys (no FallbackResolvers, no
   # Nameservers here) and adds fields of its own. Omitted means none.
   deployed

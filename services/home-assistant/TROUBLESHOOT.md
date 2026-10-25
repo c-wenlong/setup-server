@@ -260,7 +260,7 @@ cd ~/dev/setup-server/services/home-assistant
 docker compose --project-directory . stop
 sudo python3 - <<'EOF'
 import json, datetime
-p = "/home/kaichen/services/home-assistant/config/.storage/http"
+p = "/home/user/services/home-assistant/config/.storage/http"
 d = json.load(open(p))
 d["data"]["stable"].update({
     "server_host": ["127.0.0.1"],
@@ -297,7 +297,7 @@ UI and confirm it there.
 
 **Why it failed loudly here rather than quietly.** `tailscale serve` publishes
 on the same port number HA listens on, so tailscaled already held
-`100.85.87.87:8123`. HA's reverted `stable` config tried to bind `0.0.0.0:8123`,
+`100.77.77.77:8123`. HA's reverted `stable` config tried to bind `0.0.0.0:8123`,
 collided, and died. Had Serve been on a *different* port, the wildcard bind
 would have succeeded and put an unauthenticated-until-onboarded Home Assistant
 on the LAN with nothing in the output to say so. The noisy failure was luck.
@@ -447,7 +447,7 @@ curl -sv http://127.0.0.1:8123/api/onboarding
   ss -ltn | grep 8123
   ```
 
-  Expected: `127.0.0.1:8123` for HA, plus `100.85.87.87:8123` and the `fd7a:…`
+  Expected: `127.0.0.1:8123` for HA, plus `100.77.77.77:8123` and the `fd7a:…`
   v6 address, which are **tailscaled's** own serve frontend (HTTPS port equals
   local port here, so they collide on one number). **`0.0.0.0:8123` is the
   real problem** — it means `server_host` is missing from `configuration.yaml`
@@ -515,13 +515,13 @@ curl -sv http://127.0.0.1:8123/api/onboarding
 - **Is the client on the tailnet?** Not reachable off-tailnet, by design.
   Check Tailscale is connected on *that* device, not on the server.
 - First load after a new port can take ~60 s while the cert is minted:
-  `curl -v https://kai-home-server.taild6a23f.ts.net:8123/api/onboarding`
+  `curl -v https://homeserver.tail-name.ts.net:8123/api/onboarding`
 - **The page loads but is blank / spins forever** — usually the browser
   holding a cached frontend from a different HA version after an upgrade.
   Hard-refresh (Ctrl-Shift-R).
 - **The mobile app can't connect but the browser can** — the app needs the
   port in the URL (`:8123`) and `https://`. See SETUP.md → The mobile app.
-- MagicDNS off → `100.85.87.87:8123` works. Fix MagicDNS rather than living
+- MagicDNS off → `100.77.77.77:8123` works. Fix MagicDNS rather than living
   on the IP; HA builds some absolute URLs from the address you arrived on.
 
 ## Login and account problems

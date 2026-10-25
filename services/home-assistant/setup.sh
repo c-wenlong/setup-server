@@ -166,7 +166,7 @@ have_listener_tool() {
 # tailnet addresses on 8123:
 #
 #   127.0.0.1:8123                      <- Home Assistant
-#   100.85.87.87:8123                   <- tailscaled, terminating TLS
+#   100.77.77.77:8123                   <- tailscaled, terminating TLS
 #   [fd7a:115c:a1e0::a83b:5758]:8123    <- tailscaled, same
 #
 # Without this exception every correct deploy would be reported as leaking onto

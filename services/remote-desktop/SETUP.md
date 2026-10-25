@@ -2,7 +2,7 @@
 
 Apache Guacamole, an HTML5 remote-desktop gateway, in front of the RDP
 backend that Ubuntu 24.04 already ships (`gnome-remote-desktop`). Open
-`https://kai-home-server.taild6a23f.ts.net:8094` from any browser on the
+`https://homeserver.tail-name.ts.net:8094` from any browser on the
 tailnet and you are driving **this machine's** desktop — the real
 filesystem, the real `~/dev`, the real Docker socket. No client to
 install, on the Mac or anywhere else.
@@ -17,7 +17,7 @@ nothing else here, read [The security model](#the-security-model).
 
 ```
 Mac browser
- └─ https://kai-home-server.taild6a23f.ts.net:8094      TLS, tailnet-only
+ └─ https://homeserver.tail-name.ts.net:8094      TLS, tailnet-only
       │                                                 (tailscale serve)
       └─ guacamole webapp        127.0.0.1:8094 → :8080 in container (Tomcat)
            │                     file auth via user-mapping.xml — NO database
@@ -171,7 +171,7 @@ it:**
 cd ~/dev/setup-server/services/remote-desktop && ./tests/run-tests.sh --live
 ```
 
-The live suite opens a real TCP connection to `:3389` on `100.85.87.87`,
+The live suite opens a real TCP connection to `:3389` on `100.77.77.77`,
 `192.168.88.11` and `192.168.88.13` and requires all three to be refused.
 It does the same for `:8094`, and it separately requires that the bridge
 gateway `172.28.0.1:3389` *does* answer — because a filter written too
@@ -428,8 +428,8 @@ idempotent re-run must invoke zero `sudo` and zero package installs.
 No client to install. That is the entire point of choosing Guacamole.
 
 1. The Mac must be on the tailnet. `tailscale status` should list
-   `kai-home-server`.
-2. Open **`https://kai-home-server.taild6a23f.ts.net:8094`** in any
+   `homeserver`.
+2. Open **`https://homeserver.tail-name.ts.net:8094`** in any
    browser. The certificate is a real one, minted by Tailscale — no
    warning to click through. On a brand-new port the first request can
    take up to ~60 s while the cert is issued; that is not a failure.
@@ -454,7 +454,7 @@ Things worth knowing once you are in:
   it is pure bandwidth for zero information.
 
 ⚠️ **Do not expect a native RDP client to work, and do not "fix" it so it
-does.** Microsoft Remote Desktop pointed at `100.85.87.87:3389` is the
+does.** Microsoft Remote Desktop pointed at `100.77.77.77:3389` is the
 obvious thing to reach for, and the packet filter deliberately refuses
 it: :3389 accepts connections **only from the compose bridge subnet**,
 i.e. only from guacd. That is what turns an un-constrainable wildcard
