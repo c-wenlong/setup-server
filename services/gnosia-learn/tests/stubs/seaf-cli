@@ -45,7 +45,7 @@ case "${1:-}" in
       path="$HOME/.self-learn/blobs/local"
       [ -f "$STATE_DIR/seaf_path_$repo" ] && path="$(cat "$STATE_DIR/seaf_path_$repo")"
       # real output: three columns — name, id, synced folder
-      echo "self-learn-blobs $repo $path"
+      echo "gnosia-learn-blobs $repo $path"
     done
     ;;
   status) ;;

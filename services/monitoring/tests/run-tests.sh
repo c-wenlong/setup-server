@@ -212,7 +212,7 @@ PYEOF
   OUT="$(PYTHONPATH="$SANDBOX/fakelib" FAKE_KUMA_LOG="$SANDBOX/kuma.log" \
     KUMA_PORT=3001 KUMA_ADMIN_USER=u KUMA_ADMIN_PASSWORD=p NTFY_PORT=8080 \
     ADGUARD_DNS_IP=100.77.77.77 \
-    SELF_LEARN_ENV="$1" python3 "$SERVICE_DIR/seed_kuma.py" 2>&1)"
+    GNOSIA_ENV="$1" python3 "$SERVICE_DIR/seed_kuma.py" 2>&1)"
   CODE=$?
 }
 
@@ -220,20 +220,20 @@ seeded()     { grep -qx -- "$1" "$SANDBOX/kuma.log"; }
 not_seeded() { ! seeded "$1"; }
 
 test_seed_studio_monitor() {
-  echo "• seed: the studio monitor exists only while STUDIO_ENABLED=1 in services/self-learn/.env"
+  echo "• seed: the studio monitor exists only while STUDIO_ENABLED=1 in services/gnosia-learn/.env"
   setup
   printf 'STUDIO_ENABLED=0\n' > "$SANDBOX/sl.env"
   run_seed "$SANDBOX/sl.env"
   check "flag off: seed exits zero"        [ "$CODE" -eq 0 ]
-  check "flag off: app monitor still added" seeded self-learn
+  check "flag off: app monitor still added" seeded gnosia-learn
   check "flag off: dns monitor still added" seeded adguard-dns
-  check "flag off: no studio monitor"      not_seeded self-learn-studio
+  check "flag off: no studio monitor"      not_seeded gnosia-learn-studio
   run_seed "$SANDBOX/absent.env"
-  check "no env file: no studio monitor"   not_seeded self-learn-studio
+  check "no env file: no studio monitor"   not_seeded gnosia-learn-studio
   printf 'STUDIO_ENABLED=0\nSTUDIO_ENABLED=1\n' > "$SANDBOX/sl.env"
   run_seed "$SANDBOX/sl.env"
   check "flag on: seed exits zero"         [ "$CODE" -eq 0 ]
-  check "flag on: studio monitor added"    seeded self-learn-studio
+  check "flag on: studio monitor added"    seeded gnosia-learn-studio
   teardown
 }
 

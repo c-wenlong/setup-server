@@ -336,7 +336,7 @@ test_teardown_purge() {
   check "warns synced files go"       out_has "every synced file"
   check "warns photo backups go"      out_has "photo backups"
   check "says clients keep local copies" out_has "keep their local copies"
-  check "names the services that lose it" out_has "self-learn reads this .env"
+  check "names the services that lose it" out_has "gnosia-learn reads this .env"
   check "seafile data dir gone"       [ ! -e "$data" ]
   check "mysql data dir gone"         [ ! -e "$mysql" ]
   check ".env gone"                   [ ! -f "$SVC/.env" ]

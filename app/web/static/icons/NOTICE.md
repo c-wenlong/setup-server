@@ -60,14 +60,14 @@ convention (`<key>.svg` = light theme, `<key>-dark.svg` = dark theme) they
 trade places. Upstream's `-dark`/`-light` suffixes are not consistent about
 whether they name the ink or the background; each file was checked by eye.
 
-No upstream mark exists for `kaichenpedia`, `manimkc`, `self-learn`,
+No upstream mark exists for `kaichenpedia`, `manimkc`, `gnosia-learn`,
 `sources` or `design-systems`. `kaichenpedia.png`, `manimkc.png` and
-`self-learn.png` in this
+`gnosia-learn.png` in this
 directory are bespoke raster icons (not from the vendored collection above,
 so the licence table does not cover them):
 `kaichenpedia.png` is cropped from the kaichenpedia repo's own artwork,
-`manimkc.png` is that service's own logo, `self-learn.png` is the Gnosia
-mark (`apps/web/public/brand/mark.png`) from the self-learn repo, and
+`manimkc.png` is that service's own logo, `gnosia-learn.png` is the Gnosia
+mark (`apps/web/public/brand/mark.png`) from the gnosia repo, and
 `sources.svg` is the sources repo's own `site/favicon.svg` copied unchanged —
 each service's own artwork, the repo owner's in each case.
 `design-systems.svg` is drawn for this launcher (three swatch cards on a

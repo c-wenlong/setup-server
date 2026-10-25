@@ -28,12 +28,12 @@ case "$url" in
       echo '{"error_msg":"A user with this email already exists."}' >&2
       exit 1
     fi
-    echo '{"email":"self-learn-sync@test","is_active":true}'
+    echo '{"email":"gnosia-learn-sync@test","is_active":true}'
     ;;
   *api2/repos*)
     case "$req $*" in
       *POST*) echo '{"repo_id":"stub-repo-777"}' ;;
-      *)      echo '[{"id":"stub-repo-777","name":"self-learn-blobs"}]' ;;
+      *)      echo '[{"id":"stub-repo-777","name":"gnosia-learn-blobs"}]' ;;
     esac
     ;;
 esac

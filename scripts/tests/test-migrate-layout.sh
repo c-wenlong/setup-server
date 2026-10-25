@@ -44,7 +44,7 @@ setup() {
 
   # New layout, as git left it after the pull.
   for d in services/immich services/ntfy-control services/monitoring \
-           services/appflowy services/self-learn app/web; do
+           services/appflowy services/gnosia-learn app/web; do
     mkdir -p "$R/$d"
     printf '#!/usr/bin/env bash\necho "setup %s" >> "$CALLS_LOG"\n' "$d" > "$R/$d/setup.sh"
     chmod +x "$R/$d/setup.sh"
@@ -53,18 +53,18 @@ setup() {
   echo "services: {}" > "$R/services/appflowy/docker-compose.gpu.yml"
   echo "new listener" > "$R/services/ntfy-control/control_listener.py"
   echo "toggle" > "$R/services/ntfy-control/kuma_toggle.py"
-  echo "shared" > "$R/services/self-learn/same.txt"
-  echo "new" > "$R/services/self-learn/differs.txt"
+  echo "shared" > "$R/services/gnosia-learn/same.txt"
+  echo "new" > "$R/services/gnosia-learn/differs.txt"
 
   # What git left behind in the old folders.
-  mkdir -p "$R/immich" "$R/ntfy-control" "$R/launcher/__pycache__" "$R/appflowy/data" "$R/self-learn"
+  mkdir -p "$R/immich" "$R/ntfy-control" "$R/launcher/__pycache__" "$R/appflowy/data" "$R/gnosia-learn"
   echo "DB_PASSWORD=s3cret" > "$R/immich/.env"
   chmod 600 "$R/immich/.env"
   echo "KUMA_ENV_FILE=$R/monitoring/.env" > "$R/ntfy-control/.env"
   echo "x" > "$R/launcher/__pycache__/server.cpython-313.pyc"
   echo "nested" > "$R/appflowy/data/keep.txt"
-  echo "shared" > "$R/self-learn/same.txt"
-  echo "old" > "$R/self-learn/differs.txt"
+  echo "shared" > "$R/gnosia-learn/same.txt"
+  echo "old" > "$R/gnosia-learn/differs.txt"
   # A box that never ran the paperclip/openhands split.
   mkdir -p "$R/paperclip-openhands"
   echo "OPENHANDS_PORT=3000" > "$R/paperclip-openhands/.env"
@@ -74,23 +74,23 @@ setup() {
   echo "toggle" > "$HOME/services/ntfy-control/bin/kuma_toggle.py"
 
   # deploy.sh copies a *-deploy timer runs, with paths baked in at install.
-  mkdir -p "$HOME/services/self-learn/bin"
-  printf 'ENV_FILE="%s/self-learn/.env"\nCOMPOSE_DIR="%s/self-learn"\nOTHER="%s/self-learner"\n' "$R" "$R" "$R" \
-    > "$HOME/services/self-learn/bin/deploy.sh"
-  chmod +x "$HOME/services/self-learn/bin/deploy.sh"
-  cp "$HOME/services/self-learn/bin/deploy.sh" "$HOME/services/self-learn/bin/deploy.sh.bak-1"
+  mkdir -p "$HOME/services/gnosia-learn/bin"
+  printf 'ENV_FILE="%s/gnosia-learn/.env"\nCOMPOSE_DIR="%s/gnosia-learn"\nOTHER="%s/gnosia-learner"\n' "$R" "$R" "$R" \
+    > "$HOME/services/gnosia-learn/bin/deploy.sh"
+  chmod +x "$HOME/services/gnosia-learn/bin/deploy.sh"
+  cp "$HOME/services/gnosia-learn/bin/deploy.sh" "$HOME/services/gnosia-learn/bin/deploy.sh.bak-1"
 
   # Units: launcher points at the old folder (one path at end of line, as
-  # WorkingDirectory is); self-learn only in a comment. Linux unit names are
+  # WorkingDirectory is); gnosia-learn only in a comment. Linux unit names are
   # used on both OSes here: the script only cares about the glob it scans.
   if [ "$OS" = "Linux" ]; then UD="$HOME/.config/systemd/user"; EXT=service; else UD="$HOME/Library/LaunchAgents"; EXT=plist; fi
   mkdir -p "$UD"
   printf '[Service]\nWorkingDirectory=%s/launcher\nExecStart=/usr/bin/env python3 %s/launcher/server.py --port=9000\n' "$R" "$R" > "$UD/launcher.$EXT"
-  printf '# edit %s/self-learn/.env and re-run\n[Service]\nExecStart=/bin/true\n' "$R" > "$UD/self-learn.$EXT"
+  printf '# edit %s/gnosia-learn/.env and re-run\n[Service]\nExecStart=/bin/true\n' "$R" > "$UD/gnosia-learn.$EXT"
   if [ "$OS" = "Linux" ]; then NC_UNIT=ntfy-control.service; else NC_UNIT=com.ntfy-control.listener.plist; fi
 
   for c in systemctl launchctl; do
-    printf '#!/usr/bin/env bash\necho "%s $*" >> "$CALLS_LOG"\n[ -f "$STATE_DIR/fail-restart" ] && [ "$2" = try-restart ] && exit 1\n[ "$1" = print ] && case "$2" in */self-learn|*/com.ntfy-control.listener) exit 113 ;; esac\nexit 0\n' "$c" > "$SB/bin/$c"
+    printf '#!/usr/bin/env bash\necho "%s $*" >> "$CALLS_LOG"\n[ -f "$STATE_DIR/fail-restart" ] && [ "$2" = try-restart ] && exit 1\n[ "$1" = print ] && case "$2" in */gnosia-learn|*/com.ntfy-control.listener) exit 113 ;; esac\nexit 0\n' "$c" > "$SB/bin/$c"
     chmod +x "$SB/bin/$c"
   done
 
@@ -150,29 +150,29 @@ check "old immich/ removed"                 test ! -e "$R/immich"
 check "old launcher/ removed (bytecode)"    test ! -e "$R/launcher"
 check "bytecode not moved"                  test ! -e "$R/app/web/__pycache__"
 check "KUMA_ENV_FILE rewritten"             grep -qx "KUMA_ENV_FILE=$R/services/monitoring/.env" "$R/services/ntfy-control/.env"
-check "deploy.sh ENV_FILE rewritten"        grep -qx "ENV_FILE=\"$R/services/self-learn/.env\"" "$HOME/services/self-learn/bin/deploy.sh"
-check "deploy.sh COMPOSE_DIR rewritten"     grep -qx "COMPOSE_DIR=\"$R/services/self-learn\"" "$HOME/services/self-learn/bin/deploy.sh"
-check "a longer folder name is not matched" grep -qx "OTHER=\"$R/self-learner\"" "$HOME/services/self-learn/bin/deploy.sh"
-check "deploy.sh stays executable"          test -x "$HOME/services/self-learn/bin/deploy.sh"
-check ".bak copies left alone"              grep -qx "COMPOSE_DIR=\"$R/self-learn\"" "$HOME/services/self-learn/bin/deploy.sh.bak-1"
-check "identical duplicate dropped"         test ! -e "$R/self-learn/same.txt"
-check "differing file not overwritten"      grep -qx new "$R/services/self-learn/differs.txt"
-check "differing old copy left in place"    grep -qx old "$R/self-learn/differs.txt"
-check "warns about the conflict"            out_has "kept both: services/self-learn/differs.txt"
+check "deploy.sh ENV_FILE rewritten"        grep -qx "ENV_FILE=\"$R/services/gnosia-learn/.env\"" "$HOME/services/gnosia-learn/bin/deploy.sh"
+check "deploy.sh COMPOSE_DIR rewritten"     grep -qx "COMPOSE_DIR=\"$R/services/gnosia-learn\"" "$HOME/services/gnosia-learn/bin/deploy.sh"
+check "a longer folder name is not matched" grep -qx "OTHER=\"$R/gnosia-learner\"" "$HOME/services/gnosia-learn/bin/deploy.sh"
+check "deploy.sh stays executable"          test -x "$HOME/services/gnosia-learn/bin/deploy.sh"
+check ".bak copies left alone"              grep -qx "COMPOSE_DIR=\"$R/gnosia-learn\"" "$HOME/services/gnosia-learn/bin/deploy.sh.bak-1"
+check "identical duplicate dropped"         test ! -e "$R/gnosia-learn/same.txt"
+check "differing file not overwritten"      grep -qx new "$R/services/gnosia-learn/differs.txt"
+check "differing old copy left in place"    grep -qx old "$R/gnosia-learn/differs.txt"
+check "warns about the conflict"            out_has "kept both: services/gnosia-learn/differs.txt"
 check "unit repointed (end of line too)"    grep -qx "WorkingDirectory=$R/app/web" "$UD/launcher.$EXT"
 check "unit keeps its own settings"         grep -qF "$R/app/web/server.py --port=9000" "$UD/launcher.$EXT"
 check "no setup.sh re-run"                  calls_lack "setup "
-check "comment-only unit rewritten"         grep -qF "$R/services/self-learn/.env" "$UD/self-learn.$EXT"
+check "comment-only unit rewritten"         grep -qF "$R/services/gnosia-learn/.env" "$UD/gnosia-learn.$EXT"
 check "stale listener copy refreshed"       grep -qx "new listener" "$HOME/services/ntfy-control/bin/control_listener.py"
 check "combined legacy folder moved"        grep -qx "OPENHANDS_PORT=3000" "$R/services/paperclip-openhands/.env"
 if [ "$OS" = "Linux" ]; then
   check "daemon-reload"                     calls_have "systemctl --user daemon-reload"
   check "launcher restarted"                calls_have "systemctl --user try-restart launcher.service"
   check "ntfy-control restarted"            calls_have "systemctl --user try-restart ntfy-control.service"
-  check "comment-only unit not restarted"   calls_lack "try-restart self-learn.service"
+  check "comment-only unit not restarted"   calls_lack "try-restart gnosia-learn.service"
 else
   check "launcher reloaded"                 calls_have "launchctl bootstrap gui/$(id -u) $UD/launcher.plist"
-  check "comment-only agent not reloaded"   calls_lack "self-learn.plist"
+  check "comment-only agent not reloaded"   calls_lack "gnosia-learn.plist"
   check "loaded state checked first"        calls_have "launchctl print gui/$(id -u)/launcher"
 fi
 check "running container started"           calls_have "up -d --no-deps nginx"
@@ -223,7 +223,7 @@ check "exits zero"                          [ "$CODE" -eq 0 ]
 check ".env not moved"                      test -f "$R/immich/.env"
 check "nothing at the new path"             test ! -e "$R/services/immich/.env"
 check "KUMA_ENV_FILE untouched"             grep -qx "KUMA_ENV_FILE=$R/monitoring/.env" "$R/ntfy-control/.env"
-check "deploy.sh untouched"                 grep -qx "COMPOSE_DIR=\"$R/self-learn\"" "$HOME/services/self-learn/bin/deploy.sh"
+check "deploy.sh untouched"                 grep -qx "COMPOSE_DIR=\"$R/gnosia-learn\"" "$HOME/services/gnosia-learn/bin/deploy.sh"
 check "no restart run"                      calls_lack "try-restart"
 check "unit untouched"                      grep -qx "WorkingDirectory=$R/launcher" "$UD/launcher.$EXT"
 check "listener copy untouched"             grep -qx "old listener" "$HOME/services/ntfy-control/bin/control_listener.py"

@@ -1,10 +1,10 @@
-# self-learn — Gnosia study hub, auto-deployed from GitHub
+# gnosia-learn — Gnosia study hub, auto-deployed from GitHub
 
 A production build of the private
 [c-wenlong/self-learn](https://github.com/c-wenlong/self-learn) repo: a
 Next.js 16 app over a SQLite catalog, served natively and published
 tailnet-only. Push to `main` and the box picks it up on its daily poll —
-or immediately with `~/services/self-learn/bin/deploy.sh --force`.
+or immediately with `~/services/gnosia-learn/bin/deploy.sh --force`.
 
 The repo's own `docs/HOMESERVER.md` describes this exact deployment shape;
 this service wraps it in the repo's usual one-shot, idempotent form. Where
@@ -23,10 +23,10 @@ git push (laptop)
    GitHub (private repo)
         ▲  outbound git fetch, daily (POLL_SECONDS)
         │
-self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
+gnosia-learn-deploy.timer ──► bin/deploy.sh          gnosia-learn-export.timer
   (systemd user timer;          │                     (nightly 03:00:
    launchd on macOS)            │ 1. stop app + studio if   catalog export ->
-                                │    running                ~/.self-learn/archive)
+                                │    running                ~/.gnosia/archive)
                                 │ 2. git reset --hard
                                 │    origin/main
                                 │ 3. write checkout env files
@@ -37,21 +37,21 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
                                 │ 6. next build
                                 │ 7. start app + studio if they were running
                                 ▼
-              ~/services/self-learn/repo  (machine-managed clone)
+              ~/services/gnosia-learn/repo  (machine-managed clone)
                                 │  next start -p 8107 -H 127.0.0.1
                                 ▼
-              self-learn.service (systemd user unit / launchd)
+              gnosia-learn.service (systemd user unit / launchd)
                      │           127.0.0.1:8107 ──► Tailscale Serve HTTPS :8107
                      │  https://homeserver.tail-name.ts.net:8107
                      │                            (tailnet only)
-                     │  /studio/api/* proxied to ──► self-learn-studio.service
+                     │  /studio/api/* proxied to ──► gnosia-learn-studio.service
                      ▼          (npm run studio — diagram job runner, spawns
         the catalog: one SQLite  the claude CLI per job, loopback-only on
         file the app, catalog    127.0.0.1:7250 — never Serve-published.
         CLI and studio all open  Runs only while STUDIO_ENABLED=1 in .env;
-                     │           job state under ~/services/self-learn/studio)
+                     │           job state under ~/services/gnosia-learn/studio)
                      ▼
-   ~/.self-learn/  catalog.db  blobs/ vault/ archive/
+   ~/.gnosia/  catalog.db  blobs/ vault/ archive/
         (upstream layout — rsync target; catalog.db is the whole database,
         no server to run)
 ```
@@ -62,7 +62,7 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
   Serve. Upstream's S6 notes Serve forwards `Host` and
   `X-Forwarded-Proto: https`, which is exactly what the app's session
   cookie and same-origin check read — no app-side setting needed.
-- The catalog is one SQLite file at `$CATALOG_DB` under `~/.self-learn`:
+- The catalog is one SQLite file at `$CATALOG_DB` under `~/.gnosia`:
   no server, no port, no credentials — its only boundary is the
   filesystem, which already holds the blob store beside it.
 - Sign-in is the app's own `OWNER_PASSWORD` + signed cookie (one owner,
@@ -71,7 +71,7 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
 - `OWNER_PASSWORD` / `AUTH_SECRET` are generated into `.env` (mode 600)
   on first run and never overwritten. Every file that carries them — the
   checkout env files below — is written mode 600.
-- The deploy clone (`~/services/self-learn/repo`) is machine-managed and
+- The deploy clone (`~/services/gnosia-learn/repo`) is machine-managed and
   hard-reset on every deploy — **never edit it by hand**. The two env
   files inside it (`apps/web/.env.local`, `services/catalog/.env`) are
   rewritten from `.env` on every deploy; rotate secrets in `.env`, then
@@ -110,14 +110,16 @@ it whenever the recorded gitlink moves.
    line is ignored once `.env` exists. An `.env` written before the SQLite
    cut-over keeps working: its stale `postgres://` `DATABASE_URL` is
    unused, and `GNOSIA_HOME`/`CATALOG_DB` derive to the data root it names
-   through `SELF_LEARN_HOME`.
-3. Installs `deploy.sh` -> `~/services/self-learn/bin/` (refreshed every
-   run) and creates `~/.self-learn/blobs`.
-4. Writes the units — `self-learn.service` (the app),
-   `self-learn-studio.service` (the diagram job runner), the deploy
+   through `SELF_LEARN_HOME`. An `.env` from before the rename keeps its
+   root at `~/.self-learn` the same way — the paths below assume the
+   fresh default `~/.gnosia`.
+3. Installs `deploy.sh` -> `~/services/gnosia-learn/bin/` (refreshed every
+   run) and creates `$GNOSIA_HOME/blobs`.
+4. Writes the units — `gnosia-learn.service` (the app),
+   `gnosia-learn-studio.service` (the diagram job runner), the deploy
    `.timer`, the nightly export `.timer` — or the four LaunchAgents.
    The studio unit gets the resolved `claude` path baked in as
-   `STUDIO_CLAUDE_BIN` and `STUDIO_HOME=~/services/self-learn/studio`,
+   `STUDIO_CLAUDE_BIN` and `STUDIO_HOME=~/services/gnosia-learn/studio`,
    so job workspaces survive a checkout re-clone.
 5. Runs the initial deploy: clone, env files, `npm ci`, `catalog
    migrate` (creates the SQLite file on first connect), `next build`.
@@ -136,7 +138,7 @@ it whenever the recorded gitlink moves.
 ## Deploy
 
 ```sh
-cd services/self-learn && ./setup.sh
+cd services/gnosia-learn && ./setup.sh
 ```
 
 Overrides (first run only — after that, edit `.env`): `LOCAL_PORT` /
@@ -162,25 +164,25 @@ SQLite file now, so the old pg_dump/restore dance is a file copy.
 ```sh
 # on the laptop — .backup makes a consistent single file even while a
 # dev checkout has the database open
-sqlite3 ~/.self-learn/catalog.db ".backup '$HOME/laptop-catalog.db'"
+sqlite3 ~/.gnosia/catalog.db ".backup '$HOME/laptop-catalog.db'"
 scp ~/laptop-catalog.db homeserver:~/catalog.db
-rsync -a --exclude .owner ~/.self-learn/blobs/ homeserver:~/.self-learn/blobs/
+rsync -a --exclude .owner ~/.gnosia/blobs/ homeserver:~/.gnosia/blobs/
 
 # first deploy here — leave the catalog file empty
-cd services/self-learn && SKIP_SEED=1 AUTH_SECRET=<laptop's> ./setup.sh
+cd services/gnosia-learn && SKIP_SEED=1 AUTH_SECRET=<laptop's> ./setup.sh
 
 # swap the laptop's file in for the migrated-but-empty one the deploy
 # left (the app must be stopped while the file is replaced), then claim
 # the blob root for it
-systemctl --user stop self-learn
-mv ~/catalog.db ~/.self-learn/catalog.db
-cd ~/services/self-learn/repo && npm run catalog -- doctor && npm run catalog -- blob audit --fix
-systemctl --user start self-learn
+systemctl --user stop gnosia-learn
+mv ~/catalog.db ~/.gnosia/catalog.db
+cd ~/services/gnosia-learn/repo && npm run catalog -- doctor && npm run catalog -- blob audit --fix
+systemctl --user start gnosia-learn
 ```
 
 (The same swap covers a catalog that *was* seeded — `mv` replaces the
 file wholesale. On macOS the stop/start is `launchctl bootout` /
-`bootstrap` on `com.self-learn.web`.) The `--exclude .owner` matters:
+`bootstrap` on `com.gnosia-learn.web`.) The `--exclude .owner` matters:
 the blob store's marker names its database by resolved path, so a copied
 marker names the laptop's file — a path that is not here — and uploads
 and `audit --fix` would refuse the root (upstream S3).
@@ -195,11 +197,11 @@ them. The container still answers on its old loopback port even though
 
 ```sh
 docker start self-learn-db   # no-op if it is already running
-set -a; . services/self-learn/.env; set +a   # POSTGRES_USER, _PASSWORD, _DB, PG_PORT
-cd ~/services/self-learn/repo
+set -a; . services/gnosia-learn/.env; set +a   # POSTGRES_USER, _PASSWORD, _DB, PG_PORT
+cd ~/services/gnosia-learn/repo
 node services/catalog/scripts/pg-to-sqlite.mjs \
   --from "postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@127.0.0.1:$PG_PORT/$POSTGRES_DB" \
-  --to ~/.self-learn/catalog.db
+  --to ~/.gnosia/catalog.db
 ```
 
 The port migrates the fresh file to head, copies every table and runs
@@ -208,8 +210,8 @@ The port migrates the fresh file to head, copies every table and runs
 delete the empty one a fresh deploy created first. Afterwards:
 `npm run catalog -- doctor && npm run catalog -- blob audit --fix`, then
 `docker rm -f self-learn-db && docker volume rm self-learn-postgres`.
-Blobs need no move — `SELF_LEARN_HOME` and `GNOSIA_HOME` name the same
-root.
+Blobs need no move — `GNOSIA_HOME` derives to the same root the old
+`.env`'s `SELF_LEARN_HOME` already named.
 
 ## Syncing with the MacBook (`sync.sh`)
 
@@ -221,9 +223,9 @@ file, swapped in while the receiving app is stopped), never a merge.
 
 ```
 server                          Seafile                          MacBook
-~/.self-learn/blobs/local ◄── self-learn-blobs library ──► ~/.self-learn/blobs/local
+~/.gnosia/blobs/local ◄── gnosia-learn-blobs library ──► ~/.gnosia/blobs/local
   seaf-cli daemon      dedicated non-admin sync account          Seafile Client.app
-  (self-learn-         (.owner + .tmp sit beside local/,          (GUI pairing —
+  (gnosia-learn-         (.owner + .tmp sit beside local/,          (GUI pairing —
    seafile.service)     outside the synced tree)                   no seaf-cli on macOS)
 
 ./sync.sh push ──► copy catalog.db here ──► scp ──► swap it in on the Mac
@@ -238,9 +240,9 @@ server                          Seafile                          MacBook
 ```
 
 - `install` creates a **non-admin** Seafile account
-  (`self-learn-sync@<host>.local`) and a private `self-learn-blobs` library,
+  (`gnosia-learn-sync@<host>.local`) and a private `gnosia-learn-blobs` library,
   then runs `seaf-daemon` in the foreground under
-  `self-learn-seafile.service` (systemd user unit, `Restart=always` — a
+  `gnosia-learn-seafile.service` (systemd user unit, `Restart=always` — a
   dead daemon is revived, and `active (running)` actually means syncing).
   Credentials persist into `.env` (mode 600) —
   `SEAFILE_SYNC_USER`/`_PASSWORD`/`_REPO`. Admin credentials are only
@@ -248,7 +250,7 @@ server                          Seafile                          MacBook
   and no password ever lands on a process list (`curl -K -` reads the
   request from stdin; `seaf-cli` takes it via its getpass stdin
   fallback).
-- `mac-setup` writes `~/.self-learn/blobs/local/seafile-ignore.txt` on the
+- `mac-setup` writes `~/.gnosia/blobs/local/seafile-ignore.txt` on the
   Mac **before** any pairing. Only `blobs/local` is the library worktree —
   `.owner` and `.tmp` sit at `blobs/` root, outside the synced tree, so a
   foreign `.owner` can never be delivered onto either machine (the ignore
@@ -259,7 +261,7 @@ server                          Seafile                          MacBook
 - `push`/`pull` rewrite the receiver's `blobs/.owner` for its own
   `catalog.db` path after every swap, and warn that the receiver's
   `vault/` is stale — rebuild it with `learn vault pull` on that
-  machine. `pull` stops `self-learn.service` for the swap (and
+  machine. `pull` stops `gnosia-learn.service` for the swap (and
   restarts it only if it was running); `push` warns if a Next dev server
   is holding the file open on the Mac.
 - Both directions take the same `.deploy.lock` the poller uses: a sync
@@ -272,40 +274,40 @@ server                          Seafile                          MacBook
 ## Ops
 
 ```sh
-~/services/self-learn/bin/deploy.sh --force          # pull + rebuild + migrate + restart now
-~/services/self-learn/bin/deploy.sh --sha <commit>   # pin to a commit (rollback — TROUBLESHOOT.md)
-journalctl --user -u self-learn -f                   # app logs
-journalctl --user -u self-learn-studio -f            # studio runner logs
+~/services/gnosia-learn/bin/deploy.sh --force          # pull + rebuild + migrate + restart now
+~/services/gnosia-learn/bin/deploy.sh --sha <commit>   # pin to a commit (rollback — TROUBLESHOOT.md)
+journalctl --user -u gnosia-learn -f                   # app logs
+journalctl --user -u gnosia-learn-studio -f            # studio runner logs
 curl -s http://127.0.0.1:7250/api/health             # runner health (loopback)
-journalctl --user -u self-learn-deploy -n 50         # deploy history
-journalctl --user -u self-learn-export               # nightly export runs
-systemctl --user list-timers self-learn-*
-ls -l ~/.self-learn/catalog.db                       # the whole catalog, one file
-ls ~/.self-learn/archive/latest                      # newest readable export
+journalctl --user -u gnosia-learn-deploy -n 50         # deploy history
+journalctl --user -u gnosia-learn-export               # nightly export runs
+systemctl --user list-timers gnosia-learn-*
+ls -l ~/.gnosia/catalog.db                       # the whole catalog, one file
+ls ~/.gnosia/archive/latest                      # newest readable export
 tailscale serve status
 ./sync.sh status                                     # both catalogs + blob stores
-systemctl --user status self-learn-seafile           # blob-sync daemon
+systemctl --user status gnosia-learn-seafile           # blob-sync daemon
 ```
 
 Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
 port that proxies to the app, disables the deploy and export timers and
-stops the studio runner and the app, and keeps `~/services/self-learn`
+stops the studio runner and the app, and keeps `~/services/gnosia-learn`
 and `.env`, so `./setup.sh` brings it back running. `./teardown.sh
 --purge` (type the name) also deletes the deploy clone, state, studio
-and bin dirs, the unit files and `.env`. Neither touches `~/.self-learn`
+and bin dirs, the unit files and `.env`. Neither touches `~/.gnosia`
 — `catalog.db`, `blobs`, `vault` and the nightly exports in `archive/`
-all survive a purge — or `sync.sh`'s `self-learn-seafile.service`;
+all survive a purge — or `sync.sh`'s `gnosia-learn-seafile.service`;
 purge refuses while that blob link is installed. See TROUBLESHOOT.md,
 "Nuke and pave".
 
-The catalog CLI works in the checkout (`cd ~/services/self-learn/repo &&
+The catalog CLI works in the checkout (`cd ~/services/gnosia-learn/repo &&
 npm run catalog -- status`) — `services/catalog/.env` there points it at
 this `catalog.db`.
 
 ## The studio runner
 
 `STUDIO_ENABLED=1` (the server's `.env` has it on) runs a third service:
-`self-learn-studio` (`npm run studio` — `tsx services/studio/src/index.ts`),
+`gnosia-learn-studio` (`npm run studio` — `tsx services/studio/src/index.ts`),
 the diagram job runner behind the app's `/studio/api/*` proxy. It binds
 `127.0.0.1:7250`, is never published through Serve (the app proxies to it
 and stamps the signed-in owner itself), and reaches the catalog the way
@@ -315,7 +317,7 @@ resolved at setup time (`STUDIO_CLAUDE_BIN` in the unit), authenticating
 with the login credentials in `~/.claude` — the runner's default
 `STUDIO_AGENT_AUTH=login` strips `ANTHROPIC_API_KEY` from the job env.
 Job workspaces and the write-ahead log live in
-`~/services/self-learn/studio` (`STUDIO_HOME`), outside the
+`~/services/gnosia-learn/studio` (`STUDIO_HOME`), outside the
 machine-managed checkout. Its lifecycle follows the app: setup and the
 deploy poller stop/start them together, and a deliberately stopped stack
 stays stopped. Optional spend cap: set `STUDIO_DAILY_USD` in `.env` and
@@ -328,7 +330,7 @@ it refuses to queue a job while that submodule is unbuilt (health says
 `STUDIO_ENABLED=1` every deploy runs `git submodule update --init
 tools/tldrawkc` and rebuilds (`npm ci && npm run build`) only when the
 recorded gitlink moved — the last-built sha is stamped at
-`~/services/self-learn/state/tldrawkc-sha`.
+`~/services/gnosia-learn/state/tldrawkc-sha`.
 
 ## Not deployed (upstream leftovers)
 
@@ -342,5 +344,5 @@ recorded gitlink moved — the last-built sha is stamped at
 
 Nothing to install. Open `https://homeserver.tail-name.ts.net:8107`,
 sign in at `/sign-in` with `OWNER_PASSWORD` from `.env`. Editing the
-curriculum happens wherever the self-learn repo is a working clone —
+curriculum happens wherever the gnosia repo is a working clone —
 push to `main`, the box deploys it on the next poll.

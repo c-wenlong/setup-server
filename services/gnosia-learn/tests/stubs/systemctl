@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # systemctl stub: logs and succeeds. Tracks per-unit state in $STATE_DIR:
-#   web_active / web_failed  — self-learn.service (is-active / is-failed)
-#   seaf_active              — self-learn-seafile.service
-#   studio_active            — self-learn-studio.service
+#   web_active / web_failed  — gnosia-learn.service (is-active / is-failed)
+#   seaf_active              — gnosia-learn-seafile.service
+#   studio_active            — gnosia-learn-studio.service
 # enable --now also marks the unit active; disable --now clears it.
 echo "systemctl $*" >> "$CALLS_LOG"
 
-# setup.sh addresses units bare (`self-learn`), deploy.sh with the suffix
-# (`self-learn.service`) — normalise so both hit the same marker.
+# setup.sh addresses units bare (`gnosia-learn`), deploy.sh with the suffix
+# (`gnosia-learn.service`) — normalise so both hit the same marker.
 unit="${*: -1}"; unit="${unit%.service}"
 marker=""; failed_marker="x_$unit"
 case "$unit" in
-  self-learn)         marker=web_active;    failed_marker=web_failed ;;
-  self-learn-seafile) marker=seaf_active;   failed_marker=seaf_failed ;;
-  self-learn-studio)  marker=studio_active; failed_marker=studio_failed ;;
+  gnosia-learn)         marker=web_active;    failed_marker=web_failed ;;
+  gnosia-learn-seafile) marker=seaf_active;   failed_marker=seaf_failed ;;
+  gnosia-learn-studio)  marker=studio_active; failed_marker=studio_failed ;;
 esac
 
 # Real systemd runs the unit's ExecStartPre= lines before every start
 # ('-' prefix means a failure is ignored; otherwise a failed pre-hook stops
-# the start). self-learn.service uses one to clear teardown's torn-down
+# the start). gnosia-learn.service uses one to clear teardown's torn-down
 # marker — running it here keeps a stubbed `start` faithful.
 run_pre() {
   local f="$HOME/.config/systemd/user/$1.service" line cmd

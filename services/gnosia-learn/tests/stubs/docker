@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# docker stub — safety net only: the self-learn scripts no longer call
+# docker stub — safety net only: the gnosia-learn scripts no longer call
 # docker at all (the Postgres container is gone), so a logged call here is a
 # regression the suite can grep for.
 echo "docker $*" >> "$CALLS_LOG"

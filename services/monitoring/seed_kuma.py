@@ -88,9 +88,9 @@ PUBLISHED = [
     ("umami", 8106, "/api/heartbeat"),
     # "/" is the public landing page and the only unauthenticated 200 —
     # Gnosia has no health route. It proves the Next server answers, not
-    # that Postgres does: content pages read the catalog per request, and
+    # that the catalog reads: content pages read catalog.db per request, and
     # the landing page reads none, so a DB fault won't be caught here.
-    ("self-learn", 8107, "/"),
+    ("gnosia-learn", 8107, "/"),
     # "/" is the app shell (200): the whole corpus is encrypted blobs, so no
     # deeper endpoint exists — this proves nginx serves, nothing more.
     ("sources", 8098, "/"),
@@ -125,16 +125,16 @@ MONITORS.append(
 )
 
 
-def self_learn_studio_enabled():
-    """STUDIO_ENABLED=1 in services/self-learn/.env, the flag that turns the runner on.
+def gnosia_learn_studio_enabled():
+    """STUDIO_ENABLED=1 in services/gnosia-learn/.env, the flag that turns the runner on.
 
-    That file is self-learn's own switch, so it is read from there rather than
+    That file is gnosia-learn's own switch, so it is read from there rather than
     from this service's environment. A missing file or flag means off, which
     is setup.sh's default; the last assignment wins, as when the file is
-    sourced. SELF_LEARN_ENV overrides the path (the tests use it).
+    sourced. GNOSIA_ENV overrides the path (the tests use it).
     """
-    path = os.environ.get("SELF_LEARN_ENV") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "self-learn", ".env")
+    path = os.environ.get("GNOSIA_ENV") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "gnosia-learn", ".env")
     enabled = False
     try:
         with open(path, encoding="utf-8") as fh:
@@ -147,15 +147,15 @@ def self_learn_studio_enabled():
     return enabled
 
 
-# The self-learn studio runner is loopback-only too — the app proxies
+# The gnosia-learn studio runner is loopback-only too — the app proxies
 # /studio/api/* to it, so the published :8107 monitor can never see it down.
 # Seeded only while the runner is switched on: with STUDIO_ENABLED=0 (the
 # default) nothing listens on :7250, and a monitor there would alert for an
 # intentionally absent service. Turning Studio on later needs this seed run
 # again (re-run services/monitoring/setup.sh) to add it. A monitor seeded earlier is
 # left as it is; if the flag goes back to 0, pause it in the Kuma UI.
-if self_learn_studio_enabled():
-    MONITORS.append(("self-learn-studio", "http://127.0.0.1:7250/api/health"))
+if gnosia_learn_studio_enabled():
+    MONITORS.append(("gnosia-learn-studio", "http://127.0.0.1:7250/api/health"))
 
 api = UptimeKumaApi(f"http://127.0.0.1:{os.environ['KUMA_PORT']}", timeout=30)
 user = os.environ["KUMA_ADMIN_USER"]

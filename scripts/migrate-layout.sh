@@ -11,7 +11,7 @@
 #   2. absolute paths into the old folders, written once at deploy time:
 #      the launcher and ntfy-control units, ntfy-control/.env's
 #      KUMA_ENV_FILE, and the deploy.sh copies the *-deploy timers run from
-#      ~/services/<service>/bin/ (ENV_FILE, self-learn's COMPOSE_DIR)
+#      ~/services/<service>/bin/ (ENV_FILE, gnosia-learn's COMPOSE_DIR)
 #   3. containers that bind-mount a file from the old folder (appflowy's
 #      nginx.conf, coolify's .env, trigger-dev's ClickHouse config). Docker
 #      keeps the old source path, so the next restart mounts nothing.
@@ -110,7 +110,7 @@ ok "$moved file(s) moved, $kept left in place"
 # ------------------------------------------------ 2a. absolute paths in .env
 info "Rewriting old absolute paths in .env files and deployed scripts"
 # "$ROOT/<old>" -> "$ROOT/<new>" when followed by /, a quote, <, whitespace or
-# end of line (self-learn's COMPOSE_DIR has no trailing slash), so only whole
+# end of line (gnosia-learn's COMPOSE_DIR has no trailing slash), so only whole
 # folder names match. Done in Python so GNU and BSD behave the same.
 # Prints each changed file, one per line.
 rewrite_paths() {
@@ -153,7 +153,7 @@ else
   UNIT_DIR="$HOME/Library/LaunchAgents"; UNIT_GLOB="*.plist"
 fi
 # True when a non-comment line names an old folder. A unit whose only mention
-# is a comment (self-learn's names its .env) is rewritten but not restarted.
+# is a comment (gnosia-learn's names its .env) is rewritten but not restarted.
 live_mention() {
   local f="$1" pair
   for pair in $PAIRS; do

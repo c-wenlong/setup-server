@@ -3937,25 +3937,24 @@ class SharedControlRegistryTest(unittest.TestCase):
         self.assertEqual(self.control("manimkc")["parts"],
                          [{"unit": "manimkc.service"}])
 
-    def test_self_learn_stops_the_studio_runner_first_and_starts_it_last(self):
+    def test_gnosia_learn_stops_the_studio_runner_first_and_starts_it_last(self):
         # The runner's unit exists only while STUDIO_ENABLED=1, so it is an
         # optional part; it is listed first so stop takes it down before the
-        # app and the database it talks to, and start (the reverse) brings it
-        # back up after both.
-        self.assertEqual(self.names("self-learn"),
-                         ["self-learn-studio.service", "self-learn.service",
-                          "self-learn-db"])
-        optional = [p for p in self.control("self-learn")["parts"]
+        # app whose node_modules it runs against, and start (the reverse)
+        # brings it back up after.
+        self.assertEqual(self.names("gnosia-learn"),
+                         ["gnosia-learn-studio.service", "gnosia-learn.service"])
+        optional = [p for p in self.control("gnosia-learn")["parts"]
                     if p.get("optional")]
         self.assertEqual([p["unit"] for p in optional],
-                         ["self-learn-studio.service"])
+                         ["gnosia-learn-studio.service"])
 
-    def test_self_learn_reports_the_web_app_not_the_optional_runner(self):
+    def test_gnosia_learn_reports_the_web_app_not_the_optional_runner(self):
         # ntfy-control reports the first part's state unless `primary` names
         # another. With Studio off or stopped the runner is never active, so
         # without this a running app would show as stopped on the phone.
-        self.assertEqual(self.control("self-learn")["primary"],
-                         "self-learn.service")
+        self.assertEqual(self.control("gnosia-learn")["primary"],
+                         "gnosia-learn.service")
 
     def test_every_primary_names_one_of_its_own_parts(self):
         for key in self.services:

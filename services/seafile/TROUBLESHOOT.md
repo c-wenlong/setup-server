@@ -151,7 +151,7 @@ MariaDB image already on the box, so it needs no sudo.
 
 `--purge` deletes the whole Drive on this server: every library, synced file
 and phone photo backup stored here, plus all accounts. Clients keep their
-local copies. self-learn (reads this `.env` at install time, syncs into a
+local copies. gnosia-learn (reads this `.env` at install time, syncs into a
 Seafile library) and manimkc (uploads videos to a Seafile library) lose
 their target. Back up first, per SETUP.md "Backups":
 

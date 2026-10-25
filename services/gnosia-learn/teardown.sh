@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# teardown.sh — take self-learn off this box. Linux + macOS.
+# teardown.sh — take gnosia-learn off this box. Linux + macOS.
 #
 # The inverse of setup.sh's run + publish, and nothing more:
 #   1. unpublish the Tailscale Serve ports that point at the app's local port,
@@ -10,22 +10,23 @@
 #   2. stop what setup.sh starts, in this order, so the poller cannot bring
 #      anything back mid-teardown:
 #        the deploy + export timers (and any deploy/export run in flight),
-#        self-learn-studio, then self-learn (the app)
+#        gnosia-learn-studio, then gnosia-learn (the app)
 #      Linux: `systemctl --user disable --now`; macOS: `launchctl bootout`
 #      then `launchctl disable`, so login does not reload them.
-#   3. keep .env, the unit files / LaunchAgents and ~/services/self-learn,
+#   3. keep .env, the unit files / LaunchAgents and ~/services/gnosia-learn,
 #      so ./setup.sh brings it back as it was
 #
-# Never touched, purge included: ~/.self-learn (SELF_LEARN_HOME: blobs,
-# vault, the nightly exports in ~/.self-learn/archive, and the catalog's
-# SQLite file catalog.db — the data root is never purged), and anything
-# sync.sh installs (self-learn-seafile.service, ~/services/self-learn/seafile).
+# Never touched, purge included: the data root GNOSIA_HOME names (blobs,
+# vault, the nightly exports in archive/, and the catalog's SQLite file
+# catalog.db — never purged; an older .env names the same root
+# SELF_LEARN_HOME), and anything sync.sh installs
+# (gnosia-learn-seafile.service, ~/services/gnosia-learn/seafile).
 #
 # Usage:
 #   ./teardown.sh            # safe remove: data and .env kept
 #   ./teardown.sh --purge    # ALSO delete the deploy clone, state and studio
-#                            # dirs under ~/services/self-learn, the unit
-#                            # files and .env; asks you to type "self-learn"
+#                            # dirs under ~/services/gnosia-learn, the unit
+#                            # files and .env; asks you to type "gnosia-learn"
 #                            # first. Terminal only: the launcher's Remove
 #                            # button never passes it.
 #
@@ -34,7 +35,7 @@
 
 set -euo pipefail
 
-NAME="self-learn"
+NAME="gnosia-learn"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
@@ -150,41 +151,45 @@ env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 SERVICE_HOME="$(env_get SERVICE_HOME)"
 SELF_LEARN_HOME="$(env_get SELF_LEARN_HOME)"
+GNOSIA_HOME="$(env_get GNOSIA_HOME)"
 case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric (got: $LOCAL_PORT)";; esac
 [ -n "$SERVICE_HOME" ] || die "SERVICE_HOME is missing from $ENV_FILE — setup.sh always writes it, so this .env is not one teardown can trust."
 # env_get expands $HOME and ${HOME} only, but setup.sh sources .env and so
-# expands any other reference too (SELF_LEARN_HOME=$SERVICE_HOME/state/x).
+# expands any other reference too (GNOSIA_HOME=$SERVICE_HOME/state/x).
 # A path still holding a `$` here can name a different directory to setup.sh
 # than to teardown, and every keep-out check below would test the wrong one.
 # Refuse rather than guess, before anything changes.
-for v in SERVICE_HOME SELF_LEARN_HOME; do
+for v in SERVICE_HOME SELF_LEARN_HOME GNOSIA_HOME; do
   case "${!v}" in
     *'$'*) die "$v in $ENV_FILE still refers to another variable after \$HOME is expanded (got: ${!v}), so teardown cannot be sure which directory it means. Write the path out in full and re-run. Nothing was changed." ;;
   esac
 done
+# SELF_LEARN_HOME is the pre-rename name for the data root — an older .env
+# may hold only it; GNOSIA_HOME is canonical and wins when both are set.
+GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
 TARGET="http://127.0.0.1:$LOCAL_PORT"
-ok "$NAME: local :$LOCAL_PORT, state $SERVICE_HOME, blobs/exports ${SELF_LEARN_HOME:-(not set)} (never touched)"
+ok "$NAME: local :$LOCAL_PORT, state $SERVICE_HOME, blobs/exports ${GNOSIA_HOME:-(not set)} (never touched)"
 
 # Exactly the units / LaunchAgents setup.sh writes, timers first: a timer
 # left enabled could start a deploy that brings the app back while it is
 # being stopped.
 UNIT_DIR="$HOME/.config/systemd/user"
 AGENT_DIR="$HOME/Library/LaunchAgents"
-TIMERS="self-learn-deploy.timer self-learn-export.timer"
-ONESHOTS="self-learn-deploy.service self-learn-export.service"
-UNIT_FILES="$TIMERS $ONESHOTS self-learn-studio.service self-learn.service"
-AGENTS="com.self-learn.deploy com.self-learn.export com.self-learn.studio com.self-learn.web"
+TIMERS="gnosia-learn-deploy.timer gnosia-learn-export.timer"
+ONESHOTS="gnosia-learn-deploy.service gnosia-learn-export.service"
+UNIT_FILES="$TIMERS $ONESHOTS gnosia-learn-studio.service gnosia-learn.service"
+AGENTS="com.gnosia-learn.deploy com.gnosia-learn.export com.gnosia-learn.studio com.gnosia-learn.web"
 
 # Units that mention this service but that setup.sh does not create — on
-# this box, sync.sh's self-learn-seafile.service (the blob-sync daemon, which
-# runs out of ~/services/self-learn/seafile). Found by name, or by a file
+# this box, sync.sh's gnosia-learn-seafile.service (the blob-sync daemon, which
+# runs out of ~/services/gnosia-learn/seafile). Found by name, or by a file
 # whose contents name this service's directory (a backup job, say). Read-only
 # listing; they are never stopped, disabled or deleted here.
 # Run again by purge_targets after the --purge prompt.
 if [ "$OS" = "Linux" ]; then
-  SCAN_DIR="$UNIT_DIR"; SCAN_NAME='self-learn*'; SCAN_MINE=" $UNIT_FILES "
+  SCAN_DIR="$UNIT_DIR"; SCAN_NAME='gnosia-learn*'; SCAN_MINE=" $UNIT_FILES "
 else
-  SCAN_DIR="$AGENT_DIR"; SCAN_NAME='com.self-learn.*'; SCAN_MINE=" $AGENTS "
+  SCAN_DIR="$AGENT_DIR"; SCAN_NAME='com.gnosia-learn.*'; SCAN_MINE=" $AGENTS "
 fi
 scan_foreign() {
   FOREIGN=""
@@ -308,7 +313,7 @@ purge_targets() {
   PURGE_PATHS=""
   scan_foreign
   # sync.sh's blob link keeps its Seafile account password in .env and its
-  # daemon state under ~/services/self-learn. Deleting .env under a live
+  # daemon state under ~/services/gnosia-learn. Deleting .env under a live
   # link orphans that account, so the link is removed by hand first.
   [ -z "$FOREIGN" ] || die "--purge refused: $FOREIGN still installed (not created by setup.sh, so teardown will not remove it, and it may use ~/services/$NAME or .env). Remove it first — TROUBLESHOOT.md, 'Nuke and pave' — then re-run. Nothing was changed."
   [ -z "$(env_get SEAFILE_SYNC_USER)" ] || die "--purge refused: $ENV_FILE holds sync.sh's Seafile account (SEAFILE_SYNC_USER), and deleting .env would lose its password. Remove the blob link first — TROUBLESHOOT.md, 'Nuke and pave' — then re-run. Nothing was changed."
@@ -340,12 +345,12 @@ purge_targets() {
       [ -e "$PURGE_DIR/$child" ] || [ -L "$PURGE_DIR/$child" ] || continue
       p="$(real_dir "$PURGE_DIR/$child")" \
         || die "$PURGE_DIR/$child is a symlink or holds this checkout — refusing to delete it. Nothing was changed."
-      # SELF_LEARN_HOME (blobs, vault, exports) is never purged, wherever
+      # The data root (blobs, vault, exports) is never purged, wherever
       # .env points it.
-      if [ -n "$SELF_LEARN_HOME" ] && [ -d "$SELF_LEARN_HOME" ]; then
-        keep="$(cd "$SELF_LEARN_HOME" && pwd -P)" || die "Cannot resolve SELF_LEARN_HOME=$SELF_LEARN_HOME."
+      if [ -n "$GNOSIA_HOME" ] && [ -d "$GNOSIA_HOME" ]; then
+        keep="$(cd "$GNOSIA_HOME" && pwd -P)" || die "Cannot resolve GNOSIA_HOME=$GNOSIA_HOME."
         case "$keep/" in
-          "$p"/*) die "SELF_LEARN_HOME=$SELF_LEARN_HOME is inside $p — refusing to delete the blob store and exports. Nothing was changed." ;;
+          "$p"/*) die "GNOSIA_HOME=$GNOSIA_HOME is inside $p — refusing to delete the blob store and exports. Nothing was changed." ;;
         esac
       fi
       PURGE_PATHS="$PURGE_PATHS$p
@@ -355,12 +360,12 @@ purge_targets() {
 }
 if [ "$PURGE" -eq 1 ]; then
   purge_targets
-  KEEP_HOME="${SELF_LEARN_HOME:-$HOME/.self-learn}"
+  KEEP_HOME="${GNOSIA_HOME:-$HOME/.gnosia}"
   warn "--purge deletes the unit files, $ENV_FILE and:"
   if [ -n "$PURGE_PATHS" ]; then printf '%s' "$PURGE_PATHS" | sed 's/^/      /'; else echo "      (no state dirs on disk)"; fi
   warn "This cannot be undone. Kept: $KEEP_HOME — blobs, vault, the nightly exports in $KEEP_HOME/archive, and catalog.db itself (the catalog is a SQLite file under the data root, which is never purged)."
   if [ "$OS" = "Linux" ]; then
-    warn "Want a fresh export first? Answer anything else, run: systemctl --user start self-learn-export.service   then re-run."
+    warn "Want a fresh export first? Answer anything else, run: systemctl --user start gnosia-learn-export.service   then re-run."
   fi
   printf 'Type %s to confirm: ' "$NAME"
   answer=""
@@ -443,7 +448,7 @@ agent_off() {
 # so it starts the stack again (and deletes the marker). Written before
 # anything stops: a teardown that dies halfway still restores cleanly.
 # Only inside a state dir real_dir accepts (a real directory under
-# ~/services/self-learn), and never through a symlink: SERVICE_HOME comes
+# ~/services/gnosia-learn), and never through a symlink: SERVICE_HOME comes
 # from .env, so a marker path outside it is skipped, not written.
 if [ "$PURGE" -eq 0 ] && { [ -e "$SERVICE_HOME/state" ] || [ -L "$SERVICE_HOME/state" ]; }; then
   if ! state_real="$(real_dir "$SERVICE_HOME/state")" || [ ! -d "$state_real" ]; then
@@ -465,8 +470,8 @@ if [ "$OS" = "Linux" ]; then
     [ -f "$UNIT_DIR/$u" ] || continue
     systemctl --user stop "$u" >/dev/null 2>&1 || die "Could not stop $u: systemctl --user status $u"
   done
-  info "Stopping and disabling self-learn-studio, then self-learn"
-  for u in self-learn-studio.service self-learn.service; do
+  info "Stopping and disabling gnosia-learn-studio, then gnosia-learn"
+  for u in gnosia-learn-studio.service gnosia-learn.service; do
     [ -f "$UNIT_DIR/$u" ] || continue
     systemctl --user disable --now "$u" >/dev/null 2>&1 || die "Could not stop $u: systemctl --user status $u"
   done
@@ -479,7 +484,7 @@ else
   ok "LaunchAgents unloaded and disabled (plists kept)"
 fi
 
-[ -z "$FOREIGN" ] || warn "Not touched (not created by setup.sh): $FOREIGN — still installed. The blob-sync daemon keeps syncing ${SELF_LEARN_HOME:-$HOME/.self-learn}/blobs; stop it yourself if you want it gone (TROUBLESHOOT.md, 'Nuke and pave')."
+[ -z "$FOREIGN" ] || warn "Not touched (not created by setup.sh): $FOREIGN — still installed. The blob-sync daemon keeps syncing ${GNOSIA_HOME:-$HOME/.gnosia}/blobs; stop it yourself if you want it gone (TROUBLESHOOT.md, 'Nuke and pave')."
 
 # ---------------------------------------------------------------- purge
 if [ "$PURGE" -eq 1 ]; then
@@ -514,7 +519,7 @@ fi
 echo
 if [ "$PURGE" -eq 1 ]; then
   printf '\033[1;32mDone.\033[0m %s is removed and its deploy state is gone. ./setup.sh starts fresh.\n' "$NAME"
-  echo "  Kept: ${SELF_LEARN_HOME:-$HOME/.self-learn} (blobs, vault, catalog.db, nightly exports in archive/)."
+  echo "  Kept: ${GNOSIA_HOME:-$HOME/.gnosia} (blobs, vault, catalog.db, nightly exports in archive/)."
 else
   printf '\033[1;32mDone.\033[0m %s is removed. State and .env are kept; ./setup.sh brings it back.\n' "$NAME"
   echo "  Delete the deploy state too: ./teardown.sh --purge"

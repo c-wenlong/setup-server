@@ -310,7 +310,7 @@ if [ "$PURGE" -eq 1 ]; then
   warn "--purge deletes ${DATA_SHOW:-nothing for SEAFILE_VOLUME (not on disk)}, ${MYSQL_SHOW:-nothing for SEAFILE_MYSQL_VOLUME (not on disk)} and $ENV_FILE. This cannot be undone."
   warn "That is the whole Drive on this server: every library, every synced file and any phone photo backups stored here, their history, and all accounts."
   warn "Desktop and phone clients keep their local copies, but they will have nothing to sync with."
-  warn "Other services pointing at Seafile lose it: self-learn reads this .env at install time and syncs into a Seafile library; manimkc uploads its videos to a Seafile library."
+  warn "Other services pointing at Seafile lose it: gnosia-learn reads this .env at install time and syncs into a Seafile library; manimkc uploads its videos to a Seafile library."
   printf 'Type %s to confirm: ' "$NAME"
   answer=""
   read -r answer || true
