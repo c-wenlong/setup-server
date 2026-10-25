@@ -34,6 +34,32 @@ first, dated by merge.
   refuses `--purge` while self-learn-seafile.service exists or
   `SEAFILE_SYNC_USER` is set.
 
+- **teardown.sh for remote-desktop**, so it gets the launcher's Remove
+  button. The default (what the launcher runs) needs no sudo: it turns
+  off the Guacamole Serve port and runs `compose down`, and lists the
+  system half it keeps (GNOME Remote Login RDP, the `inet remote_desktop`
+  nftables filter, the TLS keypair) with the commands to undo it. The
+  filter stays up, so nothing is exposed. `--system` (terminal only)
+  turns RDP off, waits until :3389 refuses, and only then removes the
+  filter by table name (never a ruleset flush). GDM is never touched.
+
+- **teardown.sh for adguard**, so it gets the launcher's Remove button,
+  behind a DNS safety gate. Before changing anything it reads
+  `tailscale dns status --json` and dies if this node's tailnet address
+  is still a tailnet DNS resolver (stopping AdGuard then would cut DNS
+  for every device). If the answer cannot be read it dies unless you
+  pass `--dns-removed`. Default keeps `conf/`, `work/` and `.env`;
+  `--purge` deletes them, using a throwaway container of the pinned image
+  for root-owned files.
+
+- **teardown.sh for openhands**, so it gets the launcher's Remove button.
+  It stops only containers in the `openhands` compose project (with the
+  creds overlay file when present); any other container named like
+  OpenHands is listed and left running, and `--purge` refuses while one
+  exists. It never touches `~/.claude`, `~/.codex`, the creds overlay
+  sources or `~/agent-workspaces`, and prints the `setfacl -x` lines for
+  the uid 10001 ACLs instead of running them.
+
 - **teardown.sh for forgejo**, so it gets the launcher's Remove button.
   The default keeps repos, `.env` and the hidden `.admin-created` marker.
   `--purge` warns that every repository, issue, PR, wiki, LFS object and

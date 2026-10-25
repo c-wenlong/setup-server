@@ -656,6 +656,20 @@ alone. It was active before this service existed.
 
 ## Rollback and nuke-and-pave
 
+The script does all of this, in the order below, with the same guards:
+
+```bash
+cd ~/dev/setup-server/services/remote-desktop
+cp .env ~/remote-desktop.env.bak   # optional, BEFORE --purge: the RDP + Guacamole passwords
+./teardown.sh --system --purge     # terminal only; asks for sudo and for "remote-desktop" typed back
+./setup.sh                         # fresh deploy: new passwords, new keypair
+```
+
+`./teardown.sh` alone (what the launcher's Remove runs) is step 1 only.
+`--system` is step 2's commands, and it stops with the filter still in
+place if :3389 keeps answering after the backend is disabled. `--purge` is
+step 3. The manual recipe stays below for when you want to go step by step.
+
 ⚠️ **Confirm every path before deleting it.** An `rm -rf` of a path that
 never existed is a silent no-op that leaves you convinced you started
 clean, and then debugging a stale file you thought was gone. An earlier
@@ -711,7 +725,7 @@ Only if you are removing the service rather than rebuilding it.
 # RDP backend: turn the backend off, do NOT stop or remove the daemon —
 # it was installed, enabled and running before this service existed.
 sudo grdctl --system rdp disable
-sudo grdctl --system clear-credentials
+sudo grdctl --system rdp clear-credentials
 sudo systemctl restart gnome-remote-desktop
 ss -ltn | grep 3389        # expect nothing
 
