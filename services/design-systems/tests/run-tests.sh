@@ -67,6 +67,7 @@ out_lacks()  { ! grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
+env_lacks()  { ! grep -q "$1" "$SVC/.env"; }
 
 # ----------------------------------------------------------------- tests
 test_preflight_docker_perms() {
@@ -147,7 +148,7 @@ test_fresh_deploy() {
   run_deploy
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env has repo path"          env_has "SOURCE_REPO=$SOURCE_REPO"
-  check ".env has poll interval"      env_has "POLL_SECONDS=86400"
+  check ".env drops poll interval"                   env_lacks "POLL_SECONDS=86400"
   check ".env has public URL"         env_has "PUBLIC_URL=https://test-host.tailfake.ts.net:8108/"
   check ".env is owner-only"          sh -c '[ "$(stat -c %a "$0" 2>/dev/null || stat -f %Lp "$0")" = 600 ]' "$SVC/.env"
   check "deploy script installed"     [ -x "$HOME/services/design-systems/bin/deploy.sh" ]
@@ -172,16 +173,38 @@ test_fresh_deploy() {
   check "recorded built sha"          grep -qx aaa1111 "$HOME/services/design-systems/state/built-sha"
   check "compose up invoked"          [ -f "$STATE_DIR/compose_up" ]
   if [ "$OS" = "Linux" ]; then
-    check "timer unit written"        [ -f "$HOME/.config/systemd/user/design-systems-deploy.timer" ]
-    check "timer enabled"             calls_have "systemctl --user enable --now design-systems-deploy.timer"
-    check "lingering enabled"         calls_have "loginctl enable-linger"
+    check "no timer written"          [ ! -f "$HOME/.config/systemd/user/design-systems-deploy.timer" ]
+    check "no lingering touched"      no_call "loginctl enable-linger"
   else
-    check "launch agent written"      [ -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
-    check "label enabled (undoes teardown's disable)" calls_have "launchctl enable gui/.*/com.design-systems.deploy"
-    check "enabled before bootstrap"  [ "$(call_line "launchctl enable")" -lt "$(call_line "launchctl bootstrap")" ]
+    check "no launch agent written"   [ ! -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
   fi
   check "served on tailscale :8108"   calls_have "tailscale serve --bg --https=8108 http://127.0.0.1:8108"
   check "prints final URL"            out_has "https://test-host.tailfake.ts.net:8108/gallery/"
+  teardown
+}
+
+test_legacy_poller_removed() {
+  echo "• migration: a leftover per-service deploy timer/plist is removed"
+  setup
+  touch "$STATE_DIR/operator"
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    echo x > "$HOME/.config/systemd/user/design-systems-deploy.timer"
+    echo x > "$HOME/.config/systemd/user/design-systems-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist"
+  fi
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "timer disabled"     calls_have "disable --now design-systems-deploy.timer"
+    check "timer unit gone"    [ ! -f "$HOME/.config/systemd/user/design-systems-deploy.timer" ]
+    check "service unit gone"  [ ! -f "$HOME/.config/systemd/user/design-systems-deploy.service" ]
+  else
+    check "agent booted out"   calls_have "launchctl bootout gui/.*/com.design-systems.deploy"
+    check "plist gone"         [ ! -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
+  fi
   teardown
 }
 
@@ -392,10 +415,11 @@ test_live() {
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches repo"   sh -c "[ \"\$(git -C '$repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   if [ "$OS" = "Linux" ]; then
-    live_check "deploy timer active"    sh -c "systemctl --user is-active design-systems-deploy.timer | grep -qx active"
-    live_check "lingering enabled"      sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
+    live_check "no legacy timer"        sh -c "! systemctl --user is-active design-systems-deploy.timer 2>/dev/null | grep -qx active"
+    live_check "deployd watches it"     sh -c "$HOME/services/deployd/bin/deployd --status | grep -q design-systems"
   else
-    live_check "launch agent loaded"    sh -c "launchctl print gui/$(id -u)/com.design-systems.deploy"
+    live_check "no legacy agent"        sh -c "! launchctl print gui/$(id -u)/com.design-systems.deploy >/dev/null 2>&1"
+    live_check "deployd watches it"     sh -c "$HOME/services/deployd/bin/deployd --status | grep -q design-systems"
   fi
   live_check "serve maps :$port"        sh -c "'$ts' serve status | grep -A2 ':$port' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS responds"   curl -fsS -o /dev/null --max-time 30 "$url/gallery/"
@@ -428,6 +452,15 @@ deployed() {
   UNITS="$HOME/.config/systemd/user"
   echo shot > "$SH/media/refero/a.jpg"
   mkdir -p "$UNITS"
+  if [ "$OS" = "Linux" ]; then
+    # Pre-migration installs ran the per-service poller; setup.sh removes it
+    # on its next run, but a box that has not re-run setup yet still has it.
+    printf '[Timer]\n' > "$UNITS/design-systems-deploy.timer"
+    printf '[Service]\n' > "$UNITS/design-systems-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist"
+  fi
   printf '[Service]\nExecStart=/usr/bin/python3 %s/scripts/deploy_trigger.py\n' "$REPO" \
     > "$UNITS/designs-trigger.service"
   printf '[Service]\nExecStart=/bin/true\n' > "$UNITS/unrelated.service"
@@ -648,7 +681,11 @@ test_teardown_purge() {
   run_teardown --purge "design"
   check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
   check "wrong name: nothing changed" nothing_changed
-  check "wrong name: units kept"      [ -f "$UNITS/design-systems-deploy.timer" ]
+  if [ "$OS" = "Linux" ]; then
+    check "wrong name: units kept"    [ -f "$UNITS/design-systems-deploy.timer" ]
+  else
+    check "wrong name: plist kept"    [ -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
+  fi
   check "wrong name: media kept"      [ -f "$SH/media/refero/a.jpg" ]
   run_teardown --purge ""
   check "empty answer: exits non-zero" [ "$CODE" -ne 0 ]
@@ -1096,6 +1133,7 @@ test_preflight_wrong_repo
 test_lfs_pointers_fixed
 test_lfs_pointers_unfixable
 test_fresh_deploy
+test_legacy_poller_removed
 test_idempotent_rerun
 test_nginx_conf_stale_warns
 test_push_triggers_redeploy

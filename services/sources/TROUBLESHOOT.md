@@ -5,19 +5,20 @@ top-down; each layer assumes the one above it is healthy.
 
 This service shares the fetch clone at `~/dev/sources` with
 `sources-fetch.timer` — the two are independent: the fetch timer writes the
-repo, the deploy timer only reads it. A broken deploy never affects
-fetching, and vice versa.
+repo, deployd only reads it. A broken deploy never affects fetching, and
+vice versa.
 
 ## Quick status
 
 ```sh
-systemctl --user list-timers sources-deploy.timer        # poller scheduled?
-journalctl --user -u sources-deploy -n 30                # last deploy runs
-cat ~/services/sources/state/built-sha                   # what was last built
-git -C ~/dev/sources rev-parse HEAD                      # what the repo is at
-docker inspect -f '{{.State.Status}}' sources            # nginx up?
-curl -sI http://127.0.0.1:8098/ | head -1                # serving locally?
-tailscale serve status                                   # :8098 published?
+~/services/deployd/bin/deployd --status                # what deployd last saw/deployed
+systemctl --user list-timers deployd.timer             # deployd scheduled?
+journalctl --user -u deployd -n 30                     # last poll + deploy runs
+cat ~/services/sources/state/built-sha                 # what was last built
+git -C ~/dev/sources rev-parse HEAD                    # what the repo is at
+docker inspect -f '{{.State.Status}}' sources          # nginx up?
+curl -sI http://127.0.0.1:8098/ | head -1              # serving locally?
+tailscale serve status                                 # :8098 published?
 ```
 
 If `docker` says "permission denied while trying to connect to the docker
@@ -31,13 +32,18 @@ appearing in `tailscale serve status` proves nothing about the site.
 ## Layer 1 — deploys not happening
 
 **A fetch or push landed but the site didn't update.**
-- The poller only runs daily by default — deploy now with
-  `~/services/sources/bin/deploy.sh`, or check the last run:
-  `journalctl --user -u sources-deploy -n 30`.
+- deployd polls every minute — deploy now with
+  `~/services/sources/bin/deploy.sh --force`, or check the last run:
+  `journalctl --user -u deployd -n 30` /
+  `~/services/deployd/bin/deployd --status`. A `.fail` entry in
+  `~/services/deployd/state/` means the last deploy attempt failed and
+  deployd is backing off before retrying.
 - `up to date at <sha>` with an old sha → `built-sha` equals
   `git -C ~/dev/sources rev-parse HEAD`, meaning the repo itself is behind:
-  the fetch commit didn't land (check `journalctl -u sources-fetch`) or the
-  push went to another branch. `.env` `BRANCH` is only documentation here —
+  the fetch commit didn't land (check `journalctl -u sources-fetch`), the
+  push went to another branch, or the fetch committed without pushing
+  (deployd watches the *remote* — a commit that never reaches origin
+  triggers nothing). `.env` `BRANCH` is only documentation here —
   deploy.sh builds HEAD, whatever it is.
 - `note: git pull --ff-only did not apply` in the log → the clone is dirty
   or offline. The build still runs on the local HEAD, so this is a warning,
@@ -45,8 +51,8 @@ appearing in `tailscale serve status` proves nothing about the site.
   `sources-fetch.timer`, so clean it:
   `git -C ~/dev/sources status` (restore or commit the changes; the repo
   docs say develop in a worktree, never this clone).
-- No log entries at all → timer not running:
-  `systemctl --user enable --now sources-deploy.timer`; if the box just
+- No log entries at all → deployd not running:
+  `systemctl --user enable --now deployd.timer`; if the box just
   rebooted and nothing user-level runs, re-check lingering:
   `loginctl show-user $USER -p Linger` → fix with
   `sudo loginctl enable-linger $USER`.
@@ -133,8 +139,8 @@ ls releases/                       # pick the directory to go back to
 ln -sfn releases/<name> current.new && mv -Tf current.new current
 ```
 
-(Any later successful deploy moves `current` again — pin by stopping the
-timer first: `systemctl --user stop sources-deploy.timer`.)
+(Any later successful deploy moves `current` again — pin by stopping
+deployd first: `systemctl --user stop deployd.timer`.)
 
 ## Nuke and pave
 
@@ -150,8 +156,8 @@ SITE_PASSPHRASE='...' ./setup.sh
 ```
 
 `./teardown.sh` alone (what the launcher's Remove runs) unpublishes every
-Serve port that proxies only to `127.0.0.1:8098`, disables
-`sources-deploy.timer`, stops `sources-deploy.service`, and runs
+Serve port that proxies only to `127.0.0.1:8098`, removes the legacy
+`sources-deploy` timer/service if one still exists, and runs
 `docker compose down` (a local `docker-compose.override.yml` is picked up
 the same way `setup.sh`'s `up` picks it up). Files, `.env` and unit files
 stay, so `./setup.sh` brings it back. `--purge` also deletes what

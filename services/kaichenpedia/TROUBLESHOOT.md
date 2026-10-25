@@ -10,17 +10,17 @@ on :8091, and a blank Kuma graph are all the expected state, not a fault.
 Start it from the ntfy panel, the launcher's start button, or
 `docker start kaichenpedia`.
 
-Note that the **deploy timer keeps running while the container is stopped** —
-it pulls from GitHub and rebuilds into `www/current` on schedule (verified:
-it built `c0c8d6e` at 23:58 with the container down since 2026-09-08). So a
+Note that **deployd keeps redeploying while the container is stopped** —
+it pulls from GitHub and rebuilds into `www/current` on every push. So a
 fresh `built-sha` proves the pipeline works and says nothing about whether
 anything is being served.
 
 ## Quick status
 
 ```sh
-systemctl --user list-timers kaichenpedia-deploy.timer   # poller scheduled?
-journalctl --user -u kaichenpedia-deploy -n 30           # last deploy runs
+~/services/deployd/bin/deployd --status                # what deployd last saw/deployed
+systemctl --user list-timers deployd.timer             # deployd scheduled?
+journalctl --user -u deployd -n 30                     # last poll + deploy runs
 cat ~/services/kaichenpedia/state/built-sha              # what was last built
 docker inspect -f '{{.State.Status}}' kaichenpedia       # nginx up?
 curl -sI http://127.0.0.1:8091/ | head -1                # serving locally?
@@ -38,13 +38,16 @@ appearing in `tailscale serve status` proves nothing about the site.
 ## Layer 1 — deploys not happening
 
 **I pushed but the site didn't update.**
-- The poller only runs daily by default — deploy now with
-  `~/services/kaichenpedia/bin/deploy.sh`, or check the last run:
-  `journalctl --user -u kaichenpedia-deploy -n 30`.
+- deployd polls every minute — deploy now with
+  `~/services/kaichenpedia/bin/deploy.sh --force`, or check the last run:
+  `journalctl --user -u deployd -n 30` /
+  `~/services/deployd/bin/deployd --status`. A `.fail` entry in
+  `~/services/deployd/state/` means the last attempt failed and deployd is
+  backing off before retrying.
 - `up to date at <sha>` with an old sha → the fetch isn't seeing your push:
   wrong branch? `.env` `BRANCH` must match what you push to.
-- No log entries at all → timer not running:
-  `systemctl --user enable --now kaichenpedia-deploy.timer`; if the box just
+- No log entries at all → deployd not running:
+  `systemctl --user enable --now deployd.timer`; if the box just
   rebooted and nothing user-level runs, re-check lingering:
   `loginctl show-user $USER -p Linger` → fix with
   `sudo loginctl enable-linger $USER`.
@@ -118,8 +121,8 @@ The previous build stays in `www/prev`:
 cd ~/services/kaichenpedia/www
 mv current bad && mv prev current
 ```
-(Any later successful deploy overwrites the rollback — pin by stopping the
-timer first: `systemctl --user stop kaichenpedia-deploy.timer`.)
+(Any later successful deploy overwrites the rollback — pin by stopping
+deployd first: `systemctl --user stop deployd.timer`.)
 
 ## Nuke and pave
 
@@ -130,8 +133,8 @@ cp ~/services/kaichenpedia/nginx.conf ~/kaichenpedia-nginx.conf.bak   # only if 
 ./setup.sh
 ```
 
-`--purge` unpublishes the Serve port(s) pointing at the wiki, disables and
-stops `kaichenpedia-deploy.timer` then `.service`, runs `docker compose down`,
+`--purge` unpublishes the Serve port(s) pointing at the wiki, removes the
+legacy `kaichenpedia-deploy` timer/service if one still exists, runs `docker compose down`,
 then deletes what setup.sh / deploy.sh made under `SERVICE_HOME` (`repo/`,
 `www/`, `bin/`, `state/`, `nginx.conf`, `.deploy.lock`), the two unit files and
 `.env`. A file you put in `SERVICE_HOME` yourself is kept. Plain `./teardown.sh` (what the launcher's

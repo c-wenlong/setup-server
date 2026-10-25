@@ -2,10 +2,10 @@
 #
 # deploy.sh — rebuild the design-systems docs site if the repo moved.
 #
-# The server is tailnet-only, so GitHub webhooks can't reach it; instead this
-# script runs every POLL_SECONDS (systemd user timer on Linux, launchd on
-# macOS) and exits fast when the repo's HEAD hasn't moved. Also runnable by
-# hand:
+# The server is tailnet-only, so GitHub webhooks can't reach it; instead
+# deployd (services/deployd) polls the remote and re-runs setup.sh when
+# main moves — this script is the rebuild half of that run, and exits fast
+# when the repo's HEAD hasn't moved. Also runnable by hand:
 #
 #   deploy.sh            # build only if HEAD is new
 #   deploy.sh --force    # rebuild even without new commits

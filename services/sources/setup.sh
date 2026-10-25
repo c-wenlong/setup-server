@@ -9,12 +9,12 @@
 #     ~/dev/sources) — the same clone the fetch timers own; the deploy only
 #     reads it and pulls it forward, it never commits there
 #   - encrypted build served by an nginx container binding 127.0.0.1:LOCAL_PORT
-#   - auto-deploy: a poller (systemd user timer / launchd) runs
-#     bin/deploy.sh every POLL_SECONDS (default daily); new commits on the
-#     fetch clone's main go live on the next poll, or immediately via
-#     deploy.sh --force. (GitHub webhooks can't reach a tailnet-only box —
-#     polling is the outbound-only equivalent. The weekly fetch also commits
-#     locally, which the poller picks up the same way.)
+#   - auto-deploy: deployd (services/deployd) polls the repo's remote and
+#     re-runs this script when main moves; new commits go live on its next
+#     tick, or immediately via deploy.sh --force. (Anything pushed to
+#     origin — the weekly fetch included — lands the same way; a commit
+#     that only exists in the local clone does not reach the remote and
+#     so does not trigger a deploy.)
 #   - published tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
 #
 # Usage:
@@ -31,8 +31,9 @@
 # Requirements beyond the repo baseline (curl, Docker, Tailscale): git and
 # uv (the build is `uv run apps/web/build/build_site.py`).
 #
-# Idempotent: re-running refreshes the deploy script + poller and repairs any
-# missing piece; an existing .env and nginx.conf are never overwritten.
+# Idempotent: re-running refreshes the deploy script and repairs any
+# missing piece (and removes the old per-service deploy timer if a host
+# still has one); an existing .env and nginx.conf are never overwritten.
 
 set -euo pipefail
 
@@ -41,7 +42,6 @@ HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 [ -n "${SOURCE_REPO:-}" ] && SOURCE_REPO_SET=1
 SOURCE_REPO="${SOURCE_REPO:-$HOME/dev/sources}"
 BRANCH="${BRANCH:-main}"
-POLL_SECONDS="${POLL_SECONDS:-86400}"   # daily; deploy.sh --force deploys now
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
@@ -116,7 +116,6 @@ SOURCE_REPO=$SOURCE_REPO
 BRANCH=$BRANCH
 LOCAL_PORT=$LOCAL_PORT
 HTTPS_PORT=$HTTPS_PORT
-POLL_SECONDS=$POLL_SECONDS
 SERVICE_HOME=$HOME/services/sources
 UV_BIN=$(dirname "$(command -v uv)")
 PUBLIC_URL=https://$host:$HTTPS_PORT/
@@ -190,66 +189,26 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
-# ------------------------------------------------------------------ poller
+# ------------------------------------------------- legacy poller removal
+# deployd (services/deployd) polls the remote and re-runs this script now;
+# a host installed before the migration still has the per-service timer or
+# LaunchAgent — stop and remove it. teardown.sh deletes the same files.
+UNIT_DIR="$HOME/.config/systemd/user"
+PLIST_LABEL="com.sources.deploy"
+PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 if [ "$OS" = "Linux" ]; then
-  info "Installing systemd user timer (poll every ${POLL_SECONDS}s)"
-  UNIT_DIR="$HOME/.config/systemd/user"
-  mkdir -p "$UNIT_DIR"
-  cat > "$UNIT_DIR/sources-deploy.service" <<EOF
-[Unit]
-Description=sources site deploy (rebuild the encrypted site if the repo moved)
-
-[Service]
-Type=oneshot
-ExecStart=$SERVICE_HOME/bin/deploy.sh
-EOF
-  cat > "$UNIT_DIR/sources-deploy.timer" <<EOF
-[Unit]
-Description=sources site deploy poller (push-to-deploy for a tailnet-only box)
-
-[Timer]
-OnBootSec=90
-OnUnitActiveSec=${POLL_SECONDS}
-AccuracySec=15
-
-[Install]
-WantedBy=timers.target
-EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now sources-deploy.timer >/dev/null 2>&1
-  ok "Timer active: sources-deploy.timer"
-
-  if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = "yes" ]; then
-    ok "Lingering already enabled"
-  else
-    info "Enabling lingering (needs sudo, one time) so the poller runs at boot"
-    sudo loginctl enable-linger "$USER"
-    ok "Lingering enabled"
+  if [ -f "$UNIT_DIR/sources-deploy.timer" ]; then
+    systemctl --user disable --now sources-deploy.timer >/dev/null 2>&1 || true
+    rm -f "$UNIT_DIR/sources-deploy.timer" "$UNIT_DIR/sources-deploy.service"
+    systemctl --user daemon-reload
+    ok "Removed sources-deploy.timer (deployd polls now)"
   fi
 else
-  PLIST="$HOME/Library/LaunchAgents/com.sources.deploy.plist"
-  info "Installing launchd poller (every ${POLL_SECONDS}s)"
-  mkdir -p "$(dirname "$PLIST")" "$HOME/Library/Logs"
-  cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.sources.deploy</string>
-  <key>ProgramArguments</key>
-  <array><string>$SERVICE_HOME/bin/deploy.sh</string></array>
-  <key>StartInterval</key><integer>$POLL_SECONDS</integer>
-  <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/sources-deploy.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/sources-deploy.log</string>
-</dict>
-</plist>
-EOF
-  launchctl bootout "gui/$(id -u)/com.sources.deploy" 2>/dev/null || true
-  # teardown.sh disables the label so login does not reload it; undo that.
-  launchctl enable "gui/$(id -u)/com.sources.deploy" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  ok "LaunchAgent loaded (logs: ~/Library/Logs/sources-deploy.log)"
+  launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+  if [ -f "$PLIST" ]; then
+    rm -f "$PLIST"
+    ok "Removed the $PLIST_LABEL LaunchAgent (deployd polls now)"
+  fi
 fi
 
 # ------------------------------------------------------- tailscale serve
@@ -280,14 +239,10 @@ echo
 printf '\033[1;32mDone.\033[0m The sources site is at \033[1m%s\033[0m (tailnet only).\n' "$url"
 echo "Unlock it with the same passphrase as the GitHub Pages site."
 echo
-echo "Auto-deploy: commits on $SOURCE_REPO ($BRANCH) are picked up by the poller"
-echo "(every ${POLL_SECONDS}s) — including the weekly fetch commit."
+echo "Auto-deploy: deployd re-runs this when $SOURCE_REPO ($BRANCH) moves"
+echo "(services/deployd polls every minute; ~/services/deployd/bin/deployd --status)."
 echo "Manage:"
 echo "  $SERVICE_HOME/bin/deploy.sh --force        # rebuild now"
-if [ "$OS" = "Linux" ]; then
-  echo "  systemctl --user list-timers sources-deploy.timer"
-  echo "  journalctl --user -u sources-deploy -n 50   # deploy logs"
-else
-  echo "  tail -f ~/Library/Logs/sources-deploy.log"
-fi
+echo "  journalctl --user -u deployd -n 50         # poll + deploy logs (Linux)"
+echo "  tail -f ~/Library/Logs/deployd.log         # macOS"
 echo "  docker compose --project-directory $SERVICE_DIR ps|logs|restart"

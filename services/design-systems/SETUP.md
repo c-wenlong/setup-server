@@ -20,13 +20,13 @@ immediately with `~/services/design-systems/bin/deploy.sh --force`.
         push from any device
                │
                ▼
-        GitHub (private repo) ── outbound git pull --ff-only + lfs pull,
-               │                    daily (POLL_SECONDS)
+        GitHub (private repo) ◄─ deployd polls ls-remote every minute
+               │                    (services/deployd)
                ▼                          │
         ~/dev/design-systems ◄────────────┘
-        (the working clone; the         design-systems-deploy.timer ──► bin/deploy.sh
-         deploy only reads it            (systemd user timer;            │ 1. git pull --ff-only
-          and pulls it forward,           launchd on macOS)              │    (best effort)
+        (the working clone; the         deployd ──► setup.sh ──► bin/deploy.sh
+         deploy only reads it            (one poller for all               │ 1. git pull --ff-only
+          and pulls it forward,           deploy blocks)                   │    (best effort)
           never commits)                                               │ 2. git lfs pull (screenshots
           ▲                                                            │    are LFS objects)
           │                                                            │ 3. python3 tools/catalog.py build
@@ -84,9 +84,10 @@ the browser, nothing breaks.
 
 ## Why polling, not a webhook
 
-The box is tailnet-only, so GitHub can't reach it. Polling is outbound-only
-and free; worst-case latency is `POLL_SECONDS` (daily by default), and
-`deploy.sh --force` skips the wait.
+The box is tailnet-only, so GitHub can't reach it. deployd
+(`services/deployd`) resolves `main` with `git ls-remote` every minute and
+re-runs this service's `setup.sh` when it moves — `deploy.sh --force`
+skips the wait entirely.
 
 ## Security model
 
@@ -139,8 +140,9 @@ and free; worst-case latency is `POLL_SECONDS` (daily by default), and
    Bootstraps the repo's `.venv` (the `markdown` package the site build needs) if missing.
 6. `docker compose up -d` (nginx, `restart: unless-stopped`) + local health
    check on `/gallery/`.
-7. Installs the poller: systemd user timer (`OnUnitActiveSec=POLL_SECONDS`)
-   + lingering on Linux; a launchd `StartInterval` agent on macOS.
+7. Removes the old per-service `design-systems-deploy` timer / LaunchAgent
+   if a host still has one — deployd (`services/deployd`) owns scheduling
+   now.
 8. Publishes via `tailscale serve --bg --https=8108` and verifies
    `/gallery/` end-to-end.
 
@@ -151,18 +153,17 @@ cd services/design-systems && ./setup.sh
 ```
 
 Overrides: `LOCAL_PORT` / `HTTPS_PORT` (default 8108), `SOURCE_REPO`
-(default `~/dev/design-systems`), `BRANCH` (main), `POLL_SECONDS`
-(86400 = daily).
+(default `~/dev/design-systems`), `BRANCH` (main).
 
 ## Ops
 
 ```sh
 ~/services/design-systems/bin/deploy.sh --force           # rebuild right now
-journalctl --user -u design-systems-deploy -n 50          # deploy history
-systemctl --user list-timers design-systems-deploy.timer
+~/services/deployd/bin/deployd --status                   # what deployd last saw/deployed
+journalctl --user -u deployd -n 50                        # poll + deploy history (macOS: ~/Library/Logs/deployd.log)
 docker compose --project-directory ~/dev/setup-server/services/design-systems ps|logs|restart
 tailscale serve status
-./teardown.sh             # Remove: unpublish, stop poller + container; keeps state, .env, your clone
+./teardown.sh             # Remove: unpublish + stop container; keeps state, .env, your clone
 ./teardown.sh --purge     # also delete ~/services/design-systems state, the unit files and .env (asks first)
 ```
 
@@ -174,7 +175,7 @@ A failed build leaves `www/current` pointing at the last release — a
 broken commit never takes the site down, and the repoint itself is one
 rename (no gap where nginx has no root). The previous release stays in
 `www/releases/` for rollback. If `git pull` fails (dirty tree, offline,
-diverged) the poller builds the local HEAD instead and notes it in the
+diverged) the deploy builds the local HEAD instead and notes it in the
 log.
 
 The repo-path aliases (`/systems/` etc.) are served live from the

@@ -13,11 +13,11 @@ git push (any device)
         │
         ▼
    GitHub (private repo)
-        ▲  outbound git fetch, daily (POLL_SECONDS)
+        ▲  deployd polls ls-remote every minute (services/deployd)
         │
-kaichenpedia-deploy.timer ──► bin/deploy.sh
-  (systemd user timer;          │ 1. git reset --hard origin/main
-   launchd on macOS)            │ 2. python3 scripts/sync_wiki_to_site.py   (wiki/ -> site/content/)
+deployd ──► setup.sh ──► bin/deploy.sh
+  (one poller for all             │ 1. git reset --hard origin/main
+   deploy blocks)                 │ 2. python3 scripts/sync_wiki_to_site.py   (wiki/ -> site/content/)
                                 │ 3. npm ci            (only when package-lock changes)
                                 │ 4. npx quartz build  (-> site/public/)
                                 │ 5. atomic swap        www/next -> www/current
@@ -39,7 +39,7 @@ webhooks can't reach it. The push-to-deploy options were:
 
 | Option | Verdict |
 |---|---|
-| **Poll from the box** (this design) | ✅ Outbound-only, zero new attack surface, no GitHub-side config. Worst-case latency = `POLL_SECONDS` (default daily; `deploy.sh --force` deploys now). A no-change poll is one cheap `git fetch`. |
+| **Poll from the box** (this design) | ✅ Outbound-only, zero new attack surface, no GitHub-side config. Worst-case latency ≈ a minute (deployd's tick; `deploy.sh --force` deploys now). A no-change poll is one cheap `git ls-remote`. |
 | GitHub Actions self-hosted runner | True push-trigger (runner long-polls GitHub), but adds a persistent runner daemon with a repo token plus a workflow in the wiki repo. The upgrade path if polling ever feels slow. |
 | Webhook via Tailscale Funnel | ❌ Funnel exposes an endpoint to the public internet — violates this repo's tailnet-only security model. |
 | Webhook relay (smee.io, Cloudflare Tunnel) | ❌ Third-party dependency for a problem polling solves for free. |
@@ -48,8 +48,9 @@ webhooks can't reach it. The push-to-deploy options were:
 
 - nginx binds `127.0.0.1:8091` only; HTTPS + device auth come from Tailscale.
 - The site is static files — no app code, no database, no accounts.
-- `.env` holds no secrets (paths + ports only). Repo auth for the poller
-  comes from git's existing credential helper (`gh auth setup-git`).
+- `.env` holds no secrets (paths + ports only). Repo auth for deployd's
+  polling and the deploy clone's fetch comes from git's existing
+  credential helper (`gh auth setup-git`).
 - The deploy clone (`~/services/kaichenpedia/repo`) is machine-managed and
   hard-reset on every deploy — **never edit it by hand**; a human working
   copy belongs in `~/dev` per the filesystem layout in `DIRECTORY.md`.
@@ -77,8 +78,9 @@ webhooks can't reach it. The push-to-deploy options were:
 5. Runs the initial deploy: clone, sync, `npm ci`, `quartz build`, swap.
 6. `docker compose up -d` (nginx, `restart: unless-stopped`) + local health
    check.
-7. Installs the poller: systemd user timer (`OnUnitActiveSec=POLL_SECONDS`) +
-   lingering on Linux; a launchd `StartInterval` agent on macOS.
+7. Removes the old per-service `kaichenpedia-deploy` timer / LaunchAgent
+   if a host still has one — deployd (`services/deployd`) owns scheduling
+   now.
 8. Publishes via `tailscale serve --bg --https=8091` and verifies
    end-to-end.
 
@@ -89,17 +91,17 @@ cd services/kaichenpedia && ./setup.sh
 ```
 
 Overrides: `LOCAL_PORT` / `HTTPS_PORT` (default 8091), `REPO_URL`, `BRANCH`
-(main), `POLL_SECONDS` (86400 = daily).
+(main).
 
 ## Ops
 
 ```sh
 ~/services/kaichenpedia/bin/deploy.sh --force        # rebuild right now
-journalctl --user -u kaichenpedia-deploy -n 50       # deploy history
-systemctl --user list-timers kaichenpedia-deploy.timer
+~/services/deployd/bin/deployd --status              # what deployd last saw/deployed
+journalctl --user -u deployd -n 50                   # poll + deploy history (macOS: ~/Library/Logs/deployd.log)
 docker compose --project-directory ~/dev/setup-server/services/kaichenpedia ps|logs|restart
 tailscale serve status
-./teardown.sh               # Remove: unpublish, stop poller + container; keeps clone, site, .env
+./teardown.sh               # Remove: unpublish + stop container; keeps clone, site, .env
 ./teardown.sh --purge       # also delete the clone, site, units and .env (GitHub stays canonical)
 ```
 

@@ -13,11 +13,9 @@
 #     /catalog.json, /README.md) straight from a read-only mount of the
 #     checkout — the same allowlist the repo's `make serve` answers, so the
 #     ~300 MB of LFS screenshots are never copied into a release
-#   - auto-deploy: a poller (systemd user timer / launchd) runs
-#     bin/deploy.sh every POLL_SECONDS (default daily); new commits on the
-#     clone's main go live on the next poll, or immediately via
-#     deploy.sh --force. (GitHub webhooks can't reach a tailnet-only box —
-#     polling is the outbound-only equivalent.)
+#   - auto-deploy: deployd (services/deployd) polls the repo's remote and
+#     re-runs this script when main moves; new commits go live on its next
+#     tick, or immediately via bin/deploy.sh --force.
 #   - published tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
 #
 # Usage:
@@ -34,8 +32,9 @@
 # python3 (the gallery/scorecard generators are stdlib-only; Pillow is used
 # for thumbnails when present) and uv (for the site builder's venv).
 #
-# Idempotent: re-running refreshes the deploy script + poller and repairs any
-# missing piece; an existing .env and nginx.conf are never overwritten.
+# Idempotent: re-running refreshes the deploy script and repairs any
+# missing piece (and removes the old per-service deploy timer if a host
+# still has one); an existing .env and nginx.conf are never overwritten.
 
 set -euo pipefail
 
@@ -44,7 +43,6 @@ HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 [ -n "${SOURCE_REPO:-}" ] && SOURCE_REPO_SET=1
 SOURCE_REPO="${SOURCE_REPO:-$HOME/dev/design-systems}"
 BRANCH="${BRANCH:-main}"
-POLL_SECONDS="${POLL_SECONDS:-86400}"   # daily; deploy.sh --force deploys now
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
@@ -145,7 +143,6 @@ else
     printf 'BRANCH=%q\n' "$BRANCH"
     printf 'LOCAL_PORT=%q\n' "$LOCAL_PORT"
     printf 'HTTPS_PORT=%q\n' "$HTTPS_PORT"
-    printf 'POLL_SECONDS=%q\n' "$POLL_SECONDS"
     printf 'SERVICE_HOME=%q\n' "$SERVICE_HOME"
     printf 'UV_BIN=%q\n' "$UV_BIN"
     printf 'GIT_LFS_BIN=%q\n' "$GIT_LFS_BIN"
@@ -273,66 +270,26 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
-# ------------------------------------------------------------------ poller
+# ------------------------------------------------- legacy poller removal
+# deployd (services/deployd) polls the remote and re-runs this script now;
+# a host installed before the migration still has the per-service timer or
+# LaunchAgent — stop and remove it. teardown.sh deletes the same files.
+UNIT_DIR="$HOME/.config/systemd/user"
+PLIST_LABEL="com.design-systems.deploy"
+PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 if [ "$OS" = "Linux" ]; then
-  info "Installing systemd user timer (poll every ${POLL_SECONDS}s)"
-  UNIT_DIR="$HOME/.config/systemd/user"
-  mkdir -p "$UNIT_DIR"
-  cat > "$UNIT_DIR/design-systems-deploy.service" <<EOF
-[Unit]
-Description=design-systems site deploy (rebuild the docs site if the repo moved)
-
-[Service]
-Type=oneshot
-ExecStart=$SERVICE_HOME/bin/deploy.sh
-EOF
-  cat > "$UNIT_DIR/design-systems-deploy.timer" <<EOF
-[Unit]
-Description=design-systems site deploy poller (push-to-deploy for a tailnet-only box)
-
-[Timer]
-OnBootSec=90
-OnUnitActiveSec=${POLL_SECONDS}
-AccuracySec=15
-
-[Install]
-WantedBy=timers.target
-EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now design-systems-deploy.timer >/dev/null 2>&1
-  ok "Timer active: design-systems-deploy.timer"
-
-  if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = "yes" ]; then
-    ok "Lingering already enabled"
-  else
-    info "Enabling lingering (needs sudo, one time) so the poller runs at boot"
-    sudo loginctl enable-linger "$USER"
-    ok "Lingering enabled"
+  if [ -f "$UNIT_DIR/design-systems-deploy.timer" ]; then
+    systemctl --user disable --now design-systems-deploy.timer >/dev/null 2>&1 || true
+    rm -f "$UNIT_DIR/design-systems-deploy.timer" "$UNIT_DIR/design-systems-deploy.service"
+    systemctl --user daemon-reload
+    ok "Removed design-systems-deploy.timer (deployd polls now)"
   fi
 else
-  PLIST="$HOME/Library/LaunchAgents/com.design-systems.deploy.plist"
-  info "Installing launchd poller (every ${POLL_SECONDS}s)"
-  mkdir -p "$(dirname "$PLIST")" "$HOME/Library/Logs"
-  cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.design-systems.deploy</string>
-  <key>ProgramArguments</key>
-  <array><string>$SERVICE_HOME/bin/deploy.sh</string></array>
-  <key>StartInterval</key><integer>$POLL_SECONDS</integer>
-  <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/design-systems-deploy.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/design-systems-deploy.log</string>
-</dict>
-</plist>
-EOF
-  launchctl bootout "gui/$(id -u)/com.design-systems.deploy" 2>/dev/null || true
-  # teardown.sh disables the label so login does not reload it; undo that.
-  launchctl enable "gui/$(id -u)/com.design-systems.deploy" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  ok "LaunchAgent loaded (logs: ~/Library/Logs/design-systems-deploy.log)"
+  launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+  if [ -f "$PLIST" ]; then
+    rm -f "$PLIST"
+    ok "Removed the $PLIST_LABEL LaunchAgent (deployd polls now)"
+  fi
 fi
 
 # ------------------------------------------------------- tailscale serve
@@ -362,14 +319,10 @@ fi
 echo
 printf '\033[1;32mDone.\033[0m The design-systems gallery is at \033[1m%s/gallery/\033[0m (tailnet only).\n' "$url"
 echo
-echo "Auto-deploy: commits on $SOURCE_REPO ($BRANCH) are picked up by the poller"
-echo "(every ${POLL_SECONDS}s)."
+echo "Auto-deploy: deployd re-runs this when $SOURCE_REPO ($BRANCH) moves"
+echo "(services/deployd polls every minute; ~/services/deployd/bin/deployd --status)."
 echo "Manage:"
 echo "  $SERVICE_HOME/bin/deploy.sh --force        # rebuild now"
-if [ "$OS" = "Linux" ]; then
-  echo "  systemctl --user list-timers design-systems-deploy.timer"
-  echo "  journalctl --user -u design-systems-deploy -n 50   # deploy logs"
-else
-  echo "  tail -f ~/Library/Logs/design-systems-deploy.log"
-fi
+echo "  journalctl --user -u deployd -n 50         # poll + deploy logs (Linux)"
+echo "  tail -f ~/Library/Logs/deployd.log         # macOS"
 echo "  docker compose --project-directory $SERVICE_DIR ps|logs|restart"
