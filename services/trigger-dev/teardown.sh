@@ -141,6 +141,59 @@ env_lint() {
     }' "$ENV_FILE")"
   [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
 }
+
+# Is a purge target there? `[ -e ]` is false both when it is gone and when a
+# folder on the way (e.g. a root-owned 0700 dir) cannot be searched, and only
+# the first means "nothing to delete". So walk down from ~/services: a
+# component absent under a searchable parent means gone (DIR_STATE=missing);
+# one that exists but cannot be searched hides the target (DIR_STATE=hidden,
+# HIDDEN_DIR that folder, HIDDEN_REST the path below it). $2 must already be
+# checked to sit inside ~/services/ with no `..` and no trailing slash.
+DIR_STATE=""
+HIDDEN_DIR=""
+HIDDEN_REST=""
+dir_state() {
+  local var="$1" target="$2" p="$HOME/services" rest
+  rest="${target#"$HOME/services/"}"
+  DIR_STATE="present"; HIDDEN_DIR=""; HIDDEN_REST=""
+  while :; do
+    if [ ! -e "$p" ]; then
+      # A symlink that does not resolve may be dangling or point into a
+      # folder this user cannot search; the two look the same from here.
+      [ ! -L "$p" ] || die "$p is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+      DIR_STATE="missing"; return 0
+    fi
+    [ -d "$p" ] || die "$p (on the way to $var=$target) is not a directory, refusing. Nothing was changed."
+    if [ ! -x "$p" ]; then DIR_STATE="hidden"; HIDDEN_DIR="$p"; HIDDEN_REST="$rest"; return 0; fi
+    case "$rest" in */*) ;; *) break ;; esac
+    p="$p/${rest%%/*}"
+    rest="${rest#*/}"
+  done
+  if [ ! -e "$target" ]; then
+    [ ! -L "$target" ] || die "$target is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+    DIR_STATE="missing"
+  fi
+}
+
+# A purge target behind a folder this user cannot search: the host cannot
+# even see it, so a throwaway container mounts that folder ($1, already
+# through real_dir and strictly inside ~/services/$NAME) and deletes only the
+# path below it ($2). A symlink anywhere on that path is refused (it would
+# resolve inside the container, not on this box); the path must be gone
+# afterwards, and the folders emptied on the way go too. $3 is the image,
+# any further arguments are extra `docker run` options. Non-zero on failure.
+hidden_rm() {
+  local base="$1" rest="$2" image="$3"
+  shift 3
+  docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
+    -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
+        d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
+    sh "$rest" >/dev/null 2>&1 || return 1
+  # The emptied folder itself: removing it needs only its parent's
+  # permissions, and rmdir never removes anything that is not empty.
+  rmdir -- "$base" 2>/dev/null || true
+}
 env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric (got: $LOCAL_PORT)";; esac
@@ -158,6 +211,14 @@ for v in COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES; d
   [ -z "$(env_get "$v")" ] && [ -z "$(printenv "$v" 2>/dev/null || true)" ] \
     || die "$v is set (in $ENV_FILE or the shell); setup.sh never sets it, so teardown will not guess which stack or volumes it means. Unset it and re-run."
 done
+
+# The compose project name, the way Compose derives it: the top-level `name:`
+# in docker-compose.yml (trigger-dev), else this directory's name, lowercased
+# with anything but [a-z0-9_-] dropped. Used to check what a failed `down` left.
+PROJECT="$(sed -n 's/^name:[[:space:]]*//p' "$SERVICE_DIR/docker-compose.yml" | head -1)"
+PROJECT="${PROJECT%%#*}"
+PROJECT="$(printf '%s' "${PROJECT:-$(basename "$SERVICE_DIR")}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[-_]*//')"
+[ -n "$PROJECT" ] || die "Cannot tell the compose project name for $SERVICE_DIR. Nothing was changed."
 
 # Read Serve before changing anything: if it cannot be read, an empty answer
 # would look like "already off" and the mapping would come back with the
@@ -201,10 +262,13 @@ fi
 
 # One purge target from .env. Sets PT to its real path, or to "" when it is
 # not on disk. Dies before anything changes unless it is
-# ~/services/trigger-dev itself or inside it. $3 is "dir" or "file".
+# ~/services/trigger-dev itself or inside it. $3 is "dir" or "file". A target
+# behind a folder this user cannot search sets PT_BASE (that folder, resolved,
+# strictly inside ~/services/trigger-dev) and PT_REST (the path below it)
+# instead, for the cleanup container; its kind cannot be checked from here.
 purge_target() {
   local var="$1" p="$2" kind="$3" root
-  PT=""
+  PT=""; PT_BASE=""; PT_REST=""
   [ -n "$p" ] || die "$var is missing from $ENV_FILE — refusing to guess what to delete."
   while :; do case "$p" in */) p="${p%/}" ;; *) break ;; esac; done
   case "$p" in *..*) die "$var=$p contains '..' — refusing." ;; esac
@@ -212,9 +276,24 @@ purge_target() {
     "$HOME/services/"?*) ;;
     *) die "$var=$p is not inside $HOME/services/ — refusing to delete it. Remove it by hand if you are sure." ;;
   esac
+  # `[ -e ]` alone would take a target behind an unsearchable folder for gone.
+  dir_state "$var" "$p"
+  if [ "$DIR_STATE" = "hidden" ]; then
+    # The cleanup container mounts the unsearchable folder itself (real_dir
+    # resolves it without entering it) and deletes only the path below it,
+    # so that folder must sit strictly inside ~/services/trigger-dev.
+    PT_BASE="$(real_dir "$HIDDEN_DIR")" \
+      || die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME. Run: sudo rm -rf $p   then ./teardown.sh --purge again. Nothing was changed."
+    root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
+    case "$PT_BASE" in
+      "$root/$NAME"/?*) ;;
+      *) die "$HIDDEN_DIR cannot be searched, so teardown cannot reach $var=$p. Run: sudo rm -rf $p   then ./teardown.sh --purge again. Nothing was changed." ;;
+    esac
+    PT_REST="$HIDDEN_REST"
+  fi
   # And where it really is, symlinks and all: it must be ~/services/trigger-dev
   # or inside it, never ~/services itself, another service, or anything above.
-  if [ -e "$p" ] || [ -L "$p" ]; then
+  if [ "$DIR_STATE" = "present" ]; then
     if [ "$kind" = "dir" ]; then
       [ -d "$p" ] || die "$var=$p is not a directory — refusing."
     else
@@ -234,19 +313,35 @@ purge_target() {
 DATA_VARS="TRIGGER_POSTGRES TRIGGER_CLICKHOUSE TRIGGER_REDIS TRIGGER_MINIO TRIGGER_REGISTRY TRIGGER_SHARED"
 PURGE_DIRS=""
 PURGE_FILES=""
+# Targets behind an unsearchable folder: two lines each, the folder then the
+# path below it (neither can hold a newline: .env values are single lines and
+# real_dir refuses one). PURGE_HIDDEN_SHOW is the joined path, for messages.
+PURGE_HIDDEN=""
+PURGE_HIDDEN_SHOW=""
 PG_IMAGE=""
+add_hidden() {
+  [ -n "$PT_BASE" ] || return 0
+  PURGE_HIDDEN="$PURGE_HIDDEN$PT_BASE
+$PT_REST
+"
+  PURGE_HIDDEN_SHOW="$PURGE_HIDDEN_SHOW$PT_BASE/$PT_REST
+"
+}
 if [ "$PURGE" -eq 1 ]; then
   for var in $DATA_VARS; do
     purge_target "$var" "$(env_get "$var")" dir
     [ -z "$PT" ] || PURGE_DIRS="$PURGE_DIRS$PT
 "
+    add_hidden
   done
   purge_target TRIGGER_REGISTRY_AUTH "$(env_get TRIGGER_REGISTRY_AUTH)" file
   [ -z "$PT" ] || PURGE_FILES="$PURGE_FILES$PT
 "
+  add_hidden
   purge_target LOGIN_MARKER "$LOGIN_MARKER" file
   [ -z "$PT" ] || PURGE_FILES="$PURGE_FILES$PT
 "
+  add_hidden
   # Postgres, ClickHouse, Redis, MinIO and the registry write their files as
   # container users, so a plain rm usually cannot empty those dirs. The
   # cleanup runs as root in the Postgres image compose already pulled (never a
@@ -257,8 +352,9 @@ if [ "$PURGE" -eq 1 ]; then
   PG_IMAGE="postgres:$pg_tag"
   warn "--purge deletes the database, ClickHouse, Redis, MinIO (task payloads), the registry"
   warn "  (every deployed task image) and the worker token. Nothing backs them up. On disk:"
-  if [ -n "$PURGE_DIRS$PURGE_FILES" ]; then
+  if [ -n "$PURGE_DIRS$PURGE_FILES$PURGE_HIDDEN" ]; then
     printf '%s%s' "$PURGE_DIRS" "$PURGE_FILES" | sed 's/^/     /'
+    [ -z "$PURGE_HIDDEN_SHOW" ] || printf '%s' "$PURGE_HIDDEN_SHOW" | sed 's/^/     /; s/$/   (behind a folder this user cannot search)/'
   else
     warn "  (nothing: the data is already gone)"
   fi
@@ -293,6 +389,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
   port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -301,18 +398,43 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+# A shared port left on still routes here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
 # One plain `down` for every part: docker-compose.yml has no profiles and no
 # named volumes (all state is bind-mounted), so the purge path needs no -v.
+# `down` also fails when a container outside the project is still attached
+# to a trigger-* network: a task run the supervisor started after the check
+# above. That alone is no reason to stop halfway: check this project's own
+# containers are gone and a trigger-* network really is held by someone
+# else, warn naming them, and go on. Anything else dies as before, with data
+# and .env untouched.
+stack_down() {
+  local left net users busy=""
+  docker compose --project-directory "$SERVICE_DIR" down && return 0
+  left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" \
+    || die "docker compose down failed and Docker cannot list what is left. Data and .env are untouched; re-run ./teardown.sh."
+  [ -z "$left" ] || die "docker compose down failed and Trigger.dev's own containers are still there. Data and .env are untouched; re-run ./teardown.sh."
+  for net in $NETWORKS; do
+    users="$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$net" 2>/dev/null)" || continue
+    users="${users% }"
+    [ -z "$users" ] || busy="$busy$net ($users); "
+  done
+  [ -n "$busy" ] || die "docker compose down failed (not because a trigger-* network is still in use). Data and .env are untouched; re-run ./teardown.sh."
+  warn "Docker kept network(s) still used by containers outside this stack (task runs started since the check?): ${busy%; }. They go when those containers do: docker ps -a --filter network=trigger-webapp"
+}
 info "Stopping and removing the containers (docker compose down)"
-docker compose --project-directory "$SERVICE_DIR" down \
-  || die "docker compose down failed. If it could not remove a trigger-* network, a task run started since the check is attached: docker ps -a --filter network=trigger-webapp — remove it and re-run ./teardown.sh. Data and .env are untouched."
+stack_down
 ok "Containers and trigger-* networks removed; data under $HOME/services/$NAME kept"
 
 # ---------------------------------------------------------------- purge
@@ -346,6 +468,25 @@ EOF_PURGE_DIRS
   done <<EOF_PURGE_FILES
 $PURGE_FILES
 EOF_PURGE_FILES
+  # Targets behind an unsearchable folder go through that folder, mounted in
+  # the same Postgres image as root. Two may share one folder: the first
+  # cleanup removes the folder once it is empty, and a folder that is gone
+  # already (it went with an earlier target) is never mounted, since Docker
+  # would create a missing source as root. Its parent is searchable, so the
+  # test is reliable, and the path below it is gone too.
+  while IFS= read -r base && IFS= read -r rest; do
+    [ -n "$base" ] || continue
+    if [ ! -e "$base" ] && [ ! -L "$base" ]; then
+      ok "$base/$rest is already gone"
+      continue
+    fi
+    info "$base cannot be searched by this user; deleting $base/$rest with $PG_IMAGE"
+    hidden_rm "$base" "$rest" "$PG_IMAGE" --user 0 </dev/null \
+      || die "Could not delete $base/$rest through $base. Run: sudo rm -rf $base/$rest   then ./teardown.sh --purge again. .env was kept."
+    ok "Deleted $base/$rest"
+  done <<EOF_PURGE_HIDDEN
+$PURGE_HIDDEN
+EOF_PURGE_HIDDEN
   # setup.sh makes the parent of registry/data and of auth.htpasswd
   # (~/services/trigger-dev/registry). rmdir only removes an empty one, and
   # only below ~/services/trigger-dev.

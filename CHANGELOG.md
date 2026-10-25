@@ -10,6 +10,20 @@ first, dated by merge.
 
 ### Fixed
 
+- **teardown.sh hardening across the merged scripts.** `--purge` no
+  longer reads a data dir behind a folder this user cannot search (a
+  root-owned 0700 parent) as already gone and then deletes `.env` anyway.
+  A new `dir_state` check walks down from `~/services`. Where the script has
+  a cleanup container, it deletes the hidden path by mounting that folder
+  (which must sit strictly inside `~/services/<service>`). Otherwise it
+  stops before any change and names the `sudo rm -rf` to run. A symlink it
+  cannot follow is refused the same way. seafile and trigger-dev now treat a
+  `docker compose down` that fails only because outside containers still use
+  their network (seafile-net add-ons, trigger-dev task runs) the way coolify
+  does: they check their own containers are gone, warn, and carry on. Every
+  teardown now says how many shared Serve ports still route to the service,
+  instead of "already off", when it leaves them on.
+
 - **coolify setup.sh no longer breaks the last line of
   `~/.ssh/authorized_keys`.** When that file did not end in a newline,
   the Coolify key was glued onto the user's last key, breaking both. It now

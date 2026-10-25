@@ -374,11 +374,19 @@ EOF
   cat >> "$STATE_DIR/served" <<EOF
 443 http://127.0.0.1:8080
 EOF
+  # and one shared with it: this service on a path next to another handler
+  cat >> "$STATE_DIR/served" <<EOF
+4443 http://127.0.0.1:8080
+4443 http://127.0.0.1:3001 /webui
+EOF
   run_teardown
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ":3001 off"                   calls_have "serve --https=3001 off"
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "other :443 untouched"        no_call "https=443 off"
+  check "shared :4443 left on"        no_call "https=4443 off"
+  check "warns about the shared port" out_has "HTTPS :4443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:3001 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -554,6 +562,109 @@ test_teardown_purge_root_owned() {
   teardown
 }
 
+# WEBUI_VOLUME under a folder this user cannot search (a root-owned 0700
+# storage/, faked with chmod 000): `[ -e ]` cannot see the data, which must
+# not read as "already gone" while .env is deleted. The app image mounts
+# that folder and deletes only the path below it.
+hide_data_under_storage() {
+  local st="$HOME/services/open-webui/storage"
+  mkdir -p "$st"
+  mv "$(data_dir)" "$st/data"
+  sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+}
+unhide_storage() {
+  chmod u+rwx "$HOME/services" 2>/dev/null
+  chmod -R u+rwX "$HOME/services/open-webui" 2>/dev/null
+}
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: data behind an unsearchable folder is deleted, not taken as gone"
+  local st
+  deployed
+  st="$HOME/services/open-webui/storage"
+  hide_data_under_storage
+  run_teardown --purge "open-webui"
+  unhide_storage
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "mounted the unsearchable folder" grep -q -- "-v $st:/x" "$STATE_DIR/cleanup_run"
+  check "used the app image"          grep -q "ghcr.io/open-webui/open-webui:main" "$STATE_DIR/cleanup_run"
+  check "never pulled for it"         grep -q "pull never" "$STATE_DIR/cleanup_run"
+  check "no sudo"                     no_call "^sudo"
+  check "data gone"                   [ ! -e "$st/data" ]
+  check "emptied folder gone"         [ ! -e "$st" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "state dir removed"           [ ! -e "$HOME/services/open-webui" ]
+  check "ollama models kept"          [ -f "$HOME/.ollama/models/m" ]
+  teardown
+  deployed
+  st="$HOME/services/open-webui/storage"
+  hide_data_under_storage
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "open-webui"
+  unhide_storage
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/data"
+  check "  never says deleted"        bash -c '! grep -q "Deleted" <<<"$1"' _ "$OUT"
+  check "  data kept"                 [ -f "$st/data/webui.db" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  st="$HOME/services/open-webui/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/data"
+  sed -i.bak "s#^WEBUI_VOLUME=.*#WEBUI_VOLUME=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "open-webui"
+  unhide_storage
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/open-webui itself unsearchable: not strictly inside it, so
+  # no mount; stop before anything changes and name the sudo command.
+  deployed
+  chmod 000 "$HOME/services/open-webui"
+  run_teardown --purge "open-webui"
+  unhide_storage
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $(data_dir)"
+  check "  no cleanup container"      [ ! -f "$STATE_DIR/cleanup_run" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  serve untouched"           no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  data kept"                 [ -f "$(data_dir)/webui.db" ]
+  teardown
+  # ~/services itself unsearchable: same, nothing changes.
+  deployed
+  chmod 000 "$HOME/services"
+  run_teardown --purge "open-webui"
+  unhide_storage
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  data kept"                 [ -f "$(data_dir)/webui.db" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/served" <<EOF
+443 http://127.0.0.1:8080
+443 http://127.0.0.1:3001 /webui
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    bash -c '! grep -q "already off" <<<"$1"' _ "$OUT"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:3001 (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
@@ -578,6 +689,8 @@ test_teardown_serve_status_fails
 test_teardown_quoted_env
 test_teardown_purge_trailing_slashes
 test_teardown_purge_missing_data_dir
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 if [ "${1:-}" = "--live" ]; then
   echo

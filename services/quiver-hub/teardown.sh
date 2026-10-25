@@ -252,6 +252,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
   port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -260,11 +261,17 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+# A shared port left on still routes here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
 if [ -n "$others" ]; then

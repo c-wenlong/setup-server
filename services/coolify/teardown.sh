@@ -149,6 +149,59 @@ env_lint() {
     }' "$ENV_FILE")"
   [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
 }
+
+# Is a purge target there? `[ -e ]` is false both when it is gone and when a
+# folder on the way (e.g. a root-owned 0700 dir) cannot be searched, and only
+# the first means "nothing to delete". So walk down from ~/services: a
+# component absent under a searchable parent means gone (DIR_STATE=missing);
+# one that exists but cannot be searched hides the target (DIR_STATE=hidden,
+# HIDDEN_DIR that folder, HIDDEN_REST the path below it). $2 must already be
+# checked to sit inside ~/services/ with no `..` and no trailing slash.
+DIR_STATE=""
+HIDDEN_DIR=""
+HIDDEN_REST=""
+dir_state() {
+  local var="$1" target="$2" p="$HOME/services" rest
+  rest="${target#"$HOME/services/"}"
+  DIR_STATE="present"; HIDDEN_DIR=""; HIDDEN_REST=""
+  while :; do
+    if [ ! -e "$p" ]; then
+      # A symlink that does not resolve may be dangling or point into a
+      # folder this user cannot search; the two look the same from here.
+      [ ! -L "$p" ] || die "$p is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+      DIR_STATE="missing"; return 0
+    fi
+    [ -d "$p" ] || die "$p (on the way to $var=$target) is not a directory, refusing. Nothing was changed."
+    if [ ! -x "$p" ]; then DIR_STATE="hidden"; HIDDEN_DIR="$p"; HIDDEN_REST="$rest"; return 0; fi
+    case "$rest" in */*) ;; *) break ;; esac
+    p="$p/${rest%%/*}"
+    rest="${rest#*/}"
+  done
+  if [ ! -e "$target" ]; then
+    [ ! -L "$target" ] || die "$target is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+    DIR_STATE="missing"
+  fi
+}
+
+# A purge target behind a folder this user cannot search: the host cannot
+# even see it, so a throwaway container mounts that folder ($1, already
+# through real_dir and strictly inside ~/services/$NAME) and deletes only the
+# path below it ($2). A symlink anywhere on that path is refused (it would
+# resolve inside the container, not on this box); the path must be gone
+# afterwards, and the folders emptied on the way go too. $3 is the image,
+# any further arguments are extra `docker run` options. Non-zero on failure.
+hidden_rm() {
+  local base="$1" rest="$2" image="$3"
+  shift 3
+  docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
+    -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
+        d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
+    sh "$rest" >/dev/null 2>&1 || return 1
+  # The emptied folder itself: removing it needs only its parent's
+  # permissions, and rmdir never removes anything that is not empty.
+  rmdir -- "$base" 2>/dev/null || true
+}
 env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 SOKETI_PORT="$(env_get SOKETI_PORT)"
@@ -203,11 +256,18 @@ if [ -d "$HOME/.config/systemd/user" ]; then
 fi
 
 # One purge path from .env, checked like the reference's data dir. Sets
-# RESOLVED to the real path, or "" when it is not on disk.
+# RESOLVED to the real path, or "" when it is not on disk. Behind a folder
+# this user cannot search it is not "gone": RES_BASE is that folder (through
+# real_dir, strictly inside ~/services/coolify, so the cleanup container can
+# mount it) and RES_REST the path below it. $3 is what a refusal says was
+# left as it was; a 4th argument "user" marks a dir holding what the user
+# deployed, which must be seen to be empty, so a hidden one is refused.
 RESOLVED=""
+RES_BASE=""
+RES_REST=""
 resolve_purge_path() {
-  local var="$1" dir="$2" root
-  RESOLVED=""
+  local var="$1" dir="$2" left="$3" kind="${4:-}" root
+  RESOLVED=""; RES_BASE=""; RES_REST=""
   [ -n "$dir" ] || die "$var is missing from $ENV_FILE — refusing to guess what to delete."
   while :; do case "$dir" in */) dir="${dir%/}" ;; *) break ;; esac; done
   case "$dir" in *..*) die "$var=$dir contains '..' — refusing." ;; esac
@@ -215,7 +275,20 @@ resolve_purge_path() {
     "$HOME/services/"?*) ;;
     *) die "$var=$dir is not a folder inside $HOME/services/ — refusing to delete it. Remove it by hand if you are sure." ;;
   esac
-  if [ -e "$dir" ]; then
+  dir_state "$var" "$dir"
+  if [ "$DIR_STATE" = "hidden" ]; then
+    [ "$kind" != "user" ] \
+      || die "$HIDDEN_DIR cannot be searched, so teardown cannot tell whether $var=$dir still holds what you deployed through Coolify. Check it (sudo ls -A $dir), remove it by hand if it is empty (sudo rm -rf $dir), then re-run. $left"
+    RES_BASE="$(real_dir "$HIDDEN_DIR")" \
+      || die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. $left"
+    root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services. $left"
+    case "$RES_BASE" in
+      "$root/$NAME"/?*) ;;
+      *) die "$HIDDEN_DIR cannot be searched, so teardown cannot reach $var=$dir. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. $left" ;;
+    esac
+    RES_REST="$HIDDEN_REST"
+  fi
+  if [ "$DIR_STATE" = "present" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
     RESOLVED="$(real_dir "$dir")" || die "$var=$dir is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
@@ -247,16 +320,24 @@ PUB_NOTE=""
 # the confirmation prompt (nothing changed yet), and again once Coolify's
 # own stack is stopped, so an app deployed while the prompt waited cannot
 # slip through to `down -v`. $1 is what the refusal says was left as it was.
-P_DATA=""; P_SSH=""; P_BACKUPS=""; P_IMAGES=""; P_APPS=""; P_DBS=""; P_SVCS=""
+P_DATA=""; P_SSH=""; P_BACKUPS=""; P_IMAGES=""; P_APPS=""; P_DBS=""; P_SVCS=""; P_SSH_HIDDEN=""
+# Hidden purge targets as line pairs: the base, then the path below it
+# (real_dir refuses a newline in the base, env_get never returns one).
+P_HIDDEN=""
+note_hidden() { [ -z "$RES_BASE" ] || P_HIDDEN="$P_HIDDEN$RES_BASE
+$RES_REST
+"; }
 purge_checks() {
   local left="$1"
-  resolve_purge_path COOLIFY_DATA "$DATA_DIR";                          P_DATA="$RESOLVED"
-  resolve_purge_path COOLIFY_SSH "$(env_get COOLIFY_SSH)";              P_SSH="$RESOLVED"
-  resolve_purge_path COOLIFY_BACKUPS "$(env_get COOLIFY_BACKUPS)";      P_BACKUPS="$RESOLVED"
-  resolve_purge_path COOLIFY_IMAGES "$(env_get COOLIFY_IMAGES)";        P_IMAGES="$RESOLVED"
-  resolve_purge_path COOLIFY_APPLICATIONS "$(env_get COOLIFY_APPLICATIONS)"; P_APPS="$RESOLVED"
-  resolve_purge_path COOLIFY_DATABASES "$(env_get COOLIFY_DATABASES)";  P_DBS="$RESOLVED"
-  resolve_purge_path COOLIFY_SERVICES "$(env_get COOLIFY_SERVICES)";    P_SVCS="$RESOLVED"
+  P_HIDDEN=""
+  resolve_purge_path COOLIFY_DATA "$DATA_DIR" "$left";                     P_DATA="$RESOLVED"; note_hidden
+  resolve_purge_path COOLIFY_SSH "$(env_get COOLIFY_SSH)" "$left";         P_SSH="$RESOLVED"; note_hidden
+  P_SSH_HIDDEN="$RES_BASE"
+  resolve_purge_path COOLIFY_BACKUPS "$(env_get COOLIFY_BACKUPS)" "$left"; P_BACKUPS="$RESOLVED"; note_hidden
+  resolve_purge_path COOLIFY_IMAGES "$(env_get COOLIFY_IMAGES)" "$left";   P_IMAGES="$RESOLVED"; note_hidden
+  resolve_purge_path COOLIFY_APPLICATIONS "$(env_get COOLIFY_APPLICATIONS)" "$left" user; P_APPS="$RESOLVED"
+  resolve_purge_path COOLIFY_DATABASES "$(env_get COOLIFY_DATABASES)" "$left" user;       P_DBS="$RESOLVED"
+  resolve_purge_path COOLIFY_SERVICES "$(env_get COOLIFY_SERVICES)" "$left" user;         P_SVCS="$RESOLVED"
 
   MANAGED_OK=1
   MANAGED="$(managed_list)" || { MANAGED=""; MANAGED_OK=0; }
@@ -294,6 +375,9 @@ if [ "$PURGE" -eq 1 ]; then
       PUB_NOTE="$pub is a symlink, not the key file setup.sh wrote, so $AUTH is left alone. Remove Coolify's line by hand if it is there."
     fi
   fi
+  if [ -z "$PUB_LINE" ] && [ -z "$PUB_NOTE" ] && [ -n "$P_SSH_HIDDEN" ]; then
+    PUB_NOTE="$P_SSH_HIDDEN cannot be searched, so teardown cannot read Coolify's public key and $AUTH is left alone. Remove a line ending in ' coolify' by hand if one is there."
+  fi
   [ -n "$PUB_LINE" ] || [ -n "$PUB_NOTE" ] \
     || PUB_NOTE="Coolify's public key file is gone, so teardown cannot tell which line of $AUTH is Coolify's; it is left alone. Remove a line ending in ' coolify' by hand if one is there."
 
@@ -301,6 +385,12 @@ if [ "$PURGE" -eq 1 ]; then
   for t in "$P_DATA" "$P_SSH" "$P_BACKUPS" "$P_IMAGES" "$P_APPS" "$P_DBS" "$P_SVCS"; do
     [ -z "$t" ] || case " $targets " in *" $t "*) ;; *) targets="$targets $t" ;; esac
   done
+  while IFS= read -r hb && IFS= read -r hr; do
+    [ -n "$hb" ] || continue
+    case " $targets " in *" $hb/$hr "*) ;; *) targets="$targets $hb/$hr" ;; esac
+  done <<EOF
+$P_HIDDEN
+EOF
   key_msg="leaves $AUTH alone"
   if [ -n "$PUB_LINE" ] && [ -f "$AUTH" ] && grep -qxF -- "$PUB_LINE" "$AUTH"; then
     key_msg="removes Coolify's key line (only that line) from $AUTH"
@@ -336,6 +426,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" -v s="$SOKETI_T
   port != "" && /\|-- / { n++; if (/ proxy / && ($NF == t || $NF == s)) mine++ }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -344,11 +435,17 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET or $SOKETI_TARGET (already off)"
+# A shared port left on still routes here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET or $SOKETI_TARGET (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET or $SOKETI_TARGET (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
 # docker-compose.yml pins `name: coolify` and gives both volumes a fixed
@@ -450,6 +547,18 @@ if [ "$PURGE" -eq 1 ]; then
     [ -n "$d" ] && [ -e "$d" ] || continue
     rmdir -- "$d" || die "$d is no longer empty — something deployed into it. Nothing else was deleted. .env was kept."
   done
+  # Targets behind a folder this user cannot search: through the cleanup
+  # container. A base already emptied and removed with an earlier target
+  # is skipped (docker would create a missing mount source as root).
+  while IFS= read -r hb && IFS= read -r hr; do
+    [ -n "$hb" ] || continue
+    [ -e "$hb" ] || [ -L "$hb" ] || continue
+    info "$hb cannot be searched by this user; deleting $hb/$hr with $COOLIFY_IMAGE"
+    hidden_rm "$hb" "$hr" "$COOLIFY_IMAGE" --user 0:0 </dev/null \
+      || die "Could not delete $hb/$hr through $hb. Run: sudo rm -rf $hb/$hr   then ./teardown.sh --purge again. .env was kept."
+  done <<EOF
+$P_HIDDEN
+EOF
   for d in "$P_SSH" "$P_BACKUPS" "$P_IMAGES" "$P_DATA"; do
     purge_dir "$d"
   done

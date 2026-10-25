@@ -29,22 +29,33 @@ case "$1" in
     rm -f "$STATE_DIR/ml_container"
     ;;
   run)
-    # teardown --purge's cleanup of container-owned files:
-    #   docker run --rm --pull never --user 0 -v DIR:/x --entrypoint sh <image> -c 'find ...'
+    # teardown --purge's cleanups of files the host user cannot delete:
+    #   docker run --rm --pull[=]never [opts] -v DIR:MNT --entrypoint sh <image> \
+    #     -c 'find MNT -mindepth 1 -delete'
+    #   docker run --rm --pull never [opts] -v BASE:/x --entrypoint sh <image> \
+    #     -c SCRIPT sh REST          (a target behind an unsearchable folder)
     # The real container is root, so it can delete what the host user cannot.
-    # Model that by making the tree writable first, then running the real find.
-    mount_host=""; entry=""
+    # Model that by making the mounted tree accessible first, then running the
+    # real SCRIPT on the host with the mount point replaced by the host side
+    # of the mount. Like dockerd, a missing mount source is created (and
+    # noted in docker_created_mount, which no purge should ever cause).
+    entry=""; mount_host=""; mount_ctr=""; script=""; prev=""
     while [ $# -gt 0 ]; do
-      case "$1" in
-        -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
-        --entrypoint) entry="$2"; shift 2 ;;
-        *) shift ;;
+      case "$prev" in
+        --entrypoint) entry="$1" ;;
+        -v|--volume) mount_host="${1%%:*}"; mount_ctr="${1#*:}" ;;
+        -c) script="$1"; shift; break ;;
       esac
+      prev="$1"; shift
     done
     [ "$entry" = "sh" ] && [ -n "$mount_host" ] || exit 0
     [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+    [ -n "$mount_ctr" ] && [ -n "$script" ] || exit 1
+    if [ ! -e "$mount_host" ]; then
+      mkdir -p "$mount_host"; echo "$mount_host" >> "$STATE_DIR/docker_created_mount"
+    fi
     chmod -R u+rwX "$mount_host" 2>/dev/null
-    find "$mount_host" -mindepth 1 -delete
+    sh -c "${script//"$mount_ctr"/$mount_host}" "$@"
     exit $?
     ;;
   compose)

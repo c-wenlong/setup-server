@@ -117,20 +117,24 @@ case "$1" in
     if [ "$2" = version ]; then echo "Docker Compose version v2.99-stub"; exit 0; fi
     for a in "$@"; do [ "$a" = down ] && touch "$STATE_DIR/compose_down"; done ;;
   run)
-    # The purge cleanup container. Real one is root and empties the mount;
-    # model that, but never outside the sandbox.
+    # The purge cleanup containers (`-c 'find /x -mindepth 1 -delete'`, or
+    # `-c SCRIPT sh REST` for data behind an unsearchable folder). The real
+    # one is root and can reach what the host user cannot; model that by
+    # making the mount accessible, then run the real SCRIPT on the host with
+    # the mount point replaced by the host path, never outside the sandbox.
     [ ! -f "$STATE_DIR/docker_run_fails" ] || exit 1
-    host=""; entry=""
+    host=""; ctr=""; entry=""; script=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        -v) host="${2%%:*}"; shift 2 ;;
+        -v) host="${2%%:*}"; ctr="${2#*:}"; shift 2 ;;
         --entrypoint) entry="$2"; shift 2 ;;
+        -c) script="$2"; shift 2; break ;;
         *) shift ;;
       esac
     done
-    [ "$entry" = sh ] && [ -n "$host" ] || exit 1
+    [ "$entry" = sh ] && [ -n "$host" ] && [ -n "$ctr" ] && [ -n "$script" ] || exit 1
     case "$host" in "$SANDBOX"/?*) ;; *) echo "stub: mount outside sandbox: $host" >&2; exit 97 ;; esac
-    chmod -R u+rwX "$host" && find "$host" -mindepth 1 -delete ;;
+    chmod -R u+rwX "$host" && sh -c "${script//"$ctr"/$host}" "$@"; exit $? ;;
 esac
 exit 0
 EOF_STUB_D7q
@@ -349,6 +353,7 @@ EOF_SERVE_R6v
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8092 (left on, see above); 2 port(s) unpublished"
   check "agent port never served/off" no_call "45876"
   td_teardown
 }
@@ -818,6 +823,129 @@ test_teardown_macos() {
   td_teardown
 }
 
+# BESZEL_VOLUME under a folder this user cannot search (a root-owned 0700
+# storage/, faked with chmod 000): `[ -e ]` cannot see the hub data, which
+# must not read as "already gone" while .env is deleted. A local
+# alpine/busybox image mounts that folder and deletes only the path below it.
+hide_hub_under_storage() {
+  local st="$HOME/services/beszel/storage"
+  mkdir -p "$st"
+  mv "$(hub_dir)" "$st/hub"
+  set_env BESZEL_VOLUME "$st/hub"
+  chmod 000 "$st"
+}
+unhide_storage() {
+  chmod u+rwx "$HOME/services" 2>/dev/null
+  chmod -R u+rwX "$HOME/services/beszel" 2>/dev/null
+}
+
+test_teardown_purge_unsearchable_parent() {
+  echo "  teardown --purge: hub data behind an unsearchable folder is deleted, not taken as gone"
+  local st
+  deployed
+  st="$HOME/services/beszel/storage"
+  hide_hub_under_storage
+  run_teardown --purge "beszel"
+  unhide_storage
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "mounted the unsearchable folder with a local image" \
+        calls_have "docker run --rm --pull never -v $st:/x --entrypoint sh alpine:3"
+  check "never the scratch hub image" no_call "entrypoint sh henrygd"
+  check "no sudo"                     no_call "sudo"
+  check "hub data gone"               [ ! -e "$st/hub" ]
+  check "emptied folder gone"         [ ! -e "$st" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "agent binary gone"           [ ! -e "$(AGENT_BIN)" ]
+  check "marker ~/services/beszel gone" [ ! -e "$HOME/services/beszel" ]
+  td_teardown
+  deployed
+  st="$HOME/services/beszel/storage"
+  hide_hub_under_storage
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "beszel"
+  unhide_storage
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/hub"
+  check "  never says deleted"        bash -c '! grep -q "Deleted" <<<"$1"' _ "$OUT"
+  check "  hub data kept"             [ -f "$st/hub/data.db" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  td_teardown
+  # No alpine/busybox on the box: nothing could reach the data, so stop
+  # before anything changes rather than after the agent and hub are down.
+  deployed
+  st="$HOME/services/beszel/storage"
+  hide_hub_under_storage
+  : > "$STATE_DIR/images"
+  run_teardown --purge "beszel"
+  unhide_storage
+  check "no local image: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/hub"
+  check "  never pulls one"           no_call "docker run"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  agent untouched"           no_call "systemctl"
+  check "  serve untouched"           no_call " off"
+  check "  hub data kept"             [ -f "$st/hub/data.db" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  agent binary kept"         [ -f "$(AGENT_BIN)" ]
+  td_teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  st="$HOME/services/beszel/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/hub"
+  set_env BESZEL_VOLUME "$st/hub"
+  chmod 000 "$st"
+  run_teardown --purge "beszel"
+  unhide_storage
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  td_teardown
+  # ~/services/beszel itself unsearchable: not strictly inside it, so no
+  # mount; stop before anything changes and name the sudo command.
+  deployed
+  chmod 000 "$HOME/services/beszel"
+  run_teardown --purge "beszel"
+  unhide_storage
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $(hub_dir)"
+  check "  no cleanup container"      no_call "docker run"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  agent untouched"           no_call "systemctl"
+  check "  serve untouched"           no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  hub data kept"             [ -f "$(hub_dir)/data.db" ]
+  td_teardown
+  # ~/services itself unsearchable: same, nothing changes.
+  deployed
+  chmod 000 "$HOME/services"
+  run_teardown --purge "beszel"
+  unhide_storage
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  hub data kept"             [ -f "$(hub_dir)/data.db" ]
+  td_teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "  teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF_SERVE_W3j
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /beszel proxy http://127.0.0.1:8092
+EOF_SERVE_W3j
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    bash -c '! grep -q "already off" <<<"$1"' _ "$OUT"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8092 (left on, see above); 0 port(s) unpublished"
+  td_teardown
+}
+
 echo "  teardown sandbox (temp \$HOME, generated PATH stubs)"
 test_teardown_fixture
 test_teardown_safe
@@ -842,6 +970,8 @@ test_teardown_env_lint
 test_teardown_refuses_compose_overrides
 test_teardown_unit_file_missing
 test_teardown_macos
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 if [ "${1:-}" = "--live" ]; then
   echo "  live checks"

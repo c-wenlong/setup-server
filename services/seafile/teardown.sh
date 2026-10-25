@@ -137,6 +137,59 @@ env_lint() {
     }' "$ENV_FILE")"
   [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
 }
+
+# Is a purge target there? `[ -e ]` is false both when it is gone and when a
+# folder on the way (e.g. a root-owned 0700 dir) cannot be searched, and only
+# the first means "nothing to delete". So walk down from ~/services: a
+# component absent under a searchable parent means gone (DIR_STATE=missing);
+# one that exists but cannot be searched hides the target (DIR_STATE=hidden,
+# HIDDEN_DIR that folder, HIDDEN_REST the path below it). $2 must already be
+# checked to sit inside ~/services/ with no `..` and no trailing slash.
+DIR_STATE=""
+HIDDEN_DIR=""
+HIDDEN_REST=""
+dir_state() {
+  local var="$1" target="$2" p="$HOME/services" rest
+  rest="${target#"$HOME/services/"}"
+  DIR_STATE="present"; HIDDEN_DIR=""; HIDDEN_REST=""
+  while :; do
+    if [ ! -e "$p" ]; then
+      # A symlink that does not resolve may be dangling or point into a
+      # folder this user cannot search; the two look the same from here.
+      [ ! -L "$p" ] || die "$p is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+      DIR_STATE="missing"; return 0
+    fi
+    [ -d "$p" ] || die "$p (on the way to $var=$target) is not a directory, refusing. Nothing was changed."
+    if [ ! -x "$p" ]; then DIR_STATE="hidden"; HIDDEN_DIR="$p"; HIDDEN_REST="$rest"; return 0; fi
+    case "$rest" in */*) ;; *) break ;; esac
+    p="$p/${rest%%/*}"
+    rest="${rest#*/}"
+  done
+  if [ ! -e "$target" ]; then
+    [ ! -L "$target" ] || die "$target is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+    DIR_STATE="missing"
+  fi
+}
+
+# A purge target behind a folder this user cannot search: the host cannot
+# even see it, so a throwaway container mounts that folder ($1, already
+# through real_dir and strictly inside ~/services/$NAME) and deletes only the
+# path below it ($2). A symlink anywhere on that path is refused (it would
+# resolve inside the container, not on this box); the path must be gone
+# afterwards, and the folders emptied on the way go too. $3 is the image,
+# any further arguments are extra `docker run` options. Non-zero on failure.
+hidden_rm() {
+  local base="$1" rest="$2" image="$3"
+  shift 3
+  docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
+    -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
+        d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
+    sh "$rest" >/dev/null 2>&1 || return 1
+  # The emptied folder itself: removing it needs only its parent's
+  # permissions, and rmdir never removes anything that is not empty.
+  rmdir -- "$base" 2>/dev/null || true
+}
 env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 DATA_DIR="$(env_get SEAFILE_VOLUME)"
@@ -154,6 +207,14 @@ for v in COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES; d
     || die "$v is set (in $ENV_FILE or the shell); setup.sh never sets it, so teardown will not guess which stack or volumes it means. Unset it and re-run."
 done
 
+# The compose project name, the way Compose derives it: a top-level `name:`
+# in docker-compose.yml, else this directory's name, lowercased with anything
+# but [a-z0-9_-] dropped. Used only to check what a failed `down` left.
+PROJECT="$(sed -n 's/^name:[[:space:]]*//p' "$SERVICE_DIR/docker-compose.yml" | head -1)"
+PROJECT="${PROJECT%%#*}"
+PROJECT="$(printf '%s' "${PROJECT:-$(basename "$SERVICE_DIR")}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[-_]*//')"
+[ -n "$PROJECT" ] || die "Cannot tell the compose project name for $SERVICE_DIR. Nothing was changed."
+
 # Read Serve before changing anything: if it cannot be read, an empty answer
 # would look like "already off" and the mapping would come back with the
 # daemon. Stop instead.
@@ -161,12 +222,17 @@ SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
   || die "Could not read Tailscale Serve status (is tailscaled running?): $SERVE_STATUS — nothing was changed."
 
 # Check one purge target from .env ($1 = its variable name, $2 = its value)
-# and set CHECKED to its real path, or to "" when it is not on disk. Every
-# refusal dies here, before the confirmation prompt and before any change.
+# and set CHECKED to its real path, or to "" when it is not on disk. A target
+# behind a folder this user cannot search sets CHECKED_BASE (that folder,
+# resolved, strictly inside ~/services/seafile) and CHECKED_REST (the path
+# below it) instead, for the cleanup container. Every refusal dies here,
+# before the confirmation prompt and before any change.
 CHECKED=""
+CHECKED_BASE=""
+CHECKED_REST=""
 check_purge_dir() {
   local var="$1" dir="$2" root svc_real
-  CHECKED=""
+  CHECKED=""; CHECKED_BASE=""; CHECKED_REST=""
   [ -n "$dir" ] || die "$var is missing from $ENV_FILE — refusing to guess what to delete."
   while :; do case "$dir" in */) dir="${dir%/}" ;; *) break ;; esac; done
   case "$dir" in *..*) die "$var=$dir contains '..' — refusing." ;; esac
@@ -174,9 +240,24 @@ check_purge_dir() {
     "$HOME/services/"?*) ;;
     *) die "$var=$dir is not a folder inside $HOME/services/ — refusing to delete it. Remove it by hand if you are sure." ;;
   esac
+  # `[ -e ]` alone would take a dir behind an unsearchable folder for gone.
+  dir_state "$var" "$dir"
+  if [ "$DIR_STATE" = "hidden" ]; then
+    # The cleanup container mounts the unsearchable folder itself (real_dir
+    # resolves it without entering it) and deletes only the path below it,
+    # so that folder must sit strictly inside ~/services/seafile.
+    CHECKED_BASE="$(real_dir "$HIDDEN_DIR")" \
+      || die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. Nothing was changed."
+    root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
+    case "$CHECKED_BASE" in
+      "$root/$NAME"/?*) ;;
+      *) die "$HIDDEN_DIR cannot be searched, so teardown cannot reach $var=$dir. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. Nothing was changed." ;;
+    esac
+    CHECKED_REST="$HIDDEN_REST"
+  fi
   # And where it really is, symlinks and all: it must be a strict child of
   # the real ~/services, never ~/services itself or anything above it.
-  if [ -e "$dir" ]; then
+  if [ "$DIR_STATE" = "present" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
     CHECKED="$(real_dir "$dir")" || die "$var=$dir is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
@@ -195,12 +276,29 @@ check_purge_dir() {
 
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was.
-PURGE_DIRS=""
+PURGE_DATA=""; DATA_BASE=""; DATA_REST=""; DATA_SHOW=""
+PURGE_MYSQL=""; MYSQL_BASE=""; MYSQL_REST=""; MYSQL_SHOW=""
+DB_IMAGE=""
 if [ "$PURGE" -eq 1 ]; then
-  check_purge_dir SEAFILE_VOLUME "$DATA_DIR";        PURGE_DATA="$CHECKED"
-  check_purge_dir SEAFILE_MYSQL_VOLUME "$MYSQL_DIR"; PURGE_MYSQL="$CHECKED"
-  PURGE_DIRS="$(printf '%s\n%s' "$PURGE_DATA" "$PURGE_MYSQL" | sed '/^$/d')"
-  warn "--purge deletes ${PURGE_DATA:-nothing for SEAFILE_VOLUME (not on disk)}, ${PURGE_MYSQL:-nothing for SEAFILE_MYSQL_VOLUME (not on disk)} and $ENV_FILE. This cannot be undone."
+  check_purge_dir SEAFILE_VOLUME "$DATA_DIR"
+  PURGE_DATA="$CHECKED"; DATA_BASE="$CHECKED_BASE"; DATA_REST="$CHECKED_REST"
+  check_purge_dir SEAFILE_MYSQL_VOLUME "$MYSQL_DIR"
+  PURGE_MYSQL="$CHECKED"; MYSQL_BASE="$CHECKED_BASE"; MYSQL_REST="$CHECKED_REST"
+  DATA_SHOW="${PURGE_DATA:-${DATA_BASE:+$DATA_BASE/$DATA_REST}}"
+  MYSQL_SHOW="${PURGE_MYSQL:-${MYSQL_BASE:+$MYSQL_BASE/$MYSQL_REST}}"
+  # Seafile runs as root in its container and MariaDB as the image's mysql
+  # uid, so most files are not this user's and a plain rm fails on them. The
+  # cleanup is a throwaway container of the MariaDB image this stack already
+  # pulled (no pull, no sudo); it is checked here, before anything changes.
+  DB_IMAGE="$(env_get SEAFILE_DB_IMAGE)"
+  [ -n "$DB_IMAGE" ] || DB_IMAGE="mariadb:10.11"
+  # It lands in a `docker run` argv: an image reference, never an option.
+  case "$DB_IMAGE" in
+    [a-z0-9]*) ;;
+    *) die "SEAFILE_DB_IMAGE=$DB_IMAGE does not look like an image name — refusing. Nothing was changed." ;;
+  esac
+  case "$DB_IMAGE" in *[[:space:]]*) die "SEAFILE_DB_IMAGE contains whitespace — refusing. Nothing was changed." ;; esac
+  warn "--purge deletes ${DATA_SHOW:-nothing for SEAFILE_VOLUME (not on disk)}, ${MYSQL_SHOW:-nothing for SEAFILE_MYSQL_VOLUME (not on disk)} and $ENV_FILE. This cannot be undone."
   warn "That is the whole Drive on this server: every library, every synced file and any phone photo backups stored here, their history, and all accounts."
   warn "Desktop and phone clients keep their local copies, but they will have nothing to sync with."
   warn "Other services pointing at Seafile lose it: self-learn reads this .env at install time and syncs into a Seafile library; manimkc uploads its videos to a Seafile library."
@@ -234,6 +332,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
   port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -242,38 +341,68 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOT
 $SERVE_PLAN
 EOT
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+# A shared port left on still routes here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
+# `down` also fails when a container outside this project still uses the
+# fixed-name seafile-net network (Seafile's official add-ons, SeaDoc and the
+# notification server, join it from their own compose files). That alone is
+# no reason to stop halfway: check this project's own containers are gone and
+# the network really is held by someone else, warn naming them, and go on.
+# Anything else dies as before, with data and .env untouched.
+stack_down() {
+  local left users
+  docker compose --project-directory "$SERVICE_DIR" down && return 0
+  left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" \
+    || die "docker compose down failed and Docker cannot list what is left. Data and .env are untouched; re-run ./teardown.sh."
+  [ -z "$left" ] || die "docker compose down failed and Seafile's own containers are still there. Data and .env are untouched; re-run ./teardown.sh."
+  users="$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' seafile-net 2>/dev/null)" \
+    || die "docker compose down failed (not because of the seafile-net network). Data and .env are untouched; re-run ./teardown.sh."
+  users="${users% }"
+  [ -n "$users" ] || die "docker compose down failed and nothing is left on the seafile-net network, so that is not why. Data and .env are untouched; re-run ./teardown.sh."
+  warn "Docker kept the seafile-net network: still used by $users (not part of this stack, e.g. a SeaDoc or notification-server add-on). It goes when they do (docker network rm seafile-net)."
+}
 info "Stopping and removing the containers (docker compose down)"
-docker compose --project-directory "$SERVICE_DIR" down
+stack_down
 ok "Containers removed; data in ${DATA_DIR:-(not set)} and ${MYSQL_DIR:-(not set)} kept"
 
 # ---------------------------------------------------------------- purge
 if [ "$PURGE" -eq 1 ]; then
   info "Purging data"
-  # Seafile runs as root in its container and MariaDB as the image's mysql
-  # uid, so most files are not this user's and a plain rm fails on them.
-  # Try the plain rm first (a stack that never booted is all yours);
-  # otherwise empty the dir with a throwaway container of the MariaDB image
-  # this stack already pulled (no pull, no sudo), then remove the now-empty
-  # directory itself. A half-deleted store is a failure, not a warning, and
-  # .env stays so the retry still knows what to delete.
-  DB_IMAGE="$(env_get SEAFILE_DB_IMAGE)"
-  [ -n "$DB_IMAGE" ] || DB_IMAGE="mariadb:10.11"
-  # It lands in a `docker run` argv: an image reference, never an option.
-  case "$DB_IMAGE" in
-    [a-z0-9]*) ;;
-    *) die "SEAFILE_DB_IMAGE=$DB_IMAGE does not look like an image name — refusing. .env was kept." ;;
-  esac
-  case "$DB_IMAGE" in *[[:space:]]*) die "SEAFILE_DB_IMAGE contains whitespace — refusing. .env was kept." ;; esac
-  while IFS= read -r dir; do
-    [ -n "$dir" ] || continue
-    [ -e "$dir" ] || continue   # already gone (e.g. inside the other one)
+  # A plain rm first (a stack that never booted is all yours); otherwise
+  # empty the dir with the MariaDB image checked above, then remove the
+  # now-empty directory itself. A target behind a folder this user cannot
+  # search goes through that folder, mounted, instead. A half-deleted store
+  # is a failure, not a warning, and .env stays so the retry still knows what
+  # to delete: .env goes only once every data path is gone.
+  purge_one() {
+    local dir="$1" base="$2" rest="$3"
+    if [ -n "$base" ]; then
+      # Gone already (it went with the other dir): never mount a missing
+      # source, Docker would create it as root. Its parent is searchable, so
+      # this test is reliable.
+      if [ ! -e "$base" ] && [ ! -L "$base" ]; then
+        ok "$base/$rest is already gone"
+        return 0
+      fi
+      info "$base cannot be searched by this user; deleting $base/$rest with $DB_IMAGE"
+      hidden_rm "$base" "$rest" "$DB_IMAGE" \
+        || die "Could not delete $base/$rest through $base. Run: sudo rm -rf $base/$rest   then ./teardown.sh --purge again. .env was kept."
+      ok "Deleted $base/$rest"
+      return 0
+    fi
+    [ -n "$dir" ] || return 0
+    [ -e "$dir" ] || return 0   # already gone (e.g. inside the other one)
     rm -rf -- "$dir" 2>/dev/null || true
     if [ -e "$dir" ]; then
       info "Some files in $dir are container-owned; clearing them with $DB_IMAGE"
@@ -284,9 +413,9 @@ if [ "$PURGE" -eq 1 ]; then
       [ ! -e "$dir" ] || die "$dir is still there. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. .env was kept."
     fi
     ok "Deleted $dir"
-  done <<EOT
-$PURGE_DIRS
-EOT
+  }
+  purge_one "$PURGE_DATA" "$DATA_BASE" "$DATA_REST"
+  purge_one "$PURGE_MYSQL" "$MYSQL_BASE" "$MYSQL_REST"
   rm -f -- "$ENV_FILE"
   # ~/services/<name> is the launcher's install marker. Try it even when the
   # data dirs were already gone, so a purged app never reads as installed;

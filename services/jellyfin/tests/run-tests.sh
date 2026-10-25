@@ -920,6 +920,7 @@ EOF
   check "own port :8096 off"          calls_have "tailscale serve --https=8096 off"
   check "shared :443 left alone"      no_call "https=443"
   check "warns about shared port"     out_has "also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8096 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -1074,6 +1075,111 @@ test_teardown_gpu_overlay() {
   teardown
 }
 
+# A state dir behind a folder this user cannot search (a root-owned 0700
+# parent, faked with chmod 000): `[ -e ]` cannot see it, which must not read
+# as "already gone" while .env is deleted. No cleanup container here, so it
+# stops before anything changes and names the sudo command.
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: state behind an unsearchable folder stops before anything changes"
+  local st media
+  deployed
+  st="$HOME/services/jellyfin/storage"; media="$(env_val MEDIA_DIR)"
+  mkdir -p "$st/config/data"
+  echo keep > "$st/config/data/jellyfin.db"
+  sed -i.bak "s#^JELLYFIN_CONFIG=.*#JELLYFIN_CONFIG=$st/config#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "jellyfin"
+  chmod 755 "$st"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "names the folder"            out_has "$st cannot be searched"
+  check "names the sudo command"      out_has "sudo rm -rf $st/config"
+  check "never says deleted"          out_lacks "Deleted"
+  check "never asks to confirm"       out_lacks "Type jellyfin"
+  check "state kept"                  [ -f "$st/config/data/jellyfin.db" ]
+  check "cache kept"                  [ -f "$HOME/services/jellyfin/cache/img.jpg" ]
+  check "wizard marker kept"          [ -f "$HOME/services/jellyfin/.wizard-complete" ]
+  check "media kept"                  [ -f "$media/film.mkv" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "serve untouched"             no_call " off"
+  teardown
+  # JELLYFIN_CACHE behind it: the same guard.
+  deployed
+  st="$HOME/services/jellyfin/storage"
+  mkdir -p "$st/cache"; echo keep > "$st/cache/img.jpg"
+  sed -i.bak "s#^JELLYFIN_CACHE=.*#JELLYFIN_CACHE=$st/cache#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "jellyfin"
+  chmod 755 "$st"
+  check "cache hidden: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/cache"
+  check "  config kept"               [ -f "$HOME/services/jellyfin/config/data/jellyfin.db" ]
+  check "  cache kept"                [ -f "$st/cache/img.jpg" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  # ~/services/jellyfin itself unsearchable.
+  deployed
+  st="$HOME/services/jellyfin"; media="$(env_val MEDIA_DIR)"
+  chmod 000 "$st"
+  run_teardown --purge "jellyfin"
+  chmod 755 "$st"
+  check "state root unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/config"
+  check "  config kept"               [ -f "$st/config/data/jellyfin.db" ]
+  check "  media kept"                [ -f "$media/film.mkv" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  serve untouched"           no_call " off"
+  teardown
+  # Config and cache pointed somewhere already gone, ~/services/jellyfin
+  # unsearchable: the wizard marker (and the media in there) cannot be seen,
+  # so no sudo rm -rf is offered at all.
+  deployed
+  st="$HOME/services/jellyfin"; media="$(env_val MEDIA_DIR)"
+  sed -i.bak "s#^JELLYFIN_CONFIG=.*#JELLYFIN_CONFIG=$HOME/services/gone/config#; s#^JELLYFIN_CACHE=.*#JELLYFIN_CACHE=$HOME/services/gone/cache#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "jellyfin"
+  chmod 755 "$st"
+  check "marker hidden: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the marker"          out_has "wizard marker"
+  check "  offers no sudo rm"         out_lacks "sudo rm"
+  check "  marker kept"               [ -f "$st/.wizard-complete" ]
+  check "  media kept"                [ -f "$media/film.mkv" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  # ~/services itself unsearchable: not provably this service's folder, so
+  # it says to check first, still before anything changes.
+  deployed
+  chmod 000 "$HOME/services"
+  run_teardown --purge "jellyfin"
+  chmod 755 "$HOME/services"
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says to check it first"    out_has "Check what it is"
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  config kept"               [ -f "$HOME/services/jellyfin/config/data/jellyfin.db" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- /       proxy http://127.0.0.1:8080
+|-- /jelly  proxy http://127.0.0.1:8096
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8096 (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/jellyfin/setup.sh or services/jellyfin/docker-compose.yml is missing — nothing to test."
@@ -1123,6 +1229,8 @@ test_teardown_purge_media_beside_state
 test_teardown_purge_refuses_parent_of_media
 test_teardown_purge_refuses_odd_paths
 test_teardown_gpu_overlay
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 if [ "${1:-}" = "--live" ]; then
   echo

@@ -145,6 +145,59 @@ env_lint() {
     }' "$ENV_FILE")"
   [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
 }
+
+# Is a purge target there? `[ -e ]` is false both when it is gone and when a
+# folder on the way (e.g. a root-owned 0700 dir) cannot be searched, and only
+# the first means "nothing to delete". So walk down from ~/services: a
+# component absent under a searchable parent means gone (DIR_STATE=missing);
+# one that exists but cannot be searched hides the target (DIR_STATE=hidden,
+# HIDDEN_DIR that folder, HIDDEN_REST the path below it). $2 must already be
+# checked to sit inside ~/services/ with no `..` and no trailing slash.
+DIR_STATE=""
+HIDDEN_DIR=""
+HIDDEN_REST=""
+dir_state() {
+  local var="$1" target="$2" p="$HOME/services" rest
+  rest="${target#"$HOME/services/"}"
+  DIR_STATE="present"; HIDDEN_DIR=""; HIDDEN_REST=""
+  while :; do
+    if [ ! -e "$p" ]; then
+      # A symlink that does not resolve may be dangling or point into a
+      # folder this user cannot search; the two look the same from here.
+      [ ! -L "$p" ] || die "$p is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+      DIR_STATE="missing"; return 0
+    fi
+    [ -d "$p" ] || die "$p (on the way to $var=$target) is not a directory, refusing. Nothing was changed."
+    if [ ! -x "$p" ]; then DIR_STATE="hidden"; HIDDEN_DIR="$p"; HIDDEN_REST="$rest"; return 0; fi
+    case "$rest" in */*) ;; *) break ;; esac
+    p="$p/${rest%%/*}"
+    rest="${rest#*/}"
+  done
+  if [ ! -e "$target" ]; then
+    [ ! -L "$target" ] || die "$target is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+    DIR_STATE="missing"
+  fi
+}
+
+# A purge target behind a folder this user cannot search: the host cannot
+# even see it, so a throwaway container mounts that folder ($1, already
+# through real_dir and strictly inside ~/services/$NAME) and deletes only the
+# path below it ($2). A symlink anywhere on that path is refused (it would
+# resolve inside the container, not on this box); the path must be gone
+# afterwards, and the folders emptied on the way go too. $3 is the image,
+# any further arguments are extra `docker run` options. Non-zero on failure.
+hidden_rm() {
+  local base="$1" rest="$2" image="$3"
+  shift 3
+  docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
+    -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
+        d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
+    sh "$rest" >/dev/null 2>&1 || return 1
+  # The emptied folder itself: removing it needs only its parent's
+  # permissions, and rmdir never removes anything that is not empty.
+  rmdir -- "$base" 2>/dev/null || true
+}
 env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 ROOT_DIR="$(env_get PAPERLESS_ROOT)"
@@ -179,6 +232,35 @@ count_files() { find "$1" -mindepth 1 -type f 2>/dev/null | wc -l | tr -d ' '; }
 # both are removed only when empty.
 PURGE_ROOT=""
 PURGE_DIRS=()
+# data/ and media/ behind a folder this user cannot search (see dir_state):
+# that folder (real path, the same one for both), the paths below it, and
+# where the archive root is when it is the root itself that is hidden.
+HIDDEN_BASE=""
+HIDDEN_RESTS=()
+HIDDEN_ROOT=""
+SHOW_DIRS=()
+# The cleanup image, settled before the confirmation so the purge never has
+# to work it out halfway.
+PL_VERSION="$(env_get PAPERLESS_VERSION)"
+PL_IMAGE="ghcr.io/paperless-ngx/paperless-ngx:${PL_VERSION:-3.1.3}"
+# A purge target behind a folder this user cannot search. The cleanup
+# container mounts that folder itself (real_dir resolves it without entering
+# it) and deletes only the path below it, so the folder must sit strictly
+# inside ~/services/paperless-ngx: sets HIDDEN_BASE, or dies before anything
+# changes naming the sudo command ($3: data/ and media/, never export/).
+hidden_base() {
+  local var="$1" dir="$2" rmpaths="$3" base root
+  base="$(real_dir "$HIDDEN_DIR")" \
+    || die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME. Run: sudo rm -rf $rmpaths   then ./teardown.sh --purge again. Nothing was changed."
+  root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
+  case "$base" in
+    "$root/$NAME"/?*) ;;
+    *) die "$HIDDEN_DIR cannot be searched, so teardown cannot reach $var=$dir. Run: sudo rm -rf $rmpaths   then ./teardown.sh --purge again. Nothing was changed." ;;
+  esac
+  [ -z "$HIDDEN_BASE" ] || [ "$HIDDEN_BASE" = "$base" ] \
+    || die "data/ and media/ under PAPERLESS_ROOT=$dir sit behind two different unsearchable folders. Run: sudo rm -rf $rmpaths   then ./teardown.sh --purge again. Nothing was changed."
+  HIDDEN_BASE="$base"
+}
 if [ "$PURGE" -eq 1 ]; then
   [ -n "$ROOT_DIR" ] || die "PAPERLESS_ROOT is missing from $ENV_FILE — refusing to guess what to delete."
   while :; do case "$ROOT_DIR" in */) ROOT_DIR="${ROOT_DIR%/}" ;; *) break ;; esac; done
@@ -187,9 +269,19 @@ if [ "$PURGE" -eq 1 ]; then
     "$HOME/services/"?*) ;;
     *) die "PAPERLESS_ROOT=$ROOT_DIR is not a folder inside $HOME/services/ — refusing to delete it. Remove it by hand if you are sure." ;;
   esac
+  case "$ROOT_DIR" in *"
+"*) die "PAPERLESS_ROOT=$ROOT_DIR contains a newline — refusing." ;; esac
   # And where it really is, symlinks and all: it must be a strict child of
   # the real ~/services, never ~/services itself or anything above it.
-  if [ -e "$ROOT_DIR" ]; then
+  dir_state PAPERLESS_ROOT "$ROOT_DIR"
+  if [ "$DIR_STATE" = "hidden" ]; then
+    # The whole archive is out of sight: delete data/ and media/ below the
+    # hidden folder; export/ and consume/ cannot be checked, so they stay.
+    hidden_base PAPERLESS_ROOT "$ROOT_DIR" "$ROOT_DIR/data $ROOT_DIR/media"
+    HIDDEN_ROOT="$HIDDEN_BASE/$HIDDEN_REST"
+    HIDDEN_RESTS=("$HIDDEN_REST/data" "$HIDDEN_REST/media")
+    SHOW_DIRS=("$HIDDEN_ROOT/data" "$HIDDEN_ROOT/media")
+  elif [ "$DIR_STATE" = "present" ]; then
     [ -d "$ROOT_DIR" ] || die "PAPERLESS_ROOT=$ROOT_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
     PURGE_ROOT="$(real_dir "$ROOT_DIR")" || die "PAPERLESS_ROOT=$ROOT_DIR is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
@@ -198,15 +290,25 @@ if [ "$PURGE" -eq 1 ]; then
       *) die "PAPERLESS_ROOT=$ROOT_DIR resolves to $PURGE_ROOT, which is not a folder inside $root — refusing." ;;
     esac
     for sub in data media; do
-      [ -e "$PURGE_ROOT/$sub" ] || [ -L "$PURGE_ROOT/$sub" ] || continue
+      # The root itself may be unsearchable (a root-owned 0700 dir), and then
+      # `[ -e ]` cannot see data/ or media/ at all; that is not "gone".
+      dir_state "$sub" "$ROOT_DIR/$sub"
+      [ "$DIR_STATE" != "missing" ] || continue
+      if [ "$DIR_STATE" = "hidden" ]; then
+        hidden_base PAPERLESS_ROOT "$ROOT_DIR" "$ROOT_DIR/data $ROOT_DIR/media"
+        HIDDEN_RESTS+=("$HIDDEN_REST")
+        SHOW_DIRS+=("$HIDDEN_BASE/$HIDDEN_REST")
+        continue
+      fi
       [ -d "$PURGE_ROOT/$sub" ] && [ ! -L "$PURGE_ROOT/$sub" ] \
         || die "$PURGE_ROOT/$sub is not a plain directory (a symlink or a file) — refusing."
       d="$(real_dir "$PURGE_ROOT/$sub")" || die "$PURGE_ROOT/$sub is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
       PURGE_DIRS+=("$d")
+      SHOW_DIRS+=("$d")
     done
   fi
-  if [ "${#PURGE_DIRS[@]}" -gt 0 ]; then
-    warn "--purge deletes ${PURGE_DIRS[*]} and $ENV_FILE. This cannot be undone."
+  if [ "${#SHOW_DIRS[@]}" -gt 0 ]; then
+    warn "--purge deletes ${SHOW_DIRS[*]} and $ENV_FILE. This cannot be undone."
     warn "That is the whole document archive: every original and OCR'd PDF (media/), and the"
     warn "  database of tags, correspondents, titles and users (data/). THERE IS NO BACKUP OF THIS BOX."
   else
@@ -215,7 +317,10 @@ if [ "$PURGE" -eq 1 ]; then
   warn "Export first if you may ever want these documents back: press Ctrl-C now, then"
   warn "  docker exec $CONTAINER document_exporter ../export    (needs the container running: ./setup.sh)"
   warn "  and copy ${PURGE_ROOT:-$ROOT_DIR}/export off this box."
-  if [ -n "$PURGE_ROOT" ]; then
+  if [ -n "$HIDDEN_ROOT" ] || { [ -n "$PURGE_ROOT" ] && [ ! -x "$PURGE_ROOT" ]; }; then
+    warn "Kept: ${PURGE_ROOT:-$HIDDEN_ROOT}/export (the exporter's output) and ${PURGE_ROOT:-$HIDDEN_ROOT}/consume (files never filed),"
+    warn "  whatever they hold: this user cannot see into them to count or empty them."
+  elif [ -n "$PURGE_ROOT" ]; then
     warn "Kept: $PURGE_ROOT/export ($(count_files "$PURGE_ROOT/export") files, the exporter's output) and"
     warn "  $PURGE_ROOT/consume ($(count_files "$PURGE_ROOT/consume") files you dropped in that were never filed). Each is removed only if empty."
   fi
@@ -249,6 +354,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
   port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -257,11 +363,17 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+# A shared port left on still routes here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
 # Plain `down` keeps everything. `down -v` (only on the purge path) also drops
@@ -289,8 +401,6 @@ if [ "$PURGE" -eq 1 ]; then
     rm -rf -- "$d" 2>/dev/null || true
     if [ -e "$d" ]; then
       info "Some files in $d are not yours; clearing them with the pinned image"
-      PL_VERSION="$(env_get PAPERLESS_VERSION)"
-      PL_IMAGE="ghcr.io/paperless-ngx/paperless-ngx:${PL_VERSION:-3.1.3}"
       docker run --rm --pull never -v "$d:/x" --entrypoint sh "$PL_IMAGE" \
         -c 'find /x -mindepth 1 -delete' >/dev/null 2>&1 \
         || die "Could not clear the files in $d. Run: sudo rm -rf $d   then ./teardown.sh --purge again. .env was kept."
@@ -298,6 +408,21 @@ if [ "$PURGE" -eq 1 ]; then
       [ ! -e "$d" ] || die "$d is still there. Run: sudo rm -rf $d   then ./teardown.sh --purge again. .env was kept."
     fi
     ok "Deleted $d"
+  done
+  # data/ and media/ the host cannot see: a throwaway container mounts the
+  # folder that hides them and deletes only those paths. hidden_rm removes
+  # that folder once it is empty, so a folder already gone means the path
+  # below it went too. Never mount a missing folder: dockerd would create
+  # it, as root.
+  for rest in ${HIDDEN_RESTS[@]+"${HIDDEN_RESTS[@]}"}; do
+    if [ ! -e "$HIDDEN_BASE" ] && [ ! -L "$HIDDEN_BASE" ]; then
+      ok "$HIDDEN_BASE/$rest is already gone (its folder went with an earlier delete)"
+      continue
+    fi
+    info "$HIDDEN_BASE cannot be searched by this user; deleting $HIDDEN_BASE/$rest with $PL_IMAGE"
+    hidden_rm "$HIDDEN_BASE" "$rest" "$PL_IMAGE" \
+      || die "Could not delete $HIDDEN_BASE/$rest through $HIDDEN_BASE. Run: sudo rm -rf $ROOT_DIR/data $ROOT_DIR/media   then ./teardown.sh --purge again. .env was kept."
+    ok "Deleted $HIDDEN_BASE/$rest"
   done
   if [ -n "$PURGE_ROOT" ]; then
     # rmdir only ever removes an empty directory: an export or an unfiled
@@ -308,6 +433,7 @@ if [ "$PURGE" -eq 1 ]; then
     done
     rmdir -- "$PURGE_ROOT" 2>/dev/null || true
   fi
+  # Only now, with data/ and media/ gone, the secrets.
   rm -f -- "$ENV_FILE"
   # ~/services/<name> is the launcher's install marker. Try it even when the
   # archive was already gone, so a purged app never reads as installed;
@@ -321,6 +447,8 @@ if [ "$PURGE" -eq 1 ]; then
   printf '\033[1;32mDone.\033[0m %s is removed and its archive is gone. ./setup.sh starts fresh.\n' "$NAME"
   if [ -n "$PURGE_ROOT" ] && [ -e "$PURGE_ROOT" ]; then
     echo "  Left in place: $PURGE_ROOT (export/ or consume/ still has files). Remove by hand when done."
+  elif [ -n "$HIDDEN_ROOT" ] && [ -e "$HIDDEN_BASE" ]; then
+    echo "  Left in place: $HIDDEN_ROOT/export and consume/, if they were there (this user cannot see into $HIDDEN_BASE). Check with sudo ls."
   fi
 else
   printf '\033[1;32mDone.\033[0m %s is removed. Archive and .env are kept; ./setup.sh brings it back.\n' "$NAME"

@@ -54,6 +54,7 @@ check() {
 }
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
+out_lacks()  { ! grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
@@ -420,6 +421,7 @@ EOF
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8081 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -665,6 +667,193 @@ test_teardown_purge_container_owned() {
   teardown
 }
 
+# Data behind a folder this user cannot search (a root-owned 0700 parent,
+# faked with chmod 000): `[ -e ]` cannot see it, which must not read as
+# "already gone" while .env is deleted. The MariaDB image mounts that folder
+# and deletes only the paths below it.
+unhide() { chmod -R u+rwX "$HOME/services" 2>/dev/null; }
+mounts_of() { grep -c -- "-v $1:/x" "$CALLS_LOG"; }
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: data behind an unsearchable folder is deleted, not taken as gone"
+  local st
+  # Both data dirs under one unsearchable folder: two mounts of the same base.
+  deployed
+  st="$(cd "$HOME/services/seafile" && pwd -P)/storage"
+  mkdir -p "$st"
+  mv "$(data_dir)" "$st/data"; mv "$(mysql_dir)" "$st/mysql"
+  sed -i.bak -e "s#^SEAFILE_VOLUME=.*#SEAFILE_VOLUME=$st/data#" \
+    -e "s#^SEAFILE_MYSQL_VOLUME=.*#SEAFILE_MYSQL_VOLUME=$st/mysql#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "seafile"
+  unhide
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "warns it deletes both"       out_has "deletes $st/data, $st/mysql and"
+  check "mounted the unsearchable folder once per dir" [ "$(mounts_of "$st")" -eq 2 ]
+  check "used the stack's MariaDB image" calls_have "entrypoint sh mariadb:10.11"
+  check "never mounted a missing folder" [ ! -f "$STATE_DIR/mounted_missing" ]
+  check "no sudo"                     no_call "^sudo"
+  check "says data deleted"           out_has "Deleted $st/data"
+  check "says mysql deleted"          out_has "Deleted $st/mysql"
+  check "data gone"                   [ ! -e "$st/data" ]
+  check "mysql gone"                  [ ! -e "$st/mysql" ]
+  check "emptied folder gone"         [ ! -e "$st" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "marker gone"                 [ ! -e "$HOME/services/seafile" ]
+  teardown
+  # The other dir's path behind the hidden folder is already gone: the
+  # first cleanup empties and removes the folder, the second is skipped
+  # rather than mounting a folder that is no longer there.
+  deployed
+  st="$(cd "$HOME/services/seafile" && pwd -P)/storage"
+  mkdir -p "$st"
+  mv "$(data_dir)" "$st/data"; rm -rf "$(mysql_dir)"
+  sed -i.bak -e "s#^SEAFILE_VOLUME=.*#SEAFILE_VOLUME=$st/data#" \
+    -e "s#^SEAFILE_MYSQL_VOLUME=.*#SEAFILE_MYSQL_VOLUME=$st/mysql#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "seafile"
+  unhide
+  check "one already gone: exits zero" [ "$CODE" -eq 0 ]
+  check "  mounted once"              [ "$(mounts_of "$st")" -eq 1 ]
+  check "  never mounted a missing folder" [ ! -f "$STATE_DIR/mounted_missing" ]
+  check "  says it is already gone"   out_has "$st/mysql is already gone"
+  check "  folder gone"               [ ! -e "$st" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  # The hidden folder sits inside the other (searchable) data dir, which the
+  # first cleanup clears; the hidden one then has nothing left to mount.
+  deployed
+  local data; data="$(cd "$(data_dir)" && pwd -P)"
+  mkdir -p "$data/locked"
+  mv "$(mysql_dir)" "$data/locked/mysql"
+  sed -i.bak "s#^SEAFILE_MYSQL_VOLUME=.*#SEAFILE_MYSQL_VOLUME=$data/locked/mysql#" "$SVC/.env"
+  chmod 000 "$data/locked"
+  run_teardown --purge "seafile"
+  unhide
+  check "hidden inside the other dir: exits zero" [ "$CODE" -eq 0 ]
+  check "  data dir cleared by the container" [ "$(mounts_of "$data")" -eq 1 ]
+  check "  hidden folder never mounted once gone" [ "$(mounts_of "$data/locked")" -eq 0 ]
+  check "  never mounted a missing folder" [ ! -f "$STATE_DIR/mounted_missing" ]
+  check "  data gone"                 [ ! -e "$data" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  # The cleanup container fails: non-zero, sudo named, data and .env kept.
+  deployed
+  st="$(cd "$HOME/services/seafile" && pwd -P)/storage"
+  mkdir -p "$st"
+  mv "$(data_dir)" "$st/data"
+  sed -i.bak "s#^SEAFILE_VOLUME=.*#SEAFILE_VOLUME=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "seafile"
+  unhide
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/data"
+  check "  never says deleted"        out_lacks "Deleted"
+  check "  data kept"                 [ -f "$st/data/seafile-data/storage/block" ]
+  check "  mysql kept"                [ -f "$(mysql_dir)/seafile_db/repo.ibd" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  st="$(cd "$HOME/services/seafile" && pwd -P)/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/data"
+  sed -i.bak "s#^SEAFILE_VOLUME=.*#SEAFILE_VOLUME=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "seafile"
+  unhide
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  link kept"                 [ -L "$st/data" ]
+  check "  mysql kept"                [ -f "$(mysql_dir)/seafile_db/repo.ibd" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/seafile itself unsearchable: not strictly inside it, so no
+  # mount; stop before anything changes and name the sudo command.
+  deployed
+  chmod 000 "$HOME/services/seafile"
+  run_teardown --purge "seafile"
+  unhide
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $HOME/services/seafile/data"
+  check "  no cleanup container"      no_call "entrypoint sh"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  serve untouched"           no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  data kept"                 [ -f "$(data_dir)/seafile-data/storage/block" ]
+  check "  mysql kept"                [ -f "$(mysql_dir)/seafile_db/repo.ibd" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /drive proxy http://127.0.0.1:8081
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8081 (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
+# `down` fails when a container outside this project (a SeaDoc or
+# notification-server add-on from its own compose file) still uses the
+# fixed-name seafile-net network. That alone must not stop the teardown
+# halfway; anything else still does, with data and .env untouched.
+test_teardown_down_network_in_use() {
+  echo "• teardown: a failed down because an add-on still uses seafile-net warns and goes on"
+  deployed
+  touch "$STATE_DIR/compose_down_fails"
+  printf 'seadoc seafile-notification-server ' > "$STATE_DIR/network_users_seafile-net"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "checked this project's containers" calls_have "ps -aq --filter label=com.docker.compose.project=svc"
+  check "names who keeps the network" out_has "Docker kept the seafile-net network: still used by seadoc seafile-notification-server (not"
+  check "data and .env kept"          [ -f "$(data_dir)/seafile-data/storage/block" ] && [ -f "$SVC/.env" ]
+  check "says it is done"             out_has "Done."
+  run_teardown --purge "seafile"
+  check "purge: exits zero"           [ "$CODE" -eq 0 ]
+  check "  warns about the network"   out_has "Docker kept the seafile-net network"
+  check "  data gone"                 [ ! -e "$HOME/services/seafile/data" ]
+  check "  mysql gone"                [ ! -e "$HOME/services/seafile/mysql" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  # This project's own containers are still there: a real failure.
+  deployed
+  touch "$STATE_DIR/compose_down_fails"
+  printf 'seadoc ' > "$STATE_DIR/network_users_seafile-net"
+  printf 'f00dfeed\n' > "$STATE_DIR/project_left"
+  run_teardown --purge "seafile"
+  check "own containers left: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                  out_has "own containers are still there"
+  check "  data kept"                 [ -f "$(data_dir)/seafile-data/storage/block" ]
+  check "  mysql kept"                [ -f "$(mysql_dir)/seafile_db/repo.ibd" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  never says done"           out_lacks "Done."
+  rm -f "$STATE_DIR/project_left"
+  touch "$STATE_DIR/ps_label_fails"
+  run_teardown --purge "seafile"
+  check "cannot list what is left: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  data and .env kept"        [ -f "$(data_dir)/seafile-data/storage/block" ] && [ -f "$SVC/.env" ]
+  rm -f "$STATE_DIR/ps_label_fails" "$STATE_DIR/network_users_seafile-net"
+  run_teardown --purge "seafile"
+  check "network already gone: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it was not the network" out_has "not because of the seafile-net network"
+  check "  data and .env kept"        [ -f "$(data_dir)/seafile-data/storage/block" ] && [ -f "$SVC/.env" ]
+  : > "$STATE_DIR/network_users_seafile-net"
+  run_teardown --purge "seafile"
+  check "network empty: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  data and .env kept"        [ -f "$(mysql_dir)/seafile_db/repo.ibd" ] && [ -f "$SVC/.env" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
@@ -693,6 +882,9 @@ test_teardown_purge_services_root_is_a_link
 test_teardown_purge_never_its_own_checkout
 test_teardown_env_lint
 test_teardown_purge_container_owned
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
+test_teardown_down_network_in_use
 
 if [ "${1:-}" = "--live" ]; then
   echo

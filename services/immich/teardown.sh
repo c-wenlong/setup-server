@@ -140,6 +140,59 @@ env_lint() {
     }' "$ENV_FILE")"
   [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
 }
+
+# Is a purge target there? `[ -e ]` is false both when it is gone and when a
+# folder on the way (e.g. a root-owned 0700 dir) cannot be searched, and only
+# the first means "nothing to delete". So walk down from ~/services: a
+# component absent under a searchable parent means gone (DIR_STATE=missing);
+# one that exists but cannot be searched hides the target (DIR_STATE=hidden,
+# HIDDEN_DIR that folder, HIDDEN_REST the path below it). $2 must already be
+# checked to sit inside ~/services/ with no `..` and no trailing slash.
+DIR_STATE=""
+HIDDEN_DIR=""
+HIDDEN_REST=""
+dir_state() {
+  local var="$1" target="$2" p="$HOME/services" rest
+  rest="${target#"$HOME/services/"}"
+  DIR_STATE="present"; HIDDEN_DIR=""; HIDDEN_REST=""
+  while :; do
+    if [ ! -e "$p" ]; then
+      # A symlink that does not resolve may be dangling or point into a
+      # folder this user cannot search; the two look the same from here.
+      [ ! -L "$p" ] || die "$p is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+      DIR_STATE="missing"; return 0
+    fi
+    [ -d "$p" ] || die "$p (on the way to $var=$target) is not a directory, refusing. Nothing was changed."
+    if [ ! -x "$p" ]; then DIR_STATE="hidden"; HIDDEN_DIR="$p"; HIDDEN_REST="$rest"; return 0; fi
+    case "$rest" in */*) ;; *) break ;; esac
+    p="$p/${rest%%/*}"
+    rest="${rest#*/}"
+  done
+  if [ ! -e "$target" ]; then
+    [ ! -L "$target" ] || die "$target is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+    DIR_STATE="missing"
+  fi
+}
+
+# A purge target behind a folder this user cannot search: the host cannot
+# even see it, so a throwaway container mounts that folder ($1, already
+# through real_dir and strictly inside ~/services/$NAME) and deletes only the
+# path below it ($2). A symlink anywhere on that path is refused (it would
+# resolve inside the container, not on this box); the path must be gone
+# afterwards, and the folders emptied on the way go too. $3 is the image,
+# any further arguments are extra `docker run` options. Non-zero on failure.
+hidden_rm() {
+  local base="$1" rest="$2" image="$3"
+  shift 3
+  docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
+    -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
+        d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
+    sh "$rest" >/dev/null 2>&1 || return 1
+  # The emptied folder itself: removing it needs only its parent's
+  # permissions, and rmdir never removes anything that is not empty.
+  rmdir -- "$base" 2>/dev/null || true
+}
 env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 LIBRARY_DIR="$(env_get UPLOAD_LOCATION)"
@@ -166,13 +219,45 @@ done
 SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
   || die "Could not read Tailscale Serve status (is tailscaled running?): $SERVE_STATUS — nothing was changed."
 
+# A purge target that dir_state found behind a folder this user cannot
+# search. The cleanup container mounts that folder itself (real_dir resolves
+# it without entering it) and deletes only the path below it, so the folder
+# must sit strictly inside ~/services/immich: sets PT_BASE to its real path
+# and PT_REST to the path below it, or dies before anything changes, naming
+# the sudo command. A target outside ~/services/immich (or reached through a
+# folder that is) gets $3 instead: it may be a photo folder teardown never
+# deletes, so no sudo command is suggested for it.
+hidden_target() {
+  local var="$1" dir="$2" refusal="${3:-}" root nl='
+'
+  case "$dir" in
+    "$HOME/services/$NAME"/?*) ;;
+    *) die "$var=$dir is behind $HIDDEN_DIR, which this user cannot search, and is not inside $HOME/services/$NAME — refusing. ${refusal:-Remove it by hand if you are sure.}" ;;
+  esac
+  if ! PT_BASE="$(real_dir "$HIDDEN_DIR")"; then
+    case "$HIDDEN_DIR" in
+      "$HOME/services"|"$HOME/services/$NAME") ;;
+      *) [ -z "$refusal" ] || die "$HIDDEN_DIR (on the way to $var=$dir) cannot be searched and is not a real directory inside $HOME/services/$NAME — refusing. $refusal" ;;
+    esac
+    die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. Nothing was changed."
+  fi
+  root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
+  case "$PT_BASE" in
+    "$root/$NAME"/?*) ;;
+    *) die "$HIDDEN_DIR cannot be searched, so teardown cannot reach $var=$dir. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. Nothing was changed." ;;
+  esac
+  case "$HIDDEN_REST" in *"$nl"*) die "$var=$dir contains a newline — refusing." ;; esac
+  PT_REST="$HIDDEN_REST"
+}
+
 # One purge target from .env, checked the same way for both directories. Sets
-# PT to its real path, or to "" when it is not on disk. Dies before anything
-# changes unless it is ~/services/immich itself or inside it. $3 is what to
-# say after the refusal.
+# PT to its real path, or to "" when it is not on disk; when it sits behind a
+# folder this user cannot search, PT is "" and PT_BASE/PT_REST say where it
+# is (see hidden_target). Dies before anything changes unless it is
+# ~/services/immich itself or inside it. $3 is what to say after the refusal.
 purge_target() {
   local var="$1" dir="$2" refusal="$3" root
-  PT=""
+  PT=""; PT_BASE=""; PT_REST=""
   [ -n "$dir" ] || die "$var is missing from $ENV_FILE — refusing to guess what to delete."
   while :; do case "$dir" in */) dir="${dir%/}" ;; *) break ;; esac; done
   case "$dir" in *..*) die "$var=$dir contains '..' — refusing." ;; esac
@@ -182,7 +267,9 @@ purge_target() {
   esac
   # And where it really is, symlinks and all: it must be ~/services/immich
   # or inside it, never ~/services itself, another service, or anything above.
-  if [ -e "$dir" ]; then
+  dir_state "$var" "$dir"
+  [ "$DIR_STATE" != "hidden" ] || hidden_target "$var" "$dir" "$refusal"
+  if [ "$DIR_STATE" = "present" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
     PT="$(real_dir "$dir")" || die "$var=$dir is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing. $refusal"
@@ -198,6 +285,11 @@ purge_target() {
 PURGE_DB=""
 PURGE_LIBRARY=""
 PURGE_MARKER=""
+# The same three behind a folder this user cannot search: the folder (real
+# path) and the path below it, plus what the user is told is deleted.
+DB_BASE=""; DB_REST=""; DB_SHOW=""
+LIB_BASE=""; LIB_REST=""; LIB_SHOW=""
+MARKER_BASE=""; MARKER_REST=""; MARKER_SHOW=""
 PG_IMAGE=""
 if [ "$PURGE" -eq 1 ]; then
   # The library is the one path users are told to move (to a bigger disk), so
@@ -205,12 +297,19 @@ if [ "$PURGE" -eq 1 ]; then
   # else too. Outside ~/services/immich it is never deleted here.
   purge_target UPLOAD_LOCATION "$LIBRARY_DIR" \
     "UPLOAD_LOCATION is your photo library. Outside $HOME/services/$NAME it may be a photo folder you already had or a separate disk, and teardown never deletes those. Delete it by hand if you mean to, then set UPLOAD_LOCATION=$HOME/services/$NAME/library in .env and re-run ./teardown.sh --purge."
-  PURGE_LIBRARY="$PT"
+  PURGE_LIBRARY="$PT"; LIB_BASE="$PT_BASE"; LIB_REST="$PT_REST"
+  LIB_SHOW="${PT:-${PT_BASE:+$PT_BASE/$PT_REST}}"
   purge_target DB_DATA_LOCATION "$DB_DIR" "Remove it by hand if you are sure."
-  PURGE_DB="$PT"
-  if [ -e "$ML_MARKER" ] || [ -L "$ML_MARKER" ]; then
+  PURGE_DB="$PT"; DB_BASE="$PT_BASE"; DB_REST="$PT_REST"
+  DB_SHOW="${PT:-${PT_BASE:+$PT_BASE/$PT_REST}}"
+  dir_state ML_MARKER "$ML_MARKER"
+  if [ "$DIR_STATE" = "hidden" ]; then
+    hidden_target ML_MARKER "$ML_MARKER"
+    MARKER_BASE="$PT_BASE"; MARKER_REST="$PT_REST"; MARKER_SHOW="$PT_BASE/$PT_REST"
+  elif [ "$DIR_STATE" = "present" ]; then
     PURGE_MARKER="$(real_dir "$ML_MARKER")" || die "$ML_MARKER is not a plain file inside $HOME/services/$NAME — refusing."
     [ ! -d "$PURGE_MARKER" ] || die "$ML_MARKER is a directory — refusing."
+    MARKER_SHOW="$PURGE_MARKER"
   fi
   # Postgres writes its files as the container's postgres user and the server
   # writes the library as root, so a plain rm usually cannot empty either. The
@@ -219,11 +318,11 @@ if [ "$PURGE" -eq 1 ]; then
   # fails before anything changes.
   PG_IMAGE="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr\.io\/immich-app\/postgres:[^[:space:]]*\)[[:space:]]*$/\1/p' "$SERVICE_DIR/docker-compose.yml" | head -1)"
   [ -n "$PG_IMAGE" ] || die "Could not find the Postgres image in $SERVICE_DIR/docker-compose.yml — nothing was changed."
-  warn "--purge deletes your Immich photo library: ${PURGE_LIBRARY:-nothing (no library dir on disk)}"
+  warn "--purge deletes your Immich photo library: ${LIB_SHOW:-nothing (no library dir on disk)}"
   warn "  Every photo and video uploaded to Immich is deleted, with its thumbnails."
   warn "  Nothing backs them up: this box has no backup job. Copy out anything you want first."
-  warn "It also deletes the database ${PURGE_DB:-(no database dir on disk)} (albums, people, users),"
-  warn "  the ML model-cache volume, ${PURGE_MARKER:-(no ML marker)} and $ENV_FILE. This cannot be undone."
+  warn "It also deletes the database ${DB_SHOW:-(no database dir on disk)} (albums, people, users),"
+  warn "  the ML model-cache volume, ${MARKER_SHOW:-(no ML marker)} and $ENV_FILE. This cannot be undone."
   printf 'Type %s to confirm: ' "$NAME"
   answer=""
   read -r answer || true
@@ -254,6 +353,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
   port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -262,11 +362,17 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+# A shared port left on still routes here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
 # --profile ml always: the ML container exists only under that profile, and
@@ -308,17 +414,37 @@ clear_dir() {
   [ ! -e "$d" ] || die "$d is still there. Run: sudo rm -rf $d   then ./teardown.sh --purge again. .env was kept."
 }
 
+# Delete one target behind a folder this user cannot search ($1 that folder,
+# $2 the path below it, $3 the path as in .env), as root from the pinned
+# Postgres image. Two targets can share that folder, and hidden_rm removes it
+# once it is empty, so a folder that is already gone means its target went
+# with it. Never mount a missing folder: dockerd would create it, as root.
+clear_hidden() {
+  local base="$1" rest="$2" dir="$3"
+  if [ ! -e "$base" ] && [ ! -L "$base" ]; then
+    ok "$base/$rest is already gone (its folder went with an earlier delete)"
+    return 0
+  fi
+  info "$base cannot be searched by this user; deleting $base/$rest with $PG_IMAGE"
+  hidden_rm "$base" "$rest" "$PG_IMAGE" --user 0 \
+    || die "Could not delete $base/$rest through $base. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. .env was kept."
+}
+
 if [ "$PURGE" -eq 1 ]; then
   info "Purging the database, the photo library and .env"
   [ -z "$PURGE_DB" ] || clear_dir "$PURGE_DB"
+  [ -z "$DB_BASE" ] || clear_hidden "$DB_BASE" "$DB_REST" "$DB_DIR"
   [ -z "$PURGE_LIBRARY" ] || clear_dir "$PURGE_LIBRARY"
+  [ -z "$LIB_BASE" ] || clear_hidden "$LIB_BASE" "$LIB_REST" "$LIBRARY_DIR"
   [ -z "$PURGE_MARKER" ] || rm -f -- "$PURGE_MARKER"
+  [ -z "$MARKER_BASE" ] || clear_hidden "$MARKER_BASE" "$MARKER_REST" "$ML_MARKER"
+  # Only now, with every data path gone, the secrets.
   rm -f -- "$ENV_FILE"
   # ~/services/<name> is the launcher's install marker. Try it even when the
   # data was already gone, so a purged app never reads as installed; rmdir
   # only ever removes an empty directory, and a symlink is left alone.
   [ -L "$HOME/services/$NAME" ] || rmdir -- "$HOME/services/$NAME" 2>/dev/null || true
-  ok "Deleted ${PURGE_DB:-(no database dir)}, ${PURGE_LIBRARY:-(no library dir)} and $ENV_FILE"
+  ok "Deleted ${DB_SHOW:-(no database dir)}, ${LIB_SHOW:-(no library dir)} and $ENV_FILE"
 fi
 
 echo

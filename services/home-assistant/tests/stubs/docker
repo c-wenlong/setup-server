@@ -5,6 +5,7 @@
 #   compose_pull    — touched by `compose ... pull`
 #   compose_down    — touched by `compose ... down`
 #   docker_run_fails — exists => `docker run --entrypoint sh` (purge cleanup) fails
+#   cleanup_run     — one line of argv per `docker run --entrypoint sh`
 #
 # THE IMPORTANT PART: on `compose ... up` this stub freezes the state of the
 # sandbox $HOME. Home Assistant turns what it finds in configuration.yaml at
@@ -95,22 +96,32 @@ case "$1" in
     # classifier and the repair merge are genuinely exercised by the mocked
     # suite — a faked verdict would have tested nothing, and the repair path is
     # the security-critical half.
-    mount_host=""; mount_ctr=""; entry=""
+    mount_host=""; mount_ctr=""; entry=""; script=""
+    argv="$*"
     while [ $# -gt 0 ]; do
       case "$1" in
         -v|--volume) mount_host="${2%%:*}"; mount_ctr="${2#*:}"; mount_ctr="${mount_ctr%%:*}"; shift 2 ;;
         -e|--env)    export "${2?}"; shift 2 ;;
         --entrypoint) entry="$2"; shift 2 ;;
+        -c) script="$2"; shift 2; break ;;
         *) shift ;;
       esac
     done
     if [ "$entry" = "sh" ]; then
-      # teardown --purge's root-owned-file cleanup: the real container is root,
-      # so it can delete what the host user cannot. Model that by making the
-      # tree writable first, then running the real `find ... -delete`.
+      # teardown --purge's cleanups of root-owned files:
+      #   docker run --rm --pull never -v DIR:/config --entrypoint sh <image> \
+      #     -c 'find /config -mindepth 1 -delete'
+      #   docker run --rm --pull never -v BASE:/x --entrypoint sh <image> \
+      #     -c SCRIPT sh REST        (config behind an unsearchable folder)
+      # The real container is root, so it can delete what the host user
+      # cannot. Model that by making the mounted tree accessible first, then
+      # running the real SCRIPT on the host with the mount point pointing at
+      # the host side of the mount.
+      printf '%s\n' "$argv" >> "$STATE_DIR/cleanup_run"
       [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+      [ -n "$mount_host" ] && [ -n "$mount_ctr" ] && [ -n "$script" ] || exit 1
       chmod -R u+rwX "$mount_host" 2>/dev/null
-      find "$mount_host" -mindepth 1 -delete
+      sh -c "${script//"$mount_ctr"/$mount_host}" "$@"
       exit $?
     fi
     [ "$entry" = "python3" ] || exit 0

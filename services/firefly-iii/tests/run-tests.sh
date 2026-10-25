@@ -988,6 +988,7 @@ SERVE_END
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8097 or http://127.0.0.1:8099 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -1390,6 +1391,131 @@ test_teardown_commented_paths() {
   teardown
 }
 
+# State dirs behind a folder this user cannot search (a root-owned 0700
+# storage/, faked with chmod 000): `[ -e ]` cannot see them, which must not
+# read as "already gone" while .env (and its APP_KEY) is deleted. The postgres
+# image mounts that folder and deletes only the path below it.
+unhide_state() { chmod -R u+rwX "$HOME/services/firefly-iii" 2>/dev/null; }
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: state dirs behind an unsearchable folder are deleted, not taken as gone"
+  local st ff
+  # Ledger and uploads share one hidden folder; the importer config is plain.
+  deployed
+  ff="$HOME/services/firefly-iii"; st="$ff/storage"
+  mkdir -p "$st"
+  mv "$ff/db" "$st/db"; mv "$ff/upload" "$st/upload"
+  sed -i.bak -e "s#^FIREFLY_DB_DATA=.*#FIREFLY_DB_DATA=$st/db#" \
+             -e "s#^FIREFLY_UPLOAD=.*#FIREFLY_UPLOAD=$st/upload#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "firefly-iii"
+  unhide_state
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "confirmation names the hidden dirs" out_has "deletes the LEDGER and its APP_KEY: $st/db, $st/upload, $ff/importer"
+  check "mounted the unsearchable folder" calls_have "docker run --rm --pull never -v $st:/x --entrypoint sh postgres:16-alpine"
+  check "no sudo"                     no_call "^sudo"
+  check "ledger gone"                 [ ! -e "$st/db" ]
+  check "uploads gone"                [ ! -e "$st/upload" ]
+  check "importer config gone"        [ ! -e "$ff/importer" ]
+  check "says what it deleted"        out_has "Deleted $st/upload"
+  check "emptied folder gone"         [ ! -e "$st" ]
+  check "no mount source created"     [ ! -e "$STATE_DIR/docker_created_mount" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "state dir removed"           [ ! -e "$ff" ]
+  teardown
+  # Deleting the ledger empties the shared folder, so hidden_rm removes it;
+  # the uploads (never there) must then not mount a folder that is gone,
+  # which a real dockerd would create as root.
+  deployed
+  ff="$HOME/services/firefly-iii"; st="$ff/storage"
+  mkdir -p "$st"
+  mv "$ff/db" "$st/db"; rm -rf "$ff/upload"
+  sed -i.bak -e "s#^FIREFLY_DB_DATA=.*#FIREFLY_DB_DATA=$st/db#" \
+             -e "s#^FIREFLY_UPLOAD=.*#FIREFLY_UPLOAD=$st/upload#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "firefly-iii"
+  unhide_state
+  check "shared folder emptied first: exits zero" [ "$CODE" -eq 0 ]
+  check "  one cleanup container"     [ "$(call_count "-v $st:/x")" -eq 1 ]
+  check "  no mount source created"   [ ! -e "$STATE_DIR/docker_created_mount" ]
+  check "  says the uploads were already gone" out_has "$st/upload is already gone"
+  check "  folder gone"               [ ! -e "$st" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  ff="$HOME/services/firefly-iii"; st="$ff/storage"
+  mkdir -p "$st"; mv "$ff/db" "$st/db"
+  sed -i.bak "s#^FIREFLY_DB_DATA=.*#FIREFLY_DB_DATA=$st/db#" "$SVC/.env"
+  chmod 000 "$st"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "firefly-iii"
+  unhide_state
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/db"
+  check "  never says the ledger was deleted" out_lacks "Deleted $st/db"
+  check "  never says .env was deleted" out_lacks "Deleted $SVC/.env"
+  check "  ledger kept"               [ -f "$st/db/base/pgdata" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  ff="$HOME/services/firefly-iii"; st="$ff/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/db"
+  sed -i.bak "s#^FIREFLY_DB_DATA=.*#FIREFLY_DB_DATA=$st/db#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "firefly-iii"
+  unhide_state
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/firefly-iii itself unsearchable: not strictly inside it, so no
+  # mount; stop before anything changes and name the sudo command.
+  deployed
+  ff="$HOME/services/firefly-iii"
+  chmod 000 "$ff"
+  run_teardown --purge "firefly-iii"
+  unhide_state
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $ff/db"
+  check "  no cleanup container"      no_call "docker run"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  serve untouched"           no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  ledger kept"               [ -f "$ff/db/base/pgdata" ]
+  teardown
+  # And ~/services itself.
+  deployed
+  chmod 000 "$HOME/services"
+  run_teardown --purge "firefly-iii"
+  chmod 755 "$HOME/services"
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  ledger kept"               [ -f "$HOME/services/firefly-iii/db/base/pgdata" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<SERVE_END
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /ff proxy http://127.0.0.1:8097
+|-- /import proxy http://127.0.0.1:8099
+SERVE_END
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8097 or http://127.0.0.1:8099 (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 for f in setup.sh teardown.sh docker-compose.yml; do
   [ -f "$SERVICE_DIR/$f" ] || { red "services/firefly-iii/$f is missing — nothing to test."; exit 1; }
@@ -1440,6 +1566,8 @@ test_teardown_purge_refuses_odd_paths
 test_teardown_purge_trailing_slashes
 test_teardown_purge_missing_state_dirs
 test_teardown_quoted_env
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 echo "• sandbox isolation: the mocked suite changed nothing on this host"
 AFTER_FP="$(host_fingerprint)"

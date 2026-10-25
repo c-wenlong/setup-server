@@ -787,6 +787,7 @@ EOF
   check ":8443 (dashboard + soketi) off" calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8101 or http://127.0.0.1:6001 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -1071,6 +1072,106 @@ if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/teardown.sh" ] || [ 
 fi
 
 echo "Mocked suite (sandboxed, no system changes):"
+
+# A purge dir behind a folder this user cannot search (a root-owned 0700
+# vault/, faked with chmod 000): `[ -e ]` cannot see it, which must not read
+# as "already gone" while .env (APP_KEY) is deleted. Coolify's own dirs are
+# deleted through the pinned image mounting that folder; a dir that holds
+# what the user deployed must be seen to be empty, so it is refused.
+hide_under_vault() {  # hide_under_vault VAR SUBDIR
+  local v="$HOME/services/coolify/vault"
+  mkdir -p "$v/$2"; echo keep > "$v/$2/keep"
+  sed -i.bak "s#^$1=.*#$1=$v/$2#" "$SVC/.env"
+  chmod 000 "$v"
+}
+unhide_vault() { chmod -R u+rwX "$HOME/services/coolify" 2>/dev/null; }
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: a dir behind an unsearchable folder is deleted, not taken as gone"
+  local v
+  deployed
+  v="$HOME/services/coolify/vault"
+  hide_under_vault COOLIFY_BACKUPS backups
+  run_teardown --purge "coolify"
+  unhide_vault
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "mounted the unsearchable folder" calls_have "--user 0:0 -v $v:/x --entrypoint sh docker.io/coollabsio/coolify:4.3.21"
+  check "no sudo"                     no_call "^sudo"
+  check "hidden dir gone"             [ ! -e "$v/backups" ]
+  check "emptied folder gone"         [ ! -e "$v" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "marker gone"                 [ ! -e "$HOME/services/coolify" ]
+  teardown
+  deployed
+  v="$HOME/services/coolify/vault"
+  hide_under_vault COOLIFY_BACKUPS backups
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "coolify"
+  unhide_vault
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $v/backups"
+  check "  never says deleted"        out_lacks "Deleted"
+  check "  hidden dir kept"           [ -f "$v/backups/keep" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container: refused, its target untouched.
+  deployed
+  v="$HOME/services/coolify/vault"
+  mkdir -p "$v" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$v/backups"
+  sed -i.bak "s#^COOLIFY_BACKUPS=.*#COOLIFY_BACKUPS=$v/backups#" "$SVC/.env"
+  chmod 000 "$v"
+  run_teardown --purge "coolify"
+  unhide_vault
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # A user-deployed dir that cannot be listed: refused before anything changes.
+  deployed
+  v="$HOME/services/coolify/vault"
+  hide_under_vault COOLIFY_APPLICATIONS applications
+  run_teardown --purge "coolify"
+  unhide_vault
+  check "hidden applications dir: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                  out_has "still holds what you deployed"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  no cleanup container"      no_call "docker run"
+  check "  app data kept"             [ -f "$v/applications/keep" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/coolify itself unsearchable: not strictly inside it, no mount.
+  deployed
+  chmod 000 "$HOME/services/coolify"
+  run_teardown --purge "coolify"
+  unhide_vault
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  no cleanup container"      no_call "docker run"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  backups kept"              [ -f "$(data_dir)/backups/coolify/dump.sql" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOT
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /coolify proxy http://127.0.0.1:8101
+|-- /app proxy http://127.0.0.1:6001
+EOT
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8101 or http://127.0.0.1:6001 (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
 test_preflight_root
 test_preflight_docker_perms
 test_preflight_tailscale_down
@@ -1111,6 +1212,8 @@ test_teardown_refuses_compose_overrides
 test_teardown_purge_keeps_a_checkout_inside
 test_teardown_network_still_in_use
 test_teardown_purge_key_line_lookalikes
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 if [ "${1:-}" = "--live" ]; then
   echo
