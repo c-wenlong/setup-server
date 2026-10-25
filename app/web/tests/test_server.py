@@ -898,8 +898,23 @@ class ProbeCacheTest(SandboxTest):
         # The redirect must run before the first stylesheet/script tag,
         # i.e. inside the inline head script.
         head = html.split("<link", 1)[0]
-        self.assertIn("location.pathname.endsWith('/')", head)
-        self.assertIn("location.replace(", head)
+        # Assert the exact statements: a negated guard (missing `!`, or a
+        # reversed condition) or a different destination must fail here.
+        self.assertIn(
+            "if (!location.pathname.endsWith('/')"
+            " && !/\\.[^/]+$/.test(location.pathname)) {", head)
+        self.assertIn(
+            "location.replace(location.pathname + '/'"
+            " + location.search + location.hash);", head)
+        # And the guard must fire on the mount shapes actually in use:
+        # `/home` redirects, `/`, `/home/` and `/index.html` do not.
+        for path, want in (("/", False), ("/home/", False),
+                           ("/index.html", False), ("/home", True),
+                           ("/console", True)):
+            bare, _, tail = path.rpartition("/")
+            has_file = bool(tail) and "." in tail
+            redirect = not path.endswith("/") and not has_file
+            self.assertEqual(redirect, want, path)
 
     def test_registry_file_parses_and_is_self_consistent(self):
         """The real services.json must load and satisfy the schema."""
