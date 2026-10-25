@@ -19,7 +19,7 @@ Seafile, ollama). Shipped items are marked ✅ inline and kept for the reasoning
   all**, yet Docker's port mapping still shows :53 as LISTEN — a health check
   that watches a socket goes green against a resolver that refuses every query.
   The verify step resolves a real name instead. ⚠️ Still filtering nothing
-  until `100.85.87.87` is added as a nameserver in the Tailscale admin console,
+  until `100.77.77.77` is added as a nameserver in the Tailscale admin console,
   which is deliberately left as a manual step.
 - **Tailscale exit node** — not even a service: `tailscale set
   --advertise-exit-node`. Route phone/laptop traffic through home for safe
@@ -144,7 +144,7 @@ than item 10 alone.
 | # | Service | What it gets you | Rough cost | Why this rank |
 |---|---|---|---|---|
 | 1 | **Backup job** (their PBS + ZFS replication + a DB backup UI) | restic/borg of `~/services` + `pg_dump`/`mysqldump` of Immich and Seafile, pushed off-box | ~0 RAM, half a day | Not a nicety any more. Vaultwarden holds every password and Immich holds photos, both on one unbacked disk — see the Vaultwarden note above. Their whole storage story is snapshot + replicate; this box has neither. Everything below is worthless if this disk dies. |
-| 2 | **Uptime Robot** (external) | Off-site check against the tailnet edge or a public canary | 10 min, free tier | Fixes the blind spot they call out explicitly: Kuma runs *on* the box it monitors, so if kai-home-server dies, nothing tells anyone. Pairs with the existing ntfy topic. |
+| 2 | **Uptime Robot** (external) | Off-site check against the tailnet edge or a public canary | 10 min, free tier | Fixes the blind spot they call out explicitly: Kuma runs *on* the box it monitors, so if homeserver dies, nothing tells anyone. Pairs with the existing ntfy topic. |
 | 3 | **Dozzle** | Live tail + search of all container logs in a browser | ~10 MB | Highest bang-per-megabyte on the list. ~15 containers here, currently read with `docker logs` over SSH. One container, no config. |
 | 4 | **Paperless-ngx** + Tika + Gotenberg + Paperless-AI | OCR'd searchable archive of receipts, contracts, tax docs | ~800 MB–1.2 GB | ✅ base shipped (services/paperless-ngx/, 2026-09-11); Tika, Gotenberg and Paperless-AI are still unbuilt, left as a commented opt-in. Already listed under "Knowledge & documents" above; this survey independently put it top of the life-admin tier. Paperless-AI does the extraction the built-in OCR does poorly, and it points at the ollama already running. Watch RAM against ollama. |
 | 5 | **Scrutiny** | SMART health and failure trending per disk | ~50 MB | Beszel reports disk *usage*, not disk *dying*. Cheap early warning, and it makes #1 actionable before a drive goes rather than after. |

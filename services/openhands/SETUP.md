@@ -1,7 +1,7 @@
 # openhands — OpenHands Agent Canvas
 
 Browser UI for coding agents (Claude Code / Codex via ACP) at
-`https://kai-home-server.taild6a23f.ts.net:8000`. Tailnet only. Not on
+`https://homeserver.tail-name.ts.net:8000`. Tailnet only. Not on
 the LAN or the public internet.
 
 Paperclip is a **separate** service (`../paperclip/`). This script
@@ -11,7 +11,7 @@ deploys Agent Canvas only.
 
 ```
   Mac / phone on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8000
+            │  https://homeserver.tail-name.ts.net:8000
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │

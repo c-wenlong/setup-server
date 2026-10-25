@@ -38,11 +38,11 @@ case "$1" in
 
         if [ -f "$STATE_DIR/user_exists" ]; then
           # Verbatim shape of the real failure (Forgejo 15 exits 1 here).
-          echo "Command error: user already exists [name: kai]" >&2
+          echo "Command error: user already exists [name: admin]" >&2
           exit 1
         fi
         touch "$STATE_DIR/user_exists"
-        echo "New user 'kai' has been successfully created!"
+        echo "New user 'admin' has been successfully created!"
         ;;
       *)
         : ;;

@@ -66,9 +66,9 @@ headings, no layout, buttons that do nothing — and the browser console is full
 of
 
 ```
-Mixed Content: The page at 'https://kai-home-server.taild6a23f.ts.net:8097/login'
+Mixed Content: The page at 'https://homeserver.tail-name.ts.net:8097/login'
 was loaded over HTTPS, but requested an insecure stylesheet
-'http://kai-home-server.taild6a23f.ts.net:8097/build/assets/app-*.css'.
+'http://homeserver.tail-name.ts.net:8097/build/assets/app-*.css'.
 This request has been blocked.
 ```
 
@@ -78,7 +78,7 @@ HTML *is* being served correctly. Only its contents are wrong.
 **Diagnose by counting the asset scheme, not by reading the status code:**
 
 ```bash
-URL="https://kai-home-server.taild6a23f.ts.net:8097/login"
+URL="https://homeserver.tail-name.ts.net:8097/login"
 curl -s "$URL" | grep -o -E '(src|href)="http://' | wc -l
 #   0  = healthy
 #  >0  = this is your bug
@@ -96,7 +96,7 @@ grep -E 'APP_URL|TRUSTED_PROXIES' docker-compose.yml .env
 ```
 
 - `APP_URL` must be the **external tailnet HTTPS URL**
-  (`https://kai-home-server.taild6a23f.ts.net:8097`) — *not*
+  (`https://homeserver.tail-name.ts.net:8097`) — *not*
   `http://127.0.0.1:8097`. The loopback URL is the natural thing to write,
   because it is what the container actually binds, and it is wrong.
 - `TRUSTED_PROXIES: '**'` must be set, and **quoted** — bare `**` is not valid
@@ -114,7 +114,7 @@ set correctly it is zero.
 cd ~/dev/setup-server/services/firefly-iii
 # correct APP_URL / TRUSTED_PROXIES in docker-compose.yml (or .env), then:
 docker compose --project-directory . up -d --force-recreate app
-curl -s https://kai-home-server.taild6a23f.ts.net:8097/login \
+curl -s https://homeserver.tail-name.ts.net:8097/login \
   | grep -c -E '(src|href)="http://'      # must print 0
 ```
 
@@ -405,7 +405,7 @@ docker compose --project-directory . exec importer \
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8097/login          # 200?
-curl -s -o /dev/null -w '%{http_code}\n' https://kai-home-server.taild6a23f.ts.net:8097/login
+curl -s -o /dev/null -w '%{http_code}\n' https://homeserver.tail-name.ts.net:8097/login
 tailscale serve status | grep -A2 ':8097'      # should proxy to http://127.0.0.1:8097
 tailscale status | head -3                     # is this node even up?
 ```

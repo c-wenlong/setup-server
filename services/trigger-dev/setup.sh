@@ -35,7 +35,7 @@ set -euo pipefail
 LOCAL_PORT="${LOCAL_PORT:-8030}"
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@example.com}"
 REGISTRY_PORT="${REGISTRY_PORT:-5000}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"

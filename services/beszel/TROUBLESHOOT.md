@@ -28,7 +28,7 @@ opened the shell.
   `sg docker -c 'docker logs beszel --tail 50'`.
   Container missing → rerun setup.sh.
 - Faster than either from a phone: the launcher at
-  `https://kai-home-server.taild6a23f.ts.net/home/` shows beszel's live
+  `https://homeserver.tail-name.ts.net/home/` shows beszel's live
   status and has start/stop/restart buttons (they move the hub container and
   the agent unit together, in the right order).
 

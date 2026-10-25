@@ -33,7 +33,7 @@ EOF
   ip)
     case "$2" in
       -6) echo "fd7a:115c:a1e0::1234" ;;
-      *)  echo "100.85.87.87" ;;
+      *)  echo "100.77.77.77" ;;
     esac
     ;;
   serve)

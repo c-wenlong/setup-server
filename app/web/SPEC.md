@@ -8,7 +8,7 @@ neither of which is described anywhere in this document, and the "Out of
 scope" lists below (which say stop actions are not built) are stale as a
 result._
 
-A single-page app launcher for kai-home-server: every service as a tile,
+A single-page app launcher for homeserver: every service as a tile,
 tap to open. Tiles for services that are **not deployed yet** are dimmed and
 carry a Deploy action that runs that service's `setup.sh` on the box — so
 this is both an index of what exists and the place you install from.
@@ -19,7 +19,7 @@ metrics. Uptime Kuma and beszel already do that and are one tap away.
 ## Why it exists
 
 Opening a service today means typing
-`https://kai-home-server.taild6a23f.ts.net:2283` on a phone. This replaces
+`https://homeserver.tail-name.ts.net:2283` on a phone. This replaces
 that with one bookmark.
 
 ## Design direction

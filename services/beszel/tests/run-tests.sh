@@ -57,7 +57,7 @@ check "serve retries only on an approval link, dies otherwise" \
 check "port from .env is re-validated" \
       grep -q 'BESZEL_PORT in \$ENV_FILE must be numeric' "$SETUP"
 check "final URL is resolved, not hardcoded" \
-      bash -c "! grep -q 'kai-home-server\.taild6a23f' '$SETUP'"
+      bash -c "! grep -q 'homeserver\.tail-name' '$SETUP'"
 # Sudo is surgical: exactly the two one-time Linux grants the reference
 # implementation (code-server) makes, and nothing else.
 check "sudo only for lingering + tailscale operator" \

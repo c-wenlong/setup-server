@@ -18,10 +18,10 @@
 #   dns_status_fails    — exists => `dns status` fails ("no netmap", i.e. 503
 #                         from the local API, or a CLI without the subcommand)
 #
-# The fake address is deliberately NOT this box's real 100.85.87.87: a test that
-# passes only because it matched the live tailnet IP would be testing nothing,
-# and a stub that emitted the real one could not tell a resolved value from a
-# hardcoded literal in docker-compose.yml.
+# The fake address is deliberately made up: a test that passes only because it
+# matched the live tailnet IP would be testing nothing, and a stub that emitted
+# a real address could not tell a resolved value from a hardcoded literal in
+# docker-compose.yml.
 echo "tailscale $*" >> "$CALLS_LOG"
 
 if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then

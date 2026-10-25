@@ -6,7 +6,7 @@ _Shipped note (2026-09-12): Phase 1 (setup.sh, docker-compose.yml, SETUP.md, TRO
 [COMPETITIVE-ANALYSIS.md](COMPETITIVE-ANALYSIS.md) first — it explains *why*
 each decision below is what it is, and lists dead ends not to re-explore.
 
-**Target state:** Firefly III on `kai-home-server`, tailnet-only, fed by six
+**Target state:** Firefly III on `homeserver`, tailnet-only, fed by six
 per-institution pullers at three tiers of automation. Replaces the manual
 "download PDFs → parse → update Notion" monthly loop.
 
@@ -25,7 +25,7 @@ the shape of the whole system.
 |---|---|---|---|
 | 0.1 | **Can Kai's *personal* (non-business) Wise profile mint an API token that reads balance statements?** | Ask Kai to check `Your Account > Integrations and Tools > API tokens` on wise.com. If a token can be created, call `GET /v1/profiles` then the balance-statement endpoint for an SG profile. | Phase 2 dies. Fall back to Wise's monthly CSV export (still better than PDF). Escalate to Kai before redesigning. |
 | 0.2 | Which Tiger exchange licences (SGX/US/HK) are on the account? | Tiger developer portal, developer-info page | HK data needs `props_path` in client config; adjust Phase 3 |
-| 0.3 | Does DBS currently push transaction-alert **emails** (not just SMS/push) to `chenwenlongofficial@gmail.com`, and what do they contain? | Search Gmail for recent DBS alerts; sample 10-20 and record the exact formats | Phase 4 changes from parsing to monthly-PDF-only; DBS drops to Tier 3 |
+| 0.3 | Does DBS currently push transaction-alert **emails** (not just SMS/push) to the alerts mailbox, and what do they contain? | Search Gmail for recent DBS alerts; sample 10-20 and record the exact formats | Phase 4 changes from parsing to monthly-PDF-only; DBS drops to Tier 3 |
 | 0.4 | Can an individual / sole proprietor onboard to Finverse to link only their own accounts? | **One email to Finverse sales.** Send and move on — do not block on the reply | Nothing — this is opportunistic. DBS stays on Tier 2 |
 
 **Gate:** record every answer in `docs/verification-log.md` with the date and
@@ -266,7 +266,7 @@ services/firefly-iii/
 
 ## Definition of done
 
-- [ ] Firefly III reachable at `https://kai-home-server.taild6a23f.ts.net:8097`,
+- [ ] Firefly III reachable at `https://homeserver.tail-name.ts.net:8097`,
       loopback-bound, Kuma-monitored, in `DIRECTORY.md`
 - [ ] Wise + Tiger import with zero human action
 - [ ] DBS transactions appear within the hour, reconciling to the eStatement

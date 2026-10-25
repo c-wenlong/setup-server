@@ -80,12 +80,12 @@ test_fresh_deploy() {
   echo "• fresh deploy: full happy path"
   setup
   touch "$STATE_DIR/operator"
-  export OWNER_EMAIL=kai@example.com OWNER_PASSWORD='Testpass123'
+  export OWNER_EMAIL=admin@example.com OWNER_PASSWORD='Testpass123'
   run_deploy
   check "exits zero"                   [ "$CODE" -eq 0 ]
   check ".env has encryption key"      sh -c "grep -E '^N8N_ENCRYPTION_KEY=[0-9a-f]{64}$' '$SVC/.env' >/dev/null"
   check ".env is mode 600"             sh -c "[ \"\$(stat -c %a '$SVC/.env' 2>/dev/null || stat -f %Lp '$SVC/.env')\" = 600 ]"
-  check ".env has owner creds"         env_has "OWNER_EMAIL=kai@example.com"
+  check ".env has owner creds"         env_has "OWNER_EMAIL=admin@example.com"
   check ".env has public URL"          env_has "PUBLIC_URL=https://test-host.tailfake.ts.net:5678/"
   check "compose up invoked"           [ -f "$STATE_DIR/compose_up" ]
   check "owner setup API called"       calls_have "rest/owner/setup"

@@ -11,7 +11,7 @@ Triage in layers, outermost failure first:
 
 ```
 container up?  ->  DNS answers?              ->  web UI?        ->  publish?     ->  tailnet points here?
-docker ps          dig @100.85.87.87 x.com       curl :3080        serve status     Tailscale console → DNS
+docker ps          dig @100.77.77.77 x.com       curl :3080        serve status     Tailscale console → DNS
 ```
 
 Quick triage:
@@ -19,7 +19,7 @@ Quick triage:
 ```bash
 cd ~/dev/setup-server/services/adguard
 docker compose --project-directory . ps                   # adguard up?
-dig +short @100.85.87.87 example.com                      # a real A record
+dig +short @100.77.77.77 example.com                      # a real A record
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/control/status
                                                           # 401 = healthy (see below)
 tailscale serve status                                    # :3080 -> 127.0.0.1:3080
@@ -55,9 +55,9 @@ time if you do not know it.
 
 ```bash
 ss -ltnup | grep ':53'
-# 100.85.87.87:53 ... LISTEN          ← looks perfect
-dig @100.85.87.87 example.com
-# ;; communications error to 100.85.87.87#53: connection refused   ← isn't
+# 100.77.77.77:53 ... LISTEN          ← looks perfect
+dig @100.77.77.77 example.com
+# ;; communications error to 100.77.77.77#53: connection refused   ← isn't
 ```
 
 Both of those are true at the same time, and it is not a paradox. **Docker's
@@ -119,7 +119,7 @@ The error looks like:
 
 ```
 Error response from daemon: driver failed programming external connectivity on endpoint
-adguard: Error starting userland proxy: listen tcp4 100.85.87.87:53: bind: cannot
+adguard: Error starting userland proxy: listen tcp4 100.77.77.77:53: bind: cannot
 assign requested address
 ```
 
@@ -134,7 +134,7 @@ container dies, Docker restarts it a few seconds later, and by then
 after a boot is to wait thirty seconds and look again.
 
 ```bash
-tailscale ip -4                        # 100.85.87.87 — does the address exist?
+tailscale ip -4                        # 100.77.77.77 — does the address exist?
 ip addr show tailscale0 2>/dev/null    # is the interface up?
 docker inspect -f '{{.RestartCount}} {{.State.Status}}' adguard
 ```
@@ -180,7 +180,7 @@ rather than reasoning from the JSON:
 
 ```bash
 ss -ltn | grep 3080     # 127.0.0.1:3080 only
-ss -ltnup | grep ':53'  # 100.85.87.87:53 only — never 0.0.0.0:53
+ss -ltnup | grep ':53'  # 100.77.77.77:53 only — never 0.0.0.0:53
 ```
 
 Other 400s from the same endpoint:
@@ -311,13 +311,13 @@ again immediately (Settings → the UI will prompt), or restore the backup.
 Almost always the tailnet is not pointed at it. That is a manual step and it
 is easy to have skipped:
 
-<https://login.tailscale.com/admin/dns> → **Nameservers** → `100.85.87.87`
+<https://login.tailscale.com/admin/dns> → **Nameservers** → `100.77.77.77`
 should be listed. See SETUP.md → *Point the tailnet at it*.
 
 Then, on the client device:
 
 ```bash
-dig +short @100.85.87.87 example.com     # direct: does the resolver answer THIS device?
+dig +short @100.77.77.77 example.com     # direct: does the resolver answer THIS device?
 dig +short example.com                   # via the client's configured DNS
 ```
 
@@ -347,7 +347,7 @@ rollback) and say so.
 - Is a blocklist enabled? Filters → DNS blocklists — "AdGuard DNS filter"
   should be on and show a rule count.
 - Test with a domain that is definitely on the list:
-  `dig +short @100.85.87.87 doubleclick.net` → `0.0.0.0` or NXDOMAIN.
+  `dig +short @100.77.77.77 doubleclick.net` → `0.0.0.0` or NXDOMAIN.
 - **Browser-only**: Chrome and Firefox can use their own DNS-over-HTTPS,
   bypassing the system resolver entirely. Check the browser's secure-DNS
   setting before blaming AdGuard.
@@ -356,7 +356,7 @@ rollback) and say so.
 
 ```bash
 # Compare against the upstream directly:
-dig +short @100.85.87.87 the-broken-site.example
+dig +short @100.77.77.77 the-broken-site.example
 dig +short @9.9.9.10     the-broken-site.example
 ```
 
@@ -432,7 +432,7 @@ and every device on the tailnet loses DNS — phone, laptop, wherever they are �
 with no working name resolution to fix it from.
 
 The failure mode: the Tailscale console still tells every device "your
-nameserver is 100.85.87.87", but nothing is answering there any more. Devices
+nameserver is 100.77.77.77", but nothing is answering there any more. Devices
 do not fall back to something sensible; they just stop resolving. Depending on
 "Override local DNS", the device may not even have a second nameserver to try.
 
@@ -445,7 +445,7 @@ do not fall back to something sensible; they just stop resolving. Depending on
 ```
 
 1. <https://login.tailscale.com/admin/dns> → **Nameservers** → remove
-   `100.85.87.87`. This takes effect on devices within seconds to a minute.
+   `100.77.77.77`. This takes effect on devices within seconds to a minute.
 2. From a second device (not this server):
 
    ```bash
@@ -510,7 +510,7 @@ every custom filtering rule and client setting, and the query log. It does
 the whole point of the previous section.
 
 ```bash
-# 1. Tailscale console → DNS → Nameservers → remove 100.85.87.87. Verify from
+# 1. Tailscale console → DNS → Nameservers → remove 100.77.77.77. Verify from
 #    another device that DNS still works. Do not skip this.
 
 # 2. Confirm the paths before deleting them — a `rm -rf` of a path that never

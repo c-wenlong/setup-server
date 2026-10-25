@@ -16,7 +16,7 @@
 #   ./setup.sh                                  # local 3080, HTTPS 3080
 #   LOCAL_PORT=3080 HTTPS_PORT=3080 ./setup.sh
 #   LOCAL_PORT=3084 ./setup.sh                  # HTTPS follows LOCAL_PORT
-#   ADGUARD_ADMIN_USERNAME=kai ./setup.sh       # first run only; .env wins after
+#   ADGUARD_ADMIN_USERNAME=admin ./setup.sh       # first run only; .env wins after
 #
 # ---------------------------------------------------------------------------
 # THE ONE STEP THIS SCRIPT WILL NOT DO FOR YOU
@@ -56,7 +56,7 @@ LOCAL_PORT="${LOCAL_PORT:-3080}"
 # was explicit is remembered for the .env read-back below.
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-ADMIN_USERNAME="${ADGUARD_ADMIN_USERNAME:-kai}"
+ADMIN_USERNAME="${ADGUARD_ADMIN_USERNAME:-admin}"
 CONTAINER="adguard"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"

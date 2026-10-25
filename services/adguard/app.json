@@ -9,7 +9,7 @@
   "health": "http://127.0.0.1:3080/",
   "marker": "~/services/adguard",
   "env": ".env",
-  "description": "Tailnet-wide DNS filtering: every device that uses this resolver gets ads and trackers blocked everywhere, cellular included, with no per-device app. About 50 MB of RAM. Two things are worth knowing. Its DNS listener is the one service on this box that is not loopback-only — Tailscale Serve proxies HTTP, not UDP, so DNS binds the tailnet IP (100.85.87.87:53) directly; that is still tailnet-only, just not via Serve. And deploying it does nothing on its own: until you add that IP as a nameserver in the Tailscale admin console, nothing is being filtered. That step is deliberately manual, because it changes DNS for every device on your tailnet at once. Reverse it in the same order — remove the nameserver first, then stop AdGuard — or you take DNS down for your phone and laptop.",
+  "description": "Tailnet-wide DNS filtering: every device that uses this resolver gets ads and trackers blocked everywhere, cellular included, with no per-device app. About 50 MB of RAM. Two things are worth knowing. Its DNS listener is the one service on this box that is not loopback-only — Tailscale Serve proxies HTTP, not UDP, so DNS binds the tailnet IP (100.77.77.77:53) directly; that is still tailnet-only, just not via Serve. And deploying it does nothing on its own: until you add that IP as a nameserver in the Tailscale admin console, nothing is being filtered. That step is deliberately manual, because it changes DNS for every device on your tailnet at once. Reverse it in the same order — remove the nameserver first, then stop AdGuard — or you take DNS down for your phone and laptop.",
   "control": {
     "parts": [
       {

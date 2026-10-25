@@ -40,7 +40,7 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
                                 ▼
               self-learn.service (systemd user unit / launchd)
                      │           127.0.0.1:8107 ──► Tailscale Serve HTTPS :8107
-                     │  https://kai-home-server.taild6a23f.ts.net:8107
+                     │  https://homeserver.tail-name.ts.net:8107
                      │                            (tailnet only)
                      │  /studio/api/* proxied to ──► self-learn-studio.service
                      ▼          (npm run studio — diagram job runner, spawns
@@ -163,8 +163,8 @@ the real history instead:
 ```sh
 # on the laptop
 pg_dump -Fc self_learn > ~/self_learn.dump
-scp ~/self_learn.dump kai-home-server:~/
-rsync -a --exclude .owner ~/.self-learn/blobs/ kai-home-server:~/.self-learn/blobs/
+scp ~/self_learn.dump homeserver:~/
+rsync -a --exclude .owner ~/.self-learn/blobs/ homeserver:~/.self-learn/blobs/
 
 # first deploy here — leave the catalog empty
 cd services/self-learn && SKIP_SEED=1 AUTH_SECRET=<laptop's> ./setup.sh
@@ -315,7 +315,7 @@ recorded gitlink moved — the last-built sha is stamped at
 
 ## Client side
 
-Nothing to install. Open `https://kai-home-server.taild6a23f.ts.net:8107`,
+Nothing to install. Open `https://homeserver.tail-name.ts.net:8107`,
 sign in at `/sign-in` with `OWNER_PASSWORD` from `.env`. Editing the
 curriculum happens wherever the self-learn repo is a working clone —
 push to `main`, the box deploys it on the next poll.

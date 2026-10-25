@@ -57,7 +57,7 @@ minute and retry. If it stays dark:
 ## Login / redirect errors on the MagicDNS name
 
 ```bash
-paperclipai allowed-hostname kai-home-server.taild6a23f.ts.net
+paperclipai allowed-hostname homeserver.tail-name.ts.net
 paperclipai service restart
 ```
 
@@ -83,7 +83,7 @@ Then hard-refresh Settings → Profile.
 
 ```bash
 paperclipai auth bootstrap-ceo \
-  --base-url https://kai-home-server.taild6a23f.ts.net:3100
+  --base-url https://homeserver.tail-name.ts.net:3100
 ```
 
 `--force` if an admin already exists and you still need a fresh link.

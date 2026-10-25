@@ -32,7 +32,7 @@ served="$(cat "$STATE_DIR/served_port" 2>/dev/null || true)"
 
 rows=""
 add() { rows="$rows
-next-ser 1 kai 20u IPv4 1 0t0 TCP $1:$port (LISTEN)"; }
+next-ser 1 admin 20u IPv4 1 0t0 TCP $1:$port (LISTEN)"; }
 
 if [ "$port" = "$cport" ]; then
   if [ -f "$STATE_DIR/listen_lan" ]; then

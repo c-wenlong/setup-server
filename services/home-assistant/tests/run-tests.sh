@@ -318,7 +318,7 @@ test_preflight_bad_username() {
   # The username is interpolated into {"username":"..."} with printf, not
   # escaped, and that body creates the OWNER account.
   setup
-  export HA_ADMIN_USER='kai" ,"x'
+  export HA_ADMIN_USER='admin" ,"x'
   run_deploy
   check "exits non-zero"        [ "$CODE" -ne 0 ]
   check "names the allowed set" out_has "A-Za-z0-9._-"
@@ -470,7 +470,7 @@ test_fresh_deploy() {
   check ".env is mode 600"              [ "$(file_mode "$SVC/.env")" = "600" ]
   check ".env has a hex admin password" \
     sh -c "printf '%s' \"\$(sed -n 's/^HA_ADMIN_PASSWORD=//p' '$SVC/.env' | tr -d '\"')\" | grep -qE '^[a-f0-9]{32}$'"
-  check ".env names the admin user"     [ "$(env_val HA_ADMIN_USER)" = "kai" ]
+  check ".env names the admin user"     [ "$(env_val HA_ADMIN_USER)" = "admin" ]
   check ".env records the local port"   [ "$(env_val LOCAL_PORT)" = "8123" ]
   check ".env records the HTTPS port"   [ "$(env_val HTTPS_PORT)" = "8123" ]
   check ".env carries the host TZ"      [ "$(env_val TZ)" = "Asia/Singapore" ]
@@ -488,7 +488,7 @@ test_fresh_deploy() {
 
   # --- onboarding
   check "created the owner account"     calls_have "/api/onboarding/users"
-  check "  body carries the username"   grep -qF "\"username\":\"kai\"" "$STATE_DIR/users_body"
+  check "  body carries the username"   grep -qF "\"username\":\"admin\"" "$STATE_DIR/users_body"
   check "  body carries the .env password" \
     grep -qF "\"password\":\"$(env_val HA_ADMIN_PASSWORD)\"" "$STATE_DIR/users_body"
   check "  client_id is a URL"          grep -qF '"client_id":"http://127.0.0.1:8123/"' "$STATE_DIR/users_body"
@@ -525,7 +525,7 @@ test_fresh_deploy() {
   # --- final message
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check "prints the tailnet URL"        out_has "https://test-host.tailfake.ts.net:8123"
-  check "prints the login name"         out_has "Login:    kai"
+  check "prints the login name"         out_has "Login:    admin"
   check "points at .env for the password" out_has "HA_ADMIN_PASSWORD"
   check "tells you to finish the location" out_has "LOCATION"
   check "  explains why it was left"    out_has "latitude 0"

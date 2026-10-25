@@ -9,9 +9,9 @@
 #                       absent => the mapping this deploy published
 #   serve_status_fails — exists => `serve status` fails like a stopped daemon
 #
-# The reported node is test-host.tailfake.ts.net and the address 100.77.77.77 —
-# deliberately NOT this box's kai-home-server / 100.85.87.87. A URL that only
-# matched because someone hardcoded the real tailnet name into setup.sh or
+# The reported node is test-host.tailfake.ts.net and the address 100.77.77.77,
+# both made up. A URL that only
+# matched because someone hardcoded a tailnet name into setup.sh or
 # docker-compose.yml would then pass while being wrong on every other machine,
 # and on THIS service the tailnet URL is not cosmetic: it is the string that
 # has to land in PAPERLESS_URL, which is what CSRF_TRUSTED_ORIGINS is built
