@@ -165,6 +165,7 @@
   var elDBack   = $('d-back');
   var elDNote   = $('d-note');
   var elDIcon   = $('d-icon');
+  var elDStrip  = $('d-strip');
   var elDTitle  = $('d-title');
   var elDSub    = $('d-sub');
   var elDName   = $('d-name');
@@ -1482,6 +1483,56 @@
     chip('d-key', svc.key);
 
     paintControls(svc);
+    paintStrip(svc);
+  }
+
+  /* The Umbrel app-page strip: the handful of facts you scan before touching
+     anything — what kind of thing this is, whether it is up, where it lives,
+     whose it is, when it last deployed. Cells render only when they have a
+     value; an all-empty strip hides itself. */
+  function stripDate(v) {
+    /* epoch float (marker mtime) or an ISO string, -> yyyy-mm-dd */
+    var t = typeof v === 'number' ? v * 1000 : Date.parse(v || '');
+    if (!t || isNaN(t)) return null;
+    var d = new Date(t);
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  function paintStrip(svc) {
+    if (!elDStrip) return;
+    elDStrip.textContent = '';
+    var st = statusOf(svc);
+    var host = null;
+    if (svc.url) {
+      try { host = new URL(svc.url).host; } catch (e) { host = svc.url; }
+    }
+    var deploy = svc.receipt && svc.receipt.deployed_at
+      ? stripDate(svc.receipt.deployed_at) : stripDate(svc.deployed_at);
+    var cells = [
+      ['Category', groupLabel(svc.group) || svc.group || null],
+      ['Status', st.label, st.cls],
+      ['Address', host],
+      ['Author', svc.author || null],
+      ['Last deploy', deploy]
+    ];
+    var shown = 0;
+    for (var i = 0; i < cells.length; i++) {
+      if (cells[i][1] === null || cells[i][1] === undefined || cells[i][1] === '') continue;
+      var cell = make('div', 'd-strip-cell');
+      cell.appendChild(text(make('dt', 'd-strip-k'), cells[i][0]));
+      var dd = make('dd', 'd-strip-v');
+      if (cells[i][2]) {
+        var d2 = make('i', 'dot ' + cells[i][2]);
+        d2.setAttribute('aria-hidden', 'true');
+        dd.appendChild(d2);
+      }
+      dd.appendChild(document.createTextNode(cells[i][1]));
+      cell.appendChild(dd);
+      elDStrip.appendChild(cell);
+      shown++;
+    }
+    elDStrip.hidden = shown === 0;
   }
 
   /* --- start / stop / restart, on the head row ----------------------------
@@ -1571,8 +1622,8 @@
     var installed = state === 'active' || state === 'stopped';
     var ctl = controlState(svc);
     var job = liveJob(svc);
-    var sig = [state, ctl.on, ctl.reason, job, jobAction(svc), actionBusy,
-               svc && svc.removable === true].join('|');
+    var sig = [state, svc && svc.url, ctl.on, ctl.reason, job, jobAction(svc),
+               actionBusy, svc && svc.removable === true].join('|');
     if (sig === ctlSig) return;
     ctlSig = sig;
 
@@ -1580,8 +1631,23 @@
     text(elCtlWhy, '');
     elCtlWhy.hidden = true;
 
-    /* Not on the box: there is nothing to start or stop. Deploy lives on the
-       grid tile, and this page does not duplicate it. */
+    /* Umbrel app-page CTA first: the one thing you most likely came to do —
+       open a running service, or install one that is not on the box yet. It
+       precedes even the lifecycle buttons, so it sits where the store puts
+       its own primary action: top right of the hero. */
+    if (state === 'active' && svc.url) {
+      elCtl.appendChild(ctlButton('Open', 'is-primary', function () {
+        VIEW.touch(svc.key, 'launched');
+        window.open(svc.url, '_blank', 'noopener');
+      }));
+    } else if (state === 'available') {
+      elCtl.appendChild(ctlButton('Install', 'is-primary', function (node) {
+        openSheet(svc, node);
+      }));
+    }
+
+    /* Not on the box: there is nothing to start or stop beyond the Install
+       above. */
     if (!installed) return;
 
     if (!ctl.on) {
@@ -2152,6 +2218,7 @@
     elDNote.hidden = true;
     text(elDNote, '');
     clearControls();
+    if (elDStrip) { elDStrip.textContent = ''; elDStrip.hidden = true; }
     elEnv.textContent = '';
     elEnvSec.hidden = true;
     elEnvEmpty.hidden = true;
@@ -2214,7 +2281,13 @@
       /* {controllable, reason} — whether this service gets start/stop buttons
          at all. Undefined on a backend that has no lifecycle endpoint. */
       control: d.control !== undefined ? d.control : known.control,
-      removable: d.removable !== undefined ? d.removable : known.removable
+      removable: d.removable !== undefined ? d.removable : known.removable,
+      /* Strip cells — the detail payload carries none of author/receipt, so
+         they fall back to what the grid already knew. */
+      group: d.group || known.group,
+      author: known.author,
+      deployed_at: d.deployed_at !== undefined ? d.deployed_at : known.deployed_at,
+      receipt: d.receipt !== undefined ? d.receipt : known.receipt
     };
     detailSvc = view;
     paintHead(view);
