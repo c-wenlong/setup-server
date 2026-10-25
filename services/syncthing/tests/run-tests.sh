@@ -115,6 +115,7 @@ out_lacks()  { ! grep -qi -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 call_count() { grep -c -- "$1" "$CALLS_LOG"; }
+teardown_lacks() { ! grep -qE -- "$1" "$SERVICE_DIR/teardown.sh"; }
 env_val()    { sed -n "s/^$1=//p" "$SVC/.env" | head -1; }
 cfg_path()   { echo "$(env_val SYNCTHING_CONFIG)/config.xml"; }
 cfg_has()    { grep -q -- "$1" "$(cfg_path)"; }
@@ -1579,6 +1580,14 @@ test_teardown_refuses_compose_overrides() {
   teardown
 }
 
+test_teardown_no_empty_array_length() {
+  echo "• teardown.sh: no \${#arr[@]} on a maybe-empty array — Bash 3.2 + set -u errors there"
+  # macOS ships Bash 3.2, where taking the length of an empty array is an
+  # unbound-variable error under set -u, not 0. The guarded ${arr[*]+...}
+  # form expands to nothing instead, so the branch is simply false.
+  check "no array-length expansion" teardown_lacks '\${#[A-Za-z_]+\[@\]}'
+}
+
 # A state dir behind a folder this user cannot search (a root-owned 0700
 # parent, faked with chmod 000): `[ -e ]` cannot see it, which must not read
 # as "already gone" while .env is deleted. No cleanup container here, so it
@@ -1766,6 +1775,7 @@ test_teardown_env_lint
 test_teardown_refuses_compose_overrides
 test_teardown_purge_unsearchable_parent
 test_teardown_only_shared_ports
+test_teardown_no_empty_array_length
 
 if [ "${1:-}" = "--live" ]; then
   echo

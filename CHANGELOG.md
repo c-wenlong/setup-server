@@ -34,6 +34,14 @@ first, dated by merge.
 
 ### Fixed
 
+- **teardown.sh and migrate-layout.sh no longer read the length of a
+  possibly-empty array.** On macOS's bundled Bash 3.2 that expansion is an
+  unbound-variable error under `set -u`, not 0 — so an AdGuard or
+  paperless-ngx `--purge` with no state dirs, and a syncthing purge with no
+  synced folders kept, died before finishing. The guarded `${arr[*]+...}`
+  form expands to nothing instead, which is all the branch needs. Every
+  touched suite gains a static check so the length read cannot come back.
+
 - **teardown.sh hardening across the merged scripts.** `--purge` no
   longer reads a data dir behind a folder this user cannot search (a
   root-owned 0700 parent) as already gone and then deletes `.env` anyway.

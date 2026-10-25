@@ -133,6 +133,7 @@ out_lacks()  { ! grep -qi -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 call_count() { grep -c -- "$1" "$CALLS_LOG"; }
+teardown_lacks() { ! grep -qE -- "$1" "$SERVICE_DIR/teardown.sh"; }
 env_has()    { grep -q -- "$1" "$SVC/.env"; }
 env_val()    { sed -n "s/^$1=//p" "$SVC/.env" | sed 's/^"//; s/"$//' | head -1; }
 
@@ -1604,6 +1605,14 @@ test_live() {
   printf '      docker exec %s document_exporter ../export\n' "$web"
 }
 
+test_teardown_no_empty_array_length() {
+  echo "• teardown.sh: no \${#arr[@]} on a maybe-empty array — Bash 3.2 + set -u errors there"
+  # macOS ships Bash 3.2, where taking the length of an empty array is an
+  # unbound-variable error under set -u, not 0. The guarded ${arr[*]+...}
+  # form expands to nothing instead, so the branch is simply false.
+  check "no array-length expansion" teardown_lacks '\${#[A-Za-z_]+\[@\]}'
+}
+
 # ------------------------------------------------------------------ main
 for f in setup.sh teardown.sh docker-compose.yml; do
   [ -f "$SERVICE_DIR/$f" ] || { red "services/paperless-ngx/$f is missing — nothing to test."; exit 1; }
@@ -1658,6 +1667,7 @@ test_teardown_home_variable_in_env
 test_teardown_env_lint
 test_teardown_purge_unsearchable_parent
 test_teardown_only_shared_ports
+test_teardown_no_empty_array_length
 test_sandbox_was_hermetic
 
 if [ "${1:-}" = "--live" ]; then
