@@ -143,6 +143,13 @@ Do not enable the Coolify Proxy.
 - Logs: `docker compose --project-directory . logs -f coolify`
 - Restart: `docker compose --project-directory . restart`
 - Upgrade: bump `COOLIFY_VERSION` in `.env`, then `./setup.sh`
+- Remove: `./teardown.sh` (or Remove in the launcher) unpublishes the
+  dashboard and Soketi Serve ports and runs `compose down` on Coolify's own
+  stack; apps it deployed keep running, and volumes, `~/services/coolify`,
+  `.env` and the SSH key stay, so `./setup.sh` brings it back.
+  `./teardown.sh --purge` also deletes them (and Coolify's
+  `authorized_keys` line) after you type `coolify`; it refuses until the
+  apps you deployed through Coolify are deleted there.
 - Dump the database:
   ```bash
   docker compose --project-directory . exec -T postgres \

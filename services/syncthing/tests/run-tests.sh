@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/syncthing/setup.sh.
+# Tests for services/syncthing/setup.sh and teardown.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -59,7 +59,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SVC/"
 }
 
 teardown() {
@@ -903,6 +903,546 @@ assert g[\"insecureSkipHostcheck\"] is True and g[\"address\"] == \"127.0.0.1:$p
   printf '    → backups: %s holds this device'"'"'s identity and every setting.\n' "$cfg_dir"
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {  # run_teardown [flag [flag]] — stdin answer in $ANSWER
+  OUT="$(printf '%s\n' "${ANSWER:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" "$@" 2>&1)"
+  CODE=$?
+}
+purge() {  # purge ANSWER [extra flag]
+  ANSWER="$1"; shift
+  run_teardown --purge "$@"
+  ANSWER=""
+}
+
+# The unit file setup.sh writes on this platform, and the call that stops it.
+if [ "$OS" = "Linux" ]; then
+  unit_file() { echo "$HOME/.config/systemd/user/syncthing.service"; }
+  STOP_CALL="systemctl --user disable --now syncthing.service"
+else
+  unit_file() { echo "$HOME/Library/LaunchAgents/net.syncthing.syncthing.plist"; }
+  STOP_CALL="launchctl bootout gui/"
+fi
+stopped()     { calls_have "$STOP_CALL"; }
+not_stopped() { no_call "$STOP_CALL"; }
+set_env() {  # set_env KEY VALUE — replace one .env line
+  local k="$1" v="$2"
+  python3 - "$SVC/.env" "$k" "$v" <<'EOF_PYSET'
+import sys
+path, k, v = sys.argv[1:4]
+lines = open(path).read().splitlines()
+out = [("%s=%s" % (k, v)) if l.startswith(k + "=") else l for l in lines]
+open(path, "w").write("\n".join(out) + "\n")
+EOF_PYSET
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps :8384 to this GUI, and
+# neighbours sit on other ports (one a lookalike suffix). The sync root holds
+# a real file, so "files kept" means something.
+deployed() {
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/linger"
+  run_deploy
+  CFG="$(env_val SYNCTHING_CONFIG)"; DB="$(env_val SYNCTHING_DB)"; DATA="$(env_val SYNCTHING_DATA)"
+  mkdir -p "$DB" "$DATA/default"
+  echo idx > "$DB/index.db"
+  echo "my notes" > "$DATA/default/notes.md"
+  cat > "$STATE_DIR/serve_status" <<EOF_SERVE
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8384 (tailnet only)
+|-- / proxy http://127.0.0.1:8384
+
+https://test-host.tailfake.ts.net:18384 (tailnet only)
+|-- / proxy http://127.0.0.1:18384
+EOF_SERVE
+  : > "$CALLS_LOG"
+}
+untouched() {  # nothing on disk changed and nothing was stopped/unpublished
+  [ -f "$CFG/cert.pem" ] && [ -f "$DB/index.db" ] && [ -f "$DATA/default/notes.md" ] \
+    && [ -f "$SVC/.env" ] && [ -f "$(unit_file)" ] && not_stopped && no_call " off"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove stops the unit, unpublishes only its port, keeps everything"
+  deployed
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "serve off for :8384"           calls_have "tailscale serve --https=8384 off"
+  check "neighbour :2283 untouched"     no_call "https=2283"
+  check "lookalike :18384 untouched"    no_call "https=18384"
+  check "never serve reset"             no_call "serve reset"
+  check "unit stopped and disabled"     stopped
+  if [ "$OS" = "Darwin" ]; then
+    check "LaunchAgent disabled (no restart at login)" calls_have "launchctl disable gui/"
+  fi
+  check "no daemon-reload (unit kept)"  no_call "daemon-reload"
+  check "identity kept"                 [ -f "$CFG/cert.pem" ]
+  check "config.xml kept"               [ -f "$CFG/config.xml" ]
+  check "index kept"                    [ -f "$DB/index.db" ]
+  check "synced files kept"             [ -f "$DATA/default/notes.md" ]
+  check ".env kept"                     [ -f "$SVC/.env" ]
+  check "unit file kept"                [ -f "$(unit_file)" ]
+  check "binary kept"                   [ -x "$HOME/.local/bin/syncthing" ]
+  check "lingering never touched"       no_call "linger"
+  check "says how to bring it back"     out_has "./setup.sh brings it back as the same device"
+  run_teardown
+  check "re-run exits zero"             [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_https_port_override() {
+  echo "• teardown: a non-default HTTPS port is found from serve status"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/linger"
+  export HTTPS_PORT=9443
+  run_deploy
+  unset HTTPS_PORT
+  printf 'https://test-host.tailfake.ts.net:9443 (tailnet only)\n|-- / proxy http://127.0.0.1:8384\n' \
+    > "$STATE_DIR/serve_status"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "serve off for :9443"           calls_have "tailscale serve --https=9443 off"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no serve off"                  no_call " off"
+  check "says already off"              out_has "already off"
+  check "still stops the unit"          stopped
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8384 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no serve off"                  no_call " off"
+  check "says nothing points here"      out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF_SERVE
+https://test-host.tailfake.ts.net:8384 (tailnet only)
+|-- / proxy http://127.0.0.1:8384
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8384
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /sync proxy http://127.0.0.1:8384
+EOF_SERVE
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ":8384 off"                     calls_have "serve --https=8384 off"
+  check ":8443 off"                     calls_have "serve --https=8443 off"
+  check "shared :443 left on"           no_call "https=443 off"
+  check "warns about the shared port"   out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "says why"                      out_has "Could not read Tailscale Serve status"
+  check "unit not stopped"              not_stopped
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "no .env: explains"             out_has "nothing to tear down"
+  check "no .env: touched nothing"      no_call "systemctl"
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"          [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  run_teardown --delete-synced-files
+  check "files flag without --purge: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it needs --purge"       out_has "only makes sense with --purge"
+  run_teardown --purge --purge
+  check "--purge twice: exits non-zero" [ "$CODE" -ne 0 ]
+  run_teardown --purge --delete-synced-files extra
+  check "three args: exits non-zero"    [ "$CODE" -ne 0 ]
+  check "  none of that changed anything" untouched
+  if [ "$OS" = "Linux" ]; then
+    minimal_path "$SANDBOX/minpath" systemctl
+    OUT="$(PATH="$SANDBOX/minpath" bash "$SVC/teardown.sh" 2>&1)"; CODE=$?
+    check "no systemctl: exits non-zero" [ "$CODE" -ne 0 ]
+    check "  says systemd is required"  out_has "systemd is required"
+  fi
+  teardown
+}
+
+test_teardown_unit_file_missing() {
+  echo "• teardown: no unit file of ours means nothing to stop (never a distro unit)"
+  deployed
+  rm -f "$(unit_file)"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no disable/bootout call"       not_stopped
+  check "says already removed"          out_has "already removed"
+  check "still unpublishes"             calls_have "serve --https=8384 off"
+  teardown
+}
+
+test_teardown_other_units_named_not_touched() {
+  echo "• teardown: units setup.sh did not write are named and left alone"
+  deployed
+  local d; d="$(dirname "$(unit_file)")"
+  printf '[Unit]\nDescription=back up the syncthing config\n' > "$d/stbackup.service"
+  printf '[Timer]\nOnCalendar=daily\n' > "$d/syncthing-resume.timer"
+  printf '[Unit]\nDescription=unrelated\n' > "$d/other.service"
+  ANSWER="syncthing" run_teardown --purge
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "names the content match"       out_has "stbackup.service"
+  check "names the name match"          out_has "syncthing-resume.timer"
+  check "unrelated unit not named"      out_lacks "other.service"
+  check "never stops them"              no_call "stbackup"
+  check "  nor the timer"               no_call "syncthing-resume"
+  check "their files survive the purge" [ -f "$d/stbackup.service" ]
+  check "  the timer's too"             [ -f "$d/syncthing-resume.timer" ]
+  check "only our unit file deleted"    [ ! -e "$(unit_file)" ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then identity + index + .env + unit go, files stay"
+  deployed
+  purge "sync"
+  check "wrong name: exits non-zero"    [ "$CODE" -ne 0 ]
+  check "wrong name: changed nothing"   untouched
+  purge "syncthing"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "warns it is the Device ID"     out_has "every peer will see a NEW device"
+  check "identity dir gone"             [ ! -e "$CFG" ]
+  check "index dir gone"                [ ! -e "$DB" ]
+  check ".env gone with it (no split state)" [ ! -f "$SVC/.env" ]
+  check "unit file gone"                [ ! -e "$(unit_file)" ]
+  if [ "$OS" = "Linux" ]; then
+    check "daemon-reload after removing the unit" calls_have "systemctl --user daemon-reload"
+  fi
+  check "synced files KEPT"             [ -f "$DATA/default/notes.md" ]
+  check "says the files are kept"       out_has "Synced files are NOT deleted"
+  check "marker kept (it holds files)"  [ -d "$HOME/services/syncthing" ]
+  check "binary kept (not service-owned)" [ -x "$HOME/.local/bin/syncthing" ]
+  check "says how to remove the binary" out_has "rm $HOME/.local/bin/syncthing"
+  check "serve off for :8384"           calls_have "tailscale serve --https=8384 off"
+  check "unit stopped before the purge" stopped
+  check "services dir itself kept"      [ -d "$HOME/services" ]
+  check "lingering never touched"       no_call "linger"
+  teardown
+}
+
+test_teardown_purge_empty_data_removes_marker() {
+  echo "• teardown --purge: an empty sync root goes, and so does the marker"
+  deployed
+  rm -f "$DATA/default/notes.md"
+  purge "syncthing"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "empty data dir removed"        [ ! -e "$DATA" ]
+  check "marker removed"                [ ! -e "$HOME/services/syncthing" ]
+  check "services dir itself kept"      [ -d "$HOME/services" ]
+  teardown
+}
+
+test_teardown_purge_delete_synced_files() {
+  echo "• teardown --purge --delete-synced-files: the sync root goes too"
+  deployed
+  purge "syncthing" --delete-synced-files
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "synced files gone"             [ ! -e "$DATA" ]
+  check "identity gone"                 [ ! -e "$CFG" ]
+  check ".env gone"                     [ ! -f "$SVC/.env" ]
+  check "marker removed"                [ ! -e "$HOME/services/syncthing" ]
+  teardown
+  deployed
+  ANSWER="syncthing" run_teardown --delete-synced-files --purge
+  check "flags in either order"         [ "$CODE" -eq 0 ]
+  check "  files gone"                  [ ! -e "$DATA" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/Sync"; echo x > "$HOME/Sync/keep"
+  set_env SYNCTHING_DATA "$HOME/Sync"
+  purge "syncthing" --delete-synced-files
+  check "files outside ~/services/syncthing: refused" [ "$CODE" -ne 0 ]
+  check "  those files kept"            [ -f "$HOME/Sync/keep" ]
+  check "  identity kept"               [ -f "$CFG/cert.pem" ]
+  check "  nothing stopped"             not_stopped
+  teardown
+}
+
+test_teardown_purge_folders_elsewhere() {
+  echo "• teardown --purge: folders the GUI added elsewhere are kept and named"
+  deployed
+  mkdir -p "$HOME/Notes"; echo x > "$HOME/Notes/todo.md"
+  # A literal ~ on purpose: Syncthing stores GUI-added paths that way.
+  # shellcheck disable=SC2088
+  python3 - "$CFG/config.xml" "~/Notes" <<'EOF_PYF'
+import sys
+p, path = sys.argv[1:3]
+s = open(p).read()
+s = s.replace("<options>", '<folder id="notes" label="Notes" path="%s" type="sendreceive">\n    </folder>\n    <options>' % path, 1)
+open(p, "w").write(s)
+EOF_PYF
+  purge "syncthing" --delete-synced-files
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "names the kept folder"         out_hasF "$HOME/Notes"
+  check "that folder survives"          [ -f "$HOME/Notes/todo.md" ]
+  check "the sync root is gone"         [ ! -e "$DATA" ]
+  teardown
+}
+
+test_teardown_purge_refuses_files_inside_state() {
+  echo "• teardown --purge: refuses when identity/index dirs hold synced files"
+  deployed
+  python3 - "$CFG/config.xml" "$CFG/oops" <<'EOF_PYF'
+import sys
+p, path = sys.argv[1:3]
+s = open(p).read()
+s = s.replace("<options>", '<folder id="oops" label="Oops" path="%s" type="sendreceive">\n    </folder>\n    <options>' % path, 1)
+open(p, "w").write(s)
+EOF_PYF
+  mkdir -p "$CFG/oops"; echo x > "$CFG/oops/precious"
+  purge "syncthing"
+  check "folder inside config/: refused" [ "$CODE" -ne 0 ]
+  check "  says why"                    out_has "contains synced files"
+  check "  nothing changed"             untouched
+  check "  those files kept"            [ -f "$CFG/oops/precious" ]
+  teardown
+  deployed
+  python3 - "$CFG/config.xml" "$DB/oops2" <<'EOF_PYF'
+import sys
+p, path = sys.argv[1:3]
+s = open(p).read()
+s = s.replace("<options>", '<folder path="%s" id="oops2" label="Oops2" type="sendreceive">\n    </folder>\n    <options>' % path, 1)
+open(p, "w").write(s)
+EOF_PYF
+  mkdir -p "$DB/oops2"; echo x > "$DB/oops2/precious"
+  purge "syncthing"
+  check "folder inside db/ with path as the first attribute: refused" [ "$CODE" -ne 0 ]
+  check "  those files kept"            [ -f "$DB/oops2/precious" ]
+  check "  nothing changed"             untouched
+  teardown
+  deployed
+  local db; db="$DB"
+  set_env SYNCTHING_DATA "$db/files"
+  mkdir -p "$db/files"; echo x > "$db/files/keep"
+  purge "syncthing"
+  check "SYNCTHING_DATA inside db/: refused" [ "$CODE" -ne 0 ]
+  check "  files kept"                  [ -f "$db/files/keep" ]
+  check "  nothing stopped"             not_stopped
+  teardown
+  deployed
+  set_env SYNCTHING_DATA ""
+  purge "syncthing"
+  check "SYNCTHING_DATA missing: refused" [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  teardown
+}
+
+test_teardown_purge_failure_keeps_env() {
+  echo "• teardown --purge: a delete that fails part-way keeps .env for a re-run"
+  if [ "$(id -u)" = "0" ]; then echo "    (skipped as root: rm cannot fail)"; return; fi
+  deployed
+  mkdir -p "$CFG/locked"; echo x > "$CFG/locked/f"; chmod 500 "$CFG/locked"
+  purge "syncthing"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check ".env kept"                     [ -f "$SVC/.env" ]
+  check "says re-run teardown, not setup" out_has "re-run ./teardown.sh --purge"
+  chmod 700 "$CFG/locked"
+  purge "syncthing"
+  check "re-run completes"              [ "$CODE" -eq 0 ]
+  check "  identity gone"               [ ! -e "$CFG" ]
+  check "  .env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_purge_missing_dirs() {
+  echo "• teardown --purge: identity/index already gone is fine"
+  deployed
+  rm -rf "$CFG" "$DB"
+  purge "syncthing"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ".env gone"                     [ ! -f "$SVC/.env" ]
+  check "unit gone"                     [ ! -e "$(unit_file)" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses identity/index paths outside ~/services/syncthing"
+  local var
+  for var in SYNCTHING_CONFIG SYNCTHING_DB; do
+    deployed
+    set_env "$var" "$HOME"
+    purge "syncthing"
+    check "$var=\$HOME: exits non-zero" [ "$CODE" -ne 0 ]
+    check "  home untouched"            [ -d "$HOME" ]
+    check "  nothing stopped"           not_stopped
+    set_env "$var" "$HOME/services/../x"
+    purge "syncthing"
+    check "$var '..' refused"           [ "$CODE" -ne 0 ]
+    set_env "$var" "$HOME/services/"
+    purge "syncthing"
+    check "$var = services dir itself refused" [ "$CODE" -ne 0 ]
+    mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+    for dotted in "$HOME/services/." "$HOME/services/./syncthing" "$HOME/services/syncthing/.."; do
+      set_env "$var" "$dotted"
+      purge "syncthing"
+      check "$var '.'/'..' component refused: ${dotted#"$HOME"/}" [ "$CODE" -ne 0 ]
+    done
+    set_env "$var" "$HOME/services//"
+    purge "syncthing"
+    check "$var trailing slashes refused" [ "$CODE" -ne 0 ]
+    ln -s "$HOME/services" "$HOME/services/alias"
+    set_env "$var" "$HOME/services/alias"
+    purge "syncthing"
+    check "$var symlink to services refused" [ "$CODE" -ne 0 ]
+    set_env "$var" "$HOME/services/neighbour"
+    purge "syncthing"
+    check "$var another service's dir refused" [ "$CODE" -ne 0 ]
+    mkdir -p "$HOME/services/syncthing/a:b"
+    set_env "$var" "$HOME/services/syncthing/a:b"
+    purge "syncthing"
+    check "$var colon in the path refused" [ "$CODE" -ne 0 ]
+    check "  neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
+    check "  files never touched"       [ -f "$DATA/default/notes.md" ]
+    check "  .env kept throughout"      [ -f "$SVC/.env" ]
+    teardown
+  done
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/syncthing/config"; echo x > "$HOME/syncthing/config/keep"
+  purge "syncthing"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"      [ -f "$HOME/syncthing/config/keep" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/syncthing survives"
+  deployed
+  local repo="$HOME/services/syncthing/setup-server/services/syncthing"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/syncthing/setup-server/other.env"
+  sed -i.bak "s#^SYNCTHING_CONFIG=.*#SYNCTHING_CONFIG=$HOME/services/syncthing#" "$repo/.env"
+  OUT="$(printf '%s\n' "syncthing" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "checkout intact"               [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"    [ -f "$HOME/services/syncthing/setup-server/other.env" ]
+  check "identity kept"                 [ -f "$CFG/cert.pem" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8384'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"        [ "$CODE" -eq 0 ]
+  check ":8384 off"                     calls_have "serve --https=8384 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8384"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"                 [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8384 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"                [ "$CODE" -eq 0 ]
+  check "  :8384 off"                   calls_have "serve --https=8384 off"
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  set_env SYNCTHING_CONFIG "\"\${HOME}${CFG#"$HOME"}\""
+  purge "syncthing"
+  check "\${HOME} form: exits zero"     [ "$CODE" -eq 0 ]
+  check "  identity gone"               [ ! -e "$CFG" ]
+  teardown
+  deployed
+  set_env SYNCTHING_CONFIG "'\$HOME${CFG#"$HOME"}'"
+  purge "syncthing"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  identity kept"               [ -f "$CFG/cert.pem" ]
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'SYNCTHING_CONFIG=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"               out_has "SYNCTHING_CONFIG is set more than once"
+  check "  touched nothing"             untouched
+  teardown
+  deployed
+  printf 'X="first\nSYNCTHING_CONFIG=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"      out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_* in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    purge "syncthing"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  nothing changed"           untouched
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing stopped"             not_stopped
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ]; then
   red "services/syncthing/setup.sh is missing — nothing to test."
@@ -939,6 +1479,29 @@ test_ipv6_listener_rows
 test_no_socket_tool_at_all
 test_operator_escalation
 test_serve_approval_prompt
+test_teardown_safe
+test_teardown_https_port_override
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_preflight
+test_teardown_unit_file_missing
+test_teardown_other_units_named_not_touched
+test_teardown_purge
+test_teardown_purge_empty_data_removes_marker
+test_teardown_purge_delete_synced_files
+test_teardown_purge_folders_elsewhere
+test_teardown_purge_refuses_files_inside_state
+test_teardown_purge_failure_keeps_env
+test_teardown_purge_missing_dirs
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_services_root_is_a_link
+test_teardown_purge_keeps_a_checkout_inside
+test_teardown_quoted_env
+test_teardown_home_variable_in_env
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
 
 if [ "${1:-}" = "--live" ]; then
   echo
