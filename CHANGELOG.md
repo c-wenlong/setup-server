@@ -42,6 +42,18 @@ first, dated by merge.
   form expands to nothing instead, which is all the branch needs. Every
   touched suite gains a static check so the length read cannot come back.
 
+- **A live deploy can no longer lose self-learn's lock to the 60-minute
+  rule.** `deploy.sh`, `sync.sh` and `teardown.sh` reclaimed
+  `.deploy.lock` on age alone, so a deploy or restore still running past
+  the bound got raced by the next invocation — the thing the lock exists
+  to prevent, and the pid-only check it guarded against (a pid reused
+  after the holder died) was the reason the bound existed. Holders now
+  record their process start identity beside the pid, which names a
+  process instance exactly: a matching pair is a live holder whatever the
+  lock's age, a dead or mismatched pair is stale, and a lock whose pid was
+  never written self-clears past the two-minute write window. Locks
+  written by older holders keep the pid-plus-60-minute rule.
+
 - **A launcher Start after Remove no longer fools the next `self-learn`
   setup.sh into restarting the app.** A plain teardown writes
   `state/torn-down` so the next setup brings the stack back, but starting

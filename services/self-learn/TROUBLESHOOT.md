@@ -43,8 +43,10 @@ API", you are not in the `docker` group *in this shell* — re-run under
 - `could not read Username` / auth errors → git credentials broke:
   `gh auth login && gh auth setup-git`, then run `deploy.sh` by hand.
 - `another deploy is running — skipping` on every run → stale lock from a
-  killed build; self-clears when the owner pid is dead or after 60 min,
-  or: `rm -rf ~/services/self-learn/.deploy.lock`.
+  killed build; self-clears when the recorded owner is gone (dead pid, a
+  pid now owned by a different process, or a lock whose pid was never
+  written past a couple of minutes), or:
+  `rm -rf ~/services/self-learn/.deploy.lock`.
 
 **Deploy fails.** Run it by hand for the full error:
 `~/services/self-learn/bin/deploy.sh --force`
@@ -216,8 +218,9 @@ the local checkout if nothing is mid-transfer.
   isn't installed for BatchMode. `ssh user@<mac> true` must succeed
   non-interactively.
 - `a deploy or sync is running` → the shared `.deploy.lock` is held.
-  Same rules as deploy: it self-clears when the owner pid dies or after
-  60 min, or `rm -rf ~/services/self-learn/.deploy.lock`.
+  Same rules as deploy: it self-clears once the recorded owner is gone
+  (dead pid, a pid now owned by a different process, or a lock whose pid
+  was never written), or `rm -rf ~/services/self-learn/.deploy.lock`.
 - `pg_restore failed` on either side → the receiving database may be
   left empty/partial — re-run the same command; a restore is always
   drop+create first, so retrying is safe. pg version skew matters:
