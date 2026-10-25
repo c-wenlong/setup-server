@@ -671,7 +671,46 @@ test_studio_enabled() {
     check "studio disabled+stopped" calls_have "systemctl --user disable --now gnosia-learn-studio"
   else
     check "studio agent booted out" calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
+    check "flag-off marker written" [ -f "$(SVC_HOME)/state/studio-flag-off" ]
   fi
+
+  # Flip back on: a flag-off stop is not an owner's stop — the runner
+  # comes back (on macOS the marker is what tells the two apart).
+  sed -i.bak 's/^STUDIO_ENABLED=0/STUDIO_ENABLED=1/' "$SVC/.env" && rm -f "$SVC/.env.bak"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-enable exits zero"    [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "studio re-enabled"     calls_have "systemctl --user enable gnosia-learn-studio"
+    check "studio restarted"      calls_have "systemctl --user restart gnosia-learn-studio"
+  else
+    check "studio reloaded"       calls_have "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
+    check "flag-off marker gone"  [ ! -f "$(SVC_HOME)/state/studio-flag-off" ]
+  fi
+  teardown
+}
+
+test_studio_stop_survives_rerun() {
+  echo "• deployd re-run: a studio stopped on its own stays stopped (flag still on)"
+  setup
+  touch "$STATE_DIR/operator"
+  export STUDIO_ENABLED=1
+  run_deploy
+  check "first run ok"            [ "$CODE" -eq 0 ]
+  # The owner stops just the runner — enabled but inactive on systemd,
+  # unloaded with no flag-off marker on launchd. The app keeps running.
+  rm -f "$STATE_DIR/studio_active" "$STATE_DIR/launchd/com.gnosia-learn.studio"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"       [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "studio still enabled"  calls_have "systemctl --user enable gnosia-learn-studio"
+    check "studio not restarted"  no_call "systemctl --user restart gnosia-learn-studio"
+  else
+    check "studio still enabled"  calls_have "launchctl enable gui/.*/com.gnosia-learn.studio"
+    check "studio not reloaded"   no_call "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
+  fi
+  check "says it stays stopped"   out_has "leaving it stopped"
   teardown
 }
 
@@ -2239,6 +2278,7 @@ test_port_override
 test_persisted_https_port
 test_setup_leaves_stopped
 test_studio_enabled
+test_studio_stop_survives_rerun
 test_deploy_bounces_studio
 test_deploy_leaves_stopped_studio
 test_flag_change_redeploys

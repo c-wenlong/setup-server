@@ -57,16 +57,27 @@ ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
 
+# deployd's runtime home is SERVICE_HOME in services/deployd/.env —
+# overridable there; the conventional path is the fallback.
+DEPLOYD_HOME="$HOME/services/deployd"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  d="$(sed -n "s/^SERVICE_HOME=\(.*\)\$/\1/p" "$SERVICE_DIR/../deployd/.env" \
+       | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
+  case "$d" in \~/*) d="$HOME/${d#\~/}" ;; \$HOME/*) d="$HOME/${d#\$HOME/}" ;; esac
+  [ -n "$d" ] && DEPLOYD_HOME="$d"
+fi
+
 # A manual ./setup.sh re-installs the service: clear deployd's disabled
 # flag (written by teardown.sh) so auto-deploy resumes. deployd itself
 # never invokes this while the flag is set, so clearing is always manual.
-rm -f "$HOME/services/deployd/state/gnosia-learn.disabled"
+rm -f "$DEPLOYD_HOME/state/gnosia-learn.disabled"
 
 # A re-run (e.g. under deployd, whose PATH is minimal) finds node where the
-# first install recorded it in .env — put that dir on PATH first.
+# first install recorded it in .env — put that dir on PATH ahead of any
+# older system node so the version check sees the saved one.
 if [ -f "$ENV_FILE" ]; then
   d="$(sed -n "s/^NODE_BIN=\(.*\)\$/\1/p" "$ENV_FILE" | sed "s/^'//; s/'\$//")"
-  [ -n "$d" ] && [ -d "$d" ] && PATH="$PATH:$d"
+  [ -n "$d" ] && [ -d "$d" ] && PATH="$d:$PATH"
 fi
 
 # Hex is URL-safe and survives .env without quoting.
@@ -247,6 +258,7 @@ mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$GNOSIA_HOME/blobs" \
 # LaunchAgent delete it before the app comes up), so a later stop reads as the
 # owner's again.
 APP_SHOULD_RUN=1
+STUDIO_SHOULD_RUN=1
 TORN_DOWN="$SERVICE_HOME/state/torn-down"
 if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
   if [ "$OS" = "Linux" ]; then
@@ -255,10 +267,27 @@ if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
        && ! systemctl --user is-failed --quiet gnosia-learn; then
       APP_SHOULD_RUN=0
     fi
+    # A studio that is enabled but cleanly stopped was stopped deliberately
+    # (STUDIO_ENABLED=0 disables it instead) — deployd's re-runs must not
+    # bring it back while the flag stays on.
+    if [ -f "$UNIT_DIR/gnosia-learn-studio.service" ] \
+       && systemctl --user is-enabled --quiet gnosia-learn-studio \
+       && ! systemctl --user is-active --quiet gnosia-learn-studio \
+       && ! systemctl --user is-failed --quiet gnosia-learn-studio; then
+      STUDIO_SHOULD_RUN=0
+    fi
   else
     if [ -f "$WEB_PLIST" ] \
        && ! launchctl print "gui/$(id -u)/com.gnosia-learn.web" >/dev/null 2>&1; then
       APP_SHOULD_RUN=0
+    fi
+    # launchd has no disabled-but-plist-installed state to read, so a flag
+    # off run leaves state/studio-flag-off instead: unloaded without the
+    # marker means the owner booted the runner out themselves.
+    if [ -f "$STUDIO_PLIST" ] \
+       && ! launchctl print "gui/$(id -u)/com.gnosia-learn.studio" >/dev/null 2>&1 \
+       && [ ! -f "$SERVICE_HOME/state/studio-flag-off" ]; then
+      STUDIO_SHOULD_RUN=0
     fi
   fi
 fi
@@ -444,7 +473,7 @@ fi
 # before the rename) — so stop and remove it, but only once deployd itself
 # is installed to take over scheduling. teardown.sh deletes the same
 # files. The nightly export timer/LaunchAgent is unrelated and stays.
-if [ ! -x "$HOME/services/deployd/bin/deployd" ]; then
+if [ ! -x "$DEPLOYD_HOME/bin/deployd" ]; then
   warn "deployd is not installed — keeping any old deploy poller; auto-deploy is off until services/deployd/setup.sh runs"
 elif [ "$OS" = "Linux" ]; then
   removed=0
@@ -519,9 +548,10 @@ if [ "$OS" = "Linux" ]; then
   fi
   if [ "$STUDIO_ENABLED" = "1" ]; then
     # The runner follows the app's run state: it lives off the same checkout
-    # and node_modules, and an owner who stopped the app meant the stack.
+    # and node_modules, and an owner who stopped the app meant the stack. A
+    # studio-only stop is the owner's too — deployd re-runs leave it down.
     systemctl --user enable gnosia-learn-studio >/dev/null 2>&1
-    if [ "$APP_SHOULD_RUN" = "1" ]; then
+    if [ "$APP_SHOULD_RUN" = "1" ] && [ "$STUDIO_SHOULD_RUN" = "1" ]; then
       systemctl --user restart gnosia-learn-studio
     else
       warn "gnosia-learn-studio.service is stopped — leaving it stopped (start: systemctl --user start gnosia-learn-studio)"
@@ -542,19 +572,28 @@ else
     launchctl enable "gui/$(id -u)/com.gnosia-learn.web" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$WEB_PLIST"
     if [ "$STUDIO_ENABLED" = "1" ]; then
-      launchctl bootout "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
       launchctl enable "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$STUDIO_PLIST"
+      if [ "$STUDIO_SHOULD_RUN" = "1" ]; then
+        launchctl bootout "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$STUDIO_PLIST"
+      else
+        warn "com.gnosia-learn.studio is unloaded — leaving it stopped (start: launchctl bootstrap gui/$(id -u) $STUDIO_PLIST)"
+      fi
     fi
   else
     # Left stopped, but not disabled: the start command below must work.
     launchctl enable "gui/$(id -u)/com.gnosia-learn.web" 2>/dev/null || true
     warn "com.gnosia-learn.web is unloaded — leaving it stopped (start: launchctl bootstrap gui/$(id -u) $WEB_PLIST)"
   fi
-  if [ "$STUDIO_ENABLED" != "1" ]; then
+  if [ "$STUDIO_ENABLED" = "1" ]; then
+    rm -f "$SERVICE_HOME/state/studio-flag-off"
+  else
     # Same as the Linux disable --now: a studio left loaded by an older run
-    # goes away when the flag is off, regardless of the app's run state.
+    # goes away when the flag is off, regardless of the app's run state. The
+    # marker distinguishes "off because the flag says so" from an owner's
+    # bootout the next time the flag is on.
     launchctl bootout "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
+    touch "$SERVICE_HOME/state/studio-flag-off"
   fi
   launchctl bootout "gui/$(id -u)/com.gnosia-learn.export" 2>/dev/null || true
   launchctl enable "gui/$(id -u)/com.gnosia-learn.export" 2>/dev/null || true

@@ -3,6 +3,7 @@
 #   web_active / web_failed  — gnosia-learn.service (is-active / is-failed)
 #   seaf_active              — gnosia-learn-seafile.service
 #   studio_active            — gnosia-learn-studio.service
+#   web_enabled / studio_enabled / seaf_enabled — enable/disable state
 # enable --now also marks the unit active; disable --now clears it.
 echo "systemctl $*" >> "$CALLS_LOG"
 
@@ -15,6 +16,7 @@ case "$unit" in
   gnosia-learn-seafile) marker=seaf_active;   failed_marker=seaf_failed ;;
   gnosia-learn-studio)  marker=studio_active; failed_marker=studio_failed ;;
 esac
+enabled_marker="${marker%_active}_enabled"
 
 # Real systemd runs the unit's ExecStartPre= lines before every start
 # ('-' prefix means a failure is ignored; otherwise a failed pre-hook stops
@@ -42,6 +44,9 @@ case "${2:-}" in
   is-failed)
     [ -f "$STATE_DIR/$failed_marker" ] && exit 0 || exit 4
     ;;
+  is-enabled)
+    [ -n "$marker" ] && [ -f "$STATE_DIR/$enabled_marker" ] && exit 0 || exit 1
+    ;;
   stop)
     [ -n "$marker" ] && rm -f "$STATE_DIR/$marker"
     ;;
@@ -52,10 +57,12 @@ case "${2:-}" in
     fi
     ;;
   enable)
+    [ -n "$marker" ] && touch "$STATE_DIR/$enabled_marker"
     # `enable --now UNIT` starts it too
     case "$*" in *--now*) [ -n "$marker" ] && { run_pre "$unit" || exit 3; touch "$STATE_DIR/$marker"; } ;; esac
     ;;
   disable)
+    [ -n "$marker" ] && rm -f "$STATE_DIR/$enabled_marker"
     case "$*" in *--now*) [ -n "$marker" ] && rm -f "$STATE_DIR/$marker" ;; esac
     ;;
 esac

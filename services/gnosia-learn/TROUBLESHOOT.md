@@ -52,7 +52,8 @@ ls ~/.gnosia/archive/latest                      # nightly export landing?
   pid now owned by a different process, or a lock whose pid was never
   written past a couple of minutes), or:
   `rm -rf ~/services/gnosia-learn/.deploy.lock`. (A skip exits non-zero so
-  deployd retries it on the next tick — not a stuck state.)
+  deployd retries it after its failure backoff — RETRY_SECONDS, 15 min by
+  default — not on the next one-minute tick. Not a stuck state.)
 
 **Deploy fails.** Run it by hand for the full error:
 `~/services/gnosia-learn/bin/deploy.sh --force`
@@ -248,8 +249,10 @@ and catalogs on both ends are untouched — they just stop converging.
 ## Rollback
 
 `deploy.sh --sha` pins the build to a specific commit. Deployd redeploys
-when the remote ref moves, not on a timer cadence — a pin survives until
-the next push to the watched branch:
+when the remote ref moves — a pin survives until the next push to the
+watched branch, or until deployd retries a tip deploy that had failed
+earlier (a failed deploy is retried after RETRY_SECONDS and deploys the
+tip, undoing the pin):
 
 ```sh
 ~/services/gnosia-learn/bin/deploy.sh --sha <previous-sha>
