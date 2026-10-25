@@ -336,7 +336,7 @@ if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "$SERVE_TARGET" >/dev/null 2>
   until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "$SERVE_TARGET"; do
     echo
     info "Tailscale Serve needs one-time enablement: open the URL above, approve, then press Enter to retry."
-    read -r
+    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
   done
 fi
 ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> $SERVE_TARGET (tailnet only)"
