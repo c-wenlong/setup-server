@@ -1600,7 +1600,8 @@ test_teardown_purge_unsearchable_parent() {
   chmod 755 "$st"
   check "index hidden: exits non-zero" [ "$CODE" -ne 0 ]
   check "  names the folder"          out_has "$st cannot be searched"
-  check "  names the sudo command"    out_has "sudo rm -rf $st/db"
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting it" out_lacks "sudo rm -rf $st/db"
   check "  nothing changed"           hidden_untouched
   check "  index kept"                [ -f "$st/db/index.db" ]
   check "  identity kept"             [ -f "$CFG/cert.pem" ]
@@ -1615,7 +1616,8 @@ test_teardown_purge_unsearchable_parent() {
   purge "syncthing"
   chmod 755 "$st"
   check "identity hidden: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  names the sudo command"    out_has "sudo rm -rf $st/config"
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting it" out_lacks "sudo rm -rf $st/config"
   check "  nothing changed"           hidden_untouched
   check "  identity kept"             [ -f "$st/config/cert.pem" ]
   check "  index kept"                [ -f "$DB/index.db" ]
@@ -1629,7 +1631,8 @@ test_teardown_purge_unsearchable_parent() {
   purge "syncthing" --delete-synced-files
   chmod 755 "$st"
   check "files hidden (--delete-synced-files): exits non-zero" [ "$CODE" -ne 0 ]
-  check "  names the sudo command"    out_has "sudo rm -rf $st/data"
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting it" out_lacks "sudo rm -rf $st/data"
   check "  nothing changed"           hidden_untouched
   check "  synced files kept"         [ -f "$st/data/default/notes.md" ]
   check "  identity kept"             [ -f "$CFG/cert.pem" ]
@@ -1665,7 +1668,8 @@ test_teardown_purge_unsearchable_parent() {
   purge "syncthing"
   chmod 755 "$st"
   check "state root unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  names the sudo command"    out_has "sudo rm -rf $st/"
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting"   out_lacks "sudo rm -rf"
   check "  nothing changed"           hidden_untouched
   check "  identity kept"             [ -f "$CFG/cert.pem" ]
   check "  index kept"                [ -f "$DB/index.db" ]

@@ -613,6 +613,8 @@ test_teardown_down_fails() {
   check "checked this project's containers" calls_have "ps -aq --filter label=com.docker.compose.project=trigger-dev"
   check "names the network and who keeps it" out_has "trigger-webapp (run_cm9late-attempt-1)"
   check "points at the attached runner" out_has "network=trigger-webapp"
+  check "does not claim they went"    out_lacks "networks removed"
+  check "says they stay"              out_has "networks still in use stay"
   check "killed nothing"              no_call "docker rm"
   check "data kept"                   all_data_kept
   check ".env kept"                   [ -f "$SVC/.env" ]
@@ -1037,6 +1039,34 @@ test_teardown_purge_unsearchable_parent() {
   check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
   check "  target kept"               [ -f "$HOME/elsewhere/f" ]
   check "  link kept"                 [ -L "$st/minio" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # A file-kind target that is a directory behind the unsearchable folder:
+  # never rm -rf'd (it could hold anything), and no sudo rm is offered.
+  deployed
+  st="$(cd "$(state_dir)" && pwd -P)/storage"
+  mkdir -p "$st/auth.htpasswd"; echo keep > "$st/auth.htpasswd/keep"
+  set_env TRIGGER_REGISTRY_AUTH "$st/auth.htpasswd"
+  chmod 000 "$st"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "file-kind hidden dir: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it is a directory"    out_has "is a directory, not the file"
+  check "  offers no rm -rf on it"    out_lacks "sudo rm -rf $st/auth.htpasswd"
+  check "  dir kept"                  [ -f "$st/auth.htpasswd/keep" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # And the mirror image: a dir-kind target that is a plain file.
+  deployed
+  st="$(cd "$(state_dir)" && pwd -P)/storage"
+  mkdir -p "$st"; echo keep > "$st/redis"
+  set_env TRIGGER_REDIS "$st/redis"
+  chmod 000 "$st"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "dir-kind hidden file: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it is not a directory" out_has "is not a directory"
+  check "  file kept"                 [ -f "$st/redis" ]
   check "  .env kept"                 [ -f "$SVC/.env" ]
   teardown
   # ~/services/trigger-dev itself unsearchable: not strictly inside it, so

@@ -1092,7 +1092,8 @@ test_teardown_purge_unsearchable_parent() {
   chmod 755 "$st"
   check "exits non-zero"              [ "$CODE" -ne 0 ]
   check "names the folder"            out_has "$st cannot be searched"
-  check "names the sudo command"      out_has "sudo rm -rf $st/config"
+  check "says to restore access"      out_has "sudo chown -R .* $st"
+  check "never suggests deleting it"  out_lacks "sudo rm -rf $st/config"
   check "never says deleted"          out_lacks "Deleted"
   check "never asks to confirm"       out_lacks "Type jellyfin"
   check "state kept"                  [ -f "$st/config/data/jellyfin.db" ]
@@ -1112,7 +1113,8 @@ test_teardown_purge_unsearchable_parent() {
   run_teardown --purge "jellyfin"
   chmod 755 "$st"
   check "cache hidden: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  names the sudo command"    out_has "sudo rm -rf $st/cache"
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting it" out_lacks "sudo rm -rf $st/cache"
   check "  config kept"               [ -f "$HOME/services/jellyfin/config/data/jellyfin.db" ]
   check "  cache kept"                [ -f "$st/cache/img.jpg" ]
   check "  .env kept"                 [ -f "$SVC/.env" ]
@@ -1125,7 +1127,8 @@ test_teardown_purge_unsearchable_parent() {
   run_teardown --purge "jellyfin"
   chmod 755 "$st"
   check "state root unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  names the sudo command"    out_has "sudo rm -rf $st/config"
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting"   out_lacks "sudo rm -rf"
   check "  config kept"               [ -f "$st/config/data/jellyfin.db" ]
   check "  media kept"                [ -f "$media/film.mkv" ]
   check "  .env kept"                 [ -f "$SVC/.env" ]
@@ -1157,7 +1160,8 @@ test_teardown_purge_unsearchable_parent() {
   chmod 755 "$HOME/services"
   check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
   check "  says to check it first"    out_has "Check what it is"
-  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  says to restore access"    out_has "sudo chown -R"
+  check "  never suggests deleting"   out_lacks "sudo rm -rf"
   check "  config kept"               [ -f "$HOME/services/jellyfin/config/data/jellyfin.db" ]
   check "  .env kept"                 [ -f "$SVC/.env" ]
   check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]

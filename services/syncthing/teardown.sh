@@ -269,13 +269,15 @@ guard_dir() {  # guard_dir VARNAME VALUE
   # `[ -e ]` alone reads a dir behind an unsearchable folder (a root-owned
   # 0700 parent) as gone, and the purge would then delete .env and report
   # success while the state stays. No cleanup container here, so stop before
-  # anything changes. The sudo command is only offered when the hidden folder
-  # is provably this service's own (real_dir); otherwise say where to look.
+  # anything changes. Never suggest deleting the hidden dir: SYNCTHING_DATA
+  # holds the synced files and config/ or db/ could sit over one. Restore
+  # search access instead — offered only when the hidden folder is provably
+  # this service's own (real_dir); otherwise say where to look first.
   dir_state "$var" "$dir"
   if [ "$DIR_STATE" = "hidden" ]; then
     real_dir "$HIDDEN_DIR" >/dev/null \
-      || die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME, so teardown cannot tell whether $var=$dir is there (and will not delete .env while it might be) — refusing. Check what it is; if $dir is $NAME's own state, run: sudo rm -rf $dir   then ./teardown.sh --purge again. Nothing was changed."
-    die "$HIDDEN_DIR cannot be searched, so teardown cannot tell whether $var=$dir is there (and will not delete .env while it might be). Run: sudo rm -rf $dir   then ./teardown.sh --purge again. Nothing was changed."
+      || die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME, so teardown cannot tell whether $var=$dir is there (and will not delete .env while it might be) — refusing. Check what it is first; if it is $NAME's own state, give this user access to it (sudo chown -R $(id -un) $HIDDEN_DIR) and re-run ./teardown.sh --purge. Nothing was changed."
+    die "$HIDDEN_DIR cannot be searched, so teardown cannot tell whether $var=$dir is there (and will not delete .env while it might be). Give this user access to it (sudo chown -R $(id -un) $HIDDEN_DIR) and re-run ./teardown.sh --purge. Nothing was changed."
   fi
   if [ "$DIR_STATE" = "present" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."

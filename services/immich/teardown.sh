@@ -177,18 +177,27 @@ dir_state() {
 # A purge target behind a folder this user cannot search: the host cannot
 # even see it, so a throwaway container mounts that folder ($1, already
 # through real_dir and strictly inside ~/services/$NAME) and deletes only the
-# path below it ($2). A symlink anywhere on that path is refused (it would
-# resolve inside the container, not on this box); the path must be gone
-# afterwards, and the folders emptied on the way go too. $3 is the image,
-# any further arguments are extra `docker run` options. Non-zero on failure.
+# path below it ($2). $3 is the expected kind, dir or file, checked inside
+# the container before anything is deleted: the other kind is refused (exit
+# 4), the way the visible-path check refuses — rm -rf on a directory that
+# was meant to be a file could take far more than that file. A symlink
+# anywhere on that path is refused (exit 3; it would resolve inside the
+# container, not on this box); the path must be gone afterwards, and the
+# folders emptied on the way go too. $4 is the image, any further arguments
+# are extra `docker run` options. Returns the container's exit code.
 hidden_rm() {
-  local base="$1" rest="$2" image="$3"
-  shift 3
+  local base="$1" rest="$2" kind="$3" image="$4" rc=0
+  shift 4
   docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
-    -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+    -c 'set -f; r=$1; k=$2; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        if [ -e "/x/$r" ]; then
+          { [ "$k" = dir ] && [ ! -d "/x/$r" ]; } && exit 4
+          { [ "$k" = file ] && [ -d "/x/$r" ]; } && exit 4
+        fi
         rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
         d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
-    sh "$rest" >/dev/null 2>&1 || return 1
+    sh "$rest" "$kind" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
   # The emptied folder itself: removing it needs only its parent's
   # permissions, and rmdir never removes anything that is not empty.
   rmdir -- "$base" 2>/dev/null || true
@@ -415,29 +424,37 @@ clear_dir() {
 }
 
 # Delete one target behind a folder this user cannot search ($1 that folder,
-# $2 the path below it, $3 the path as in .env), as root from the pinned
-# Postgres image. Two targets can share that folder, and hidden_rm removes it
-# once it is empty, so a folder that is already gone means its target went
-# with it. Never mount a missing folder: dockerd would create it, as root.
+# $2 the path below it, $3 its kind — dir or file — and $4 the path as in
+# .env), as root from the pinned Postgres image. Two targets can share that
+# folder, and hidden_rm removes it once it is empty, so a folder that is
+# already gone means its target went with it. Never mount a missing folder:
+# dockerd would create it, as root.
 clear_hidden() {
-  local base="$1" rest="$2" dir="$3"
+  local base="$1" rest="$2" kind="$3" dir="$4" rc=0
   if [ ! -e "$base" ] && [ ! -L "$base" ]; then
     ok "$base/$rest is already gone (its folder went with an earlier delete)"
     return 0
   fi
   info "$base cannot be searched by this user; deleting $base/$rest with $PG_IMAGE"
-  hidden_rm "$base" "$rest" "$PG_IMAGE" --user 0 \
-    || die "Could not delete $base/$rest through $base. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. .env was kept."
+  hidden_rm "$base" "$rest" "$kind" "$PG_IMAGE" --user 0 || rc=$?
+  case "$rc" in
+    0) ;;
+    4) if [ "$kind" = file ]; then
+         die "$base/$rest is a directory, not the file .env names — refusing to delete a directory in its place. Look inside it by hand, then re-run ./teardown.sh --purge. .env was kept."
+       fi
+       die "$base/$rest is not a directory — refusing to delete what is there instead. Look at it by hand, then re-run ./teardown.sh --purge. .env was kept." ;;
+    *) die "Could not delete $base/$rest through $base. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. .env was kept." ;;
+  esac
 }
 
 if [ "$PURGE" -eq 1 ]; then
   info "Purging the database, the photo library and .env"
   [ -z "$PURGE_DB" ] || clear_dir "$PURGE_DB"
-  [ -z "$DB_BASE" ] || clear_hidden "$DB_BASE" "$DB_REST" "$DB_DIR"
+  [ -z "$DB_BASE" ] || clear_hidden "$DB_BASE" "$DB_REST" dir "$DB_DIR"
   [ -z "$PURGE_LIBRARY" ] || clear_dir "$PURGE_LIBRARY"
-  [ -z "$LIB_BASE" ] || clear_hidden "$LIB_BASE" "$LIB_REST" "$LIBRARY_DIR"
+  [ -z "$LIB_BASE" ] || clear_hidden "$LIB_BASE" "$LIB_REST" dir "$LIBRARY_DIR"
   [ -z "$PURGE_MARKER" ] || rm -f -- "$PURGE_MARKER"
-  [ -z "$MARKER_BASE" ] || clear_hidden "$MARKER_BASE" "$MARKER_REST" "$ML_MARKER"
+  [ -z "$MARKER_BASE" ] || clear_hidden "$MARKER_BASE" "$MARKER_REST" file "$ML_MARKER"
   # Only now, with every data path gone, the secrets.
   rm -f -- "$ENV_FILE"
   # ~/services/<name> is the launcher's install marker. Try it even when the

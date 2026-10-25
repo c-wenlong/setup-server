@@ -174,18 +174,27 @@ dir_state() {
 # A purge target behind a folder this user cannot search: the host cannot
 # even see it, so a throwaway container mounts that folder ($1, already
 # through real_dir and strictly inside ~/services/$NAME) and deletes only the
-# path below it ($2). A symlink anywhere on that path is refused (it would
-# resolve inside the container, not on this box); the path must be gone
-# afterwards, and the folders emptied on the way go too. $3 is the image,
-# any further arguments are extra `docker run` options. Non-zero on failure.
+# path below it ($2). $3 is the expected kind, dir or file, checked inside
+# the container before anything is deleted: the other kind is refused (exit
+# 4), the way the visible-path check refuses — rm -rf on a directory that
+# was meant to be a file could take far more than that file. A symlink
+# anywhere on that path is refused (exit 3; it would resolve inside the
+# container, not on this box); the path must be gone afterwards, and the
+# folders emptied on the way go too. $4 is the image, any further arguments
+# are extra `docker run` options. Returns the container's exit code.
 hidden_rm() {
-  local base="$1" rest="$2" image="$3"
-  shift 3
+  local base="$1" rest="$2" kind="$3" image="$4" rc=0
+  shift 4
   docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
-    -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+    -c 'set -f; r=$1; k=$2; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        if [ -e "/x/$r" ]; then
+          { [ "$k" = dir ] && [ ! -d "/x/$r" ]; } && exit 4
+          { [ "$k" = file ] && [ -d "/x/$r" ]; } && exit 4
+        fi
         rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
         d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
-    sh "$rest" >/dev/null 2>&1 || return 1
+    sh "$rest" "$kind" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
   # The emptied folder itself: removing it needs only its parent's
   # permissions, and rmdir never removes anything that is not empty.
   rmdir -- "$base" 2>/dev/null || true
@@ -340,7 +349,7 @@ if [ "$PURGE" -eq 1 ]; then
     esac
   elif [ -n "$PURGE_BASE" ]; then
     info "$PURGE_BASE cannot be searched by this user; deleting $PURGE_SHOW with $HA_IMAGE"
-    hidden_rm "$PURGE_BASE" "$PURGE_REST" "$HA_IMAGE" \
+    hidden_rm "$PURGE_BASE" "$PURGE_REST" dir "$HA_IMAGE" \
       || die "Could not delete $PURGE_SHOW through $PURGE_BASE. Run: sudo rm -rf $CONFIG_DIR   then ./teardown.sh --purge again. .env was kept."
   fi
   rm -f -- "$ENV_FILE"

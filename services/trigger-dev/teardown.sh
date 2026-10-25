@@ -178,18 +178,27 @@ dir_state() {
 # A purge target behind a folder this user cannot search: the host cannot
 # even see it, so a throwaway container mounts that folder ($1, already
 # through real_dir and strictly inside ~/services/$NAME) and deletes only the
-# path below it ($2). A symlink anywhere on that path is refused (it would
-# resolve inside the container, not on this box); the path must be gone
-# afterwards, and the folders emptied on the way go too. $3 is the image,
-# any further arguments are extra `docker run` options. Non-zero on failure.
+# path below it ($2). $3 is the expected kind, dir or file, checked inside
+# the container before anything is deleted: the other kind is refused (exit
+# 4), the way the visible-path check refuses — rm -rf on a directory that
+# was meant to be a file could take far more than that file. A symlink
+# anywhere on that path is refused (exit 3; it would resolve inside the
+# container, not on this box); the path must be gone afterwards, and the
+# folders emptied on the way go too. $4 is the image, any further arguments
+# are extra `docker run` options. Returns the container's exit code.
 hidden_rm() {
-  local base="$1" rest="$2" image="$3"
-  shift 3
+  local base="$1" rest="$2" kind="$3" image="$4" rc=0
+  shift 4
   docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
-    -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+    -c 'set -f; r=$1; k=$2; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        if [ -e "/x/$r" ]; then
+          { [ "$k" = dir ] && [ ! -d "/x/$r" ]; } && exit 4
+          { [ "$k" = file ] && [ -d "/x/$r" ]; } && exit 4
+        fi
         rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
         d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
-    sh "$rest" >/dev/null 2>&1 || return 1
+    sh "$rest" "$kind" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
   # The emptied folder itself: removing it needs only its parent's
   # permissions, and rmdir never removes anything that is not empty.
   rmdir -- "$base" 2>/dev/null || true
@@ -264,11 +273,11 @@ fi
 # not on disk. Dies before anything changes unless it is
 # ~/services/trigger-dev itself or inside it. $3 is "dir" or "file". A target
 # behind a folder this user cannot search sets PT_BASE (that folder, resolved,
-# strictly inside ~/services/trigger-dev) and PT_REST (the path below it)
-# instead, for the cleanup container; its kind cannot be checked from here.
+# strictly inside ~/services/trigger-dev), PT_REST (the path below it) and
+# PT_KIND instead, for the cleanup container to check inside.
 purge_target() {
   local var="$1" p="$2" kind="$3" root
-  PT=""; PT_BASE=""; PT_REST=""
+  PT=""; PT_BASE=""; PT_REST=""; PT_KIND=""
   [ -n "$p" ] || die "$var is missing from $ENV_FILE — refusing to guess what to delete."
   while :; do case "$p" in */) p="${p%/}" ;; *) break ;; esac; done
   case "$p" in *..*) die "$var=$p contains '..' — refusing." ;; esac
@@ -290,6 +299,7 @@ purge_target() {
       *) die "$HIDDEN_DIR cannot be searched, so teardown cannot reach $var=$p. Run: sudo rm -rf $p   then ./teardown.sh --purge again. Nothing was changed." ;;
     esac
     PT_REST="$HIDDEN_REST"
+    PT_KIND="$kind"
   fi
   # And where it really is, symlinks and all: it must be ~/services/trigger-dev
   # or inside it, never ~/services itself, another service, or anything above.
@@ -313,9 +323,10 @@ purge_target() {
 DATA_VARS="TRIGGER_POSTGRES TRIGGER_CLICKHOUSE TRIGGER_REDIS TRIGGER_MINIO TRIGGER_REGISTRY TRIGGER_SHARED"
 PURGE_DIRS=""
 PURGE_FILES=""
-# Targets behind an unsearchable folder: two lines each, the folder then the
-# path below it (neither can hold a newline: .env values are single lines and
-# real_dir refuses one). PURGE_HIDDEN_SHOW is the joined path, for messages.
+# Targets behind an unsearchable folder: three lines each, the folder, the
+# path below it and its kind (none can hold a newline: .env values are single
+# lines and real_dir refuses one). PURGE_HIDDEN_SHOW is the joined path, for
+# messages.
 PURGE_HIDDEN=""
 PURGE_HIDDEN_SHOW=""
 PG_IMAGE=""
@@ -323,6 +334,7 @@ add_hidden() {
   [ -n "$PT_BASE" ] || return 0
   PURGE_HIDDEN="$PURGE_HIDDEN$PT_BASE
 $PT_REST
+$PT_KIND
 "
   PURGE_HIDDEN_SHOW="$PURGE_HIDDEN_SHOW$PT_BASE/$PT_REST
 "
@@ -432,10 +444,16 @@ stack_down() {
   done
   [ -n "$busy" ] || die "docker compose down failed (not because a trigger-* network is still in use). Data and .env are untouched; re-run ./teardown.sh."
   warn "Docker kept network(s) still used by containers outside this stack (task runs started since the check?): ${busy%; }. They go when those containers do: docker ps -a --filter network=trigger-webapp"
+  NETWORKS_LEFT=1
 }
 info "Stopping and removing the containers (docker compose down)"
+NETWORKS_LEFT=""
 stack_down
-ok "Containers and trigger-* networks removed; data under $HOME/services/$NAME kept"
+if [ -n "$NETWORKS_LEFT" ]; then
+  ok "Containers removed; the trigger-* networks still in use stay until their containers stop. Data under $HOME/services/$NAME kept"
+else
+  ok "Containers and trigger-* networks removed; data under $HOME/services/$NAME kept"
+fi
 
 # ---------------------------------------------------------------- purge
 # Empty one checked purge dir. A plain rm first (a dir that never booted is
@@ -474,16 +492,26 @@ EOF_PURGE_FILES
   # already (it went with an earlier target) is never mounted, since Docker
   # would create a missing source as root. Its parent is searchable, so the
   # test is reliable, and the path below it is gone too.
-  while IFS= read -r base && IFS= read -r rest; do
+  while IFS= read -r base && IFS= read -r rest && IFS= read -r kind; do
     [ -n "$base" ] || continue
     if [ ! -e "$base" ] && [ ! -L "$base" ]; then
       ok "$base/$rest is already gone"
       continue
     fi
     info "$base cannot be searched by this user; deleting $base/$rest with $PG_IMAGE"
-    hidden_rm "$base" "$rest" "$PG_IMAGE" --user 0 </dev/null \
-      || die "Could not delete $base/$rest through $base. Run: sudo rm -rf $base/$rest   then ./teardown.sh --purge again. .env was kept."
-    ok "Deleted $base/$rest"
+    rc=0
+    hidden_rm "$base" "$rest" "$kind" "$PG_IMAGE" --user 0 </dev/null || rc=$?
+    case "$rc" in
+      0) ok "Deleted $base/$rest" ;;
+      # A kind the visible path refuses on is refused here too, before any
+      # rm: a directory where a file was named could hold anything, and no
+      # sudo rm -rf is suggested for it.
+      4) if [ "$kind" = file ]; then
+           die "$base/$rest is a directory, not the file .env names — refusing to delete a directory in its place. Look inside it by hand, then re-run ./teardown.sh --purge. .env was kept."
+         fi
+         die "$base/$rest is not a directory — refusing to delete what is there instead. Look at it by hand, then re-run ./teardown.sh --purge. .env was kept." ;;
+      *) die "Could not delete $base/$rest through $base. Run: sudo rm -rf $base/$rest   then ./teardown.sh --purge again. .env was kept." ;;
+    esac
   done <<EOF_PURGE_HIDDEN
 $PURGE_HIDDEN
 EOF_PURGE_HIDDEN
