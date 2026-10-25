@@ -10,6 +10,15 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for adguard**, so it gets the launcher's Remove button,
+  behind a DNS safety gate. Before changing anything it reads
+  `tailscale dns status --json` and dies if this node's tailnet address
+  is still a tailnet DNS resolver (stopping AdGuard then would cut DNS
+  for every device). If the answer cannot be read it dies unless you
+  pass `--dns-removed`. Default keeps `conf/`, `work/` and `.env`;
+  `--purge` deletes them, using a throwaway container of the pinned image
+  for root-owned files.
+
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
   gets the launcher's Remove button. The vaultwarden, immich and

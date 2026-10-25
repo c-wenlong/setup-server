@@ -453,12 +453,22 @@ do not fall back to something sensible; they just stop resolving. Depending on
    ```
 
    Do not skip this. It is the only thing that proves step 1 propagated.
-3. Now do whatever you came to do:
+3. Now do whatever you came to do. To take it off the box, use the
+   teardown script: it refuses to stop anything while
+   `tailscale dns status --json` still lists this node's IP as a resolver
+   (Resolvers, FallbackResolvers, split DNS routes or legacy Nameservers),
+   so the wrong order is blocked rather than just discouraged:
 
    ```bash
    cd ~/dev/setup-server/services/adguard
-   docker compose --project-directory . down
+   ./teardown.sh                 # unpublish :3080, compose down; conf/work/.env kept
    ```
+
+   If it says it **could not tell** (tailscaled down, logged out, a CLI
+   without `dns status --json`), and you did steps 1 and 2 yourself, re-run
+   with `./teardown.sh --dns-removed`. That flag never overrides a
+   nameserver the tailnet still lists. The launcher's Remove button runs the
+   plain form, so it only works once the check comes back clear.
 
 ### If you already stopped it and the tailnet is broken
 
@@ -502,18 +512,21 @@ ls -ld ~/services/adguard ~/services/adguard/conf ~/services/adguard/work
 ls -l  ~/services/adguard/conf/AdGuardHome.yaml
 grep -E "^(ADGUARD_CONF|ADGUARD_WORK)=" ~/dev/setup-server/services/adguard/.env
 
-# 3. Keep the config if you might want the blocklists back. sudo: the
-#    container runs as root, so everything under conf/ and work/ is
-#    root-owned on the host even though the directories are yours.
+# 3. Keep the config if you might want the blocklists back. Do this BEFORE
+#    step 4, which deletes it. sudo: the container runs as root, so
+#    everything under conf/ and work/ is root-owned on the host even though
+#    the directories are yours.
 sudo cp ~/services/adguard/conf/AdGuardHome.yaml ~/AdGuardHome-$(date +%F).yaml
 sudo chown $(id -u):$(id -g) ~/AdGuardHome-$(date +%F).yaml
 
-# 4. Tear down.
+# 4. Tear down. Refuses while the tailnet still lists this node as a
+#    nameserver (step 1), then asks you to type "adguard". Unpublishes only
+#    the Serve ports that point at :3080 (never `serve reset`), runs
+#    `compose down`, deletes the ADGUARD_CONF and ADGUARD_WORK dirs named in
+#    .env (root-owned files cleared with the pinned image, no sudo), then
+#    .env and the empty ~/services/adguard.
 cd ~/dev/setup-server/services/adguard
-docker compose --project-directory . down -v
-sudo rm -rf ~/services/adguard    # config, query log, downloaded blocklists
-rm -f .env                        # new credentials + a fresh ADGUARD_DNS_IP
-tailscale serve --https=3080 off  # NOT `serve reset` — that clears every port
+./teardown.sh --purge             # add --dns-removed only if it says it could not tell
 
 # 5. Redeploy, then re-add the nameserver in the Tailscale console.
 ./setup.sh
@@ -532,8 +545,13 @@ Two things that make this recipe safe rather than superstitious:
   either extreme — AdGuard comes back up on a config file that is missing
   half its state.
 
-If you would rather not use sudo, delete the contents from inside a container
-that is already root:
+`./teardown.sh --purge` does both for you: it deletes exactly the `.env`
+paths (and refuses any outside `~/services/adguard`), and clears root-owned
+files with a throwaway container of the pinned image. If that cleanup fails
+it stops, keeps `.env`, and prints the `sudo rm -rf` to run.
+
+By hand, without sudo, delete the contents from inside a container that is
+already root:
 
 ```bash
 docker run --rm -v ~/services/adguard:/x --entrypoint rm alpine -rf /x/conf /x/work
