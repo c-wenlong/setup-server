@@ -257,25 +257,41 @@ serves the install page passes every other check.
 
 ## Nuke and pave
 
-Destroys every repository, issue, PR and user on this instance. Anything
-that only exists here is gone — which, until there is a backup job, is the
-whole argument for keeping GitHub canonical.
+Destroys every repository, issue, PR, wiki and user on this instance.
+Anything that only exists here is gone — which, until there is a backup job,
+is the whole argument for keeping GitHub canonical.
+
+Back up first, while the container is still running. The dump goes to the
+container's `/tmp` and is copied out, because a dump left in
+`~/services/forgejo/data/` is deleted by the purge along with everything else:
+
+```bash
+docker exec -u git -w /tmp forgejo forgejo dump -c /data/gitea/conf/app.ini --file /tmp/forgejo-dump.zip
+docker cp forgejo:/tmp/forgejo-dump.zip ./forgejo-dump-$(date +%F).zip
+```
+
+Then use `teardown.sh`, not a hand recipe: it unpublishes only the Serve
+ports that point at this service (and the SSH TCP forward, when SSH is on),
+runs `compose down`, clears container-owned files with the pinned image
+instead of sudo, and refuses to delete a data dir that is not really inside
+`~/services/forgejo/`.
 
 ```bash
 cd ~/dev/setup-server/services/forgejo
-docker compose --project-directory . down -v
-rm -rf ~/services/forgejo          # repos AND database AND the admin marker
-rm -f .env                         # forces new generated credentials
-tailscale serve --https=3000 off
-./setup.sh
+./teardown.sh            # remove, keep repos + .env + admin marker (the launcher's Remove)
+./teardown.sh --purge    # also delete FORGEJO_DATA, .admin-created and .env; type the name
+./setup.sh               # back, fresh if you purged (new admin, new password)
 ```
+
+There is no undo for `--purge`. From a terminal, pause the `forgejo` monitor
+in Uptime Kuma first, or it pages; the launcher's Remove does that.
 
 ⚠️ Deleting only `~/services/forgejo/data` leaves
 `~/services/forgejo/.admin-created` behind — a hidden file `ls` will not show
 you. `setup.sh` reads it as "the admin already exists" and skips creating one,
 and you get a fresh instance with no account and a password in `.env` that
-authenticates nothing. Delete the whole `~/services/forgejo`, or remove that
-marker too.
+authenticates nothing. `./teardown.sh --purge` deletes the marker too; by
+hand, delete the whole `~/services/forgejo`, or remove that marker as well.
 
 To keep the repositories and rebuild only the account/settings layer, there
 is no shortcut — the SQLite DB *is* the metadata. Take a `forgejo dump`,
