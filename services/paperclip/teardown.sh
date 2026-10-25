@@ -366,15 +366,36 @@ EOF
 # ---------------------------------------------------------------- stop
 # Straight to the service manager rather than `paperclipai service
 # uninstall`, so the unit file stays for ./setup.sh and the CLI is not needed.
+# On Linux systemd is asked what runs under the name whether or not the unit
+# file is there: a unit whose file was deleted while it ran stays loaded and
+# keeps running until stopped. Every failure stops the script before the
+# purge deletes anything, and the default path exits non-zero too.
+unit_active() {
+  local out state
+  out="$(systemctl --user show -p LoadState -p ActiveState -- "$UNIT" 2>/dev/null)" \
+    || die "systemd could not say whether $UNIT is running (systemctl --user show failed; is the user bus reachable? try from a login shell). Serve is already off; nothing else was changed. Re-run once fixed."
+  state="$(printf '%s\n' "$out" | sed -n 's/^ActiveState=//p')"
+  [ -n "$state" ] \
+    || die "systemd gave no ActiveState for $UNIT, so teardown cannot tell whether it is running. Serve is already off; nothing else was changed. Re-run once fixed."
+  case "$state" in inactive|failed) return 1 ;; *) return 0 ;; esac
+}
 if [ "$OS" = "Linux" ]; then
   if [ -e "$UNIT_FILE" ]; then
     info "Stopping and disabling $UNIT (systemd user unit)"
     systemctl --user disable --now "$UNIT" \
       || die "systemctl --user disable --now $UNIT failed (is the user bus reachable? try from a login shell). Serve is already off; re-run once fixed."
+    ! unit_active \
+      || die "$UNIT is still running after systemctl --user disable --now. Serve is already off; nothing else was changed. Stop it (systemctl --user stop $UNIT) and re-run."
     ok "$UNIT stopped and disabled; unit file kept"
+  elif unit_active; then
+    info "$UNIT_FILE is gone but $UNIT is still running; stopping it (systemctl --user stop)"
+    systemctl --user stop "$UNIT" \
+      || die "systemctl --user stop $UNIT failed, so Paperclip is still running. Serve is already off; nothing else was changed. Re-run once fixed."
+    ! unit_active \
+      || die "$UNIT is still running after systemctl --user stop. Serve is already off; nothing else was changed. Re-run once fixed."
+    ok "$UNIT stopped (its unit file was already gone)"
   else
-    systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
-    ok "No $UNIT_FILE (service not installed)"
+    ok "No $UNIT_FILE and nothing running as $UNIT (service not installed)"
   fi
 else
   # Every failure here stops the script before the purge deletes anything:

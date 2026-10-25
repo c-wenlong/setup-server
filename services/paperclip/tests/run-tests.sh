@@ -1009,6 +1009,64 @@ test_teardown_macos_launchctl_failures() {
   teardown
 }
 
+# systemd is asked what runs as paperclipai.service whether or not the unit
+# file is there; a stop that fails or does not take stops the purge.
+test_teardown_linux_unit_states() {
+  [ "$OS" = "Linux" ] || return 0
+  echo "• teardown: a unit still running without its file is stopped, or purge refuses"
+  purge_kept() { [ -f "$SVC/.env" ] && [ -f "$HOME/services/paperclip/ceo-invite.txt" ]; }
+  deployed
+  rm -f "$(unit_file)"; touch "$STATE_DIR/active.paperclipai"
+  run_teardown --purge "paperclip"
+  check "file gone, running: exits zero"   [ "$CODE" -eq 0 ]
+  check "  asks systemd"                   calls_have "systemctl --user show -p LoadState -p ActiveState -- paperclipai.service"
+  check "  stops it"                       calls_have "systemctl --user stop paperclipai.service"
+  check "  no longer running"              [ ! -e "$STATE_DIR/active.paperclipai" ]
+  check "  then purges .env"               [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  rm -f "$(unit_file)"; touch "$STATE_DIR/active.paperclipai" "$STATE_DIR/stop_fails"
+  run_teardown
+  check "stop fails, default path: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  and says why"                   out_has "stop paperclipai.service failed"
+  run_teardown --purge "paperclip"
+  check "stop fails: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "  says so"                        out_has "stop paperclipai.service failed"
+  check "  .env and markers kept"          purge_kept
+  teardown
+  deployed
+  rm -f "$(unit_file)"; touch "$STATE_DIR/active.paperclipai" "$STATE_DIR/stop_ignored"
+  run_teardown --purge "paperclip"
+  check "still running after stop: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says so"                        out_has "still running after systemctl --user stop"
+  check "  .env and markers kept"          purge_kept
+  teardown
+  deployed
+  rm -f "$(unit_file)"; touch "$STATE_DIR/show_fails"
+  run_teardown
+  check "systemd cannot be asked, default path: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  and says why"                   out_has "could not say whether paperclipai.service is running"
+  run_teardown --purge "paperclip"
+  check "systemd cannot be asked: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says so"                        out_has "could not say whether paperclipai.service is running"
+  check "  .env and markers kept"          purge_kept
+  teardown
+  deployed
+  touch "$STATE_DIR/active.paperclipai" "$STATE_DIR/stop_ignored"
+  run_teardown --purge "paperclip"
+  check "file there, still running after disable --now: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  unit file kept"                 [ -f "$(unit_file)" ]
+  check "  .env and markers kept"          purge_kept
+  teardown
+  deployed
+  rm -f "$(unit_file)"
+  run_teardown --purge "paperclip"
+  check "file gone, not running: exits zero" [ "$CODE" -eq 0 ]
+  check "  no stop call"                   no_call "systemctl --user stop"
+  check "  purges .env"                    [ ! -f "$SVC/.env" ]
+  teardown
+}
+
 test_teardown_purge_instance_layouts() {
   echo "• teardown --purge: the printed instance rm follows the config it found"
   deployed
@@ -1164,6 +1222,7 @@ test_teardown_refuses_compose_overrides
 test_teardown_leaves_neighbours_alone
 test_teardown_macos
 test_teardown_macos_launchctl_failures
+test_teardown_linux_unit_states
 test_teardown_purge_instance_layouts
 
 if [ "${1:-}" = "--live" ]; then
