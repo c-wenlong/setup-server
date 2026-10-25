@@ -37,7 +37,9 @@ STUBS_EXEMPT="beszel"
 
 # Services with no launcher tile, so no app.json. ntfy-control has no UI of
 # its own: it is the phone-side twin of the launcher's start/stop buttons.
-NO_TILE="ntfy-control"
+# deployd is headless plumbing — a timer that polls git remotes and runs
+# other services' deploy commands; nothing to open or probe in the launcher.
+NO_TILE="ntfy-control deployd"
 
 FAILURES=0
 

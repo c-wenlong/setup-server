@@ -45,7 +45,7 @@ setup() {
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT QUIVER_REF STATE_DIR CALLS_LOG
+  unset FAKE_UID LOCAL_PORT HTTPS_PORT QUIVER_REF QUIVER_TRACK STATE_DIR CALLS_LOG
 }
 
 # run_deploy [stdin-string] — runs setup.sh under stubs; sets OUT and CODE
@@ -292,6 +292,17 @@ test_pin_by_sha() {
   check "no ls-remote"        no_call "git ls-remote"
   check "installs that sha"   uv_spec_is "quiver @ git+$REPO@$QUIVER_REF"
   check ".env records it"     env_has "QUIVER_REF=$QUIVER_REF"
+  teardown
+}
+
+test_track_ref() {
+  echo "• QUIVER_TRACK keeps .env on the branch while QUIVER_REF pins the run"
+  setup
+  export QUIVER_REF="abcdefabcdefabcdefabcdefabcdefabcdefabcd" QUIVER_TRACK="main"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "installs the pinned sha" uv_spec_is "quiver @ git+$REPO@$QUIVER_REF"
+  check ".env still tracks main"  env_has "QUIVER_REF=main"
   teardown
 }
 
@@ -1053,6 +1064,7 @@ test_forced_reinstall_failure_keeps_live_build
 test_forced_reinstall_success
 test_migrates_flat_layout
 test_pin_by_sha
+test_track_ref
 test_pin_by_tag
 test_explicit_ref_beats_env
 test_unknown_ref

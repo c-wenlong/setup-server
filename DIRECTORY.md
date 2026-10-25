@@ -71,6 +71,7 @@ Supporting services (no Tailscale Serve entry):
 | 7250 | self-learn-studio | Loopback only, deliberately — the app proxies `/studio/api/*` to it and stamps the signed-in owner itself, so it has no Serve entry and no auth of its own beyond that boundary. Spawns `claude` per diagram job; `STUDIO_DAILY_USD` in `services/self-learn/.env` caps spend when set |
 | — | seafile-mysql, seafile-redis | Docker-internal network only, no host ports |
 | — | [ntfy-control](services/ntfy-control/) | systemd user unit. Listens on ntfy topic `control` (loopback subscribe, no port of its own); allowlisted start/stop of services from the phone app, replies + Kuma pause included. Shares one allowlist with the launcher: the `control` block per service in `app/web/services.json` |
+| — | [deployd](services/deployd/) | systemd user timer + oneshot, polls every 60s. The tailnet-only answer to GitHub webhooks: pulls this checkout ff-only (deploy config self-updates), scans `services/*/app.json` for `deploy` blocks (`repo`/`ref`/`cmd`), `git ls-remote`s each watched ref and runs the cmd when the sha moves. State + per-service output tails in `~/services/deployd/state/`; a failed cmd backs off 15 min per sha. Replaces per-service deploy timers — quiver-hub is registered first; the design-systems/sources/kaichenpedia daily timers migrate onto it |
 
 ## Port allocation rules
 
