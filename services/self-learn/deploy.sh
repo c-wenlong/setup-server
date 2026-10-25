@@ -2,14 +2,19 @@
 #
 # deploy.sh — pull c-wenlong/self-learn from GitHub and redeploy if it changed.
 #
-# The server is tailnet-only, so GitHub webhooks can't reach it; instead this
-# script runs every POLL_SECONDS (systemd user timer on Linux, launchd on
-# macOS) and exits fast when origin/BRANCH hasn't moved. Also runnable by hand:
+# The server is tailnet-only, so GitHub webhooks can't reach it; instead
+# deployd (services/deployd) polls the remote and re-runs setup.sh when
+# main moves — this script is the rebuild half of that run, and exits fast
+# when origin/BRANCH hasn't moved. Also runnable by hand:
 #
 #   deploy.sh            # redeploy only if origin/BRANCH has new commits
 #   deploy.sh --force    # redeploy even without new commits
-#   deploy.sh --sha <r>  # redeploy a specific commit (rollback — pause the
-#                        # timer first, or the next poll redeploys BRANCH)
+#   deploy.sh --sha <r>  # redeploy a specific commit (rollback — the next
+#                        # push to BRANCH redeploys its tip again)
+#
+# When deployd invokes a deploy it sets DEPLOY_SHA to the remote sha it
+# polled; that pins the build exactly like --sha so its record of "what is
+# deployed" matches what is built.
 #
 # Installed by setup.sh into $SERVICE_HOME/bin/ (ENV_FILE and COMPOSE_DIR are
 # baked in at install time — edit the copy in the setup-server repo, then
@@ -91,8 +96,9 @@ if [ -d "$LOCK" ]; then
   fi
 fi
 if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "another deploy is running — skipping"
-  exit 0
+  # Non-zero so deployd retries instead of recording the remote sha as done.
+  echo "another deploy is running — skipping" >&2
+  exit 1
 fi
 pid_start $$ > "$LOCK/started"
 echo $$ > "$LOCK/pid"
@@ -108,6 +114,8 @@ case "${1:-}" in
   --sha) PIN_SHA="${2:?usage: deploy.sh [--force | --sha <commit>]}" ;;
   *) echo "usage: deploy.sh [--force | --sha <commit>]" >&2; exit 2 ;;
 esac
+# deployd pins the run with DEPLOY_SHA; an explicit --sha wins.
+PIN_SHA="${PIN_SHA:-${DEPLOY_SHA:-}}"
 
 # --------------------------------------------------------------- app services
 # The studio runner is managed with the app: it shells `npm run catalog` out
@@ -203,6 +211,16 @@ git -C "$REPO_DIR" fetch --quiet origin "$BRANCH" || die_deploy "git fetch"
 remote_sha="$(git -C "$REPO_DIR" rev-parse "origin/$BRANCH")"
 target_sha="${PIN_SHA:-$remote_sha}"
 built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
+
+# deployd pins the run with DEPLOY_SHA. If that sha is not on the fetched
+# branch (diverged history, a force-push in between), building it would
+# deploy something other than what deployd recorded — fail so it retries.
+# A manual --sha may deliberately pin off-tip for a rollback, so the guard
+# only fires when the pin is exactly the deployd-requested sha.
+if [ -n "${DEPLOY_SHA:-}" ] && [ "$PIN_SHA" = "$DEPLOY_SHA" ] \
+    && ! git -C "$REPO_DIR" merge-base --is-ancestor "$DEPLOY_SHA" "$remote_sha" 2>/dev/null; then
+  die_deploy "deployd asked for $DEPLOY_SHA but it is not an ancestor of origin/$BRANCH ($remote_sha) — failing so it retries"
+fi
 
 # The two feature flags are written into apps/web/.env.local below, and the
 # runner is set up from the same flags, so a flag change in $ENV_FILE is

@@ -3,14 +3,14 @@
 A production build of the private
 [c-wenlong/self-learn](https://github.com/c-wenlong/self-learn) repo: a
 Next.js 16 app over a Postgres 17 catalog, served natively and published
-tailnet-only. Push to `main` and the box picks it up on its daily poll —
+tailnet-only. Push to `main` and deployd picks it up on its next tick —
 or immediately with `~/services/self-learn/bin/deploy.sh --force`.
 
 The repo's own `docs/HOMESERVER.md` describes this exact deployment shape;
 this service wraps it in the repo's usual one-shot, idempotent form. Where
 they differ: systemd **user** units instead of system units (the repo's
 sudo rule), generated Postgres credentials instead of `catalog:catalog`,
-and the deploy/update order from upstream step 14 baked into a poller.
+and the deploy/update order from upstream step 14 driven by deployd.
 
 ## Architecture
 
@@ -19,12 +19,12 @@ git push (laptop)
         │
         ▼
    GitHub (private repo)
-        ▲  outbound git fetch, daily (POLL_SECONDS)
+        ▲  outbound git ls-remote, every minute (deployd)
         │
-self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
-  (systemd user timer;          │                     (nightly 03:00:
-   launchd on macOS)            │ 1. stop app + studio if   catalog export ->
-                                │    running                ~/.self-learn/archive)
+deployd ──► setup.sh ──► bin/deploy.sh             self-learn-export.timer
+  (services/deployd;      │                         (nightly 03:00:
+   one timer for all      │ 1. stop app + studio if   catalog export ->
+   services)              │    running                ~/.self-learn/archive)
                                 │ 2. git reset --hard
                                 │    origin/main
                                 │ 3. write checkout env files
@@ -82,7 +82,7 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
   rewritten from `.env` on every deploy; rotate secrets in `.env`, then
   `deploy.sh --force`.
 - A deliberately stopped app stays stopped across deploys *and* setup
-  re-runs: the poller rebuilds and migrates but only restarts the app if
+  re-runs: deploy.sh rebuilds and migrates but only restarts the app if
   it was running, and Postgres is returned to whatever state it was
   found in. If a deploy step fails partway, the previous
   `node_modules`/`.next` are restored from the rename-aside snapshot and
@@ -92,7 +92,7 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
 
 | Dependency | Why | Checked in preflight |
 |---|---|---|
-| git + non-interactive repo access | poller fetches the private repo unattended | `git ls-remote` with prompts disabled |
+| git + non-interactive repo access | deployd polls and the deploy fetches the private repo unattended | `git ls-remote` with prompts disabled |
 | Node.js >= 22.22.2 (+ npm) | upstream `engines`; build, catalog CLI, `next start`, studio runner | version compare |
 | Docker + Compose v2 | Postgres container | daemon reachable |
 | Tailscale (running) | HTTPS publish | backend state |
@@ -117,19 +117,22 @@ it whenever the recorded gitlink moves.
 3. Installs `deploy.sh` -> `~/services/self-learn/bin/` (refreshed every
    run) and creates `~/.self-learn/blobs`.
 4. Writes the units — `self-learn.service` (the app),
-   `self-learn-studio.service` (the diagram job runner), the deploy
-   `.timer`, the nightly export `.timer` — or the four LaunchAgents.
-   The studio unit gets the resolved `claude` path baked in as
-   `STUDIO_CLAUDE_BIN` and `STUDIO_HOME=~/services/self-learn/studio`,
+   `self-learn-studio.service` (the diagram job runner), and the
+   nightly export `.timer` — or the matching LaunchAgents — and removes
+   a leftover `self-learn-deploy` timer/LaunchAgent from before the
+   deployd migration (kept, with a warning, when deployd itself is not
+   installed). The studio unit gets the resolved `claude` path baked in
+   as `STUDIO_CLAUDE_BIN` and `STUDIO_HOME=~/services/self-learn/studio`,
    so job workspaces survive a checkout re-clone.
 5. Runs the initial deploy: clone, env files, `npm ci`, Postgres up,
-   `catalog migrate`, `next build`.
+   `catalog migrate`, `next build`. When deployd invoked this run it
+   passes `DEPLOY_SHA`, which pins the build to the polled commit.
 6. Bootstraps the catalog **once** (marker `state/db-bootstrapped`):
    `catalog import seed`, six `catalog flip`s in upstream order, and
    `catalog blob audit --fix` to claim the blob root for this database.
    `SKIP_SEED=1` skips this for a dump restore instead (below).
-7. Enables + starts the app and both timers, enables lingering (Linux),
-   and publishes `tailscale serve --bg --https=8107`. The studio runner
+7. Enables + starts the app and the export timer, enables lingering
+   (Linux), and publishes `tailscale serve --bg --https=8107`. The studio runner
    is enabled + started only while `STUDIO_ENABLED=1` — flipping the flag
    to 0 and re-running stops and disables it. An app that was
    deliberately stopped before the re-run is left stopped (studio
@@ -143,10 +146,12 @@ cd services/self-learn && ./setup.sh
 
 Overrides (first run only — after that, edit `.env`): `LOCAL_PORT` /
 `HTTPS_PORT` (default 8107), `PG_PORT` (5432), `REPO_URL`, `BRANCH`
-(main), `POLL_SECONDS` (86400 = daily), `SKIP_SEED` (1 = leave the
+(main), `SKIP_SEED` (1 = leave the
 catalog empty for a dump restore), `OWNER_PASSWORD`, `AUTH_SECRET`,
 `STUDIO_ENABLED` (0; 1 = run the studio job runner + UI — needs a
-logged-in `claude`), `ASSET_FILES_ENABLED` (1).
+logged-in `claude`), `ASSET_FILES_ENABLED` (1). If you change `REPO_URL`
+or `BRANCH`, also update the `deploy` block in `app.json` — deployd
+polls what the manifest declares, not what `.env` says.
 
 For a real deployment, pass the **laptop's `AUTH_SECRET`** on first run
 (`AUTH_SECRET=... ./setup.sh`): provider keys saved in Settings are
@@ -235,7 +240,7 @@ server                          Seafile                          MacBook
   machine. `pull` stops `self-learn.service` for the restore (and
   restarts it only if it was running); `push` warns if a Next dev server
   is holding connections on the Mac.
-- Both directions take the same `.deploy.lock` the poller uses: a sync
+- Both directions take the same `.deploy.lock` the deploy uses: a sync
   blocks a deploy and vice versa — a deploy must never migrate a
   database mid-restore.
 - `status` tables each catalog table (count + newest timestamp) on both
@@ -250,9 +255,10 @@ server                          Seafile                          MacBook
 journalctl --user -u self-learn -f                   # app logs
 journalctl --user -u self-learn-studio -f            # studio runner logs
 curl -s http://127.0.0.1:7250/api/health             # runner health (loopback)
-journalctl --user -u self-learn-deploy -n 50         # deploy history
-journalctl --user -u self-learn-export               # nightly export runs
-systemctl --user list-timers self-learn-*
+journalctl --user -u deployd -n 50                       # deploy history
+~/services/deployd/bin/deployd --status                  # watched repos + last results
+journalctl --user -u self-learn-export                   # nightly export runs
+systemctl --user list-timers self-learn-export.timer deployd.timer
 docker compose --project-directory ~/dev/setup-server/services/self-learn ps|logs
 docker compose --project-directory ~/dev/setup-server/services/self-learn exec db \
   psql -U catalog self_learn                         # SQL in (password in .env)
@@ -263,8 +269,10 @@ systemctl --user status self-learn-seafile           # blob-sync daemon
 ```
 
 Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
-port that proxies to the app, disables the deploy and export timers, stops
-the studio runner, the app and Postgres (`compose down`), and keeps the
+port that proxies to the app, disables the export timer (and any leftover
+deploy timer), stops
+the studio runner, the app and Postgres (`compose down`), marks the service
+disabled in deployd's state so the next push does not resurrect it, and keeps the
 catalog volume, `~/services/self-learn` and `.env`, so `./setup.sh` brings
 it back running. `./teardown.sh --purge` (type the name) also drops the
 volume (`down -v`), the deploy clone, state, studio and bin dirs, the unit
@@ -292,7 +300,7 @@ with the login credentials in `~/.claude` — the runner's default
 Job workspaces and the write-ahead log live in
 `~/services/self-learn/studio` (`STUDIO_HOME`), outside the
 machine-managed checkout. Its lifecycle follows the app: setup and the
-deploy poller stop/start them together, and a deliberately stopped stack
+deploy script stop/start them together, and a deliberately stopped stack
 stays stopped. Optional spend cap: set `STUDIO_DAILY_USD` in `.env` and
 re-run `setup.sh` — the unit template propagates it into the runner's
 environment (empty means no cap).
@@ -318,4 +326,4 @@ recorded gitlink moved — the last-built sha is stamped at
 Nothing to install. Open `https://homeserver.tail-name.ts.net:8107`,
 sign in at `/sign-in` with `OWNER_PASSWORD` from `.env`. Editing the
 curriculum happens wherever the self-learn repo is a working clone —
-push to `main`, the box deploys it on the next poll.
+push to `main`, deployd deploys it on the next tick.

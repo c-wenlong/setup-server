@@ -3,10 +3,10 @@
 Layered triage: deploy pipeline → database → app → publish → client. Work
 top-down; each layer assumes the one above it is healthy.
 
-**A deliberately stopped app stays stopped.** The poller rebuilds and
+**A deliberately stopped app stays stopped.** deploy.sh rebuilds and
 migrates but only restarts the app if it was running, and Postgres is
 put back in the state it was found (this is how the launcher's stop
-button survives the daily poll and setup re-runs). So a red tile with
+button survives deployd's re-runs). So a red tile with
 fresh deploy logs means stopped-on-purpose, not broken — `systemctl
 --user start self-learn` or the launcher's start button.
 
@@ -14,8 +14,9 @@ fresh deploy logs means stopped-on-purpose, not broken — `systemctl
 
 ```sh
 systemctl --user is-active self-learn                  # app up?
-systemctl --user list-timers self-learn-*              # poller + export scheduled?
-journalctl --user -u self-learn-deploy -n 30           # last deploy runs
+systemctl --user list-timers self-learn-export.timer deployd.timer   # schedulers
+~/services/deployd/bin/deployd --status                # watched repos + last results
+journalctl --user -u deployd -n 30                     # last deploy runs
 cat ~/services/self-learn/state/built-sha              # what was last built
 docker inspect -f '{{.State.Status}}' self-learn-db    # Postgres up?
 curl -sI http://127.0.0.1:8107/ | head -1              # app answering locally?
@@ -31,13 +32,18 @@ API", you are not in the `docker` group *in this shell* — re-run under
 
 **I pushed but the app didn't update.**
 
-- The poller only runs daily by default — deploy now:
-  `~/services/self-learn/bin/deploy.sh`, or check the last run:
-  `journalctl --user -u self-learn-deploy -n 30`.
+- deployd polls every minute — check what it saw and did:
+  `~/services/deployd/bin/deployd --status`, then
+  `journalctl --user -u deployd -n 30`. Deploy now by hand:
+  `~/services/self-learn/bin/deploy.sh`.
 - `up to date at <sha>` with an old sha → the fetch isn't seeing your
-  push: wrong branch? `.env` `BRANCH` must match what you push to.
-- No log entries at all → timer not running:
-  `systemctl --user enable --now self-learn-deploy.timer`; if the box
+  push: wrong branch? `.env` `BRANCH` must match what you push to —
+  and the `deploy` block in `app.json` must match it too (deployd polls
+  the manifest, not `.env`).
+- `disabled` in `deployd --status` → teardown marked the service off so
+  a push cannot resurrect it; re-run `./setup.sh` to re-enable.
+- No log entries at all → deployd's timer not running:
+  `systemctl --user is-active deployd.timer`; if the box
   just rebooted and nothing user-level runs, check lingering:
   `loginctl show-user $USER -p Linger` → `sudo loginctl enable-linger $USER`.
 - `could not read Username` / auth errors → git credentials broke:
@@ -46,12 +52,13 @@ API", you are not in the `docker` group *in this shell* — re-run under
   killed build; self-clears when the recorded owner is gone (dead pid, a
   pid now owned by a different process, or a lock whose pid was never
   written past a couple of minutes), or:
-  `rm -rf ~/services/self-learn/.deploy.lock`.
+  `rm -rf ~/services/self-learn/.deploy.lock`. (A skip exits non-zero so
+  deployd retries it on the next tick — not a stuck state.)
 
 **Deploy fails.** Run it by hand for the full error:
 `~/services/self-learn/bin/deploy.sh --force`
 
-- `npm ci` / network errors → transient; the next timer tick retries.
+- `npm ci` / network errors → transient; the next deployd tick retries.
 - `catalog migrate` fails → Postgres down or `DATABASE_URL` wrong:
   `docker ps | grep self-learn-db`, and compare `DATABASE_URL` in
   `services/self-learn/.env` against `services/catalog/.env` inside the checkout —
@@ -159,7 +166,7 @@ API", you are not in the `docker` group *in this shell* — re-run under
 - Jobs fail with "catalog" errors → the runner reaches Postgres by
   spawning `npm run catalog` in the checkout, which reads
   `services/catalog/.env` — same diagnosis as Layer 2.
-- A deploy appeared to kill a job mid-run → expected: the poller stops
+- A deploy appeared to kill a job mid-run → expected: the deploy stops
   and restarts the runner with the app (it shares the checkout's
   `node_modules`). Job state under `~/services/self-learn/studio` is the
   write-ahead log — interrupted jobs resume or can be re-enqueued.
@@ -240,17 +247,17 @@ and catalogs on both ends are untouched — they just stop converging.
 
 ## Rollback
 
-`deploy.sh --sha` pins the build to a specific commit. Pause the poll
-first — the next tick redeploys the branch tip and undoes the pin:
+`deploy.sh --sha` pins the build to a specific commit. Nothing re-pulls
+on a schedule — the pin holds until the next push to `main`, when deployd
+deploys the new tip again:
 
 ```sh
-systemctl --user stop self-learn-deploy.timer    # don't let the poll re-pull
 ~/services/self-learn/bin/deploy.sh --sha <previous-sha>
-# ...fixed upstream? resume the daily poll (redeploys origin/main):
-systemctl --user start self-learn-deploy.timer
+# ...fixed upstream? either push to main (deployd redeploys the tip) or:
+~/services/self-learn/bin/deploy.sh
 ```
 
-Or skip the pin and push a revert commit instead — cleanest, the poller
+Or skip the pin and push a revert commit instead — cleanest, deployd
 deploys it like anything else. Database migrations are forward-only: a
 rolled-back app against a migrated DB is upstream's expected state
 (`migrate` is a hash check, not a replay).
@@ -258,8 +265,8 @@ rolled-back app against a migrated DB is upstream's expected state
 ## Nuke and pave
 
 Use `teardown.sh`, not a hand recipe. It unpublishes only the Serve ports
-that proxy to the app's port, disables the deploy + export timers first (so
-the poller cannot restart anything mid-teardown), then stops the studio
+that proxy to the app's port, disables the export timer (and any leftover
+deploy timer) first, then stops the studio
 runner, the app and Postgres, and refuses to start while a deploy or
 `sync.sh` push/pull holds the deploy lock, then holds that lock itself until
 it finishes. It never touches

@@ -112,7 +112,7 @@ run_deploy() {
   CODE=$?
 }
 
-# Run the installed poller script directly (as the timer would).
+# Run the installed deploy script directly (as deployd's cmd would).
 run_poll() {
   OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/self-learn/bin/deploy.sh" "$@" 2>&1)"
   CODE=$?
@@ -236,14 +236,14 @@ test_fresh_deploy() {
   if [ "$OS" = "Linux" ]; then
     check "app unit written"            [ -f "$HOME/.config/systemd/user/self-learn.service" ]
     check "app binds loopback+port"     grep -q -- "-p 8107 -H 127.0.0.1" "$HOME/.config/systemd/user/self-learn.service"
-    check "deploy timer written"        [ -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
+    check "no deploy timer (deployd)"   [ ! -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
     check "export timer written"        [ -f "$HOME/.config/systemd/user/self-learn-export.timer" ]
     check "studio unit written"         [ -f "$HOME/.config/systemd/user/self-learn-studio.service" ]
     check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/self-learn-studio.service"
     check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/self-learn-studio.service"
     check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/self-learn/studio" "$HOME/.config/systemd/user/self-learn-studio.service"
     check "app restarted"               calls_have "systemctl --user restart self-learn"
-    check "deploy timer enabled"        calls_have "systemctl --user enable --now self-learn-deploy.timer"
+    check "deploy timer not enabled"    no_call "enable --now self-learn-deploy.timer"
     check "export timer enabled"        calls_have "systemctl --user enable --now self-learn-export.timer"
     check "studio off by default"       calls_have "systemctl --user disable --now self-learn-studio"
     check "export unit mode is 600"     sh -c "[ \"$(stat -c %a "$HOME/.config/systemd/user/self-learn-export.service" 2>/dev/null || stat -f %Lp "$HOME/.config/systemd/user/self-learn-export.service")\" = 600 ]"
@@ -251,13 +251,13 @@ test_fresh_deploy() {
   else
     check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.self-learn.web.plist" ]
     check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.studio.plist" ]
-    check "deploy agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
+    check "no deploy agent (deployd)"   [ ! -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
     check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
-    check "deploy agent sets PATH"      grep -q "/opt/homebrew/bin" "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
     check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.self-learn.web"
     check "studio agent not loaded"     no_call "launchctl bootstrap .*com.self-learn.studio"
+    check "deploy agent not loaded"     no_call "launchctl bootstrap .*com.self-learn.deploy"
     local a
-    for a in web deploy export; do
+    for a in web export; do
       check "$a label enabled before bootstrap (undoes teardown's disable)" \
         before "launchctl enable gui/.*/com.self-learn.$a" "launchctl bootstrap .*com.self-learn.$a"
     done
@@ -286,6 +286,120 @@ test_idempotent_rerun() {
   check "no git clone"            no_call "git clone"
   check "never invoked sudo"      no_call "^sudo "
   check "compose up re-invoked"   [ -f "$STATE_DIR/compose_up" ]
+  teardown
+}
+
+fake_deployd() {
+  mkdir -p "$HOME/services/deployd/bin" "$HOME/services/deployd/state"
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/services/deployd/bin/deployd"
+  chmod +x "$HOME/services/deployd/bin/deployd"
+}
+
+seed_legacy_poller() {
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    echo x > "$HOME/.config/systemd/user/self-learn-deploy.timer"
+    echo x > "$HOME/.config/systemd/user/self-learn-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
+  fi
+}
+
+test_legacy_poller_removed() {
+  echo "• migration: a leftover per-service deploy timer/plist is removed once deployd is installed"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  seed_legacy_poller
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "timer disabled"     calls_have "disable --now self-learn-deploy.timer"
+    check "timer unit gone"    [ ! -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
+    check "service unit gone"  [ ! -f "$HOME/.config/systemd/user/self-learn-deploy.service" ]
+    check "export timer kept"  [ -f "$HOME/.config/systemd/user/self-learn-export.timer" ]
+  else
+    check "agent booted out"   calls_have "launchctl bootout gui/.*/com.self-learn.deploy"
+    check "plist gone"         [ ! -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
+    check "export plist kept"  [ -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
+  fi
+  teardown
+}
+
+test_legacy_poller_kept_without_deployd() {
+  echo "• migration: without deployd the old poller is kept, with a warning"
+  setup
+  touch "$STATE_DIR/operator"
+  seed_legacy_poller
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  check "warns about deployd"  out_has "deployd is not installed"
+  if [ "$OS" = "Linux" ]; then
+    check "timer unit kept"    [ -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
+    check "never disabled"     no_call "disable --now self-learn-deploy.timer"
+  else
+    check "plist kept"         [ -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
+    check "never booted out"   no_call "launchctl bootout gui/.*/com.self-learn.deploy"
+  fi
+  teardown
+}
+
+test_deployd_disabled_flag() {
+  echo "• teardown marks deployd disabled; a manual setup clears the flag"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  run_deploy
+  run_teardown
+  check "teardown exits zero"     [ "$CODE" -eq 0 ]
+  check "disabled flag written"   [ -f "$HOME/services/deployd/state/self-learn.disabled" ]
+  run_deploy
+  check "re-setup exits zero"     [ "$CODE" -eq 0 ]
+  check "disabled flag cleared"   [ ! -f "$HOME/services/deployd/state/self-learn.disabled" ]
+  teardown
+}
+
+test_deploy_sha_pin() {
+  echo "• deployd-requested sha: DEPLOY_SHA pins the built commit like --sha"
+  setup
+  touch "$STATE_DIR/operator"
+  DEPLOY_SHA=ddd4444 run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "resets to the pin"       calls_have "reset --hard --quiet ddd4444"
+  check "built sha is the pin"    grep -qx ddd4444 "$HOME/services/self-learn/state/built-sha"
+  : > "$CALLS_LOG"
+  DEPLOY_SHA=eee5555 run_poll
+  check "poll: exits zero"        [ "$CODE" -eq 0 ]
+  check "poll: deploys the pin"   out_has "deploying eee5555"
+  check "poll: resets to the pin" calls_have "reset --hard --quiet eee5555"
+  # A pin that is not on the fetched branch fails instead of building it —
+  # deployd would otherwise record a sha that was never deployed.
+  echo fff6666 > "$STATE_DIR/git_diverged_sha"
+  : > "$CALLS_LOG"
+  DEPLOY_SHA=fff6666 run_poll
+  check "diverged pin: exits non-zero" [ "$CODE" -ne 0 ]
+  check "diverged pin: says why"       out_has "not an ancestor of origin/"
+  check "diverged pin: nothing built"  no_call "reset --hard"
+  teardown
+}
+
+test_path_restored_from_env() {
+  echo "• re-run under a minimal PATH finds node via the dir saved in .env"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "first run ok"            [ "$CODE" -eq 0 ]
+  nonode="$STATE_DIR/no-node-stubs"; mkdir -p "$nonode"
+  for s in "$STUBS"/*; do [ "${s##*/}" = node ] || ln -s "$s" "$nonode/${s##*/}"; done
+  nodebin="$STATE_DIR/saved-node-bin"; mkdir -p "$nodebin"
+  printf '#!/bin/sh\nexec "%s/node" "$@"\n' "$STUBS" > "$nodebin/node"; chmod +x "$nodebin/node"
+  ln -s "$STUBS/npm" "$nodebin/npm"
+  grep -v '^NODE_BIN=' "$SVC/.env" > "$SVC/.env.tmp" && mv "$SVC/.env.tmp" "$SVC/.env"
+  printf "NODE_BIN='%s'\n" "$nodebin" >> "$SVC/.env"
+  OUT="$(printf '\n' | PATH="$nonode:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  check "exits zero without stub node" [ "$CODE" -eq 0 ]
+  check "found node via .env"          out_has "Preflight checks"
   teardown
 }
 
@@ -386,7 +500,7 @@ test_poll_lock() {
   echo $$ > "$HOME/services/self-learn/.deploy.lock/pid"
   : > "$CALLS_LOG"
   run_poll
-  check "exits zero"             [ "$CODE" -eq 0 ]
+  check "exits non-zero"         [ "$CODE" -ne 0 ]
   check "reports the skip"       out_has "another deploy is running"
   check "touched no git"         no_call "fetch --quiet"
   rm -rf "$HOME/services/self-learn/.deploy.lock"
@@ -855,13 +969,21 @@ test_sync_pull() {
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "remote dump"         calls_have "pg_dump -Fc"
   check "scp back"            calls_have "scp .*-p .*self_learn-sync.dump"
-  check "app stopped"         calls_have "systemctl --user stop self-learn.service"
+  if [ "$OS" = "Linux" ]; then
+    check "app stopped"         calls_have "systemctl --user stop self-learn.service"
+  else
+    check "app stopped"         calls_have "launchctl bootout gui/.*/com.self-learn.web"
+  fi
   check "compose up"          calls_have "compose --project-directory .* up -d"
   check "drop sent locally"   grep -q "DROP DATABASE" "$STATE_DIR/local_sql.log"
   check "local restore"       calls_have "pg_restore --no-owner"
   check "owner rewritten"     grep -q '"self_learn:16384"' "$HOME/.self-learn/blobs/.owner"
   check "audit ran"           calls_have "npm run catalog -- blob audit"
-  check "app restarted"       calls_have "systemctl --user start self-learn.service"
+  if [ "$OS" = "Linux" ]; then
+    check "app restarted"       calls_have "systemctl --user start self-learn.service"
+  else
+    check "app restarted"       calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+  fi
   check "postgres left up"    no_call "compose --project-directory .* stop$"
   teardown
 }
@@ -1018,12 +1140,16 @@ test_live() {
   if [ "$OS" = "Linux" ]; then
     live_check "app unit active"           sh -c "systemctl --user is-active self-learn.service | grep -qx active"
     live_check "app unit enabled"          sh -c "systemctl --user is-enabled self-learn.service | grep -qx enabled"
-    live_check "deploy timer active"       sh -c "systemctl --user is-active self-learn-deploy.timer | grep -qx active"
+    live_check "no legacy deploy timer"    sh -c "! systemctl --user is-active self-learn-deploy.timer 2>/dev/null | grep -qx active"
     live_check "export timer active"       sh -c "systemctl --user is-active self-learn-export.timer | grep -qx active"
+    live_check "deployd timer active"      sh -c "systemctl --user is-active deployd.timer 2>/dev/null | grep -qx active"
+    live_check "deployd watches it"        sh -c "$HOME/services/deployd/bin/deployd --status | grep -q self-learn"
     live_check "lingering enabled"         sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
   else
     live_check "web agent loaded"          sh -c "launchctl print gui/$(id -u)/com.self-learn.web"
-    live_check "deploy agent loaded"       sh -c "launchctl print gui/$(id -u)/com.self-learn.deploy"
+    live_check "no legacy deploy agent"    sh -c "! launchctl print gui/$(id -u)/com.self-learn.deploy >/dev/null 2>&1"
+    live_check "deployd agent loaded"      sh -c "launchctl print gui/$(id -u)/com.setup-server.deployd >/dev/null 2>&1"
+    live_check "deployd watches it"        sh -c "$HOME/services/deployd/bin/deployd --status | grep -q self-learn"
   fi
   live_check "serve maps :$port"           sh -c "'$ts' serve status | grep -A2 ':$port' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS responds"      curl -fsS -o /dev/null --max-time 30 "$url/"
@@ -1063,6 +1189,20 @@ deployed() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
+  # teardown.sh still removes the pre-migration deploy timer/plist, so the
+  # deployed sandbox seeds it the way a pre-migration install left it.
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    echo x > "$HOME/.config/systemd/user/self-learn-deploy.timer"
+    echo x > "$HOME/.config/systemd/user/self-learn-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents" "$STATE_DIR/launchd"
+    echo x > "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
+    # Per-label loaded markers, as a real deployed box has them (the studio
+    # runner stays unmarked — it is disabled by default).
+    local a
+    for a in deploy export web; do touch "$STATE_DIR/launchd/com.self-learn.$a"; done
+  fi
   mkdir -p "$(SVC_HOME)/studio/jobs" "$HOME/.self-learn/archive/latest" "$HOME/.self-learn/vault"
   echo wal > "$(SVC_HOME)/studio/jobs/wal"
   echo export > "$HOME/.self-learn/archive/latest/catalog.json"
@@ -1137,11 +1277,12 @@ test_teardown_then_setup_restores() {
   check "postgres up again"             [ -f "$STATE_DIR/db_running" ]
   if [ "$OS" = "Linux" ]; then
     check "app restarted"               calls_have "systemctl --user restart self-learn"
-    check "timers re-enabled"           calls_have "systemctl --user enable --now self-learn-deploy.timer"
+    check "export timer re-enabled"     calls_have "systemctl --user enable --now self-learn-export.timer"
+    check "deploy timer stays gone"     no_call "enable --now self-learn-deploy.timer"
   fi
   check "serve republished"             calls_have "tailscale serve --bg --https=8107"
   # A later plain stop is the owner's again.
-  rm -f "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  rm -f "$STATE_DIR/web_active" "$STATE_DIR/db_running" "$STATE_DIR/launchd/com.self-learn.web"
   : > "$CALLS_LOG"
   run_deploy
   check "next stop respected again"     out_has "leaving it stopped"
@@ -1831,7 +1972,7 @@ test_teardown_macos_agents() {
   touch "$STATE_DIR/launchd_bootout_fails"
   run_teardown --purge "self-learn"
   check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  says so"                     out_has "Could not unload LaunchAgent com.self-learn.web"
+  check "  says so"                     out_has "Could not unload LaunchAgent com.self-learn.deploy"
   check "  Postgres left up (no down -v)" [ ! -f "$STATE_DIR/compose_down" ]
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
   check "  .env kept"                   [ -f "$SVC/.env" ]
@@ -1872,6 +2013,11 @@ test_preflight_git_auth
 test_preflight_root
 test_fresh_deploy
 test_idempotent_rerun
+test_legacy_poller_removed
+test_legacy_poller_kept_without_deployd
+test_deployd_disabled_flag
+test_deploy_sha_pin
+test_path_restored_from_env
 test_push_triggers_redeploy
 test_lockfile_change_triggers_ci
 test_stopped_app_stays_stopped

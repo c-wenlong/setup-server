@@ -6,6 +6,9 @@
 #   fixture/<sha>/   — checkout contents applied by `git reset --hard <sha>`
 #                      (origin/* resolves through remote_sha); lets a test make
 #                      a new commit actually change files in the checkout
+#   git_diverged_sha — holds a sha: `merge-base --is-ancestor <sha> *` fails
+#                      for it, simulating a deployd pin that is not on the
+#                      fetched branch
 echo "git $*" >> "$CALLS_LOG"
 
 repo_dir=""
@@ -32,6 +35,13 @@ case "${1:-}" in
     cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111
     ;;
   fetch) ;;
+  merge-base)
+    # --is-ancestor <sha> <ref>: true for any sha but the flagged diverged one
+    if [ -f "$STATE_DIR/git_diverged_sha" ] \
+        && [ "${3:-}" = "$(cat "$STATE_DIR/git_diverged_sha")" ]; then
+      exit 1
+    fi
+    ;;
   submodule)
     # `git -C <repo> submodule update --init tools/<name>` — materialise the
     # submodule dir so the tldrawkc build step can cd into it. Rev-parse is
