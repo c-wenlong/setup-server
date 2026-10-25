@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# uname stub: FAKE_UNAME overrides `uname -s`, so the mocked suite can drive
+# teardown.sh's macOS branch on a Linux box. Everything else (and every call
+# while FAKE_UNAME is unset) goes to the real uname.
+if [ -n "${FAKE_UNAME:-}" ] && [ "${1:-}" = "-s" ] && [ "$#" -eq 1 ]; then
+  echo "$FAKE_UNAME"
+  exit 0
+fi
+for u in /usr/bin/uname /bin/uname; do
+  [ -x "$u" ] && exec "$u" "$@"
+done
+echo "uname stub: no real uname found" >&2
+exit 1

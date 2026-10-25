@@ -138,16 +138,28 @@ timer first: `systemctl --user stop sources-deploy.timer`.)
 
 ## Nuke and pave
 
+`./teardown.sh` is the authority; do not hand-run the old recipe. First
+save the passphrase if you have no other copy: `.env` holds
+`SITE_PASSPHRASE`, and `--purge` deletes `.env`.
+
 ```sh
-systemctl --user disable --now sources-deploy.timer
-rm -f ~/.config/systemd/user/sources-deploy.{service,timer}
-systemctl --user daemon-reload
-docker compose --project-directory ~/dev/setup-server/services/sources down
-rm -rf ~/services/sources
-rm -f ~/dev/setup-server/services/sources/.env
-tailscale serve --https=8098 off
-cd ~/dev/setup-server/services/sources && SITE_PASSPHRASE='...' ./setup.sh
+cd ~/dev/setup-server/services/sources
+grep '^SITE_PASSPHRASE=' .env          # backup step: copy it somewhere safe
+./teardown.sh --purge                  # type "sources" to confirm
+SITE_PASSPHRASE='...' ./setup.sh
 ```
-Nothing of value lives in `~/services/sources` — the corpus's source of
-truth is the git repo at `~/dev/sources` (and GitHub), which this never
-touches.
+
+`./teardown.sh` alone (what the launcher's Remove runs) unpublishes every
+Serve port that proxies only to `127.0.0.1:8098`, disables
+`sources-deploy.timer`, stops `sources-deploy.service`, and runs
+`docker compose down` (a local `docker-compose.override.yml` is picked up
+the same way `setup.sh`'s `up` picks it up). Files, `.env` and unit files
+stay, so `./setup.sh` brings it back. `--purge` also deletes what
+`setup.sh` wrote under `~/services/sources` (`bin`, `state`, `www`,
+`nginx.conf`), `.env` and the two unit files, then removes the marker dir
+only if nothing else is left in it.
+
+It never touches the sources repo it builds from (`SOURCE_REPO`, default
+`~/dev/sources`: the corpus's source of truth, with GitHub), lingering,
+or units it did not create: `sources-trigger.service` and its backups are
+named in a warning and left alone.

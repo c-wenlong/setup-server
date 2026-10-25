@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
-# systemctl stub: logs and succeeds.
+# systemctl stub: logs and succeeds. State in $STATE_DIR:
+#   systemctl_fails — exists => `disable` / `stop` fail like a broken user manager
 echo "systemctl $*" >> "$CALLS_LOG"
+case " $* " in
+  *" disable "*|*" stop "*) [ ! -f "$STATE_DIR/systemctl_fails" ] || { echo "Failed to connect to bus" >&2; exit 1; } ;;
+esac
 exit 0

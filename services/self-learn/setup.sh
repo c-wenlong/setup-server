@@ -234,8 +234,11 @@ mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SELF_LEARN_HOME/blobs"
 # earlier run finished a first deploy; without it the install was
 # interrupted and the start below repairs rather than overrides. A *failed*
 # unit is restarted too (that's the repair), so only clean-inactive counts.
+# state/torn-down is teardown.sh's note that the stop was a removal, not the
+# owner's stop: setup after a teardown brings the stack back up.
 APP_SHOULD_RUN=1
-if [ -f "$SERVICE_HOME/state/built-sha" ]; then
+TORN_DOWN="$SERVICE_HOME/state/torn-down"
+if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
   if [ "$OS" = "Linux" ]; then
     if [ -f "$UNIT_DIR/self-learn.service" ] \
        && ! systemctl --user is-active --quiet self-learn \
@@ -532,12 +535,17 @@ else
   info "Loading LaunchAgents"
   if [ "$APP_SHOULD_RUN" = "1" ]; then
     launchctl bootout "gui/$(id -u)/com.self-learn.web" 2>/dev/null || true
+    # teardown.sh disables each label so login does not reload it; undo that.
+    launchctl enable "gui/$(id -u)/com.self-learn.web" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$WEB_PLIST"
     if [ "$STUDIO_ENABLED" = "1" ]; then
       launchctl bootout "gui/$(id -u)/com.self-learn.studio" 2>/dev/null || true
+      launchctl enable "gui/$(id -u)/com.self-learn.studio" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$STUDIO_PLIST"
     fi
   else
+    # Left stopped, but not disabled: the start command below must work.
+    launchctl enable "gui/$(id -u)/com.self-learn.web" 2>/dev/null || true
     warn "com.self-learn.web is unloaded — leaving it stopped (start: launchctl bootstrap gui/$(id -u) $WEB_PLIST)"
   fi
   if [ "$STUDIO_ENABLED" != "1" ]; then
@@ -547,10 +555,12 @@ else
   fi
   for agent in com.self-learn.deploy com.self-learn.export; do
     launchctl bootout "gui/$(id -u)/$agent" 2>/dev/null || true
+    launchctl enable "gui/$(id -u)/$agent" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$agent.plist"
   done
   ok "LaunchAgents loaded (logs: ~/Library/Logs/self-learn*.log)"
 fi
+rm -f "$TORN_DOWN"   # the stack is enabled again; a later stop is the owner's
 
 # The `compose up -d` above was needed by the deploy and any bootstrap — if
 # Postgres was stopped along with the app, put it back the way it was found.

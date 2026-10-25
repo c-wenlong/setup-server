@@ -1,4 +1,25 @@
 #!/usr/bin/env bash
-# launchctl stub (used when the mocked suite runs on macOS): logs and succeeds.
+# launchctl stub (used when the mocked suite runs on macOS, or fakes it with
+# FAKE_UNAME=Darwin): logs every call. State in $STATE_DIR:
+#   launchd_not_loaded     — exists => `print` fails (the agent is not loaded)
+#   launchd_bootout_fails  — exists => `bootout` fails; if its content is
+#                            "async", the agent still unloads (print fails
+#                            afterwards), as launchd sometimes reports
+#   launchd_disable_fails  — exists => `disable` fails
 echo "launchctl $*" >> "$CALLS_LOG"
+case "${1:-}" in
+  print)
+    [ ! -f "$STATE_DIR/launchd_not_loaded" ] || exit 113
+    ;;
+  bootout)
+    if [ -f "$STATE_DIR/launchd_bootout_fails" ]; then
+      [ "$(cat "$STATE_DIR/launchd_bootout_fails")" != "async" ] || touch "$STATE_DIR/launchd_not_loaded"
+      echo "Boot-out failed: 5: Input/output error" >&2
+      exit 5
+    fi
+    ;;
+  disable)
+    [ ! -f "$STATE_DIR/launchd_disable_fails" ] || exit 1
+    ;;
+esac
 exit 0
