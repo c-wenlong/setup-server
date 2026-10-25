@@ -10,6 +10,15 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for remote-desktop**, so it gets the launcher's Remove
+  button. The default (what the launcher runs) needs no sudo: it turns
+  off the Guacamole Serve port and runs `compose down`, and lists the
+  system half it keeps (GNOME Remote Login RDP, the `inet remote_desktop`
+  nftables filter, the TLS keypair) with the commands to undo it. The
+  filter stays up, so nothing is exposed. `--system` (terminal only)
+  turns RDP off, waits until :3389 refuses, and only then removes the
+  filter by table name (never a ruleset flush). GDM is never touched.
+
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
   gets the launcher's Remove button. The vaultwarden, immich and
