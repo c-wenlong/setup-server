@@ -1055,30 +1055,30 @@ body.is-board #view-board {
    squeezing the name into two characters. */
 .d-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 13px;
+  gap: 18px;
 }
 
 .d-icon {
   display: inline-flex;
   flex: none;
-  width: 46px; height: 46px;
+  width: 84px; height: 84px;
   align-items: center; justify-content: center;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 13px;
+  border-radius: 22px;
 }
-.d-icon > * { width: 24px; height: 24px; display: block; }
-.d-icon .icon-blank { background: var(--surface-2); border-radius: 7px; }
+.d-icon > * { width: 56px; height: 56px; display: block; }
+.d-icon .icon-blank { background: var(--surface-2); border-radius: 15px; }
 
-.d-headtext { display: flex; flex-direction: column; min-width: 0; padding-top: 3px; }
+.d-headtext { display: flex; flex-direction: column; min-width: 0; }
 
 .detail h2 {
-  font-size: 22px;
-  font-weight: 600;
+  font-size: 30px;
+  font-weight: 650;
   letter-spacing: var(--tight);
-  line-height: 1.2;
+  line-height: 1.15;
 }
 
 .d-sub {
@@ -1086,13 +1086,57 @@ body.is-board #view-board {
   align-items: center;
   flex-wrap: wrap;
   gap: 7px;
-  margin-top: 4px;
-  font-size: 12.5px;
+  margin-top: 6px;
+  font-size: 13px;
   color: var(--muted);
 }
 .d-sub .dot { flex: none; }
 .d-key { font-size: 12px; color: var(--faint); }
 .d-sep { color: var(--border-strong); }
+
+/* The Umbrel metadata strip: one rounded panel of labelled facts between the
+   hero and the body. dt/dd pairs flow left to right and wrap on narrow
+   screens; the borders between cells are drawn on the values, so the first
+   cell stays clean. */
+.d-strip {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 18px 0 0;
+  padding: 4px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.d-strip-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 14px;
+  border-left: 1px solid var(--border);
+}
+.d-strip-cell:first-child { border-left: 0; padding-left: 12px; }
+.d-strip-k {
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.d-strip-v {
+  display: block;
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.d-strip-v .dot { display: inline-block; vertical-align: -1px; margin-right: 6px; }
+@media (max-width: 560px) {
+  .d-strip-cell { flex: 1 0 45%; border-left: 0; padding-left: 12px; }
+}
 
 /* --- start / stop / restart --- */
 
@@ -1113,16 +1157,16 @@ body.is-board #view-board {
   align-items: center;
   justify-content: center;
   min-height: 44px;          /* iOS tap target, same floor as .btn */
-  padding: 0 15px;
+  padding: 0 20px;
   font-family: inherit;
   font-size: 14px;
-  font-weight: 540;
+  font-weight: 560;
   letter-spacing: -.005em;
   white-space: nowrap;
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 11px;
+  border-radius: 24px;
   cursor: pointer;
   transition: transform var(--dur) ease, background-color var(--dur) ease,
               border-color var(--dur) ease, color var(--dur) ease,

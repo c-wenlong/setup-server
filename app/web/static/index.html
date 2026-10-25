@@ -40,6 +40,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <link rel="stylesheet" href="tooltip.css">
 <link rel="stylesheet" href="view.css">
 <link rel="stylesheet" href="catalogue.css">
+<link rel="stylesheet" href="deployd.css">
 </head>
 <body>
 
@@ -167,8 +168,13 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
        </span>
      </div>
 
-     <!-- No launch link and no URL here on purpose: opening a service is the
-          grid's job. This page is description, config and env vars. -->
+     <!-- At-a-glance strip, Umbrel app-page style: category, status, where it
+          is, who made it, when it last deployed. Painted by app.js. -->
+     <dl class="d-strip" id="d-strip" hidden></dl>
+
+     <!-- The primary CTA (Open / Install) and the lifecycle buttons are
+          painted into .d-head by app.js — they rebuild on every state change
+          and cannot live here as static markup. -->
 
      <!-- Two columns from `--bp-2col` up, stacked below it. The breadcrumb and
           the head row above span the full width; only the body splits. -->
@@ -199,6 +205,11 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
      <!-- Mount point for view.js's Resources block. Deliberately in the main
           column, not the notes column beside it. -->
      <div id="view-res"></div>
+
+     <!-- Mount point for deployd.js's deployment-activity section: the whole
+          watched table on deployd's own page, just this service's row on any
+          other. Renders nothing when /api/deployd has nothing to say. -->
+     <div id="deployd-mount"></div>
 
      <section class="d-sec" id="d-env-sec" hidden>
        <h3 class="d-sec-h">Environment</h3>
@@ -269,6 +280,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <script src="view.js"></script>
 <script src="app.js"></script>
 <script src="notes.js"></script>
+<script src="deployd.js"></script>
 <script src="catalogue.js"></script>
 <script src="tooltip.js"></script>
 </body>
