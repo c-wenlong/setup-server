@@ -20,6 +20,15 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for code-server**, so it gets the launcher's Remove
+  button. On `:443` it turns off only code-server's own path (`/`), so
+  the launcher's `/home` stays up; a port that is all code-server goes
+  off whole. It disables the unit (Linux) or boots out the agent (macOS),
+  and keeps `config.yaml`, user data, extensions, the binary and every
+  workspace folder. `--purge` deletes only the unit file and the empty
+  `~/services/code-server` marker, and prints the `rm` for everything
+  else.
+
 - **teardown.sh for beszel, quiver-hub, syncthing, trigger-dev and
   coolify**, so each gets the launcher's Remove button. Service-specific:
   syncthing's purge deletes only its identity and index and keeps your

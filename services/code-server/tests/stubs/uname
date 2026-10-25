@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# uname stub: FAKE_OS overrides `uname -s` (to run the macOS branch on Linux);
+# everything else is the real uname.
+if [ -n "${FAKE_OS:-}" ] && [ "${1:-}" = "-s" ]; then
+  echo "$FAKE_OS"
+  exit 0
+fi
+PATH=/usr/bin:/bin exec uname "$@"
