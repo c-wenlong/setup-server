@@ -1026,7 +1026,7 @@ test_teardown_purge_instance_layouts() {
   mkdir -p "$HOME/pcempty"
   sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME/pcempty#" "$SVC/.env"
   run_teardown --purge "paperclip"
-  check "~/.paperclip fallback: exits zero" [ "$CODE" -eq 0 ]
+  check "home .paperclip fallback: exits zero" [ "$CODE" -eq 0 ]
   check "  prints its rm"              out_has "rm -rf -- '$HOME/.paperclip/instances/default'"
   check "  prints its master.key"      out_has "cp -p '$(master_key)'"
   check "  no rm for the empty data dir" out_lacks "pcempty/instances"
