@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/paperclip/setup.sh.
+# Tests for services/paperclip/setup.sh and teardown.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -31,7 +31,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC/ui"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SVC/"
   cp "$SERVICE_DIR/ui/profile-credentials.js" "$SVC/ui/"
 }
 
@@ -40,7 +40,7 @@ teardown() {
   export HOME="$ORIG_HOME"
   unset FAKE_UID PAPERCLIP_PORT PAPERCLIP_HTTPS_PORT PAPERCLIP_DATA \
         AGENT_WORKSPACES PAPERCLIP_COMPANY_ID PAPERCLIP_API_KEY \
-        PAPERCLIP_EMAIL PAPERCLIP_PASSWORD \
+        PAPERCLIP_EMAIL PAPERCLIP_PASSWORD FAKE_OS \
         STATE_DIR CALLS_LOG
 }
 
@@ -399,6 +399,576 @@ EOF
   teardown
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+unit_file() { echo "$HOME/.config/systemd/user/paperclipai.service"; }
+master_key() { echo "$HOME/.paperclip/instances/default/secrets/master.key"; }
+
+# A deployed sandbox: setup.sh has run (unit file, instance, CLI store, CEO
+# invite), both agent markers exist, the host has Claude / Codex logins, an
+# agent left work in the workspace, Serve maps :3100 here, and neighbours sit
+# on other ports (two of them lookalikes of 3100).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/linger"
+  run_deploy
+  touch "$HOME/services/paperclip/.agent-claude-local" "$HOME/services/paperclip/.agent-codex-local"
+  mkdir -p "$HOME/.claude" "$HOME/.codex"
+  printf 'host-cred\n' > "$HOME/.claude/.credentials.json"
+  printf 'codex-auth\n' > "$HOME/.codex/auth.json"
+  echo work > "$HOME/agent-workspaces/paperclip-test/agent-output.md"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:3100 (tailnet only)
+|-- / proxy http://127.0.0.1:3100
+
+https://test-host.tailfake.ts.net:13100 (tailnet only)
+|-- / proxy http://127.0.0.1:13100
+
+https://test-host.tailfake.ts.net:31000 (tailnet only)
+|-- / proxy http://127.0.0.1:31000
+EOF
+  : > "$CALLS_LOG"
+}
+
+# Nothing outside this service changed: host logins, instance, CLI, workspace.
+host_state_intact() {
+  grep -qx 'host-cred' "$HOME/.claude/.credentials.json" \
+    && grep -qx 'codex-auth' "$HOME/.codex/auth.json" \
+    && [ -f "$(master_key)" ] \
+    && [ -d "$HOME/.paperclip/cli/current" ] \
+    && [ -f "$HOME/agent-workspaces/paperclip-test/agent-output.md" ]
+}
+nothing_changed() {
+  [ -f "$SVC/.env" ] && [ -f "$(unit_file)" ] \
+    && [ -f "$HOME/services/paperclip/ceo-invite.txt" ] \
+    && ! grep -q -- " off" "$CALLS_LOG" \
+    && ! grep -q -- "^systemctl --user disable" "$CALLS_LOG"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps everything, unpublishes only its port"
+  deployed
+  run_teardown
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "serve off for :3100"          calls_have "tailscale serve --https=3100 off"
+  check "neighbour :2283 untouched"    no_call "https=2283"
+  check "lookalike :13100 untouched"   no_call "https=13100"
+  check "lookalike :31000 untouched"   no_call "https=31000"
+  check "never serve reset"            no_call "serve reset"
+  check "serve off before the stop"    [ "$(grep -n -e ' off$' -e 'disable --now' "$CALLS_LOG" | head -1 | grep -c ' off$')" -eq 1 ]
+  check "disable --now paperclipai"    calls_have "systemctl --user disable --now paperclipai.service"
+  check "unit file kept"               [ -f "$(unit_file)" ]
+  check "no daemon-reload"             no_call "daemon-reload"
+  check "never calls paperclipai"      no_call "^paperclipai "
+  check "  (so never 'uninstall')"     no_call "uninstall"
+  check "lingering untouched"          no_call "linger"
+  check "no docker beyond a listing"   ! grep -v '^docker ps' "$CALLS_LOG" | grep -q '^docker '
+  check ".env kept"                    [ -f "$SVC/.env" ]
+  check "CEO invite kept"              [ -f "$HOME/services/paperclip/ceo-invite.txt" ]
+  check "agent markers kept"           [ -f "$HOME/services/paperclip/.agent-codex-local" ]
+  check "instance, CLI, logins kept"   host_state_intact
+  check "says how to bring it back"    out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"            [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_https_port_differs() {
+  echo "• teardown: an explicit PAPERCLIP_HTTPS_PORT is found from Serve"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/linger"
+  export PAPERCLIP_PORT=3121 PAPERCLIP_HTTPS_PORT=8444
+  run_deploy
+  unset PAPERCLIP_PORT PAPERCLIP_HTTPS_PORT
+  printf 'https://test-host.tailfake.ts.net:8444 (tailnet only)\n|-- / proxy http://127.0.0.1:3121\n' \
+    > "$STATE_DIR/serve_status"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "serve off for :8444"          calls_have "tailscale serve --https=8444 off"
+  check "  and not :3100"              no_call "https=3100"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "no serve off"                 no_call " off"
+  check "says already off"             out_has "already off"
+  check "still disables the unit"      calls_have "systemctl --user disable --now paperclipai.service"
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:3100 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "no serve off"                 no_call " off"
+  check "says nothing points here"     out_has "already off"
+  teardown
+}
+
+test_teardown_port_hop() {
+  echo "• teardown: Paperclip hopped to :3101 — the live port counts, a stale one does not"
+  deployed
+  local inst="$HOME/.paperclip/instances/default"
+  printf '{"schemaVersion":1,"pid":4242,"host":"127.0.0.1","port":3101}\n' > "$inst/runtime-info.json"
+  echo 4242 > "$STATE_DIR/ps_pid"
+  echo "/usr/bin/node $HOME/.paperclip/cli/current/node_modules/paperclipai/dist/index.js run --instance default" \
+    > "$STATE_DIR/ps_args"
+  cat >> "$STATE_DIR/serve_status" <<EOF
+
+https://test-host.tailfake.ts.net:3101 (tailnet only)
+|-- / proxy http://127.0.0.1:3101
+EOF
+  run_teardown
+  check "live hop: exits zero"         [ "$CODE" -eq 0 ]
+  check "  :3100 off"                  calls_have "serve --https=3100 off"
+  check "  :3101 (live port) off"      calls_have "serve --https=3101 off"
+  check "  says it hopped"             out_has "hopped"
+  check "  neighbour :2283 untouched"  no_call "https=2283"
+  teardown
+
+  deployed
+  inst="$HOME/.paperclip/instances/default"
+  printf '{"schemaVersion":1,"pid":4242,"host":"127.0.0.1","port":3101}\n' > "$inst/runtime-info.json"
+  echo 4242 > "$STATE_DIR/ps_pid"
+  echo "/usr/bin/python3 -m http.server 3101" > "$STATE_DIR/ps_args"
+  cat >> "$STATE_DIR/serve_status" <<EOF
+
+https://test-host.tailfake.ts.net:3101 (tailnet only)
+|-- / proxy http://127.0.0.1:3101
+EOF
+  run_teardown
+  check "pid reused by another program: exits zero" [ "$CODE" -eq 0 ]
+  check "  :3101 left on"              no_call "https=3101"
+  check "  warns about the stale record" out_has "that process is gone"
+  check "  :3100 still off"            calls_have "serve --https=3100 off"
+  rm -f "$STATE_DIR/ps_pid"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "dead pid: :3101 left on"      no_call "https=3101"
+  teardown
+
+  deployed
+  python3 - "$HOME/.paperclip/instances/default/config.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p))
+c["server"]["port"] = 3150
+json.dump(c, open(p, "w"))
+PY
+  printf 'https://test-host.tailfake.ts.net:3150 (tailnet only)\n|-- / proxy http://127.0.0.1:3150\n' \
+    >> "$STATE_DIR/serve_status"
+  run_teardown
+  check "config.json drift: exits zero" [ "$CODE" -eq 0 ]
+  check "  warns about :3150"          out_has "says port 3150"
+  check "  :3150 left on"              no_call "https=3150"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"      [ "$CODE" -ne 0 ]
+  check "no .env: explains"            out_has "nothing to tear down"
+  check "no .env: touched nothing"     no_call "^systemctl "
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"         [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero" [ "$CODE" -ne 0 ]
+  OUT="$(PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge extra 2>&1 </dev/null)"; CODE=$?
+  check "two args: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "nothing changed"              nothing_changed
+  sed -i.bak 's/^PAPERCLIP_PORT=.*/PAPERCLIP_PORT=abc/' "$SVC/.env"
+  run_teardown
+  check "bad port: exits non-zero"     [ "$CODE" -ne 0 ]
+  sed -i.bak '/^PAPERCLIP_PORT=/d' "$SVC/.env"
+  run_teardown
+  check "no port: exits non-zero"      [ "$CODE" -ne 0 ]
+  check "  nothing changed"            nothing_changed
+  teardown
+  deployed
+  sed -i.bak '/^PAPERCLIP_DATA=/d' "$SVC/.env"
+  run_teardown
+  check "no PAPERCLIP_DATA: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"            nothing_changed
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then exactly setup.sh's files go"
+  deployed
+  run_teardown --purge "paperclip-openhands"
+  check "wrong name: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "wrong name: nothing changed"  nothing_changed
+  check "wrong name: agent markers kept" [ -f "$HOME/services/paperclip/.agent-claude-local" ]
+  run_teardown --purge ""
+  check "empty answer: exits non-zero" [ "$CODE" -ne 0 ]
+  check "empty answer: nothing changed" nothing_changed
+  run_teardown --purge "paperclip"
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "serve off for :3100"          calls_have "tailscale serve --https=3100 off"
+  check "neighbour :2283 untouched"    no_call "https=2283"
+  check "unit disabled"                calls_have "systemctl --user disable --now paperclipai.service"
+  check "unit file gone"               [ ! -e "$(unit_file)" ]
+  check "daemon-reload after"          calls_have "systemctl --user daemon-reload"
+  check "CEO invite + markers gone"    [ ! -e "$HOME/services/paperclip/ceo-invite.txt" ]
+  check "marker dir gone"              [ ! -e "$HOME/services/paperclip" ]
+  check "services dir itself kept"     [ -d "$HOME/services" ]
+  check ".env gone"                    [ ! -f "$SVC/.env" ]
+  check "master.key, CLI, workspace, logins kept" host_state_intact
+  check "whole instance kept"          [ -f "$(pc_cfg)" ]
+  check "never calls paperclipai"      no_call "^paperclipai "
+  check "warns what master.key does"   out_has "master.key decrypts every secret"
+  check "  says a DB backup is useless without it" out_has "any backup of the database is useless"
+  check "prints the instance rm"       out_has "rm -rf -- '$HOME/.paperclip/instances/default'"
+  check "prints the CLI store rm"      out_has "rm -rf -- '$HOME/.paperclip/cli'"
+  check "prints a master.key copy"     out_has "cp -p '$(master_key)'"
+  check "names the kept workspace"     out_has "$HOME/agent-workspaces/paperclip-test"
+  : > "$CALLS_LOG"
+  printf 'PAPERCLIP_PORT=3100\nPAPERCLIP_DATA=%s/.paperclip\n' "$HOME" > "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "re-run on a purged box: exits zero" [ "$CODE" -eq 0 ]
+  check "  instance still kept"        [ -f "$(master_key)" ]
+  teardown
+}
+
+test_teardown_purge_keeps_foreign_files() {
+  echo "• teardown --purge: files setup.sh did not write in ~/services/paperclip stay"
+  deployed
+  echo mine > "$HOME/services/paperclip/notes.txt"
+  run_teardown --purge "paperclip"
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "invite gone"                  [ ! -e "$HOME/services/paperclip/ceo-invite.txt" ]
+  check "user file kept"               grep -qx mine "$HOME/services/paperclip/notes.txt"
+  check "says the dir is kept"         out_has "still holds files setup.sh did not write"
+  teardown
+}
+
+test_teardown_purge_missing_marker() {
+  echo "• teardown --purge: a marker dir already gone is fine"
+  deployed
+  rm -rf "$HOME/services/paperclip"
+  run_teardown --purge "paperclip"
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check ".env gone"                    [ ! -f "$SVC/.env" ]
+  check "instance kept"                host_state_intact
+  teardown
+}
+
+test_teardown_never_claude_codex() {
+  echo "• teardown: a .env pointing a data var at ~/.claude or ~/.codex is refused"
+  # @H@ stands for the sandbox $HOME, which only exists after deployed().
+  local v val
+  for v in PAPERCLIP_DATA AGENT_WORKSPACES; do
+    for val in "@H@/.claude" "@H@/.claude/" "@H@/.claude/paperclip" "@H@/.codex" '${HOME}/.codex'; do
+      deployed
+      val="${val//@H@/$HOME}"
+      sed -i.bak "s#^$v=.*#$v=$val#" "$SVC/.env"
+      ls -la "$HOME/.claude" "$HOME/.codex" > "$SANDBOX/before"
+      run_teardown --purge "paperclip"
+      check "$v=$val: purge exits non-zero" [ "$CODE" -ne 0 ]
+      check "  nothing changed"        nothing_changed
+      check "  logins byte-identical"  host_state_intact
+      ls -la "$HOME/.claude" "$HOME/.codex" > "$SANDBOX/after"
+      check "  no file added or removed there" cmp -s "$SANDBOX/before" "$SANDBOX/after"
+      teardown
+    done
+  done
+  deployed
+  ln -s "$HOME/.claude" "$HOME/pc-link"
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME/pc-link#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "symlink into ~/.claude: refused" [ "$CODE" -ne 0 ]
+  check "  nothing changed"            nothing_changed
+  teardown
+  deployed
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "PAPERCLIP_DATA=\$HOME (holds ~/.claude): refused" [ "$CODE" -ne 0 ]
+  check "  nothing changed"            nothing_changed
+  teardown
+  # real_dir is what every deleted path goes through; it must refuse a marker
+  # dir or marker file that leads into ~/.claude.
+  deployed
+  mv "$HOME/services/paperclip" "$SANDBOX/marker-real"
+  cp "$SANDBOX/marker-real/ceo-invite.txt" "$HOME/.claude/ceo-invite.txt"
+  ln -s "$HOME/.claude" "$HOME/services/paperclip"
+  run_teardown --purge "paperclip"
+  check "marker dir -> ~/.claude: refused" [ "$CODE" -ne 0 ]
+  check "  ~/.claude/ceo-invite.txt kept" [ -f "$HOME/.claude/ceo-invite.txt" ]
+  check "  logins kept"                host_state_intact
+  check "  .env kept"                  [ -f "$SVC/.env" ]
+  rm -f "$HOME/services/paperclip"
+  teardown
+  deployed
+  rm -f "$HOME/services/paperclip/ceo-invite.txt"
+  ln -s "$HOME/.claude/.credentials.json" "$HOME/services/paperclip/ceo-invite.txt"
+  run_teardown --purge "paperclip"
+  check "marker file -> ~/.claude creds: refused" [ "$CODE" -ne 0 ]
+  check "  creds kept"                 host_state_intact
+  check "  the link itself kept"       [ -L "$HOME/services/paperclip/ceo-invite.txt" ]
+  teardown
+  deployed
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME/.claude#" "$SVC/.env"
+  run_teardown
+  check "default mode with PAPERCLIP_DATA=~/.claude: exits zero" [ "$CODE" -eq 0 ]
+  check "  logins kept"                host_state_intact
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: odd PAPERCLIP_DATA / AGENT_WORKSPACES values are refused"
+  # @H@ stands for the sandbox $HOME, which only exists after deployed().
+  local val
+  mkdir_neighbour() { mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"; }
+  for val in "relative/.paperclip" "@H@/services/../.paperclip" "@H@/./.paperclip" \
+             "@H@/.paperclip/." "@H@/.paperclip/.." "@H@/services/neighbour" \
+             "@H@/services" "@H@/services/" "@H@/services/paperclip/a:b" "/" "@H@/.."; do
+    deployed
+    val="${val//@H@/$HOME}"
+    mkdir_neighbour
+    sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$val#" "$SVC/.env"
+    run_teardown --purge "paperclip"
+    check "PAPERCLIP_DATA=$val: refused" [ "$CODE" -ne 0 ]
+    check "  nothing changed"          nothing_changed
+    check "  neighbour kept"           [ -f "$HOME/services/neighbour/keep" ]
+    teardown
+  done
+  deployed
+  mkdir_neighbour
+  sed -i.bak "s#^AGENT_WORKSPACES=.*#AGENT_WORKSPACES=$HOME/services/neighbour#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "AGENT_WORKSPACES in another service's dir: refused" [ "$CODE" -ne 0 ]
+  check "  nothing changed"            nothing_changed
+  teardown
+  deployed
+  ln -s "$HOME/services/neighbour" "$HOME/nb-link"
+  mkdir_neighbour
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME/nb-link#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "symlink into another service's dir: refused" [ "$CODE" -ne 0 ]
+  teardown
+  deployed
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME/.paperclip//#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "trailing slashes on the real path: accepted" [ "$CODE" -eq 0 ]
+  check "  printed path has no trailing slash" out_has "rm -rf -- '$HOME/.paperclip/instances/default'"
+  check "  instance kept"              [ -f "$(master_key)" ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/paperclip"; echo x > "$HOME/paperclip/ceo-invite.txt"
+  run_teardown --purge "paperclip"
+  check "exits non-zero"               [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"     [ -f "$HOME/paperclip/ceo-invite.txt" ]
+  check "nothing changed"              [ -f "$SVC/.env" ] && no_call " off"
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/paperclip survives"
+  deployed
+  local repo="$HOME/services/paperclip/setup-server/services/paperclip"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/paperclip/setup-server/other.env"
+  OUT="$(printf '%s\n' "paperclip" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "checkout intact"              [ -f "$repo/teardown.sh" ] && [ -f "$repo/setup.sh" ]
+  check "other services' files kept"   [ -f "$HOME/services/paperclip/setup-server/other.env" ]
+  check "marker dir kept (not empty)"  [ -d "$HOME/services/paperclip" ]
+  check "the other checkout's .env untouched" [ -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:3100 (tailnet only)
+|-- / proxy http://127.0.0.1:3100
+
+https://test-host.tailfake.ts.net:8444 (tailnet only)
+|-- / proxy http://127.0.0.1:3100
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /pc proxy http://127.0.0.1:3100
+EOF
+  run_teardown
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check ":3100 off"                    calls_have "serve --https=3100 off"
+  check ":8444 off"                    calls_have "serve --https=8444 off"
+  check "shared :443 left on"          no_call "https=443 off"
+  check "warns about the shared port"  out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"               [ "$CODE" -ne 0 ]
+  check "says why"                     out_has "Could not read Tailscale Serve status"
+  check "nothing changed"              nothing_changed
+  run_teardown --purge "paperclip"
+  check "purge: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "purge: nothing changed"       nothing_changed
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^PAPERCLIP_PORT=.*/export PAPERCLIP_PORT='3100'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"       [ "$CODE" -eq 0 ]
+  check ":3100 off"                    calls_have "serve --https=3100 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^PAPERCLIP_PORT=.*/PAPERCLIP_PORT="3100"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"                [ "$CODE" -eq 0 ]
+  check ":3100 off"                    calls_have "serve --https=3100 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^PAPERCLIP_PORT=.*/PAPERCLIP_PORT=3100 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"               [ "$CODE" -eq 0 ]
+  check ":3100 off"                    calls_have "serve --https=3100 off"
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=\"\${HOME}/.paperclip\"#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "\${HOME} form: exits zero"    [ "$CODE" -eq 0 ]
+  check "  prints the expanded path"   out_has "rm -rf -- '$HOME/.paperclip/instances/default'"
+  teardown
+  deployed
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA='\$HOME/.paperclip'#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  nothing changed"            nothing_changed
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'PAPERCLIP_PORT=9999\n' >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"              out_has "PAPERCLIP_PORT is set more than once"
+  check "  nothing changed"            nothing_changed
+  teardown
+  deployed
+  printf 'X="first\nPAPERCLIP_DATA=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"     out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"            nothing_changed
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_* in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+    deployed
+    printf '%s=%s\n' "$v" "x" >> "$SVC/.env"
+    run_teardown --purge "paperclip"
+    check "$v in .env: exits non-zero" [ "$CODE" -ne 0 ]
+    check "  nothing changed"          nothing_changed
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"            nothing_changed
+  teardown
+}
+
+test_teardown_leaves_neighbours_alone() {
+  echo "• teardown: OpenHands and other Paperclip-ish units / containers are named, not touched"
+  deployed
+  local ud="$HOME/.config/systemd/user"
+  printf '[Service]\nExecStart=/usr/bin/docker start openhands-agent-canvas\n' > "$ud/agent-canvas.service"
+  : > "$ud/paperclipai-staging.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$ud/unrelated.service"
+  mkdir -p "$ud/default.target.wants"
+  ln -s "$(unit_file)" "$ud/default.target.wants/paperclipai.service"
+  printf 'openhands-agent-canvas\n' > "$STATE_DIR/docker_ps"
+  run_teardown --purge "paperclip"
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "names the OpenHands unit"     out_has "Left alone (not created by this setup.sh): $ud/agent-canvas.service"
+  check "names the other instance"     out_has "Left alone (not created by this setup.sh): $ud/paperclipai-staging.service"
+  check "  not the unrelated unit"     out_lacks "unrelated.service"
+  check "names the OpenHands container" out_has "openhands-agent-canvas"
+  check "no systemctl call for them"   ! grep -E '^systemctl .*(agent-canvas|staging)' "$CALLS_LOG"
+  check "their files kept"             [ -f "$ud/agent-canvas.service" ] && [ -f "$ud/paperclipai-staging.service" ]
+  check "no docker stop / rm / compose" ! grep -E '^docker (stop|rm|kill|compose|container)' "$CALLS_LOG"
+  check "lingering untouched"          no_call "linger"
+  teardown
+}
+
+test_teardown_macos() {
+  echo "• teardown on macOS: launchd bootout + disable, plist removed only on --purge"
+  deployed
+  local plist="$HOME/Library/LaunchAgents/ing.paperclip.paperclipai.plist"
+  mkdir -p "$(dirname "$plist")"; echo '<plist/>' > "$plist"
+  export FAKE_OS=Darwin
+  run_teardown
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "bootout gui/<uid>/label"      calls_have "launchctl bootout gui/1000/ing.paperclip.paperclipai"
+  check "disable gui/<uid>/label"      calls_have "launchctl disable gui/1000/ing.paperclip.paperclipai"
+  check "no systemctl on macOS"        no_call "^systemctl "
+  check "plist kept"                   [ -f "$plist" ]
+  check "serve off for :3100"          calls_have "serve --https=3100 off"
+  run_teardown --purge "paperclip"
+  check "purge: exits zero"            [ "$CODE" -eq 0 ]
+  check "purge: plist gone"            [ ! -e "$plist" ]
+  check "purge: Linux unit file untouched" [ -f "$(unit_file)" ]
+  check "purge: instance kept"         host_state_intact
+  unset FAKE_OS
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -497,6 +1067,27 @@ test_serve_approval_prompt
 test_ceo_already_exists
 test_agents_when_company_set
 test_migrates_legacy_env
+test_teardown_safe
+test_teardown_https_port_differs
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_port_hop
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_keeps_foreign_files
+test_teardown_purge_missing_marker
+test_teardown_never_claude_codex
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_services_root_is_a_link
+test_teardown_purge_keeps_a_checkout_inside
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_quoted_env
+test_teardown_home_variable_in_env
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
+test_teardown_leaves_neighbours_alone
+test_teardown_macos
 
 if [ "${1:-}" = "--live" ]; then
   echo

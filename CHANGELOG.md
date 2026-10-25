@@ -10,6 +10,16 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for paperclip**, so it gets the launcher's Remove button.
+  It finds the port Paperclip actually bound (it can hop off the default)
+  from its own runtime record, counted only while that pid is still a
+  running `paperclipai run`. Default disables `paperclipai.service` and
+  keeps everything. `--purge` deletes only the four files setup.sh
+  writes in `~/services/paperclip`, the unit and `.env`; it never deletes
+  `~/.paperclip` (instance, CLI store, `master.key`), `~/agent-workspaces`,
+  `~/.claude` or `~/.codex`, and prints a backup line and the `rm` for
+  each instead. It never runs `paperclipai uninstall`.
+
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
   gets the launcher's Remove button. The vaultwarden, immich and
