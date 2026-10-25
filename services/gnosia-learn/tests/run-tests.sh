@@ -123,6 +123,13 @@ run_deploy() {
   CODE=$?
 }
 
+# stdin is /dev/null: the deployd/systemd case — `read` sees instant EOF and
+# the approval loop must die, not spin serve forever.
+run_deploy_no_stdin() {
+  OUT="$(PATH="$STUBS:$PATH" bash "$SVC/setup.sh" </dev/null 2>&1)"
+  CODE=$?
+}
+
 # Run the installed poller script directly (as the timer would).
 run_poll() {
   OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/gnosia-learn/bin/deploy.sh" "$@" 2>&1)"
@@ -874,6 +881,18 @@ test_serve_approval_pause() {
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "explained the pause"   out_has "approval URL"
   check "serve retried to 3"    sh -c '[ "$(grep -c "tailscale serve" "$CALLS_LOG")" -eq 3 ]'
+  teardown
+}
+
+test_serve_approval_no_stdin() {
+  echo "• serve approval with no stdin (deployd): dies, does not spin"
+  setup
+  touch "$STATE_DIR/operator"
+  echo 2 > "$STATE_DIR/serve_fails_left"
+  run_deploy_no_stdin
+  check "exits non-zero"        [ "$CODE" -ne 0 ]
+  check "says why"              out_has "stdin closed or no TTY"
+  check "serve tried few times" sh -c '[ "$(grep -c "tailscale serve" "$CALLS_LOG")" -le 5 ]'
   teardown
 }
 
@@ -2288,6 +2307,7 @@ test_deploy_pinned_sha
 test_failed_build_restores
 test_operator_escalation
 test_serve_approval_pause
+test_serve_approval_no_stdin
 test_sync_install
 test_sync_install_idempotent
 test_sync_install_old_layout
