@@ -275,10 +275,11 @@ test_path_restored_from_env() {
   for s in "$STUBS"/*; do [ "${s##*/}" = uv ] || ln -s "$s" "$nouv/${s##*/}"; done
   uvbin="$STATE_DIR/saved-uv-bin"; mkdir -p "$uvbin"
   printf '#!/bin/sh\nexec "%s/uv" "$@"\n' "$STUBS" > "$uvbin/uv"; chmod +x "$uvbin/uv"
-  grep -v '^UV_BIN=' "$SVC/.env" > "$SVC/.env.tmp" && mv "$SVC/.env.tmp" "$SVC/.env"
-  printf "UV_BIN='%s'\n" "$uvbin" >> "$SVC/.env"
+  # deploy.sh prepends both recorded dirs to PATH, so GIT_LFS_BIN must also
+  # point somewhere git-free or the real git shadows the stub.
+  grep -v -E '^(UV_BIN|GIT_LFS_BIN)=' "$SVC/.env" > "$SVC/.env.tmp" && mv "$SVC/.env.tmp" "$SVC/.env"
+  printf "UV_BIN='%s'\nGIT_LFS_BIN='%s'\n" "$uvbin" "$uvbin" >> "$SVC/.env"
   OUT="$(printf '\n' | PATH="$nouv:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
-  echo "DEBUG CODE=$CODE"; echo "$OUT" | tail -25   # TEMP: CI failure diagnosis
   check "exits zero without stub uv" [ "$CODE" -eq 0 ]
   check "found uv via .env"          out_has "Preflight checks"
   teardown
