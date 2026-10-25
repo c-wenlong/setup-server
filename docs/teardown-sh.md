@@ -10,9 +10,11 @@ the reference and the launcher's Remove action running it without
 `--purge`. Since then: firefly-iii, home-assistant, homepage, jellyfin,
 metabase, n8n, open-webui, umami; then vaultwarden, immich, paperless-ngx,
 seafile, appflowy, plane; then kaichenpedia, design-systems, sources,
-self-learn. monitoring, ntfy-control and the launcher itself get none:
-they are the box's own plumbing, so Remove would take down the thing
-that shows the button or raises the alert. Services without one keep their **Nuke
+self-learn; then beszel, quiver-hub, syncthing, trigger-dev, coolify;
+then code-server, forgejo, openhands, adguard, remote-desktop, paperclip.
+monitoring, ntfy-control and the launcher itself get none: they are the
+box's own plumbing, so Remove would take down the thing that shows the
+button or raises the alert. Services without one keep their **Nuke
 and pave** recipe as the authority.
 
 ## Recommendation

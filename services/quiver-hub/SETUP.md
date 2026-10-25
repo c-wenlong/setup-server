@@ -201,6 +201,8 @@ journalctl --user -u quiver-hub.service -f      # live logs
 systemctl --user restart quiver-hub.service
 tailscale serve status                          # expect :8477 / proxy http://127.0.0.1:8477
 tailscale serve --https=8477 off                # unpublish (this port only)
+./teardown.sh                                   # Remove: unpublish + stop; .env, unit, build kept
+./teardown.sh --purge                           # also delete .env + unit file (asks for the name)
 ./setup.sh                                      # upgrade to the current QUIVER_REF tip
 cat ~/.local/share/quiver-hub/installed-rev     # which quiver commit is running
 ```
@@ -226,7 +228,9 @@ reinstall, no sudo, `.env` kept), upgrade when main moves, pinning by SHA and
 by tag, unknown refs, GitHub or uv failures, a too-old quiver (no `swe remote`, or no `--public-url`), port
 overrides and `.env` precedence, the `:443` refusal, an HTTPS port owned by
 another service, a hub that never gets healthy, the Serve approval loop, and
-`pair.sh`'s https links.
+`pair.sh`'s https links, and `teardown.sh` (only this hub's Serve ports go
+off, the unit is disabled, `--purge` confirmation and path guards, `~/.quiver`
+and units it did not write left alone).
 
 The live suite checks the unit is active and enabled, lingering, the unit
 binds 127.0.0.1, `/v1/status` on loopback and over the tailnet, no listener
