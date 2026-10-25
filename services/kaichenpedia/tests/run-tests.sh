@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/kaichenpedia/setup.sh + deploy.sh.
+# Tests for services/kaichenpedia/setup.sh + deploy.sh + teardown.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -25,13 +25,13 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
 
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT REPO_URL BRANCH POLL_SECONDS STATE_DIR CALLS_LOG
+  unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT REPO_URL BRANCH POLL_SECONDS STATE_DIR CALLS_LOG
 }
 
 run_deploy() {
@@ -55,8 +55,9 @@ check() {
 }
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
-calls_have() { grep -q "$1" "$CALLS_LOG"; }
-no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
+out_lacks()  { ! grep -q "$1" <<<"$OUT"; }
+calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
+no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
 
 # ----------------------------------------------------------------- tests
@@ -125,6 +126,8 @@ test_fresh_deploy() {
     check "lingering enabled"         calls_have "loginctl enable-linger"
   else
     check "launch agent written"      [ -f "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist" ]
+    check "label enabled (undoes teardown's disable)" calls_have "launchctl enable gui/.*/com.kaichenpedia.deploy"
+    check "enabled before bootstrap"  [ "$(call_line "launchctl enable")" -lt "$(call_line "launchctl bootstrap")" ]
   fi
   check "served on tailscale :8091"   calls_have "tailscale serve --bg --https=8091 http://127.0.0.1:8091"
   check "prints final URL"            out_has "https://test-host.tailfake.ts.net:8091"
@@ -245,6 +248,646 @@ test_live() {
   live_check "tailnet HTTPS responds"   curl -fsS -o /dev/null --max-time 30 "$url/"
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+KP() { printf '%s' "$HOME/services/kaichenpedia"; }
+UDIR() { printf '%s' "$HOME/.config/systemd/user"; }
+set_home() { sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME=$1#" "$SVC/.env"; }
+# Line number of the first call matching $1 (0 when absent).
+call_line() { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1 | grep . || echo 0; }
+
+# A deployed sandbox: setup.sh has run (clone, build, units), Serve maps this
+# port to this service, and neighbours sit on other ports (one a lookalike).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo "my edit" >> "$(KP)/nginx.conf"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8091 (tailnet only)
+|-- / proxy http://127.0.0.1:8091
+
+https://test-host.tailfake.ts.net:18091 (tailnet only)
+|-- / proxy http://127.0.0.1:18091
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+state_all_there() {
+  [ -d "$(KP)/repo/.git" ] && [ -f "$(KP)/www/current/index.html" ] && [ -x "$(KP)/bin/deploy.sh" ] \
+    && [ -f "$(KP)/state/built-sha" ] && grep -q "my edit" "$(KP)/nginx.conf"
+}
+units_there() {
+  if [ "$OS" = "Linux" ]; then
+    [ -f "$(UDIR)/kaichenpedia-deploy.timer" ] && [ -f "$(UDIR)/kaichenpedia-deploy.service" ]
+  else
+    [ -f "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist" ]
+  fi
+}
+units_gone() {
+  if [ "$OS" = "Linux" ]; then
+    [ ! -e "$(UDIR)/kaichenpedia-deploy.timer" ] && [ ! -e "$(UDIR)/kaichenpedia-deploy.service" ]
+  else
+    [ ! -e "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist" ]
+  fi
+}
+nothing_changed() {
+  no_call " off" && no_call "disable --now" && no_call "--user stop" \
+    && no_call "launchctl bootout" && no_call "launchctl disable" \
+    && [ ! -f "$STATE_DIR/compose_down" ] && [ -f "$SVC/.env" ] && state_all_there && units_there
+}
+
+# Back-date a deploy lock past deploy.sh's 60-minute stale mark.
+age_lock() { touch -t 202001010000 "$1"; }
+
+# teardown.sh --purge, with a hook run while the confirmation prompt waits:
+# $1 is the answer, $2 a snippet run once the prompt is on screen (before
+# the answer is sent). Sets OUT and CODE like run_teardown.
+run_purge_at_prompt() {
+  local out="$SANDBOX/teardown.out"
+  : > "$out"
+  { for _ in $(seq 1 100); do grep -q "to confirm" "$out" && break; sleep 0.1; done
+    eval "$2"
+    printf '%s\n' "$1"; } | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge > "$out" 2>&1
+  CODE=$?
+  OUT="$(cat "$out")"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove stops poller + container, keeps everything on disk"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8091"         calls_have "tailscale serve --https=8091 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18091 untouched"  no_call "https=18091"
+  check "never serve reset"           no_call "serve reset"
+  if [ "$OS" = "Linux" ]; then
+    check "timer disabled + stopped"  calls_have "systemctl --user disable --now kaichenpedia-deploy.timer"
+    check "static service stopped"    calls_have "systemctl --user stop kaichenpedia-deploy.service"
+    check "static service not disabled" no_call "disable --now kaichenpedia-deploy.service"
+    check "timer before service"      [ "$(call_line "disable --now kaichenpedia-deploy.timer")" -lt "$(call_line "stop kaichenpedia-deploy.service")" ]
+    check "no daemon-reload"          no_call "daemon-reload"
+  else
+    check "launch agent booted out"   calls_have "launchctl bootout gui/.*/com.kaichenpedia.deploy"
+    check "launch agent disabled (no reload at login)" calls_have "launchctl disable gui/.*/com.kaichenpedia.deploy"
+  fi
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down without -v"             no_call "down -v"
+  check "compose down on this dir"    calls_have "docker compose --project-directory $SVC down"
+  check "clone, site, bin, state, nginx.conf kept" state_all_there
+  check "unit files kept"             units_there
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_other_units_left_alone() {
+  echo "• teardown: units that mention kaichenpedia but setup.sh did not make are named, not touched"
+  deployed
+  if [ "$OS" = "Linux" ]; then
+    printf '[Service]\nExecStart=/bin/true\n' > "$(UDIR)/kaichenpedia-backup.service"
+    printf '[Service]\nExecStart=%s/services/kaichenpedia/bin/deploy.sh --force\n' "$HOME" > "$(UDIR)/wiki-nightly.service"
+    printf '[Service]\nExecStart=/bin/true\n' > "$(UDIR)/unrelated.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo kaichenpedia > "$HOME/Library/LaunchAgents/com.me.wiki-nightly.plist"
+  fi
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "warns naming the lookalike" out_has "kaichenpedia-backup.service"
+    check "warns naming the mention"  out_has "wiki-nightly.service"
+    check "unrelated not named"       out_lacks "unrelated.service"
+    check "no systemctl on them"      no_call "systemctl.*\(kaichenpedia-backup\|wiki-nightly\|unrelated\)"
+  else
+    check "warns naming the mention"  out_has "com.me.wiki-nightly.plist"
+  fi
+  run_teardown --purge "kaichenpedia"
+  check "purge exits zero"            [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "purge keeps the lookalike" [ -f "$(UDIR)/kaichenpedia-backup.service" ]
+    check "purge keeps the mention"   [ -f "$(UDIR)/wiki-nightly.service" ]
+    check "purge keeps unrelated"     [ -f "$(UDIR)/unrelated.service" ]
+  else
+    check "purge keeps the mention"   [ -f "$HOME/Library/LaunchAgents/com.me.wiki-nightly.plist" ]
+  fi
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8091 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8092 (tailnet only)
+|-- / proxy http://127.0.0.1:8091
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8091
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /wiki proxy http://127.0.0.1:8091
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8092 off"                   calls_have "serve --https=8092 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "nothing changed"             nothing_changed
+  teardown
+}
+
+test_teardown_systemctl_fails() {
+  [ "$OS" = "Linux" ] || return 0
+  echo "• teardown: a failing systemctl disable stops instead of claiming success"
+  deployed
+  touch "$STATE_DIR/systemctl_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "names the unit"              out_has "disable --now kaichenpedia-deploy.timer failed"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "root: nothing changed"       nothing_changed
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: nothing changed" nothing_changed
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "no docker: nothing changed"  nothing_changed
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then exactly setup.sh's state goes"
+  deployed
+  mkdir "$(KP)/.deploy.lock"; age_lock "$(KP)/.deploy.lock"   # stale: a live one refuses (see below)
+  run_teardown --purge "kaichenpedia-deploy"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: nothing changed" nothing_changed
+  run_teardown --purge "kaichenpedia"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "warned GitHub is canonical"  out_has "GitHub is canonical"
+  check "serve off for :8091"         calls_have "tailscale serve --https=8091 off"
+  check "compose down without -v"     no_call "down -v"
+  check "repo clone gone"             [ ! -e "$(KP)/repo" ]
+  check "www gone"                    [ ! -e "$(KP)/www" ]
+  check "bin gone"                    [ ! -e "$(KP)/bin" ]
+  check "state gone"                  [ ! -e "$(KP)/state" ]
+  check "nginx.conf gone"             [ ! -e "$(KP)/nginx.conf" ]
+  check "stale deploy lock gone"      [ ! -e "$(KP)/.deploy.lock" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "unit files gone"             units_gone
+  [ "$OS" = "Linux" ] && check "daemon-reload after removing units" calls_have "systemctl --user daemon-reload"
+  check "marker dir gone"             [ ! -e "$(KP)" ]
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "timers.target.wants untouched" [ -d "$(UDIR)" ]
+  teardown
+}
+
+test_teardown_purge_rm_fails() {
+  echo "• teardown --purge: a path rm cannot delete stops with the sudo command, .env kept"
+  deployed
+  mkdir -p "$(KP)/www/locked"; echo x > "$(KP)/www/locked/f"; chmod 555 "$(KP)/www/locked"
+  run_teardown --purge "kaichenpedia"
+  chmod 755 "$(KP)/www/locked" 2>/dev/null
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "names sudo rm -rf and the path" out_has "sudo rm -rf $(KP)/www"
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "unit files kept"             units_there
+  teardown
+}
+
+test_teardown_purge_keeps_user_files() {
+  echo "• teardown --purge: a file you put in SERVICE_HOME survives (and keeps the dir)"
+  deployed
+  echo mine > "$(KP)/notes.txt"
+  run_teardown --purge "kaichenpedia"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "your file kept"              [ -f "$(KP)/notes.txt" ]
+  check "warns the dir was left"      out_has "still holds files setup.sh did not make"
+  check "owned repo gone"             [ ! -e "$(KP)/repo" ]
+  check "owned www gone"              [ ! -e "$(KP)/www" ]
+  teardown
+}
+
+test_teardown_purge_symlinked_child() {
+  echo "• teardown --purge: a symlinked www/ is refused before anything changes"
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo x > "$HOME/elsewhere/keep"
+  mv "$(KP)/www" "$HOME/www-real"
+  ln -s "$HOME/elsewhere" "$(KP)/www"
+  run_teardown --purge "kaichenpedia"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "link target kept"            [ -f "$HOME/elsewhere/keep" ]
+  check "repo kept"                   [ -d "$(KP)/repo/.git" ]
+  check "units kept"                  units_there
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_purge_missing_state() {
+  echo "• teardown --purge: SERVICE_HOME already gone is fine"
+  deployed
+  rm -rf "$(KP)"
+  run_teardown --purge "kaichenpedia"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "unit files gone"             units_gone
+  teardown
+  deployed
+  sed -i.bak '/^SERVICE_HOME=/d' "$SVC/.env"
+  run_teardown --purge "kaichenpedia"
+  check "SERVICE_HOME unset: refused" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a SERVICE_HOME outside ~/services/kaichenpedia"
+  deployed
+  set_home "$HOME"
+  run_teardown --purge "kaichenpedia"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing changed"             nothing_changed
+  set_home "$HOME/services/../x"
+  run_teardown --purge "kaichenpedia"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  set_home "$HOME/services/"
+  run_teardown --purge "kaichenpedia"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./kaichenpedia" "$HOME/services/kaichenpedia/.."; do
+    set_home "$dotted"
+    run_teardown --purge "kaichenpedia"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
+  check "still nothing changed"       nothing_changed
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  set_home "$HOME/services//"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "kaichenpedia"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  set_home "$HOME/services/alias"
+  run_teardown --purge "kaichenpedia"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  set_home "$(KP)/"
+  run_teardown --purge "kaichenpedia"
+  check "one trailing slash on its own dir is fine" [ "$CODE" -eq 0 ]
+  check "  state gone"                [ ! -e "$(KP)/repo" ]
+  teardown
+}
+
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/kaichenpedia itself or inside it"
+  deployed
+  mkdir -p "$HOME/services/neighbour/repo"; echo x > "$HOME/services/neighbour/repo/keep"
+  set_home "$HOME/services/neighbour"
+  run_teardown --purge "kaichenpedia"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"             [ -f "$HOME/services/neighbour/repo/keep" ]
+  check "  nothing changed"           nothing_changed
+  mkdir -p "$(KP)/a:b"
+  set_home "$(KP)/a:b"
+  run_teardown --purge "kaichenpedia"
+  check "a colon in the path refused" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/kaichenpedia/repo"; echo x > "$HOME/kaichenpedia/repo/keep"
+  run_teardown --purge "kaichenpedia"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"   [ -f "$HOME/kaichenpedia/repo/keep" ]
+  check "units kept"                  units_there
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/kaichenpedia survives"
+  deployed
+  local repo
+  repo="$(KP)/setup-server/services/kaichenpedia"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$(KP)/setup-server/other.env"
+  OUT="$(printf '%s\n' "kaichenpedia" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "checkout intact"             [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"  [ -f "$(KP)/setup-server/other.env" ]
+  check "state kept"                  state_all_there
+  check "units kept"                  units_there
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8091'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8091 off"                   calls_have "serve --https=8091 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8091"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  check "  :8091 off"                 calls_have "serve --https=8091 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8091 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  check "  :8091 off"                 calls_have "serve --https=8091 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=80x1/' "$SVC/.env"
+  run_teardown
+  check "non-numeric port refused"    [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  set_home "\"\${HOME}/services/kaichenpedia\""
+  run_teardown --purge "kaichenpedia"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  state gone"                [ ! -e "$(KP)/repo" ]
+  teardown
+  deployed
+  set_home "'\$HOME/services/kaichenpedia'"
+  run_teardown --purge "kaichenpedia"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  state kept"                state_all_there
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'SERVICE_HOME=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "SERVICE_HOME is set more than once"
+  check "  nothing changed"           nothing_changed
+  teardown
+  deployed
+  printf 'X="first\nSERVICE_HOME=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_* in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "kaichenpedia"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  nothing changed"           nothing_changed
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+}
+
+test_teardown_unresolved_variable() {
+  echo "• teardown: a path in .env that still names another variable is refused before anything changes"
+  deployed
+  set_home "\$HOME/services/\${NAME}"
+  run_teardown --purge "kaichenpedia"
+  check "purge: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "  says why"                  out_has "SERVICE_HOME .*still refers to another variable"
+  check "  refused before the prompt" out_lacks "to confirm"
+  check "  nothing changed"           nothing_changed
+  run_teardown
+  check "plain run: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+}
+
+test_teardown_purge_deploy_lock() {
+  echo "• teardown --purge: a live deploy lock refuses up front; a stale one is cleared; teardown holds it through the purge"
+  local lock
+  deployed
+  lock="$(KP)/.deploy.lock"
+  mkdir "$lock"
+  run_teardown --purge "kaichenpedia"
+  check "live lock: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "  says a deploy is running"  out_has "A deploy is running"
+  check "  refused before the prompt" out_lacks "to confirm"
+  check "  nothing changed"           nothing_changed
+  check "  lock left to its owner"    [ -d "$lock" ]
+  run_teardown
+  check "plain teardown (deletes nothing) still runs" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  lock="$(KP)/.deploy.lock"
+  run_purge_at_prompt "kaichenpedia" "mkdir '$lock'"
+  check "deploy started during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says a deploy is running"  out_has "A deploy is running"
+  check "  nothing changed"           nothing_changed
+  teardown
+  deployed
+  lock="$(KP)/.deploy.lock"
+  run_purge_at_prompt "kaichenpedia" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
+  check "no lock: exits zero"         [ "$CODE" -eq 0 ]
+  check "  not taken while the prompt waits" grep -qx free "$STATE_DIR/lock_at_prompt"
+  teardown
+  deployed
+  lock="$(KP)/.deploy.lock"
+  mkdir "$lock"; age_lock "$lock"
+  printf '%s' "$lock" > "$STATE_DIR/lock_probe"
+  run_teardown --purge "kaichenpedia"
+  check "stale lock: exits zero"      [ "$CODE" -eq 0 ]
+  check "  says it cleared it"        out_has "Cleared a stale deploy lock"
+  check "  teardown holds it during down" grep -qx held "$STATE_DIR/lock_at_down"
+  check "  gone after the purge"      [ ! -e "$lock" ]
+  check "  marker dir gone"           [ ! -e "$(KP)" ]
+  teardown
+  deployed
+  lock="$(KP)/.deploy.lock"
+  mkdir "$lock"; echo mine > "$lock/notes"; age_lock "$lock"
+  run_teardown --purge "kaichenpedia"
+  check "old lock holding files: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  check "  its files kept"            [ -f "$lock/notes" ]
+  teardown
+  deployed
+  lock="$(KP)/.deploy.lock"
+  mkdir -p "$HOME/elsewhere"; ln -s "$HOME/elsewhere" "$lock"
+  run_teardown --purge "kaichenpedia"
+  check "symlinked lock: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  check "  link left as it was"       [ -L "$lock" ] && [ -d "$HOME/elsewhere" ]
+  teardown
+}
+
+test_teardown_purge_rechecked_after_lock() {
+  echo "• teardown --purge: targets are worked out again once the lock is held; a change during the prompt deletes nothing"
+  deployed
+  mv "$(KP)/repo" "$SANDBOX/repo.saved"
+  run_purge_at_prompt "kaichenpedia" "mv '$SANDBOX/repo.saved' '$(KP)/repo'"
+  check "repo/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says the list changed"     out_has "changed while the prompt waited"
+  check "  nothing changed"           nothing_changed
+  check "  lock dropped"              [ ! -e "$(KP)/.deploy.lock" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
+  run_purge_at_prompt "kaichenpedia" "mv '$(KP)/www' '$SANDBOX/www.saved' && ln -s '$HOME/elsewhere' '$(KP)/www'"
+  check "www/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  refuses the link"          out_has "www is a symlink"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ] && no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  link target kept"          [ -f "$HOME/elsewhere/keep" ]
+  teardown
+}
+
+# macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it.
+test_teardown_macos_launch_agent() {
+  echo "• teardown (macOS branch): only a loaded agent is booted out; a failed unload stops before --purge deletes anything"
+  deployed
+  export FAKE_UNAME=Darwin
+  run_teardown
+  check "loaded agent: exits zero"    [ "$CODE" -eq 0 ]
+  check "  checked with print first"  [ "$(call_line "launchctl print gui/.*/com.kaichenpedia.deploy")" -gt 0 ] && [ "$(call_line "launchctl print")" -lt "$(call_line "launchctl bootout")" ]
+  check "  booted out"                calls_have "launchctl bootout gui/.*/com.kaichenpedia.deploy"
+  check "  disabled"                  calls_have "launchctl disable gui/.*/com.kaichenpedia.deploy"
+  check "  no systemctl"              no_call "systemctl"
+  : > "$CALLS_LOG"
+  touch "$STATE_DIR/launchd_not_loaded"
+  run_teardown
+  check "agent not loaded: exits zero" [ "$CODE" -eq 0 ]
+  check "  no bootout attempted"      no_call "launchctl bootout"
+  check "  still disabled"            calls_have "launchctl disable gui/.*/com.kaichenpedia.deploy"
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  touch "$STATE_DIR/launchd_bootout_fails"
+  run_teardown --purge "kaichenpedia"
+  check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says so"                   out_has "Could not unload LaunchAgent com.kaichenpedia.deploy"
+  check "  no compose down"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  state kept"                state_all_there
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  echo async > "$STATE_DIR/launchd_bootout_fails"
+  run_teardown
+  check "bootout errors but the agent unloads: exits zero" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  touch "$STATE_DIR/launchd_disable_fails"
+  run_teardown --purge "kaichenpedia"
+  check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it would reload"      out_has "would load again at the next login"
+  check "  state kept"                state_all_there
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  run_teardown --purge "kaichenpedia"
+  check "purge on macOS: exits zero"  [ "$CODE" -eq 0 ]
+  check "  state gone"                [ ! -e "$(KP)/www" ]
+  check "  no daemon-reload"          no_call "daemon-reload"
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
@@ -257,6 +900,32 @@ test_push_triggers_redeploy
 test_poll_lock
 test_port_override
 test_operator_escalation
+test_teardown_safe
+test_teardown_other_units_left_alone
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_systemctl_fails
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_rm_fails
+test_teardown_purge_keeps_user_files
+test_teardown_purge_symlinked_child
+test_teardown_purge_missing_state
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_trailing_slashes
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_purge_keeps_a_checkout_inside
+test_teardown_quoted_env
+test_teardown_home_variable_in_env
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
+test_teardown_unresolved_variable
+test_teardown_purge_deploy_lock
+test_teardown_purge_rechecked_after_lock
+test_teardown_macos_launch_agent
 
 if [ "${1:-}" = "--live" ]; then
   echo

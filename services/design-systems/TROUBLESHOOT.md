@@ -164,16 +164,27 @@ repo-path aliases keep serving the live checkout either way.)
 
 ## Nuke and pave
 
+`teardown.sh --purge` does it, asking you to type `design-systems` first.
+It unpublishes every Serve port that points only at `127.0.0.1:8108`,
+disables the poller timer and stops its service, runs `compose down` (same
+files `up` used, so a local `docker-compose.override.yml` still applies),
+then deletes `bin/`, `state/`, `www/`, `media/` and `nginx.conf` from
+`~/services/design-systems`, the two poller unit files, and `.env`.
+
+The clone at `~/dev/design-systems` is never deleted or changed, and
+`designs-trigger.service` (not created by `setup.sh`) is left running with a
+warning. Back up anything you want first, since the refero mirror takes a
+while to re-fetch and `nginx.conf` holds any edits you made:
+
 ```sh
-systemctl --user disable --now design-systems-deploy.timer
-rm -f ~/.config/systemd/user/design-systems-deploy.{service,timer}
-systemctl --user daemon-reload
-docker compose --project-directory ~/dev/setup-server/services/design-systems down
-rm -rf ~/services/design-systems
-rm -f ~/dev/setup-server/services/design-systems/.env
-tailscale serve --https=8108 off
-cd ~/dev/setup-server/services/design-systems && ./setup.sh
+cp -a ~/services/design-systems/media ~/design-systems-media.bak       # optional
+cp ~/services/design-systems/nginx.conf ~/design-systems-nginx.conf.bak # optional
+cd ~/dev/setup-server/services/design-systems
+./teardown.sh --purge
+./setup.sh
 ```
-Nothing of value lives in `~/services/design-systems` — the source of
-truth is the git repo at `~/dev/design-systems` (and GitHub), which this
-never writes to beyond the repo's own gitignored build outputs.
+Without `--purge`, `./teardown.sh` only unpublishes, stops the poller and
+the container, and keeps everything else, so `./setup.sh` brings it back as
+it was. The source of truth is the git repo at `~/dev/design-systems` (and
+GitHub), which this never writes to beyond the repo's own gitignored build
+outputs.

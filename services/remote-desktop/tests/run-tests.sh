@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/remote-desktop/setup.sh.
+# Tests for services/remote-desktop/setup.sh and teardown.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -133,6 +133,7 @@ setup() {
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
   cp "$SERVICE_DIR/setup.sh" "$SVC/"
+  [ -f "$SERVICE_DIR/teardown.sh" ] && cp "$SERVICE_DIR/teardown.sh" "$SVC/"
   [ -f "$SERVICE_DIR/docker-compose.yml" ] && cp "$SERVICE_DIR/docker-compose.yml" "$SVC/"
   # GNOME's Remote Login authenticates against a real system account, so
   # setup.sh needs RDP_USER's actual login password and will not invent one.
@@ -1172,6 +1173,608 @@ test_container_not_running() {
 }
 
 # ------------------------------------------------- sandbox integrity proof
+# ═══════════════════════════════════════════════════════════════ teardown
+# teardown.sh, default path = what the launcher's Remove runs: no terminal,
+# no sudo. It must take down Serve + the two containers and leave EVERY
+# system-level piece alone, the packet filter above all (the RDP listener is
+# still up and wildcard-bound). --system is the terminal-only path that backs
+# the system half out, listener first; it needs a tty, so those cases run
+# under a pty from the REAL python3's pty module (resolved before any stub
+# is on PATH). util-linux `script` was tried first and hung now and then
+# when the child exited under load; pty.spawn returns on the child's EIO.
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+$1} 2>&1)"
+  CODE=$?
+}
+
+REAL_PY="$(command -v python3 2>/dev/null || true)"
+have_pty() { [ -n "$REAL_PY" ] && "$REAL_PY" -c 'import pty, os; os.waitstatus_to_exitcode' 2>/dev/null; }
+
+run_teardown_tty() {  # run_teardown_tty "<args>" [stdin]
+  # shellcheck disable=SC2086  # $1 is a deliberate word list of flags
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" timeout 120 "$REAL_PY" -c '
+import os, pty, sys
+sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash "$SVC/teardown.sh" $1 2>&1)"
+  CODE=$?
+}
+
+state_dir() { env_val GUAC_STATE; }
+rootfs()    { printf '%s/rootfs%s' "$STATE_DIR" "$1"; }
+line_of()   { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1; }
+
+# A deployed sandbox: setup.sh has run (filter installed, RDP enabled, cert
+# in the shadow /var/lib), Serve maps this port to this service's /guacamole/
+# path, and neighbours sit on other ports (one a lookalike suffix, one a
+# lookalike PREFIX: 127.0.0.1:80940 starts with 127.0.0.1:8094).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8094 (tailnet only)
+|-- / proxy http://127.0.0.1:8094/guacamole/
+
+https://test-host.tailfake.ts.net:18094 (tailnet only)
+|-- / proxy http://127.0.0.1:18094/guacamole/
+
+https://test-host.tailfake.ts.net:9094 (tailnet only)
+|-- / proxy http://127.0.0.1:80940/guacamole/
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+system_half_intact() {
+  [ -f "$STATE_DIR/fw_installed" ] && [ -f "$STATE_DIR/fw_unit_enabled" ] &&
+  [ -f "$STATE_DIR/grd_rdp_enabled" ] &&
+  [ -f "$(rootfs /etc/remote-desktop/rdp-firewall.nft)" ] &&
+  [ -f "$(rootfs /etc/systemd/system/remote-desktop-firewall.service)" ] &&
+  [ -f "$(rootfs /var/lib/gnome-remote-desktop/certificates/rdp-tls.key)" ]
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove = Serve + containers only; the filter keeps guarding :3389"
+  deployed
+  check "deploy left the system half in place" system_half_intact
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "serve off for :8094"           calls_have "tailscale serve --https=8094 off"
+  check "neighbour :2283 untouched"     no_call "https=2283"
+  check "suffix lookalike :18094 untouched" no_call "https=18094"
+  check "prefix lookalike :9094 untouched"  no_call "https=9094"
+  check "never serve reset"             no_call "serve reset"
+  check "compose down"                  [ -f "$STATE_DIR/compose_down" ]
+  check "  in this service's project dir" grep -q -- "--project-directory $SVC down" "$STATE_DIR/compose_cmds"
+  check "down keeps volumes (no -v)"    no_call "down -v"
+  check "NO sudo at all"                no_call "^sudo"
+  check "backend untouched (no grdctl)" no_call "^grdctl"
+  check "nftables untouched"            no_call "^nft"
+  check "firewall unit not disabled"    no_call "disable"
+  check "system half all still there"   system_half_intact
+  check "user-mapping.xml kept"         [ -f "$(mapping_file)" ]
+  check "cert copy kept"                [ -f "$(state_dir)/rdp-tls.crt" ]
+  check ".env kept"                     [ -f "$SVC/.env" ]
+  check "lists what is left"            out_has "still in place"
+  check "  names the nft table"         out_hasF "inet remote_desktop"
+  check "  names the RDP listener"      out_has "Remote Login"
+  check "  points at --system"          out_hasF "./teardown.sh --system"
+  check "  says it is not exposed"      out_has "Nothing is exposed"
+  check "  hand order: RDP off before the filter" \
+    ordered_lines "$(grep -n 'rdp disable' <<<"$OUT" | head -1 | cut -d: -f1)" \
+                  "$(grep -n 'disable --now remote-desktop-firewall' <<<"$OUT" | head -1 | cut -d: -f1)"
+  check "says how to bring it back"     out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"             [ "$CODE" -eq 0 ]
+  : > "$CALLS_LOG"
+  run_deploy
+  check "./setup.sh brings it back"     [ "$CODE" -eq 0 ]
+  check "  with no sudo (system half was kept)" no_call "^sudo"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no serve off"                  no_call " off"
+  check "says already off"              out_has "already off"
+  check "still compose down"            [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8094 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no serve off"                  no_call " off"
+  check "says nothing points here"      out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:8094/guacamole/
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8094
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /desktop proxy http://127.0.0.1:8094/guacamole/
+EOF
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ":8110 off"                     calls_have "serve --https=8110 off"
+  check ":8443 off"                     calls_have "serve --https=8443 off"
+  check "shared :443 left on"           no_call "https=443 off"
+  check "warns about the shared port"   out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: when every match is on a shared port, it does not claim 'already off'"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /desktop proxy http://127.0.0.1:8094/guacamole/
+EOF
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "shared :443 left on"           no_call " off"
+  check "does not say already off"      out_lacks "already off"
+  check "says a shared port still routes here" out_hasF "1 shared HTTPS port(s) still route to http://127.0.0.1:8094"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "says why"                      out_has "Could not read Tailscale Serve status"
+  check "no compose down"               [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "no .env: explains"             out_has "nothing to tear down"
+  check "no .env: touched nothing"      [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"          [ "$CODE" -ne 0 ]
+  check "root: explains"                out_has "regular user"
+  unset FAKE_UID
+  export FAKE_UNAME=Darwin
+  run_teardown
+  check "macOS: exits non-zero"         [ "$CODE" -ne 0 ]
+  check "macOS: explains"               out_has "macOS never hosts"
+  unset FAKE_UNAME
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  run_teardown "--purge --system --purge"
+  check "too many args: exits non-zero" [ "$CODE" -ne 0 ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "nothing ever stopped"          [ ! -f "$STATE_DIR/compose_down" ]
+  check "nothing ever unpublished"      no_call " off"
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then GUAC_STATE, .env and the marker go"
+  deployed
+  local dir; dir="$(state_dir)"
+  run_teardown --purge "remote"
+  check "wrong name: exits non-zero"    [ "$CODE" -ne 0 ]
+  check "wrong name: state kept"        [ -f "$(mapping_file)" ]
+  check "wrong name: .env kept"         [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped"   [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched"   no_call " off"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "remote-desktop"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "state dir (= the marker) gone" [ ! -e "$dir" ]
+  check "marker ~/services/remote-desktop gone" [ ! -e "$HOME/services/remote-desktop" ]
+  check ".env gone"                     [ ! -f "$SVC/.env" ]
+  check "serve off for :8094"           calls_have "tailscale serve --https=8094 off"
+  check "compose down"                  [ -f "$STATE_DIR/compose_down" ]
+  check "services dir itself kept"      [ -d "$HOME/services" ]
+  check "neighbour kept"                [ -f "$HOME/services/neighbour/keep" ]
+  check "still NO sudo"                 no_call "^sudo"
+  check "system half untouched"         system_half_intact
+  check "says --system now needs the hand commands" out_has "which --purge just deleted"
+  teardown
+}
+
+test_teardown_purge_split_dirs() {
+  echo "• teardown --purge: a GUAC_HOME outside GUAC_STATE goes too, if it is ours"
+  deployed
+  local own="$HOME/services/remote-desktop"
+  mkdir -p "$own/state" "$own/guac-home2"; echo x > "$own/guac-home2/user-mapping.xml"
+  sed -i.bak -e "s#^GUAC_STATE=.*#GUAC_STATE=$own/state#" -e "s#^GUAC_HOME=.*#GUAC_HOME=$own/guac-home2#" "$SVC/.env"
+  rm -rf "$own/guac-home" "$own/.applied" "$own/rdp-tls.crt"
+  run_teardown --purge "remote-desktop"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "GUAC_STATE gone"               [ ! -e "$own/state" ]
+  check "GUAC_HOME gone"                [ ! -e "$own/guac-home2" ]
+  check "marker gone once empty"        [ ! -e "$own" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  sed -i.bak -e "s#^GUAC_HOME=.*#GUAC_HOME=$HOME/services/neighbour#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "GUAC_HOME in another service's dir: refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"               [ -f "$HOME/services/neighbour/keep" ]
+  check "  nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "  our state kept"              [ -d "$(state_dir)" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a state dir outside ~/services/remote-desktop"
+  deployed
+  sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$HOME#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "\$HOME: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "home untouched"                [ -d "$HOME" ]
+  check "nothing stopped"               [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "'..' refused"                  [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "services dir itself refused"   [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  local dotted
+  for dotted in "$HOME/services/." "$HOME/services/./remote-desktop" "$HOME/services/remote-desktop/.."; do
+    sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$dotted#" "$SVC/.env"
+    run_teardown --purge "remote-desktop"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched"  [ -f "$HOME/services/neighbour/keep" ]
+  check "our state never touched"       [ -f "$(mapping_file)" ]
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$HOME/services//#" "$SVC/.env"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "remote-desktop"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "neighbour data kept"           [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$HOME/services/alias#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "symlink to services refused"   [ "$CODE" -ne 0 ]
+  check "neighbour still kept"          [ -f "$HOME/services/neighbour/keep" ]
+  sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$HOME/services/remote-desktop///#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "own dir with trailing slashes: exits zero" [ "$CODE" -eq 0 ]
+  check "  and it is gone"              [ ! -e "$HOME/services/remote-desktop" ]
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: a state dir already gone is fine"
+  deployed
+  rm -rf "$(state_dir)"
+  run_teardown --purge "remote-desktop"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ".env gone"                     [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  # The marker outlives a hand-deleted state subdir: still removed when empty.
+  local own="$HOME/services/remote-desktop"
+  sed -i.bak -e "s#^GUAC_STATE=.*#GUAC_STATE=$own/state#" -e "s#^GUAC_HOME=.*#GUAC_HOME=$own/state/guac-home#" "$SVC/.env"
+  rm -rf "${own:?}/"* "$own/.applied"
+  run_teardown --purge "remote-desktop"
+  check "empty marker still removed"    [ ! -e "$own" ]
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  local dir; dir="$(state_dir)"
+  sed -i.bak -e "s#^GUAC_STATE=.*#GUAC_STATE=\"\${HOME}${dir#"$HOME"}\"#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "\${HOME} form: exits zero"     [ "$CODE" -eq 0 ]
+  check "  dir gone"                    [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(state_dir)"
+  sed -i.bak -e "s#^GUAC_STATE=.*#GUAC_STATE='\$HOME${dir#"$HOME"}'#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  dir kept"                    [ -e "$dir" ]
+  teardown
+}
+
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/remote-desktop itself or inside it"
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$HOME/services/neighbour#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"               [ -f "$HOME/services/neighbour/keep" ]
+  check "  nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  mkdir -p "$HOME/services/remote-desktop/a:b"
+  sed -i.bak "s#^GUAC_STATE=.*#GUAC_STATE=$HOME/services/remote-desktop/a:b#" "$SVC/.env"
+  run_teardown --purge "remote-desktop"
+  check "a colon in the path refused"   [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/remote-desktop"; echo x > "$HOME/remote-desktop/keep"
+  run_teardown --purge "remote-desktop"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"     [ -f "$HOME/remote-desktop/keep" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/remote-desktop survives"
+  deployed
+  local repo="$HOME/services/remote-desktop/setup-server/services/remote-desktop"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/remote-desktop/setup-server/other.env"
+  OUT="$(printf '%s\n' "remote-desktop" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "checkout intact"               [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"    [ -f "$HOME/services/remote-desktop/setup-server/other.env" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^GUAC_PORT=.*/export GUAC_PORT='8094'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"        [ "$CODE" -eq 0 ]
+  check ":8094 off"                     calls_have "serve --https=8094 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^GUAC_PORT=.*/GUAC_PORT="8094"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"                 [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  sed -i.bak -e 's/^GUAC_PORT=.*/GUAC_PORT=8094 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"                [ "$CODE" -eq 0 ]
+  check "  :8094 off"                   calls_have "serve --https=8094 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^GUAC_PORT=.*/GUAC_PORT=abc/' "$SVC/.env"
+  run_teardown
+  check "non-numeric port refused"      [ "$CODE" -ne 0 ]
+  check "  nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'GUAC_STATE=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"               out_has "GUAC_STATE is set more than once"
+  check "  touched nothing"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nGUAC_STATE=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"      out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_FILE / COMPOSE_PROJECT_NAME in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "remote-desktop"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  nothing unpublished"       no_call " off"
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_foreign_user_units() {
+  echo "• teardown: user units mentioning this service are named, never touched"
+  deployed
+  local ud="$HOME/.config/systemd/user"
+  mkdir -p "$ud"
+  printf '[Service]\nExecStart=/usr/bin/ssh -L 4822:guacd:4822 box\n' > "$ud/guac-tunnel.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$ud/unrelated.service"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "names the foreign unit"        out_hasF "guac-tunnel.service"
+  check "  not the unrelated one"       out_lacks "unrelated.service"
+  check "  no systemctl --user call"    no_call "systemctl --user"
+  check "  unit file kept"              [ -f "$ud/guac-tunnel.service" ]
+  teardown
+}
+
+# ----------------------------------------------------- teardown --system
+test_teardown_system_needs_a_terminal() {
+  echo "• teardown --system: no terminal (the launcher's situation) changes nothing"
+  deployed
+  run_teardown --system
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "says it needs a terminal"      out_has "needs a terminal"
+  check "no sudo"                       no_call "^sudo"
+  check "nothing unpublished"           no_call " off"
+  check "nothing stopped"               [ ! -f "$STATE_DIR/compose_down" ]
+  check "system half intact"            system_half_intact
+  teardown
+}
+
+test_teardown_system() {
+  echo "• teardown --system (tty): RDP off and verified closed BEFORE the filter goes"
+  if ! have_pty; then note "    (skipped: no python3 pty module for a terminal)"; return 0; fi
+  deployed
+  run_teardown_tty --system
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "announces the sudo steps first" \
+    ordered_lines "$(grep -n 'needs sudo' <<<"$OUT" | head -1 | cut -d: -f1)" \
+                  "$(grep -n 'RDP is off' <<<"$OUT" | head -1 | cut -d: -f1)"
+  check "serve off + compose down first" [ -f "$STATE_DIR/compose_down" ]
+  check "RDP disabled"                  [ ! -f "$STATE_DIR/grd_rdp_enabled" ]
+  check "credentials cleared"           calls_have "sudo grdctl --system rdp clear-credentials"
+  check "daemon restarted, not stopped" calls_have "sudo systemctl restart gnome-remote-desktop.service"
+  check "  never stopped or disabled"   no_call "systemctl \(stop\|disable\|mask\).*gnome-remote-desktop"
+  check "probed :3389 after the restart" ordered_lines \
+    "$(line_of 'restart gnome-remote-desktop')" "$(line_of 'python3 probe tcp 127.0.0.1 3389')"
+  check "ORDER: rdp disable < restart < probe < filter off" ordered_lines \
+    "$(line_of 'sudo grdctl --system rdp disable')" \
+    "$(line_of 'sudo systemctl restart gnome-remote-desktop')" \
+    "$(line_of 'python3 probe tcp 127.0.0.1 3389')" \
+    "$(line_of 'sudo systemctl disable --now remote-desktop-firewall.service')"
+  check "filter unit disabled"          [ ! -f "$STATE_DIR/fw_unit_enabled" ]
+  check "nft table gone"                [ ! -f "$STATE_DIR/fw_installed" ]
+  check "never a ruleset flush"         no_call "flush"
+  check "rules file removed"            [ ! -e "$(rootfs /etc/remote-desktop/rdp-firewall.nft)" ]
+  check "/etc/remote-desktop removed"   [ ! -e "$(rootfs /etc/remote-desktop)" ]
+  check "unit file removed"             [ ! -e "$(rootfs /etc/systemd/system/remote-desktop-firewall.service)" ]
+  check "daemon-reload"                 calls_have "sudo systemctl daemon-reload"
+  check "TLS key removed"               [ ! -e "$(rootfs /var/lib/gnome-remote-desktop/certificates/rdp-tls.key)" ]
+  check "TLS cert removed"              [ ! -e "$(rootfs /var/lib/gnome-remote-desktop/certificates/rdp-tls.crt)" ]
+  check "  and the markers claiming it" [ ! -e "$(state_dir)/.applied/rdp-cert" ]
+  check "user-mapping.xml kept"         [ -f "$(mapping_file)" ]
+  check ".env kept"                     [ -f "$SVC/.env" ]
+  check "no leftover warning"           out_lacks "still in place"
+  run_teardown_tty --system
+  check "re-run exits zero"             [ "$CODE" -eq 0 ]
+  rm -f "$STATE_DIR/install_owners"; : > "$CALLS_LOG"
+  run_deploy
+  check "./setup.sh rebuilds it"        [ "$CODE" -eq 0 ]
+  check "  with a NEW keypair"          grep -q 'rdp-tls.key' "$STATE_DIR/install_owners"
+  check "  and the filter back"         system_half_intact
+  teardown
+}
+
+test_teardown_system_listener_survives() {
+  echo "• teardown --system: if :3389 still answers, the filter STAYS"
+  if ! have_pty; then note "    (skipped: no python3 pty module for a terminal)"; return 0; fi
+  deployed
+  touch "$STATE_DIR/grd_disable_noop"
+  run_teardown_tty --system
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "says the filter is left"       out_has "LEFT IN PLACE"
+  check "filter unit never disabled"    no_call "disable --now remote-desktop-firewall"
+  check "nft never touched"             no_call "^nft"
+  check "table still there"             [ -f "$STATE_DIR/fw_installed" ]
+  check "rules file kept"               [ -f "$(rootfs /etc/remote-desktop/rdp-firewall.nft)" ]
+  teardown
+  deployed
+  touch "$STATE_DIR/grd_disable_fails"
+  run_teardown_tty --system
+  check "grdctl disable fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  no restart"                  no_call "restart gnome-remote-desktop"
+  check "  filter intact"               system_half_intact
+  teardown
+  deployed
+  touch "$STATE_DIR/restart_grd_fails"
+  run_teardown_tty --system
+  check "restart fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  filter never disabled"       no_call "disable --now remote-desktop-firewall"
+  teardown
+}
+
+test_teardown_system_interrupted_after_keypair() {
+  echo "• teardown --system: interrupted right after the keypair goes, setup.sh still regenerates it"
+  if ! have_pty; then note "    (skipped: no python3 pty module for a terminal)"; return 0; fi
+  deployed
+  touch "$STATE_DIR/rm_keypair_interrupts"
+  run_teardown_tty --system
+  rm -f "$STATE_DIR/rm_keypair_interrupts"
+  check "interrupted: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "TLS key removed"               [ ! -e "$(rootfs /var/lib/gnome-remote-desktop/certificates/rdp-tls.key)" ]
+  check "cert marker already cleared"   [ ! -e "$(state_dir)/.applied/rdp-cert" ]
+  check "cert copy already cleared"     [ ! -e "$(state_dir)/rdp-tls.crt" ]
+  rm -f "$STATE_DIR/install_owners"; : > "$CALLS_LOG"
+  run_deploy
+  check "./setup.sh rebuilds it"        [ "$CODE" -eq 0 ]
+  check "  with a NEW keypair"          grep -q 'rdp-tls.key' "$STATE_DIR/install_owners"
+  teardown
+}
+
+test_teardown_system_table_outlives_unit() {
+  echo "• teardown --system: a table left after its unit stops is deleted by name"
+  if ! have_pty; then note "    (skipped: no python3 pty module for a terminal)"; return 0; fi
+  deployed
+  touch "$STATE_DIR/fw_table_lingers"
+  run_teardown_tty --system
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "deleted exactly that table"    calls_have "^nft delete table inet remote_desktop$"
+  check "table gone"                    [ ! -f "$STATE_DIR/fw_installed" ]
+  teardown
+}
+
+test_teardown_system_and_purge() {
+  echo "• teardown --system --purge (tty): system half first, then state"
+  if ! have_pty; then note "    (skipped: no python3 pty module for a terminal)"; return 0; fi
+  deployed
+  run_teardown_tty "--system --purge" "wrong"
+  check "wrong name: exits non-zero"    [ "$CODE" -ne 0 ]
+  check "  no sudo"                     no_call "^sudo"
+  check "  system half intact"          system_half_intact
+  run_teardown_tty "--purge --system" "remote-desktop"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "RDP off"                       [ ! -f "$STATE_DIR/grd_rdp_enabled" ]
+  check "filter gone"                   [ ! -f "$STATE_DIR/fw_installed" ]
+  check "state + marker gone"           [ ! -e "$HOME/services/remote-desktop" ]
+  check ".env gone"                     [ ! -f "$SVC/.env" ]
+  teardown
+}
+
 # Recorded before the mocked suite runs, checked after. A mocked suite that
 # quietly wrote to ~/services/remote-desktop, or reconfigured the RDP backend
 # on the real box, would be worse than no suite at all — and on THIS service a
@@ -1182,8 +1785,11 @@ snapshot_host() {
   local f
   HOST_SNAPSHOT=""
   for f in "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" \
+           "$SERVICE_DIR/teardown.sh" \
            "$SERVICE_DIR/SETUP.md" "$SERVICE_DIR/TROUBLESHOOT.md" \
            "$SERVICE_DIR/.env" "$ORIG_HOME/services/remote-desktop" \
+           /etc/remote-desktop /etc/remote-desktop/rdp-firewall.nft \
+           /etc/systemd/system/remote-desktop-firewall.service \
            /etc/polkit-1/rules.d /etc/xrdp; do
     if [ -f "$f" ]; then
       HOST_SNAPSHOT="$HOST_SNAPSHOT
@@ -1635,6 +2241,32 @@ test_serve_approval_prompt
 test_https_front_door_slow
 test_no_listener_audit_via_ss_at_all
 test_container_not_running
+test_teardown_safe
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_only_shared_ports
+test_teardown_serve_status_fails
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_split_dirs
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_data_dir
+test_teardown_home_variable_in_env
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_purge_keeps_a_checkout_inside
+test_teardown_quoted_env
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
+test_teardown_foreign_user_units
+test_teardown_system_needs_a_terminal
+test_teardown_system
+test_teardown_system_listener_survives
+test_teardown_system_interrupted_after_keypair
+test_teardown_system_table_outlives_unit
+test_teardown_system_and_purge
 test_sandbox_was_hermetic
 
 if [ "${1:-}" = "--live" ]; then

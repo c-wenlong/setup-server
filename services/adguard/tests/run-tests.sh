@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/adguard/setup.sh.
+# Tests for services/adguard/setup.sh and teardown.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -69,10 +69,11 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
 
 teardown() {
+  chmod -R u+w "$SANDBOX" 2>/dev/null  # the purge tests make read-only dirs
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
   unset FAKE_UID LOCAL_PORT HTTPS_PORT ADGUARD_ADMIN_USERNAME STATE_DIR CALLS_LOG
@@ -1144,6 +1145,717 @@ test_live() {
   printf '      this container. The other order takes DNS down tailnet-wide.\n'
 }
 
+# ------------------------------------------------------------- teardown
+# teardown.sh's mocked suite. The reference cases (Serve detection, purge
+# guards, .env reading) mirror services/stirling-pdf; the DNS gate cases are
+# this service's own: stopping AdGuard while the tailnet still uses it as a
+# nameserver takes DNS down for every device, so the gate must refuse on
+# every shape of "still listed" and on every way of "could not tell".
+run_teardown() {  # run_teardown [flag] [stdin]
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+run_teardown_args() {  # run_teardown_args <stdin> <flag>...
+  local input="$1"; shift
+  OUT="$(printf '%s\n' "$input" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" "$@" 2>&1)"
+  CODE=$?
+}
+
+conf_dir() { env_val ADGUARD_CONF; }
+work_dir() { env_val ADGUARD_WORK; }
+
+# `tailscale dns status --json` for a logged-in node, with the given extra
+# top-level keys (already indented two spaces, comma-separated) after
+# CurrentTailnet. Same two-space MarshalIndent shape as the real CLI, which
+# always prints all four resolver keys: any the extra keys leave out are
+# added as null. dns_json "" leaves them all out (a truncated or renamed
+# shape).
+dns_json() {
+  local extra="${1:-}" k
+  if [ -n "$extra" ]; then
+    for k in Resolvers SplitDNSRoutes FallbackResolvers Nameservers; do
+      case "$extra" in *"
+  \"$k\":"*|"  \"$k\":"*) ;; *) extra="$extra,
+  \"$k\": null" ;; esac
+    done
+  fi
+  {
+    echo '{'
+    echo '  "TailscaleDNS": true,'
+    echo '  "CurrentTailnet": {'
+    echo '    "MagicDNSEnabled": true,'
+    echo '    "MagicDNSSuffix": "tailfake.ts.net",'
+    echo '    "SelfDNSName": "test-host.tailfake.ts.net."'
+    if [ -n "$extra" ]; then
+      echo '  },'
+      printf '%s\n' "$extra"
+    else
+      echo '  }'
+    fi
+    echo '}'
+  } > "$STATE_DIR/dns_status"
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps this port to this service,
+# neighbours sit on other ports (one a lookalike suffix), the tailnet lists
+# only Quad9 as its resolver, and the container has written config + logs.
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  [ "$CODE" -eq 0 ] || red "      (deployed: setup.sh failed: $(tail -3 <<<"$OUT"))"
+  echo "schema_version: 34" > "$(conf_dir)/AdGuardHome.yaml"
+  mkdir -p "$(work_dir)/data"
+  echo '{}' > "$(work_dir)/data/querylog.json"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:3000 (tailnet only)
+|-- / proxy http://127.0.0.1:3000
+
+https://test-host.tailfake.ts.net:3080 (tailnet only)
+|-- / proxy http://127.0.0.1:3080
+
+https://test-host.tailfake.ts.net:13080 (tailnet only)
+|-- / proxy http://127.0.0.1:13080
+EOF
+  dns_json '  "Resolvers": [
+    {
+      "Addr": "https://dns10.quad9.net/dns-query"
+    }
+  ],
+  "SystemDNS": {
+    "Nameservers": [
+      "100.100.100.100"
+    ]
+  }'
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down" "$STATE_DIR/compose_cmds"
+}
+
+nothing_changed() {  # nothing_changed <label>
+  check "$1: exits non-zero"           [ "$CODE" -ne 0 ]
+  check "$1: nothing unpublished"      no_call " off"
+  check "$1: container not stopped"    [ ! -f "$STATE_DIR/compose_down" ]
+  check "$1: config kept"              [ -f "$(conf_dir)/AdGuardHome.yaml" ]
+  check "$1: .env kept"                [ -f "$SVC/.env" ]
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps config and .env, unpublishes only its port"
+  deployed
+  OUT="$(PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" </dev/null 2>&1)"; CODE=$?
+  check "launcher-shaped run (no args, no stdin) exits zero" [ "$CODE" -eq 0 ]
+  check "read the tailnet DNS config"  calls_have "^tailscale dns status --json"
+  check "warns about the admin console first" out_has "login.tailscale.com/admin/dns"
+  check "says it is not a nameserver"  out_has "Not a tailnet nameserver"
+  check "serve off for :3080"         calls_have "tailscale serve --https=3080 off"
+  check "neighbour :3000 untouched"   no_call "https=3000 "
+  check "lookalike :13080 untouched"  no_call "https=13080"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "  in the service directory"  grep -q -- "compose --project-directory $SVC down" "$STATE_DIR/compose_cmds"
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "no cleanup container"        [ ! -f "$STATE_DIR/cleanup_ran" ]
+  check "conf kept"                   [ -f "$(conf_dir)/AdGuardHome.yaml" ]
+  check "work kept"                   [ -f "$(work_dir)/data/querylog.json" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  check "names the unpaused DNS monitor" out_has "adguard-dns"
+  check "no systemctl / launchctl"    no_call "^systemctl\|^launchctl"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_https_port_override() {
+  echo "• teardown: an HTTPS port other than LOCAL_PORT is found from Serve"
+  setup
+  touch "$STATE_DIR/operator"
+  export HTTPS_PORT=9443
+  run_deploy
+  unset HTTPS_PORT
+  printf 'https://test-host.tailfake.ts.net:9443 (tailnet only)\n|-- / proxy http://127.0.0.1:3080\n' \
+    > "$STATE_DIR/serve_status"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :9443"         calls_have "tailscale serve --https=9443 off"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:3080 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:3081 (tailnet only)
+|-- / proxy http://127.0.0.1:3080
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:3080
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /adguard proxy http://127.0.0.1:3080
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":3081 off"                   calls_have "serve --https=3081 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  nothing_changed "serve status down"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "root: no compose down"       [ ! -f "$STATE_DIR/compose_down" ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  run_teardown_args "" --dns-removed --dns-removed
+  check "flag given twice: exits non-zero" [ "$CODE" -ne 0 ]
+  check "flag given twice: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "no docker: nothing unpublished" no_call " off"
+  teardown
+}
+
+# ---- the DNS gate ----------------------------------------------------
+test_teardown_dns_gate_listed() {
+  echo "• teardown: refuses while the tailnet still lists this node as a resolver"
+  local shape json
+  for shape in Resolvers FallbackResolvers SplitDNSRoutes Nameservers port doh v6 bootstrap; do
+    deployed
+    case "$shape" in
+      Resolvers|FallbackResolvers)
+        json="  \"$shape\": [
+    {
+      \"Addr\": \"https://dns10.quad9.net/dns-query\"
+    },
+    {
+      \"Addr\": \"$FAKE_TS_IP\"
+    }
+  ]" ;;
+      SplitDNSRoutes)
+        json='  "SplitDNSRoutes": {
+    "lan.example": [
+      {
+        "Addr": "'"$FAKE_TS_IP"'"
+      }
+    ]
+  }' ;;
+      Nameservers)
+        json='  "Nameservers": [
+    "'"$FAKE_TS_IP"'"
+  ]' ;;
+      port)
+        json='  "Resolvers": [
+    {
+      "Addr": "'"$FAKE_TS_IP"':53"
+    }
+  ]' ;;
+      doh)
+        json='  "FallbackResolvers": [
+    {
+      "Addr": "https://'"$FAKE_TS_IP"'/dns-query"
+    }
+  ]' ;;
+      v6)
+        json='  "Resolvers": [
+    {
+      "Addr": "FD7A:115C:A1E0::1111:2222"
+    }
+  ]' ;;
+      bootstrap)
+        json='  "Resolvers": [
+    {
+      "Addr": "https://adguard.example/dns-query",
+      "BootstrapResolution": [
+        "'"$FAKE_TS_IP"'"
+      ]
+    }
+  ]' ;;
+    esac
+    dns_json "$json"
+    run_teardown
+    nothing_changed "$shape"
+    check "$shape: says the tailnet still uses it" out_has "still uses $FAKE_TS_IP for DNS"
+    check "$shape: points at the admin console" out_has "login.tailscale.com/admin/dns"
+    teardown
+  done
+
+  deployed
+  dns_json '  "Resolvers": [
+    {
+      "Addr": "'"$FAKE_TS_IP"'"
+    }
+  ]'
+  run_teardown --dns-removed
+  nothing_changed "listed + --dns-removed"
+  check "  says the flag does not override it" out_has "does not override"
+  run_teardown --purge "adguard"
+  nothing_changed "listed + --purge"
+  check "  never got to the purge prompt" out_lacks "Type adguard to confirm"
+  check "  work kept"                 [ -f "$(work_dir)/data/querylog.json" ]
+  teardown
+}
+
+test_teardown_dns_gate_address_moved() {
+  echo "• teardown: checks both the .env address and the node's current one"
+  deployed
+  echo 100.77.77.78 > "$STATE_DIR/ts_ip"
+  dns_json '  "Resolvers": [
+    {
+      "Addr": "100.77.77.78"
+    }
+  ]'
+  run_teardown
+  nothing_changed "current address listed"
+  teardown
+  deployed
+  echo 100.77.77.78 > "$STATE_DIR/ts_ip"
+  dns_json '  "Resolvers": [
+    {
+      "Addr": "'"$FAKE_TS_IP"'"
+    }
+  ]'
+  run_teardown
+  nothing_changed ".env address listed"
+  teardown
+}
+
+test_teardown_dns_gate_clear() {
+  echo "• teardown: lookalike addresses and non-resolver fields do not block"
+  deployed
+  dns_json '  "Resolvers": [
+    {
+      "Addr": "100.77.77.7"
+    },
+    {
+      "Addr": "100.77.77.770"
+    },
+    {
+      "Addr": "1100.77.77.77"
+    },
+    {
+      "Addr": "100.77.77.77.example"
+    }
+  ],
+  "SearchDomains": [
+    "tailfake.ts.net"
+  ],
+  "ExtraRecords": [
+    {
+      "Name": "adguard.tailfake.ts.net.",
+      "Value": "'"$FAKE_TS_IP"'"
+    }
+  ],
+  "SystemDNS": {
+    "Nameservers": [
+      "'"$FAKE_TS_IP"'"
+    ]
+  }'
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  rm -f "$STATE_DIR/dns_status"        # logged in, no resolvers at all
+  run_teardown
+  check "no resolvers configured: exits zero" [ "$CODE" -eq 0 ]
+  teardown
+  # The shape a real node printed (on one line here: a parser, not an
+  # indent match), with other addresses in every slot.
+  deployed
+  printf '{"TailscaleDNS":true,"CurrentTailnet":{"MagicDNSEnabled":true,"MagicDNSSuffix":"tailfake.ts.net","SelfDNSName":"test-host.tailfake.ts.net."},"Resolvers":[{"Addr":"1.1.1.1"},{"Addr":"9.9.9.9"}],"FallbackResolvers":null,"SplitDNSRoutes":{"ts.net.":[{"Addr":"199.247.155.53"}],"empty.example.":null},"Nameservers":["8.8.8.8"],"CertDomains":null,"SearchDomains":["tailfake.ts.net"]}\n' > "$STATE_DIR/dns_status"
+  run_teardown
+  check "real-box shape, compact: exits zero" [ "$CODE" -eq 0 ]
+  check "  compose down"              [ -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf '{"TailscaleDNS":true,"CurrentTailnet":{"MagicDNSSuffix":"tailfake.ts.net"},"Resolvers":[{"Addr":"1.1.1.1"},{"Addr":"%s"}],"FallbackResolvers":null,"SplitDNSRoutes":null,"Nameservers":null}\n' "$FAKE_TS_IP" > "$STATE_DIR/dns_status"
+  run_teardown
+  nothing_changed "real-box shape, compact, listed"
+  check "  says the tailnet still uses it" out_has "still uses $FAKE_TS_IP for DNS"
+  teardown
+}
+
+test_teardown_dns_gate_unknown() {
+  echo "• teardown: an unreadable DNS config stops, unless --dns-removed"
+  local shape
+  # Every shape below has the right key names but not the right types, or
+  # is not quite JSON: none of them may read as "not listed".
+  local all_null='"Resolvers": null, "SplitDNSRoutes": null, "FallbackResolvers": null, "Nameservers": null'
+  local tailnet='"TailscaleDNS": true, "CurrentTailnet": {"MagicDNSSuffix": "tailfake.ts.net"}'
+  for shape in fails logged-out text truncated no-ip \
+      tailnet-null tailnet-string no-tailscaledns keys-missing \
+      resolvers-string resolvers-of-strings resolver-no-addr resolver-addr-number \
+      fallback-object split-array split-route-string split-route-of-strings \
+      nameservers-objects nameservers-string duplicate-key escaped-addr \
+      trailing-garbage two-objects bad-literal; do
+    deployed
+    case "$shape" in
+      fails)      touch "$STATE_DIR/dns_status_fails" ;;
+      logged-out) printf '{\n  "TailscaleDNS": true\n}\n' > "$STATE_DIR/dns_status" ;;
+      text)       printf '\n=== MagicDNS configuration ===\n\nResolvers (in preference order):\n  - 9.9.9.9\n' > "$STATE_DIR/dns_status" ;;
+      truncated)  dns_json ""; sed -i.bak '$d' "$STATE_DIR/dns_status" ;;
+      no-ip)      sed -i.bak '/^ADGUARD_DNS_IP=/d' "$SVC/.env" ;;
+      tailnet-null)
+        printf '{"TailscaleDNS": true, "CurrentTailnet": null, "Resolvers": "unavailable", "SplitDNSRoutes": null, "FallbackResolvers": "unavailable", "Nameservers": null}\n' > "$STATE_DIR/dns_status" ;;
+      tailnet-string)
+        printf '{"TailscaleDNS": true, "CurrentTailnet": "tailfake.ts.net", %s}\n' "$all_null" > "$STATE_DIR/dns_status" ;;
+      no-tailscaledns)
+        printf '{"CurrentTailnet": {"MagicDNSSuffix": "tailfake.ts.net"}, %s}\n' "$all_null" > "$STATE_DIR/dns_status" ;;
+      keys-missing)
+        printf '{%s, "Resolvers": null, "FallbackResolvers": null, "Nameservers": null}\n' "$tailnet" > "$STATE_DIR/dns_status" ;;
+      resolvers-string)     dns_json '  "Resolvers": "unavailable"' ;;
+      resolvers-of-strings) dns_json '  "Resolvers": ["9.9.9.9"]' ;;
+      resolver-no-addr)     dns_json '  "Resolvers": [{"Address": "9.9.9.9"}]' ;;
+      resolver-addr-number) dns_json '  "Resolvers": [{"Addr": 9}]' ;;
+      fallback-object)      dns_json '  "FallbackResolvers": {"Addr": "9.9.9.9"}' ;;
+      split-array)          dns_json '  "SplitDNSRoutes": [{"Addr": "9.9.9.9"}]' ;;
+      split-route-string)   dns_json '  "SplitDNSRoutes": {"lan.example.": "9.9.9.9"}' ;;
+      split-route-of-strings) dns_json '  "SplitDNSRoutes": {"lan.example.": ["9.9.9.9"]}' ;;
+      nameservers-objects)  dns_json '  "Nameservers": [{"Addr": "9.9.9.9"}]' ;;
+      nameservers-string)   dns_json '  "Nameservers": "9.9.9.9"' ;;
+      duplicate-key)
+        printf '{%s, %s, "Resolvers": [{"Addr": "%s"}]}\n' "$tailnet" "$all_null" "$FAKE_TS_IP" > "$STATE_DIR/dns_status" ;;
+      escaped-addr)
+        # \u0031 is "1": decoded, this is the node's own address.
+        dns_json '  "Resolvers": [{"Addr": "\u0031'"${FAKE_TS_IP#1}"'"}]' ;;
+      trailing-garbage)     dns_json '  "Resolvers": null'; echo 'x' >> "$STATE_DIR/dns_status" ;;
+      two-objects)          dns_json '  "Resolvers": null'; echo '{}' >> "$STATE_DIR/dns_status" ;;
+      bad-literal)          dns_json '  "Resolvers": nul' ;;
+    esac
+    run_teardown
+    nothing_changed "$shape"
+    check "$shape: says it could not tell" out_has "Could not tell whether"
+    check "$shape: names the override"  out_has "teardown.sh --dns-removed"
+    teardown
+  done
+
+  deployed
+  touch "$STATE_DIR/dns_status_fails"
+  run_teardown --dns-removed
+  check "--dns-removed: exits zero"   [ "$CODE" -eq 0 ]
+  check "  says it went ahead on the flag" out_has "going ahead on your --dns-removed"
+  check "  serve off"                 calls_have "serve --https=3080 off"
+  check "  compose down"              [ -f "$STATE_DIR/compose_down" ]
+  teardown
+
+  deployed
+  touch "$STATE_DIR/dns_status_fails"
+  run_teardown --purge "adguard"
+  nothing_changed "unknown + --purge"
+  check "  suggests the purge retry"  out_has "--dns-removed --purge"
+  run_teardown_args "adguard" --purge --dns-removed
+  check "--purge --dns-removed: exits zero" [ "$CODE" -eq 0 ]
+  check "  conf gone"                 [ ! -e "$HOME/services/adguard/conf" ]
+  teardown
+}
+
+test_teardown_foreign_units_left_alone() {
+  echo "• teardown: units setup.sh did not create are named, never touched"
+  deployed
+  local ud="$HOME/.config/systemd/user"
+  mkdir -p "$ud/default.target.wants"
+  printf '[Service]\nExecStart=/bin/true\n' > "$ud/adguard-backup.service"
+  printf '[Service]\nExecStart=/usr/bin/tar czf /tmp/x -C /home/x/services/AdGuard .\n' > "$ud/nightly-tar.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$ud/unrelated.service"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "names the unit by file name" out_has "adguard-backup.service"
+  check "names the unit by content"   out_has "nightly-tar.service"
+  check "does not name the unrelated one" out_lacks "unrelated.service"
+  check "units kept"                  [ -f "$ud/adguard-backup.service" ] && [ -f "$ud/nightly-tar.service" ]
+  check "no systemctl"                no_call "^systemctl"
+  teardown
+}
+
+# ---- purge -----------------------------------------------------------
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then conf/, work/, .env and the marker go"
+  deployed
+  local conf work; conf="$(conf_dir)"; work="$(work_dir)"
+  echo keep > "$HOME/services/neighbour-file"
+  run_teardown --purge "adguar"
+  nothing_changed "wrong name"
+  check "wrong name: work kept"       [ -f "$work/data/querylog.json" ]
+  run_teardown --purge "adguard"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "offers the backup before the prompt" out_has "sudo cp $conf/AdGuardHome.yaml"
+  check "conf gone"                   [ ! -e "$conf" ]
+  check "work gone"                   [ ! -e "$work" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "marker ~/services/adguard gone" [ ! -e "$HOME/services/adguard" ]
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "  and its other contents"    [ -f "$HOME/services/neighbour-file" ]
+  check "serve off for :3080"         calls_have "tailscale serve --https=3080 off"
+  check "down without -v"             no_call "down -v"
+  check "docker-compose.yml kept"     [ -f "$SVC/docker-compose.yml" ]
+  teardown
+}
+
+test_teardown_purge_root_owned() {
+  echo "• teardown --purge: root-owned files are cleared with the pinned image"
+  deployed
+  local conf; conf="$(conf_dir)"
+  mkdir -p "$conf/locked"; echo x > "$conf/locked/file"; chmod 500 "$conf/locked"
+  run_teardown --purge "adguard"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "used the cleanup container"  calls_have "^docker run --rm --pull never -v $conf:/x --entrypoint sh adguard/adguardhome:v0.107.79 -c find /x -mindepth 1 -delete"
+  check "conf gone"                   [ ! -e "$conf" ]
+  check "marker gone"                 [ ! -e "$HOME/services/adguard" ]
+  teardown
+  deployed
+  conf="$(conf_dir)"
+  mkdir -p "$conf/locked"; echo x > "$conf/locked/file"; chmod 500 "$conf/locked"
+  touch "$STATE_DIR/cleanup_fails"
+  run_teardown --purge "adguard"
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names sudo rm -rf"         out_hasF "sudo rm -rf $conf"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a conf/work dir outside ~/services/adguard"
+  deployed
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME#" "$SVC/.env"
+  run_teardown --purge "adguard"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "adguard"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "adguard"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./adguard" "$HOME/services/adguard/.."; do
+    sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$dotted#" "$SVC/.env"
+    run_teardown --purge "adguard"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME/services/adguard/conf#" "$SVC/.env"
+  sed -i.bak "s#^ADGUARD_WORK=.*#ADGUARD_WORK=$HOME/services/neighbour#" "$SVC/.env"
+  run_teardown --purge "adguard"
+  check "ADGUARD_WORK checked too"    [ "$CODE" -ne 0 ]
+  check "  conf kept (refused before deleting anything)" [ -f "$HOME/services/adguard/conf/AdGuardHome.yaml" ]
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME/services//#" "$SVC/.env"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "adguard"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/adguard/alias"
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME/services/adguard/alias#" "$SVC/.env"
+  run_teardown --purge "adguard"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME/services/adguard/conf///#" "$SVC/.env"
+  rm -f "$HOME/services/adguard/alias"
+  run_teardown --purge "adguard"
+  check "trailing slashes on its own dir: exits zero" [ "$CODE" -eq 0 ]
+  check "  conf gone"                 [ ! -e "$HOME/services/adguard/conf" ]
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: data already gone is fine, and the marker still goes"
+  deployed
+  rm -rf "$(conf_dir)" "$(work_dir)"
+  run_teardown --purge "adguard"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "marker gone"                 [ ! -e "$HOME/services/adguard" ]
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  local dir; dir="$(conf_dir)"
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=\"\${HOME}${dir#"$HOME"}\"#" "$SVC/.env"
+  run_teardown --purge "adguard"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(conf_dir)"
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF='\$HOME${dir#"$HOME"}'#" "$SVC/.env"
+  run_teardown --purge "adguard"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  dir kept"                  [ -e "$dir" ]
+  teardown
+}
+
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/adguard itself or inside it"
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME/services/neighbour#" "$SVC/.env"
+  run_teardown --purge "adguard"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"             [ -f "$HOME/services/neighbour/keep" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^ADGUARD_CONF=.*#ADGUARD_CONF=$HOME/services/adguard/a:b#" "$SVC/.env"
+  mkdir -p "$HOME/services/adguard/a:b"
+  run_teardown --purge "adguard"
+  check "a colon in the path refused" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/adguard/conf"; echo x > "$HOME/adguard/conf/keep"
+  run_teardown --purge "adguard"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"    [ -f "$HOME/adguard/conf/keep" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/adguard survives"
+  deployed
+  local repo="$HOME/services/adguard/conf/setup-server/services/adguard"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/adguard/conf/setup-server/other.env"
+  OUT="$(printf '%s\n' "adguard" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "checkout intact"             [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"  [ -f "$HOME/services/adguard/conf/setup-server/other.env" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='3080'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":3080 off"                   calls_have "serve --https=3080 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="3080"/' -e "s/^ADGUARD_DNS_IP=.*/ADGUARD_DNS_IP=\"$FAKE_TS_IP\"  # resolver/" "$SVC/.env"
+  dns_json '  "Resolvers": [
+    {
+      "Addr": "'"$FAKE_TS_IP"'"
+    }
+  ]'
+  run_teardown
+  check "double-quoted DNS IP still gates" [ "$CODE" -ne 0 ]
+  check "  named the address"         out_has "still uses $FAKE_TS_IP for DNS"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=3080 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'ADGUARD_CONF=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "ADGUARD_CONF is set more than once"
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nADGUARD_CONF=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_FILE / COMPOSE_PROJECT_NAME in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "adguard"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  nothing unpublished"       no_call " off"
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/adguard/setup.sh or services/adguard/docker-compose.yml is missing — nothing to test."
@@ -1189,6 +1901,30 @@ test_admin_username_override
 test_python3_dns_fallback
 test_operator_escalation
 test_serve_approval_prompt
+test_teardown_safe
+test_teardown_https_port_override
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_preflight
+test_teardown_dns_gate_listed
+test_teardown_dns_gate_address_moved
+test_teardown_dns_gate_clear
+test_teardown_dns_gate_unknown
+test_teardown_foreign_units_left_alone
+test_teardown_purge
+test_teardown_purge_root_owned
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_data_dir
+test_teardown_home_variable_in_env
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_purge_keeps_a_checkout_inside
+test_teardown_quoted_env
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
 test_sandbox_was_hermetic
 
 if [ "${1:-}" = "--live" ]; then

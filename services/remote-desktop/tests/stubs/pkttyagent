@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# pkttyagent stub: setup.sh and teardown.sh --system start a text polkit agent
+# when one is installed. The real one would register with the host's polkit.
+echo "pkttyagent $*" >> "$CALLS_LOG"
+exit 0

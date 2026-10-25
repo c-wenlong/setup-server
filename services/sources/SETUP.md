@@ -123,6 +123,8 @@ journalctl --user -u sources-deploy -n 50            # deploy history
 systemctl --user list-timers sources-deploy.timer
 docker compose --project-directory ~/dev/setup-server/services/sources ps|logs|restart
 tailscale serve status
+./teardown.sh                                        # Remove: unpublish, stop poller + container; files and .env kept
+./teardown.sh --purge                                # also delete site files, .env (SITE_PASSPHRASE!) and unit files
 ```
 
 A failed build leaves `www/current` pointing at the last release — a
