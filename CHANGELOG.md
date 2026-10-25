@@ -20,6 +20,19 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for beszel, quiver-hub, syncthing, trigger-dev and
+  coolify**, so each gets the launcher's Remove button. Service-specific:
+  syncthing's purge deletes only its identity and index and keeps your
+  synced files unless you also pass `--delete-synced-files`; quiver-hub
+  keeps `~/.local/share/quiver-hub` and `~/.quiver`; trigger-dev refuses
+  while task-runner containers exist rather than killing them; coolify
+  never stops the apps it deployed, refuses `--purge` while any exist, and
+  removes only its own key line from `authorized_keys`. Coolify's Remove
+  also carries on when Compose cannot delete the `coolify` network because
+  deployed apps still use it, as long as its own containers are gone.
+  beszel and syncthing setup.sh now `launchctl enable` before
+  bootstrap on macOS.
+
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
   gets the launcher's Remove button. The vaultwarden, immich and

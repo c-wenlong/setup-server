@@ -442,6 +442,9 @@ else
 </plist>
 EOF
   launchctl bootout "gui/$(id -u)/net.syncthing.syncthing" 2>/dev/null || true
+  # teardown.sh disables the label (so RunAtLoad cannot restart it at the
+  # next login); a disabled label refuses bootstrap. A no-op otherwise.
+  launchctl enable "gui/$(id -u)/net.syncthing.syncthing"
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
   ok "LaunchAgent loaded (starts at login; logs: ~/Library/Logs/syncthing.log)"
 fi
