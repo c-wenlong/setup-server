@@ -39,7 +39,7 @@ setup() {
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT SOURCE_REPO BRANCH POLL_SECONDS STATE_DIR CALLS_LOG
+  unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT SOURCE_REPO BRANCH POLL_SECONDS STATE_DIR CALLS_LOG
 }
 
 run_deploy() {
@@ -457,6 +457,22 @@ nothing_changed() {
     && [ -f "$SVC/.env" ] && [ -f "$SH/www/current/index.html" ] && repo_intact
 }
 
+# Back-date a deploy lock past deploy.sh's 60-minute stale mark.
+age_lock() { touch -t 202001010000 "$1"; }
+
+# teardown.sh --purge, with a hook run while the confirmation prompt waits:
+# $1 is the answer, $2 a snippet run once the prompt is on screen (before
+# the answer is sent). Sets OUT and CODE like run_teardown.
+run_purge_at_prompt() {
+  local out="$SANDBOX/teardown.out"
+  : > "$out"
+  { for _ in $(seq 1 100); do grep -q "to confirm" "$out" && break; sleep 0.1; done
+    eval "$2"
+    printf '%s\n' "$1"; } | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge > "$out" 2>&1
+  CODE=$?
+  OUT="$(cat "$out")"
+}
+
 test_teardown_safe() {
   echo "• teardown: safe remove keeps state and .env, unpublishes only its port"
   deployed
@@ -619,7 +635,7 @@ test_teardown_preflight() {
 test_teardown_purge() {
   echo "• teardown --purge: typed confirmation, then exactly setup.sh's state goes"
   deployed
-  mkdir "$SH/.deploy.lock"
+  mkdir "$SH/.deploy.lock"; age_lock "$SH/.deploy.lock"   # stale: a live one refuses (see below)
   run_teardown --purge "design"
   check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
   check "wrong name: nothing changed" nothing_changed
@@ -638,7 +654,7 @@ test_teardown_purge() {
   check "www/ gone"                   [ ! -e "$SH/www" ]
   check "media/ gone"                 [ ! -e "$SH/media" ]
   check "nginx.conf gone"             [ ! -e "$SH/nginx.conf" ]
-  check "deploy lock gone"            [ ! -e "$SH/.deploy.lock" ]
+  check "stale deploy lock gone"      [ ! -e "$SH/.deploy.lock" ]
   check ".env gone"                   [ ! -f "$SVC/.env" ]
   check "marker dir gone"             [ ! -e "$SH" ]
   check "services dir itself kept"    [ -d "$HOME/services" ]
@@ -905,6 +921,142 @@ test_teardown_refuses_compose_overrides() {
   teardown
 }
 
+test_teardown_unresolved_variable() {
+  echo "• teardown: a path in .env that still names another variable is refused before anything changes"
+  deployed
+  # setup.sh sources .env, so to it this is the clone inside www/; to a
+  # teardown that left it literal, the overlap check would test nothing.
+  mkdir -p "$SH/www/clone/.git"; echo mine > "$SH/www/clone/precious"
+  sed -i.bak "s#^SOURCE_REPO=.*#SOURCE_REPO=\$SERVICE_HOME/www/clone#" "$SVC/.env"
+  run_teardown --purge "design-systems"
+  check "SOURCE_REPO=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                  out_has "SOURCE_REPO .*still refers to another variable"
+  check "  refused before the prompt" out_lacks "to confirm"
+  check "  clone kept"                [ -f "$SH/www/clone/precious" ]
+  check "  nothing changed"           nothing_changed
+  run_teardown
+  check "plain run: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+  deployed
+  sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME=\$HOME/services/\${NAME}#" "$SVC/.env"
+  run_teardown --purge "design-systems"
+  check "SERVICE_HOME=...\${NAME}: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+}
+
+test_teardown_purge_deploy_lock() {
+  echo "• teardown --purge: a live deploy lock refuses up front; a stale one is cleared; teardown holds it through the purge"
+  local lock
+  deployed
+  lock="$SH/.deploy.lock"
+  mkdir "$lock"
+  run_teardown --purge "design-systems"
+  check "live lock: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "  says a deploy is running"  out_has "A deploy is running"
+  check "  refused before the prompt" out_lacks "to confirm"
+  check "  nothing changed"           nothing_changed
+  check "  lock left to its owner"    [ -d "$lock" ]
+  run_teardown
+  check "plain teardown (deletes nothing) still runs" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  lock="$SH/.deploy.lock"
+  run_purge_at_prompt "design-systems" "mkdir '$lock'"
+  check "deploy started during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says a deploy is running"  out_has "A deploy is running"
+  check "  nothing changed"           nothing_changed
+  teardown
+  deployed
+  lock="$SH/.deploy.lock"
+  run_purge_at_prompt "design-systems" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
+  check "no lock: exits zero"         [ "$CODE" -eq 0 ]
+  check "  not taken while the prompt waits" grep -qx free "$STATE_DIR/lock_at_prompt"
+  teardown
+  deployed
+  lock="$SH/.deploy.lock"
+  mkdir "$lock"; age_lock "$lock"
+  printf '%s' "$lock" > "$STATE_DIR/lock_probe"
+  run_teardown --purge "design-systems"
+  check "stale lock: exits zero"      [ "$CODE" -eq 0 ]
+  check "  says it cleared it"        out_has "Cleared a stale deploy lock"
+  check "  teardown holds it during down" grep -qx held "$STATE_DIR/lock_at_down"
+  check "  gone after the purge"      [ ! -e "$lock" ]
+  check "  marker dir gone"           [ ! -e "$SH" ]
+  teardown
+  deployed
+  lock="$SH/.deploy.lock"
+  mkdir "$lock"; echo mine > "$lock/notes"; age_lock "$lock"
+  run_teardown --purge "design-systems"
+  check "old lock holding files: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  check "  its files kept"            [ -f "$lock/notes" ]
+  teardown
+  deployed
+  lock="$SH/.deploy.lock"
+  mkdir -p "$HOME/elsewhere"; ln -s "$HOME/elsewhere" "$lock"
+  run_teardown --purge "design-systems"
+  check "symlinked lock: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  check "  link left as it was"       [ -L "$lock" ] && [ -d "$HOME/elsewhere" ]
+  teardown
+}
+
+# macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it.
+test_teardown_macos_launch_agent() {
+  echo "• teardown (macOS branch): only a loaded agent is booted out; a failed unload stops before --purge deletes anything"
+  deployed
+  export FAKE_UNAME=Darwin
+  run_teardown
+  check "loaded agent: exits zero"    [ "$CODE" -eq 0 ]
+  check "  checked with print first"  [ "$(call_line "launchctl print gui/.*/com.design-systems.deploy")" -gt 0 ] && [ "$(call_line "launchctl print")" -lt "$(call_line "launchctl bootout")" ]
+  check "  booted out"                calls_have "launchctl bootout gui/.*/com.design-systems.deploy"
+  check "  disabled"                  calls_have "launchctl disable gui/.*/com.design-systems.deploy"
+  check "  no systemctl"              no_call "systemctl"
+  : > "$CALLS_LOG"
+  touch "$STATE_DIR/launchd_not_loaded"
+  run_teardown
+  check "agent not loaded: exits zero" [ "$CODE" -eq 0 ]
+  check "  no bootout attempted"      no_call "launchctl bootout"
+  check "  still disabled"            calls_have "launchctl disable gui/.*/com.design-systems.deploy"
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  touch "$STATE_DIR/launchd_bootout_fails"
+  run_teardown --purge "design-systems"
+  check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says so"                   out_has "Could not unload LaunchAgent com.design-systems.deploy"
+  check "  no compose down"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  state kept"                [ -f "$SH/www/current/index.html" ]
+  check "  media kept"                [ -f "$SH/media/refero/a.jpg" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  echo async > "$STATE_DIR/launchd_bootout_fails"
+  run_teardown
+  check "bootout errors but the agent unloads: exits zero" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  touch "$STATE_DIR/launchd_disable_fails"
+  run_teardown --purge "design-systems"
+  check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it would reload"      out_has "would load again at the next login"
+  check "  state kept"                [ -f "$SH/www/current/index.html" ]
+  check "  media kept"                [ -f "$SH/media/refero/a.jpg" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  run_teardown --purge "design-systems"
+  check "purge on macOS: exits zero"  [ "$CODE" -eq 0 ]
+  check "  state gone"                [ ! -e "$SH/www" ]
+  check "  no daemon-reload"          no_call "daemon-reload"
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
@@ -945,6 +1097,9 @@ test_teardown_home_variable_in_env
 test_teardown_quoted_env
 test_teardown_env_lint
 test_teardown_refuses_compose_overrides
+test_teardown_unresolved_variable
+test_teardown_purge_deploy_lock
+test_teardown_macos_launch_agent
 
 if [ "${1:-}" = "--live" ]; then
   echo

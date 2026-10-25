@@ -39,7 +39,7 @@ setup() {
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT SOURCE_REPO BRANCH POLL_SECONDS SITE_PASSPHRASE STATE_DIR CALLS_LOG
+  unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT SOURCE_REPO BRANCH POLL_SECONDS SITE_PASSPHRASE STATE_DIR CALLS_LOG
 }
 
 run_deploy() {
@@ -307,6 +307,31 @@ EOF_SERVE_FIXTURE
   : > "$CALLS_LOG"
   rm -f "$STATE_DIR/compose_down"
 }
+
+# Back-date a deploy lock past deploy.sh's 60-minute stale mark.
+age_lock() { touch -t 202001010000 "$1"; }
+
+# teardown.sh --purge, with a hook run while the confirmation prompt waits:
+# $1 is the answer, $2 a snippet run once the prompt is on screen (before
+# the answer is sent). Sets OUT and CODE like run_teardown.
+run_purge_at_prompt() {
+  local out="$SANDBOX/teardown.out"
+  : > "$out"
+  { for _ in $(seq 1 100); do grep -q "to confirm" "$out" && break; sleep 0.1; done
+    eval "$2"
+    printf '%s\n' "$1"; } | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge > "$out" 2>&1
+  CODE=$?
+  OUT="$(cat "$out")"
+}
+
+# Nothing a teardown changes happened.
+nothing_changed() {
+  [ ! -f "$STATE_DIR/compose_down" ] && no_call " off" && no_call "systemctl" && no_call "launchctl" \
+    && [ -f "$SVC/.env" ] && [ -f "$(site_home)/www/current/index.html" ] && [ -d "$(site_home)/state" ]
+}
+# Line number of the first call matching $1 (0 when absent).
+call_line() { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1 | grep . || echo 0; }
+out_lacks() { ! grep -q -- "$1" <<<"$OUT"; }
 
 test_teardown_safe() {
   echo "• teardown: safe remove keeps files and .env, unpublishes only its port, stops the poller"
@@ -753,6 +778,173 @@ test_teardown_compose_override_file() {
   teardown
 }
 
+test_teardown_unresolved_variable() {
+  echo "• teardown: a path in .env that still names another variable is refused before anything changes"
+  deployed
+  local home; home="$(site_home)"
+  # To a reader that expands it, this is a repo inside www/; left literal,
+  # the overlap check would test a path that does not exist.
+  mkdir -p "$home/www/repo/.git"; echo mine > "$home/www/repo/notes.md"
+  set_env SOURCE_REPO "\$SERVICE_HOME/www/repo"
+  run_teardown --purge "sources"
+  check "SOURCE_REPO=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                  out_has "SOURCE_REPO .*still refers to another variable"
+  check "  refused before the prompt" out_lacks "to confirm"
+  check "  repo kept"                 [ -f "$home/www/repo/notes.md" ]
+  check "  nothing changed"           nothing_changed
+  run_teardown
+  check "plain run: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+  deployed
+  set_env SERVICE_HOME "\$HOME/services/\${NAME}"
+  run_teardown --purge "sources"
+  check "SERVICE_HOME=...\${NAME}: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+}
+
+test_teardown_foreign_units_by_content() {
+  echo "• teardown: a unit or agent whose contents name ~/services/sources is listed, never touched"
+  deployed
+  printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/sources/www/ /backup/\n' "$HOME" \
+    > "$(unit_dir)/nightly-mirror.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$(unit_dir)/unrelated.service"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "names the unit by its contents" out_has "nightly-mirror.service mentions sources but setup.sh does not create it"
+  check "unrelated unit not named"    out_lacks "unrelated.service"
+  check "never addressed"             no_call "nightly-mirror"
+  run_teardown --purge "sources"
+  check "purge: exits zero"           [ "$CODE" -eq 0 ]
+  check "  unit kept"                 [ -f "$(unit_dir)/nightly-mirror.service" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$HOME/Library/LaunchAgents"
+  printf '<string>%s/services/sources/bin/deploy.sh</string>\n' "$HOME" \
+    > "$HOME/Library/LaunchAgents/com.me.mirror.plist"
+  echo other > "$HOME/Library/LaunchAgents/com.me.unrelated.plist"
+  echo own > "$HOME/Library/LaunchAgents/com.sources.deploy.plist"
+  run_teardown
+  check "macOS: exits zero"           [ "$CODE" -eq 0 ]
+  check "  names the agent by its contents" out_has "com.me.mirror.plist mentions sources"
+  check "  unrelated agent not named" out_lacks "com.me.unrelated.plist"
+  check "  its own plist not named"   out_lacks "com.sources.deploy.plist mentions"
+  check "  agent never addressed"     no_call "com.me.mirror"
+  check "  agent kept"                [ -f "$HOME/Library/LaunchAgents/com.me.mirror.plist" ]
+  teardown
+}
+
+test_teardown_purge_deploy_lock() {
+  echo "• teardown --purge: a live deploy lock refuses up front; a stale one is cleared; teardown holds it through the purge"
+  local lock
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  mkdir "$lock"
+  run_teardown --purge "sources"
+  check "live lock: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "  says a deploy is running"  out_has "A deploy is running"
+  check "  refused before the prompt" out_lacks "to confirm"
+  check "  nothing changed"           nothing_changed
+  check "  lock left to its owner"    [ -d "$lock" ]
+  run_teardown
+  check "plain teardown (deletes nothing) still runs" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  run_purge_at_prompt "sources" "mkdir '$lock'"
+  check "deploy started during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says a deploy is running"  out_has "A deploy is running"
+  check "  nothing changed"           nothing_changed
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  run_purge_at_prompt "sources" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
+  check "no lock: exits zero"         [ "$CODE" -eq 0 ]
+  check "  not taken while the prompt waits" grep -qx free "$STATE_DIR/lock_at_prompt"
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  mkdir "$lock"; age_lock "$lock"
+  printf '%s' "$lock" > "$STATE_DIR/lock_probe"
+  run_teardown --purge "sources"
+  check "stale lock: exits zero"      [ "$CODE" -eq 0 ]
+  check "  says it cleared it"        out_has "Cleared a stale deploy lock"
+  check "  teardown holds it during down" grep -qx held "$STATE_DIR/lock_at_down"
+  check "  gone after the purge"      [ ! -e "$lock" ]
+  check "  marker dir gone"           [ ! -e "$(site_home)" ]
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  mkdir "$lock"; echo mine > "$lock/notes"; age_lock "$lock"
+  run_teardown --purge "sources"
+  check "old lock holding files: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  check "  its files kept"            [ -f "$lock/notes" ]
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  mkdir -p "$HOME/elsewhere"; ln -s "$HOME/elsewhere" "$lock"
+  run_teardown --purge "sources"
+  check "symlinked lock: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  check "  link left as it was"       [ -L "$lock" ] && [ -d "$HOME/elsewhere" ]
+  teardown
+}
+
+# macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it.
+test_teardown_macos_launch_agent() {
+  echo "• teardown (macOS branch): only a loaded agent is booted out; a failed unload stops before --purge deletes anything"
+  deployed
+  export FAKE_UNAME=Darwin
+  run_teardown
+  check "loaded agent: exits zero"    [ "$CODE" -eq 0 ]
+  check "  checked with print first"  [ "$(call_line "launchctl print gui/.*/com.sources.deploy")" -gt 0 ] && [ "$(call_line "launchctl print")" -lt "$(call_line "launchctl bootout")" ]
+  check "  booted out"                calls_have "launchctl bootout gui/.*/com.sources.deploy"
+  check "  disabled"                  calls_have "launchctl disable gui/.*/com.sources.deploy"
+  check "  no systemctl"              no_call "systemctl"
+  : > "$CALLS_LOG"
+  touch "$STATE_DIR/launchd_not_loaded"
+  run_teardown
+  check "agent not loaded: exits zero" [ "$CODE" -eq 0 ]
+  check "  no bootout attempted"      no_call "launchctl bootout"
+  check "  still disabled"            calls_have "launchctl disable gui/.*/com.sources.deploy"
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  touch "$STATE_DIR/launchd_bootout_fails"
+  run_teardown --purge "sources"
+  check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says so"                   out_has "Could not unload LaunchAgent com.sources.deploy"
+  check "  no compose down"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  state kept"                [ -f "$(site_home)/www/current/index.html" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  echo async > "$STATE_DIR/launchd_bootout_fails"
+  run_teardown
+  check "bootout errors but the agent unloads: exits zero" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  touch "$STATE_DIR/launchd_disable_fails"
+  run_teardown --purge "sources"
+  check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it would reload"      out_has "would load again at the next login"
+  check "  state kept"                [ -f "$(site_home)/www/current/index.html" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  run_teardown --purge "sources"
+  check "purge on macOS: exits zero"  [ "$CODE" -eq 0 ]
+  check "  state gone"                [ ! -e "$(site_home)/www" ]
+  check "  no daemon-reload"          no_call "daemon-reload"
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -837,6 +1029,10 @@ if [ "$OS" = "Linux" ]; then
   test_teardown_env_lint
   test_teardown_refuses_compose_overrides
   test_teardown_compose_override_file
+test_teardown_unresolved_variable
+test_teardown_foreign_units_by_content
+test_teardown_purge_deploy_lock
+test_teardown_macos_launch_agent
 else
   green "    ✓ (teardown tests skipped on macOS — they assert the systemd poller)"; PASS=$((PASS + 1))
 fi

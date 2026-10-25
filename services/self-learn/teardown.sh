@@ -159,6 +159,16 @@ SERVICE_HOME="$(env_get SERVICE_HOME)"
 SELF_LEARN_HOME="$(env_get SELF_LEARN_HOME)"
 case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric (got: $LOCAL_PORT)";; esac
 [ -n "$SERVICE_HOME" ] || die "SERVICE_HOME is missing from $ENV_FILE — setup.sh always writes it, so this .env is not one teardown can trust."
+# env_get expands $HOME and ${HOME} only, but setup.sh sources .env and so
+# expands any other reference too (SELF_LEARN_HOME=$SERVICE_HOME/state/x).
+# A path still holding a `$` here can name a different directory to setup.sh
+# than to teardown, and every keep-out check below would test the wrong one.
+# Refuse rather than guess, before anything changes.
+for v in SERVICE_HOME SELF_LEARN_HOME; do
+  case "${!v}" in
+    *'$'*) die "$v in $ENV_FILE still refers to another variable after \$HOME is expanded (got: ${!v}), so teardown cannot be sure which directory it means. Write the path out in full and re-run. Nothing was changed." ;;
+  esac
+done
 TARGET="http://127.0.0.1:$LOCAL_PORT"
 ok "$NAME: local :$LOCAL_PORT, state $SERVICE_HOME, blobs/exports ${SELF_LEARN_HOME:-(not set)} (never touched)"
 
@@ -183,25 +193,28 @@ AGENTS="com.self-learn.deploy com.self-learn.export com.self-learn.studio com.se
 
 # Units that mention this service but that setup.sh does not create — on
 # this box, sync.sh's self-learn-seafile.service (the blob-sync daemon, which
-# runs out of ~/services/self-learn/seafile). Read-only listing; they are
-# never stopped, disabled or deleted here.
+# runs out of ~/services/self-learn/seafile). Found by name, or by a file
+# whose contents name this service's directory (a backup job, say). Read-only
+# listing; they are never stopped, disabled or deleted here.
 FOREIGN=""
 if [ "$OS" = "Linux" ]; then
-  if [ -d "$UNIT_DIR" ]; then
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      b="$(basename "$f")"
-      case " $UNIT_FILES " in *" $b "*) ;; *) FOREIGN="$FOREIGN $b" ;; esac
-    done < <(find "$UNIT_DIR" -maxdepth 1 -name 'self-learn*' ! -type d 2>/dev/null | sort)
-  fi
+  SCAN_DIR="$UNIT_DIR"; SCAN_NAME='self-learn*'; SCAN_MINE=" $UNIT_FILES "
 else
-  if [ -d "$AGENT_DIR" ]; then
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      b="$(basename "$f" .plist)"
-      case " $AGENTS " in *" $b "*) ;; *) FOREIGN="$FOREIGN $b" ;; esac
-    done < <(find "$AGENT_DIR" -maxdepth 1 -name 'com.self-learn.*' ! -type d 2>/dev/null | sort)
-  fi
+  SCAN_DIR="$AGENT_DIR"; SCAN_NAME='com.self-learn.*'; SCAN_MINE=" $AGENTS "
+fi
+if [ -d "$SCAN_DIR" ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    b="$(basename "$f")"
+    [ "$OS" = "Linux" ] || b="${b%.plist}"
+    case "$SCAN_MINE" in *" $b "*) continue ;; esac
+    # shellcheck disable=SC2254  # SCAN_NAME is a glob on purpose
+    case "$(basename "$f")" in
+      $SCAN_NAME) ;;
+      *) grep -qF -e "$HOME/services/$NAME" -e "$SERVICE_HOME" "$f" 2>/dev/null || continue ;;
+    esac
+    FOREIGN="$FOREIGN $b"
+  done < <(find "$SCAN_DIR" -maxdepth 1 ! -type d 2>/dev/null | sort)
 fi
 FOREIGN="${FOREIGN# }"
 
@@ -213,14 +226,20 @@ SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
 
 # A deploy (poller) or a sync.sh push/pull holds this lock while it rebuilds
 # or restores the database. Taking Postgres down under either would leave a
-# half-migrated or half-restored catalog, so wait for it instead. Same
-# liveness rule deploy.sh uses: a dead owner, or a lock older than 60 min,
-# is stale. Then teardown takes the lock itself (the same mkdir + pid scheme
-# deploy.sh and sync.sh use), so neither can start until it is done, and
-# drops it on exit. No SERVICE_HOME on disk: nothing can hold it, so there is
-# nothing to take.
+# half-migrated or half-restored catalog, so wait for it instead. A live
+# owner pid always means held, however old the lock is; a lock with no pid
+# yet is a run just starting unless it is over 60 min old (deploy.sh's
+# stale rule); a dead owner is stale. lock_check only looks, and runs before
+# the --purge prompt so a held lock refuses up front. lock_take runs after
+# the prompt (which can wait any length of time, long enough for deploy.sh
+# or sync.sh to call a lock stale and take it): it checks again, clears a
+# stale lock, then takes it itself (the same mkdir + pid scheme deploy.sh and
+# sync.sh use), so neither can start until teardown is done, and drops it
+# on exit. No SERVICE_HOME on disk: nothing can hold it, so nothing to take.
 LOCK="$SERVICE_HOME/.deploy.lock"
 LOCK_HELD=0
+LOCK_STALE=0
+owner=""
 release_lock() {
   [ "$LOCK_HELD" -eq 1 ] || return 0
   LOCK_HELD=0
@@ -229,31 +248,39 @@ release_lock() {
   rm -f -- "$LOCK/pid"
   rmdir -- "$LOCK" 2>/dev/null || true
 }
-if [ -L "$LOCK" ]; then
-  die "$LOCK is a symlink, not the deploy lock deploy.sh makes — refusing. Nothing was changed."
-fi
-if [ -d "$LOCK" ]; then
+lock_check() {
+  LOCK_STALE=0
+  if [ -L "$LOCK" ]; then
+    die "$LOCK is a symlink, not the deploy lock deploy.sh makes — refusing. Nothing was changed."
+  fi
+  [ -d "$LOCK" ] || return 0
   owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
   if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
     die "A deploy or sync.sh run (pid $owner) holds $LOCK — try again after it finishes. Nothing was changed."
   elif [ -z "$owner" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
     die "A deploy or sync.sh run is just starting ($LOCK) — try again in a minute. Nothing was changed."
   fi
-  # Stale: clear it the way deploy.sh would, but never recursively — a lock
-  # holds only its pid file, so anything more means it is not one.
   [ ! -L "$LOCK/pid" ] || die "$LOCK/pid is a symlink — refusing. Nothing was changed."
-  rm -f -- "$LOCK/pid"
-  rmdir -- "$LOCK" 2>/dev/null \
-    || die "$LOCK holds more than a stale deploy lock's pid file — look inside, remove it by hand, then re-run. Nothing was changed."
-  ok "Cleared a stale deploy lock (${owner:+owner pid $owner is gone, }no deploy is running)"
-fi
-if [ -d "$SERVICE_HOME" ]; then
+  LOCK_STALE=1
+}
+lock_take() {
+  lock_check
+  [ -d "$SERVICE_HOME" ] || return 0
+  if [ "$LOCK_STALE" -eq 1 ]; then
+    # Clear it the way deploy.sh would, but never recursively — a lock
+    # holds only its pid file, so anything more means it is not one.
+    rm -f -- "$LOCK/pid"
+    rmdir -- "$LOCK" 2>/dev/null \
+      || die "$LOCK holds more than a stale deploy lock's pid file — look inside, remove it by hand, then re-run. Nothing was changed."
+    ok "Cleared a stale deploy lock (${owner:+owner pid $owner is gone, }no deploy is running)"
+  fi
   trap release_lock EXIT
   mkdir -- "$LOCK" 2>/dev/null \
     || die "A deploy or sync.sh run took $LOCK just now — try again after it finishes. Nothing was changed."
   LOCK_HELD=1
   echo $$ > "$LOCK/pid"
-fi
+}
+lock_check
 
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was.
@@ -287,7 +314,8 @@ if [ "$PURGE" -eq 1 ]; then
     # studio runner's STUDIO_HOME. Anything else (e.g. sync.sh's seafile/)
     # stays. Each one goes through real_dir, so a symlinked repo/ pointing at
     # a working clone in ~/dev is refused. The deploy lock is teardown's own
-    # by now; it is released (removed) after the last deletion below.
+    # once the prompt is answered; it is released (removed) after the last
+    # deletion below.
     for child in repo bin state studio; do
       [ -e "$PURGE_DIR/$child" ] || [ -L "$PURGE_DIR/$child" ] || continue
       p="$(real_dir "$PURGE_DIR/$child")" \
@@ -316,6 +344,7 @@ if [ "$PURGE" -eq 1 ]; then
   read -r answer || true
   [ "$answer" = "$NAME" ] || die "Confirmation did not match; nothing was changed."
 fi
+lock_take
 
 # ------------------------------------------------------- tailscale serve
 # Every HTTPS port whose handlers all proxy to this service's local port, and
@@ -354,6 +383,29 @@ done <<EOF
 $SERVE_PLAN
 EOF
 [ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+
+# macOS: unload one LaunchAgent now (bootout) and keep launchd from loading
+# its plist again at the next login (disable; setup.sh enables it before
+# bootstrapping). `launchctl print` fails for an agent that is not loaded:
+# nothing to unload, so bootout is skipped. A loaded agent that bootout
+# cannot unload is still running and could rebuild or write into what
+# --purge deletes, so that stops the teardown before anything is deleted.
+# bootout can report an error while launchd finishes the unload by itself,
+# so it only counts as failed if the agent is still loaded a moment later.
+agent_off() {
+  local target i
+  target="gui/$(id -u)/$1"
+  if launchctl print "$target" >/dev/null 2>&1 \
+     && ! launchctl bootout "$target" >/dev/null 2>&1; then
+    for i in 1 2 3; do
+      launchctl print "$target" >/dev/null 2>&1 || break
+      [ "$i" -lt 3 ] || die "Could not unload LaunchAgent $1: launchctl bootout $target failed and it is still loaded (check: launchctl print $target). Nothing was deleted; fix that and re-run."
+      sleep 1
+    done
+  fi
+  launchctl disable "$target" >/dev/null 2>&1 \
+    || die "Could not disable LaunchAgent $1 (launchctl disable $target), so it would load again at the next login. Nothing was deleted; fix that and re-run."
+}
 
 # ---------------------------------------------------------------- stop
 # A plain teardown leaves the unit files in place, and setup.sh reads "unit
@@ -394,10 +446,7 @@ else
   info "Unloading and disabling the LaunchAgents (deploy, export, studio, web)"
   # bootout unloads each now; disable keeps launchd from loading the plist
   # again at the next login (setup.sh enables each before bootstrapping).
-  for a in $AGENTS; do
-    launchctl bootout "gui/$(id -u)/$a" 2>/dev/null || true
-    launchctl disable "gui/$(id -u)/$a" 2>/dev/null || true
-  done
+  for a in $AGENTS; do agent_off "$a"; done
   ok "LaunchAgents unloaded and disabled (plists kept)"
 fi
 

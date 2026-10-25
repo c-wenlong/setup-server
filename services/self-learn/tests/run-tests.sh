@@ -97,7 +97,7 @@ EOF
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT PG_PORT REPO_URL BRANCH POLL_SECONDS \
+  unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT PG_PORT REPO_URL BRANCH POLL_SECONDS \
     SKIP_SEED OWNER_PASSWORD AUTH_SECRET STATE_DIR CALLS_LOG \
     STUDIO_ENABLED ASSET_FILES_ENABLED \
     SEAFILE_ENV MAC_SSH MAC_HOME MAC_REPO MAC_PGBIN MAC_DB MAC_DB_URL \
@@ -1584,6 +1584,166 @@ for f in "$STUBS"/*; do
   [ -x "$f" ] || { red "stub not executable: $f — chmod +x it"; exit 1; }
 done
 
+
+# teardown.sh --purge, with a hook run while the confirmation prompt waits:
+# $1 is the answer, $2 a snippet run once the prompt is on screen (before
+# the answer is sent). Sets OUT and CODE like run_teardown.
+run_purge_at_prompt() {
+  local out="$SANDBOX/teardown.out"
+  : > "$out"
+  { for _ in $(seq 1 100); do grep -q "to confirm" "$out" && break; sleep 0.1; done
+    eval "$2"
+    printf '%s\n' "$1"; } | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge > "$out" 2>&1
+  CODE=$?
+  OUT="$(cat "$out")"
+}
+
+test_teardown_unresolved_variable() {
+  echo "• teardown: a path in .env that still names another variable is refused before anything changes"
+  deployed
+  # setup.sh sources .env, so to it this is state/content, inside a dir the
+  # purge deletes; left literal, the keep-SELF_LEARN_HOME check tests nothing.
+  mkdir -p "$(SVC_HOME)/state/content"; echo blob > "$(SVC_HOME)/state/content/b1"
+  sed -i.bak 's#^SELF_LEARN_HOME=.*#SELF_LEARN_HOME=$SERVICE_HOME/state/content#' "$SVC/.env"
+  run_teardown --purge "self-learn"
+  check "SELF_LEARN_HOME=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                    out_has "SELF_LEARN_HOME .*still refers to another variable"
+  check "  refused before the prompt"   out_lacks "to confirm"
+  check "  content kept"                [ -f "$(SVC_HOME)/state/content/b1" ]
+  check "  nothing changed"             untouched
+  run_teardown
+  check "plain run: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  check "  no lock left behind"         [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  teardown
+  deployed
+  sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/${NAME}"#' "$SVC/.env"
+  run_teardown --purge "self-learn"
+  check "SERVICE_HOME=...\${NAME}: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  teardown
+}
+
+test_teardown_lock_after_prompt() {
+  echo "• teardown --purge: the deploy lock is taken after the typed confirmation, and re-checked then"
+  local lock
+  deployed
+  lock="$(SVC_HOME)/.deploy.lock"
+  printf '%s' "$lock" > "$STATE_DIR/lock_probe"
+  run_purge_at_prompt "self-learn" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "  lock not held while the prompt waits" grep -qx free "$STATE_DIR/lock_at_prompt"
+  check "  held by a live pid during down -v" grep -q "^live " "$STATE_DIR/lock_at_down"
+  teardown
+  deployed
+  lock="$(SVC_HOME)/.deploy.lock"
+  run_purge_at_prompt "self-learn" "mkdir '$lock' && echo \$\$ > '$lock/pid'"
+  check "a deploy/sync that starts during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says who holds it"           out_has "holds .*deploy.lock"
+  check "  nothing changed"             untouched
+  check "  lock left to its owner"      [ -f "$lock/pid" ]
+  teardown
+  deployed
+  lock="$(SVC_HOME)/.deploy.lock"
+  mkdir -p "$lock"; echo 999999 > "$lock/pid"
+  run_purge_at_prompt "self-learn" "[ -f '$lock/pid' ] && echo kept > '$STATE_DIR/lock_at_prompt' || echo cleared > '$STATE_DIR/lock_at_prompt'"
+  check "stale lock: exits zero"        [ "$CODE" -eq 0 ]
+  check "  not cleared before the answer" grep -qx kept "$STATE_DIR/lock_at_prompt"
+  check "  cleared after it"            out_has "Cleared a stale deploy lock"
+  teardown
+  deployed
+  lock="$(SVC_HOME)/.deploy.lock"
+  mkdir -p "$lock"; echo 999999 > "$lock/pid"
+  run_teardown --purge "self-lear"
+  check "wrong name with a stale lock: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  stale lock not touched (nothing changed)" [ "$(cat "$lock/pid")" = 999999 ]
+  teardown
+}
+
+test_teardown_foreign_units_by_content() {
+  echo "• teardown: a unit whose contents name ~/services/self-learn is listed, never touched; purge refused"
+  deployed
+  mkdir -p "$(UNIT_DIR)"
+  printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/self-learn/studio/ /backup/\n' "$HOME" \
+    > "$(UNIT_DIR)/nightly-backup.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$(UNIT_DIR)/unrelated.service"
+  run_teardown --purge "self-learn"
+  check "purge: exits non-zero"         [ "$CODE" -ne 0 ]
+  check "  names it"                    out_has "nightly-backup.service"
+  check "  nothing changed"             untouched
+  run_teardown
+  check "default: exits zero"           [ "$CODE" -eq 0 ]
+  check "  warns, naming it"            out_has "Not touched (not created by setup.sh): nightly-backup.service"
+  check "  unrelated not named"         out_lacks "unrelated.service"
+  check "  never addressed"             no_call "nightly-backup"
+  check "  unit kept"                   [ -f "$(UNIT_DIR)/nightly-backup.service" ]
+  teardown
+}
+
+# macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it, and
+# $STATE_DIR/launchd/ gives the launchctl stub one loaded marker per label.
+test_teardown_macos_agents() {
+  echo "• teardown (macOS branch): only loaded agents are booted out; a failed unload stops before --purge deletes anything"
+  local a
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"
+  for a in deploy export web; do touch "$STATE_DIR/launchd/com.self-learn.$a"; done
+  mkdir -p "$HOME/Library/LaunchAgents"
+  printf '<string>%s/services/self-learn/bin/deploy.sh</string>\n' "$HOME" \
+    > "$HOME/Library/LaunchAgents/com.me.backup.plist"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  for a in deploy export web; do
+    check "loaded $a agent booted out"  calls_have "launchctl bootout gui/.*/com.self-learn.$a"
+  done
+  check "studio (not loaded) not booted out" no_call "launchctl bootout gui/.*/com.self-learn.studio"
+  for a in deploy export studio web; do
+    check "$a agent disabled"           calls_have "launchctl disable gui/.*/com.self-learn.$a"
+  done
+  check "deploy before web"             before "bootout gui/.*/com.self-learn.deploy" "bootout gui/.*/com.self-learn.web"
+  check "no systemctl"                  no_call "systemctl"
+  check "agent named by contents"       out_has "Not touched (not created by setup.sh): com.me.backup"
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.self-learn.web"
+  touch "$STATE_DIR/launchd_bootout_fails"
+  run_teardown --purge "self-learn"
+  check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says so"                     out_has "Could not unload LaunchAgent com.self-learn.web"
+  check "  Postgres left up (no down -v)" [ ! -f "$STATE_DIR/compose_down" ]
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "  .env kept"                   [ -f "$SVC/.env" ]
+  check "  lock dropped"                [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.self-learn.web"
+  echo async > "$STATE_DIR/launchd_bootout_fails"
+  run_teardown
+  check "bootout errors but the agent unloads: exits zero" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"
+  touch "$STATE_DIR/launchd_disable_fails"
+  run_teardown --purge "self-learn"
+  check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it would reload"        out_has "would load again at the next login"
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "  .env kept"                   [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"
+  run_teardown --purge "self-learn"
+  check "purge on macOS: exits zero"    [ "$CODE" -eq 0 ]
+  check "  state gone"                  [ ! -e "$(SVC_HOME)/state" ]
+  check "  no daemon-reload"            no_call "daemon-reload"
+  teardown
+}
+
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
 test_preflight_tailscale_down
@@ -1652,6 +1812,10 @@ test_teardown_purge_keeps_unknown_entries
 test_teardown_waits_for_lock
 test_teardown_holds_lock
 test_teardown_marker_refusals
+test_teardown_unresolved_variable
+test_teardown_lock_after_prompt
+test_teardown_foreign_units_by_content
+test_teardown_macos_agents
 
 if [ "${1:-}" = "--live" ]; then
   echo

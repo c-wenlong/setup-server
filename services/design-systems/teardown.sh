@@ -154,6 +154,15 @@ LOCAL_PORT="$(env_get LOCAL_PORT)"
 SERVICE_HOME="$(env_get SERVICE_HOME)"
 SOURCE_REPO="$(env_get SOURCE_REPO)"
 case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric (got: $LOCAL_PORT)";; esac
+# env_get expands $HOME and ${HOME} only. A path still holding a `$` after
+# that refers to some other variable, which setup.sh or deploy.sh may read
+# differently, so every keep-out check below could test the wrong directory.
+# Refuse rather than guess, before anything changes.
+for v in SERVICE_HOME SOURCE_REPO; do
+  case "${!v}" in
+    *'$'*) die "$v in $ENV_FILE still refers to another variable after \$HOME is expanded (got: ${!v}), so teardown cannot be sure which directory it means. Write the path out in full and re-run. Nothing was changed." ;;
+  esac
+done
 TARGET="http://127.0.0.1:$LOCAL_PORT"
 ok "$NAME: local :$LOCAL_PORT, state ${SERVICE_HOME:-(not set)}, clone ${SOURCE_REPO:-(not set)} (never touched)"
 
@@ -195,6 +204,45 @@ fi
 # daemon. Stop instead.
 SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
   || die "Could not read Tailscale Serve status (is tailscaled running?): $SERVE_STATUS — nothing was changed."
+
+# deploy.sh (bin/deploy.sh: the timer's poll, or by hand with --force) holds
+# a mkdir lock at SERVICE_HOME/.deploy.lock while it builds into www/ and
+# state/. A purge under a live deploy would race a rebuild that recreates
+# what it just deleted, so it waits for that deploy instead. The lock holds
+# no pid; deploy.sh itself calls it stale only once it is over 60 min old,
+# so teardown uses the same rule. lock_check only looks: it runs before the
+# prompt, so a held lock refuses with nothing changed. lock_take runs after
+# the prompt: it checks again (a deploy may have started while the prompt
+# waited), clears a stale lock and takes the lock itself, so deploy.sh
+# skips until the purge is done. Dropped on exit.
+LOCK=""
+LOCK_HELD=0
+release_lock() {
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+  LOCK_HELD=0
+  rmdir -- "$LOCK" 2>/dev/null || true
+}
+lock_check() {
+  [ -n "$LOCK" ] || return 0
+  [ ! -L "$LOCK" ] || die "$LOCK is a symlink, not the lock deploy.sh makes — refusing. Nothing was changed."
+  [ -e "$LOCK" ] || return 0
+  [ -d "$LOCK" ] || die "$LOCK is not a directory, so it is not the lock deploy.sh makes — refusing. Nothing was changed."
+  [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ] \
+    || die "A deploy is running (it holds $LOCK) — try again after it finishes. Nothing was changed."
+}
+lock_take() {
+  [ -n "$LOCK" ] || return 0
+  lock_check
+  if [ -d "$LOCK" ]; then
+    rmdir -- "$LOCK" 2>/dev/null \
+      || die "$LOCK is over 60 min old but not empty, so it is not a stale deploy lock — look inside, remove it by hand, then re-run. Nothing was changed."
+    ok "Cleared a stale deploy lock (over 60 min old)"
+  fi
+  trap release_lock EXIT
+  mkdir -- "$LOCK" 2>/dev/null \
+    || die "A deploy took $LOCK just now — try again after it finishes. Nothing was changed."
+  LOCK_HELD=1
+}
 
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was. What goes: the paths setup.sh and
@@ -242,19 +290,22 @@ if [ "$PURGE" -eq 1 ]; then
     case "$PURGE_HOME/" in
       "$repo_real"/*) die "SOURCE_REPO=$SOURCE_REPO holds $PURGE_HOME — a purge would delete inside your clone, so it refuses." ;;
     esac
-    for c in bin state www media nginx.conf .deploy.lock; do
+    LOCK="$PURGE_HOME/.deploy.lock"
+    for c in bin state www media nginx.conf; do
       p="$PURGE_HOME/$c"
       [ -e "$p" ] || [ -L "$p" ] || continue
       rp="$(real_dir "$p")" || die "$p is a symlink or otherwise not a real path inside $PURGE_HOME — refusing. Remove it by hand if you are sure."
       PURGE_PATHS="$PURGE_PATHS$rp$nl"
     done
   fi
+  lock_check
   warn "--purge deletes, inside ${PURGE_HOME:-(no service dir on disk)}: bin/ (installed deploy.sh), state/, www/ (every built release), media/ (the refero mirror: re-mirroring takes a while), nginx.conf (your edits to it) and the deploy lock; plus the poller's unit files and $ENV_FILE. This cannot be undone."
   warn "Kept: your clone at $SOURCE_REPO, and anything else in the service dir."
   printf 'Type %s to confirm: ' "$NAME"
   answer=""
   read -r answer || true
   [ "$answer" = "$NAME" ] || die "Confirmation did not match; nothing was changed."
+  lock_take
 fi
 
 # ------------------------------------------------------- tailscale serve
@@ -295,6 +346,29 @@ $SERVE_PLAN
 EOF
 [ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
 
+# macOS: unload one LaunchAgent now (bootout) and keep launchd from loading
+# its plist again at the next login (disable; setup.sh enables it before
+# bootstrapping). `launchctl print` fails for an agent that is not loaded:
+# nothing to unload, so bootout is skipped. A loaded agent that bootout
+# cannot unload is still running and could rebuild or write into what
+# --purge deletes, so that stops the teardown before anything is deleted.
+# bootout can report an error while launchd finishes the unload by itself,
+# so it only counts as failed if the agent is still loaded a moment later.
+agent_off() {
+  local target i
+  target="gui/$(id -u)/$1"
+  if launchctl print "$target" >/dev/null 2>&1 \
+     && ! launchctl bootout "$target" >/dev/null 2>&1; then
+    for i in 1 2 3; do
+      launchctl print "$target" >/dev/null 2>&1 || break
+      [ "$i" -lt 3 ] || die "Could not unload LaunchAgent $1: launchctl bootout $target failed and it is still loaded (check: launchctl print $target). Nothing was deleted; fix that and re-run."
+      sleep 1
+    done
+  fi
+  launchctl disable "$target" >/dev/null 2>&1 \
+    || die "Could not disable LaunchAgent $1 (launchctl disable $target), so it would load again at the next login. Nothing was deleted; fix that and re-run."
+}
+
 # ---------------------------------------------------------------- poller
 # Before the container, so a poll cannot start a rebuild mid-teardown. The
 # timer goes first (it is what triggers the service), then the oneshot
@@ -315,10 +389,7 @@ if [ "$OS" = "Linux" ]; then
     ok "$DEPLOY_UNIT stopped"
   fi
 else
-  # bootout unloads it now; disable keeps launchd from loading the plist
-  # again at the next login (setup.sh enables it before bootstrapping).
-  launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
-  launchctl disable "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+  agent_off "$PLIST_LABEL"
   ok "LaunchAgent $PLIST_LABEL unloaded and disabled"
 fi
 for u in $FOREIGN_UNITS; do
@@ -359,6 +430,8 @@ EOF
   fi
   rm -f -- "${ENV_FILE:?}"
   ok "Deleted $ENV_FILE"
+  # Nothing left for a deploy to rebuild, and the rmdir below needs it gone.
+  release_lock
   # ~/services/<name> is the launcher's install marker (and SERVICE_HOME
   # itself). Try it even when the state was already gone, so a purged app
   # never reads as installed; rmdir only ever removes an empty directory.

@@ -20,7 +20,13 @@ case "$1" in
         for a in "$@"; do
           case "$a" in
             up)   touch "$STATE_DIR/compose_up" ;;
-            down) touch "$STATE_DIR/compose_down" ;;
+            down) touch "$STATE_DIR/compose_down"
+                  # lock_probe: a lock dir path; its state at `down` goes
+                  # to lock_at_down ("held" or "free").
+                  if [ -f "$STATE_DIR/lock_probe" ]; then
+                    if [ -d "$(cat "$STATE_DIR/lock_probe")" ]; then echo held; else echo free; fi \
+                      > "$STATE_DIR/lock_at_down"
+                  fi ;;
           esac
         done
         ;;
