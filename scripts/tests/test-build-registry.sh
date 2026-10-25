@@ -131,6 +131,30 @@ gen
 check "invalid JSON fails"                  out_has "services/alpha/app.json is not valid JSON"
 teardown
 
+echo "• control.stop_guard"
+setup
+touch "$R/services/alpha/teardown.sh"
+printf '{"key": "alpha", "name": "A", "group": "daily", "control": {"parts": [{"container": "a"}], "stop_guard": ["teardown.sh", "--check-dns"]}}\n' > "$R/services/alpha/app.json"
+gen
+check "valid guard: exits zero"             [ "$CODE" -eq 0 ]
+check "first item made repo-relative"       py 'd["services"][1]["control"]["stop_guard"] == ["services/alpha/teardown.sh", "--check-dns"]'
+check "rest of control kept"                py 'd["services"][1]["control"]["parts"] == [{"container": "a"}]'
+check "manifest itself untouched"           grep -qF '"stop_guard": ["teardown.sh", "--check-dns"]' "$R/services/alpha/app.json"
+teardown
+for bad in '"teardown.sh"' '[]' '["teardown.sh", 3]' '["teardown.sh", ""]' '["missing.sh"]' \
+    '["../duo/app.json"]' '["/bin/sh"]' '["~/x.sh"]' '["."]' \
+    '["teardown.sh", "--reason=DNS maintenance"]' '["teardown.sh", "--x;rm"]' \
+    '["teardown.sh", "--x\n"]'; do
+  setup
+  touch "$R/services/alpha/teardown.sh"
+  printf '{"key": "alpha", "name": "A", "group": "daily", "control": {"stop_guard": %s}}\n' "$bad" > "$R/services/alpha/app.json"
+  gen
+  check "stop_guard $bad fails"             [ "$CODE" -ne 0 ]
+  check "  names the field"                 out_has "control.stop_guard"
+  check "  nothing written"                 test ! -e "$R/app/web/services.json"
+  teardown
+done
+
 echo "• the real repo"
 OUT="$(mktemp)"
 python3 "$SCRIPT" --check > "$OUT" 2>&1; CODE=$?

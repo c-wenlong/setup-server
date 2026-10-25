@@ -1394,7 +1394,9 @@
       } else {
         setPill('pill-fail', 'Failed');
         text(elRunExit, 'exit ' + code);
-        alertSheet(sheetAction === 'deploy'
+        alertSheet(job.refused
+          ? 'The ' + sheetAction + ' was refused by this service\'s safety check, so nothing was changed. The last lines of the log above say why.'
+          : sheetAction === 'deploy'
           ? 'The setup script exited with code ' + code + '. The log above has the details; nothing was rolled back.'
           : 'The ' + sheetAction + ' exited with code ' + code + '. The log above has the details, and the service may be part way between states.');
         say(verb.label + ' failed, exit code ' + code);
