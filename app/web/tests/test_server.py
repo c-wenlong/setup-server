@@ -902,18 +902,19 @@ class ProbeCacheTest(SandboxTest):
         # reversed condition) or a different destination must fail here.
         self.assertIn(
             "if (!location.pathname.endsWith('/')"
-            " && !/\\.[^/]+$/.test(location.pathname)) {", head)
+            " && !/\\.html?$/i.test(location.pathname)) {", head)
         self.assertIn(
             "location.replace(location.pathname + '/'"
             " + location.search + location.hash);", head)
         # And the guard must fire on the mount shapes actually in use:
-        # `/home` redirects, `/`, `/home/` and `/index.html` do not.
+        # bare mounts redirect (dotted ones included), trailing-slash and
+        # page URLs do not.
         for path, want in (("/", False), ("/home/", False),
                            ("/index.html", False), ("/home", True),
-                           ("/console", True)):
-            bare, _, tail = path.rpartition("/")
-            has_file = bool(tail) and "." in tail
-            redirect = not path.endswith("/") and not has_file
+                           ("/console", True), ("/home.v2", True)):
+            tail = path.rpartition("/")[2]
+            is_page = tail.lower().endswith((".html", ".htm"))
+            redirect = not path.endswith("/") and not is_page
             self.assertEqual(redirect, want, path)
 
     def test_registry_file_parses_and_is_self_consistent(self):

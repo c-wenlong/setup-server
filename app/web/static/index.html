@@ -10,9 +10,10 @@
    On `/home` (no slash) every asset would resolve at the vhost root and
    hit whatever service lives there. Bounce to the slash form first so
    none of that gets requested; replace() keeps the bounce out of history.
-   File-looking paths (/index.html) are left alone — their assets resolve
-   beside the file correctly, and appending a slash would 404 them. */
-if (!location.pathname.endsWith('/') && !/\.[^/]+$/.test(location.pathname)) {
+   Page URLs ending in .html are left alone — their assets resolve beside
+   the file correctly, and appending a slash would 404 them. A dotted
+   mount like /home.v2 still redirects. */
+if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
   location.replace(location.pathname + '/' + location.search + location.hash);
 }
 /* Paint the chosen theme before CSS so the first frame is not the wrong
