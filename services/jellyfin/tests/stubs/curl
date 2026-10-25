@@ -103,7 +103,7 @@ case "$url" in
     # correct deploy is the address the request came in on — so mirror it.
     base="${url%/System/Info/Public}"
     [ -f "$STATE_DIR/wrong_published_url" ] && base="http://localhost:8096"
-    emit 200 "{\"LocalAddress\":\"$base\",\"ServerName\":\"kai-home-server\",\"Version\":\"12.0.0\",\"ProductName\":\"Jellyfin Server\",\"Id\":\"stub\",\"StartupWizardCompleted\":$wc}"
+    emit 200 "{\"LocalAddress\":\"$base\",\"ServerName\":\"homeserver\",\"Version\":\"12.0.0\",\"ProductName\":\"Jellyfin Server\",\"Id\":\"stub\",\"StartupWizardCompleted\":$wc}"
     ;;
 
   */Users/Public)

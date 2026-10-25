@@ -2,7 +2,7 @@
 
 Lights, sensors, switches, media players and the automations that tie them
 together, running entirely on this box, on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8123`.
+`https://homeserver.tail-name.ts.net:8123`.
 
 Home Assistant is the one service in this repo whose *whole point* is talking
 to hardware on your LAN. Everything else here is a web app that happens to be
@@ -22,7 +22,7 @@ One container, host networking, loopback bind:
 
 ```
   phone / laptop / tablet on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8123
+            │  https://homeserver.tail-name.ts.net:8123
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8123
@@ -88,7 +88,7 @@ not, and this was measured on this box rather than reasoned about:
 ss -ltn | grep 8123
 LISTEN 0 128 127.0.0.1:8123 0.0.0.0:*      <- the ONLY listener
 curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8123/     -> 302
-curl -o /dev/null -w '%{http_code}' http://100.85.87.87:8123/  -> 000 (refused)
+curl -o /dev/null -w '%{http_code}' http://100.77.77.77:8123/  -> 000 (refused)
 ```
 
 `network_mode: host` gives the container the host's network namespace, which
@@ -382,7 +382,7 @@ answered correctly without asking.
 
 The deploy is deliberately incomplete. After `setup.sh` finishes:
 
-1. Open `https://kai-home-server.taild6a23f.ts.net:8123` from a device on the
+1. Open `https://homeserver.tail-name.ts.net:8123` from a device on the
    tailnet and log in with the username and password from `.env`.
 2. HA presents the **location step**. Set it properly:
    - Drag the map pin to your actual house, or type the address. This drives
@@ -414,7 +414,7 @@ whether you are driving).
    give it the full URL *including the port*:
 
    ```
-   https://kai-home-server.taild6a23f.ts.net:8123
+   https://homeserver.tail-name.ts.net:8123
    ```
 
 4. Log in with the `.env` credentials. Grant location permission (choose
@@ -427,7 +427,7 @@ Common failures:
   reports something unhelpful about an invalid server.
 - **Using `http://`** — Serve is HTTPS-only.
 - **Tailscale not connected on the phone** — the name will not resolve.
-  `100.85.87.87:8123` is a useful thing to try when MagicDNS is misbehaving,
+  `100.77.77.77:8123` is a useful thing to try when MagicDNS is misbehaving,
   but fix MagicDNS rather than living on the IP.
 - **"Unable to connect" only when out of the house** — check Tailscale is
   actually up on the phone's mobile data, not just on wifi.

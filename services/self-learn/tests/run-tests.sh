@@ -817,7 +817,9 @@ EOF
   run_sync mac-setup
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
-  check "remote links blobs/local" calls_have "-d '/Users/kaichen/.self-learn/blobs/local'"
+  # MAC_HOME derives from MAC_SSH (tester@mac.invalid), proving the account,
+  # not a hardcoded user, owns the paths.
+  check "remote links blobs/local" calls_have "-d '/Users/tester/.self-learn/blobs/local'"
   check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.self-learn.seafile.plist"
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
@@ -1143,6 +1145,33 @@ test_teardown_then_setup_restores() {
   : > "$CALLS_LOG"
   run_deploy
   check "next stop respected again"     out_has "leaving it stopped"
+  teardown
+}
+
+test_teardown_then_start_and_stop() {
+  echo "• teardown, then Start+Stop (launcher/phone/manual): the stop reads as the owner's again"
+  deployed
+  run_teardown
+  check "marker written"                [ -f "$(SVC_HOME)/state/torn-down" ]
+  # What the launcher's Start button does: the stubs run the unit's
+  # ExecStartPre / the agent's ProgramArguments, which clear the marker.
+  if [ "$OS" = "Linux" ]; then
+    check "unit clears marker on start" grep -q '^ExecStartPre=-/bin/rm -f .*/state/torn-down' "$(UNIT_DIR)/self-learn.service"
+    PATH="$STUBS:$PATH" systemctl --user start self-learn.service >/dev/null
+    check "start consumed the marker"   [ ! -f "$(SVC_HOME)/state/torn-down" ]
+    PATH="$STUBS:$PATH" systemctl --user stop self-learn.service >/dev/null
+  else
+    check "agent clears marker on load" grep -qF 'rm -f "$1"; exec "$2" run start' "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
+    check "agent passes marker path"    grep -q '<string>.*/state/torn-down</string>' "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
+    PATH="$STUBS:$PATH" launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.self-learn.web.plist" >/dev/null
+    check "load consumed the marker"    [ ! -f "$(SVC_HOME)/state/torn-down" ]
+    PATH="$STUBS:$PATH" launchctl bootout "gui/$(id -u)/com.self-learn.web" >/dev/null
+  fi
+  : > "$CALLS_LOG"
+  run_deploy
+  check "setup exits zero"              [ "$CODE" -eq 0 ]
+  check "stop stays stopped"            out_has "leaving it stopped"
+  check "marker stays gone"             [ ! -f "$(SVC_HOME)/state/torn-down" ]
   teardown
 }
 
@@ -1880,6 +1909,7 @@ test_sync_status
 test_sync_status_unreachable
 test_teardown_safe
 test_teardown_then_setup_restores
+test_teardown_then_start_and_stop
 test_teardown_not_published
 test_teardown_port_owned_by_someone_else
 test_teardown_every_port_pointing_here

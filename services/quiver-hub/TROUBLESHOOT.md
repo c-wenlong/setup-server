@@ -12,7 +12,7 @@ Quick triage (run on the hub):
 systemctl --user is-active quiver-hub.service       # expect: active
 curl -fsS http://127.0.0.1:8477/v1/status           # expect: {"ok": true, ...}
 tailscale serve status                              # expect: :8477  / proxy http://127.0.0.1:8477
-curl -fsS https://kai-home-server.taild6a23f.ts.net:8477/v1/status
+curl -fsS https://homeserver.tail-name.ts.net:8477/v1/status
 ```
 
 Or just: `./tests/run-tests.sh --live`
@@ -103,9 +103,9 @@ journalctl --user -u quiver-hub.service -e --no-pager
   to check; re-pair (Pair with Tailscale, or `./pair.sh`).
 - **MacBook satellite never shows up**: on the Mac, `swe remote agent` must
   have been paired against the https URL:
-  `swe remote agent --hub=https://kai-home-server.taild6a23f.ts.net:8477 --token=<token>`.
+  `swe remote agent --hub=https://homeserver.tail-name.ts.net:8477 --token=<token>`.
   `pairing failed` there means a bad or expired token, or the Mac is off the
-  tailnet (`curl https://kai-home-server.taild6a23f.ts.net:8477/v1/status`
+  tailnet (`curl https://homeserver.tail-name.ts.net:8477/v1/status`
   from the Mac). On the hub, `$S remote status` lists the machines it knows.
 - **Sessions from this box missing or read-only**: the hub only sees
   harnesses on the unit's `PATH` (see SETUP.md). `systemctl --user show

@@ -2,7 +2,7 @@
 
 Timeline, albums, sharing, iOS/Android background camera backup, and —
 when machine learning is on — semantic search, face grouping and OCR.
-Web UI: `https://kai-home-server.taild6a23f.ts.net:2283`.
+Web UI: `https://homeserver.tail-name.ts.net:2283`.
 
 Chosen over PhotoPrism (no native mobile app, so no background backup;
 multi-user is paywalled) and Ente (much lighter server, true E2EE, but
@@ -158,7 +158,7 @@ not undo it.
 ## Client side
 
 **Phone (the whole point).** Install Immich from the App Store / Play Store,
-tap **Server Endpoint**, enter `https://kai-home-server.taild6a23f.ts.net:2283/api`,
+tap **Server Endpoint**, enter `https://homeserver.tail-name.ts.net:2283/api`,
 log in with the `.env` credentials, then enable background backup. The phone
 must be on the tailnet (Tailscale app connected) for backup to run — off the
 tailnet it queues and uploads next time it connects.
@@ -173,7 +173,7 @@ survive:
 
 ```bash
 immich-go upload from-google-photos \
-  --server=https://kai-home-server.taild6a23f.ts.net:2283 \
+  --server=https://homeserver.tail-name.ts.net:2283 \
   --api-key=<Account Settings → API Keys> \
   takeout-*.zip
 ```

@@ -9,7 +9,7 @@ import os
 
 from uptime_kuma_api import MonitorType, NotificationType, UptimeKumaApi
 
-HOST = os.environ.get("TAILNET_HOST", "kai-home-server.taild6a23f.ts.net")
+HOST = os.environ.get("TAILNET_HOST", "homeserver.tail-name.ts.net")
 
 # Monitors probe the tailnet HTTPS URL, not loopback, so that the dashboard
 # shows the address you actually open and each check exercises the whole
@@ -189,10 +189,14 @@ else:
 # mapping still shows :53 as listening, so nothing short of a real query tells
 # you the resolver works. This monitor asks it to resolve a name — the only
 # check that fails when the thing AdGuard exists to do has stopped.
-DNS_MONITORS = [
-    ("adguard-dns", "example.com",
-     os.environ.get("ADGUARD_DNS_IP", "100.85.87.87"), 53),
-]
+# setup.sh resolves `tailscale ip -4` and passes it in. Skipped rather than
+# guessed when absent: a made-up resolver address would monitor nothing and
+# report a false outage forever.
+ADGUARD_DNS_IP = os.environ.get("ADGUARD_DNS_IP", "")
+DNS_MONITORS = ([("adguard-dns", "example.com", ADGUARD_DNS_IP, 53)]
+                if ADGUARD_DNS_IP else [])
+if not ADGUARD_DNS_IP:
+    print("ADGUARD_DNS_IP unset — skipping the adguard-dns monitor")
 
 have = {m["name"]: m for m in api.get_monitors()}
 

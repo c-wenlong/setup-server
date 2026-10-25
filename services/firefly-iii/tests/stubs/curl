@@ -77,7 +77,7 @@ while [ $# -gt 0 ]; do
       piece="$2"
       # curl's five --data-urlencode forms: `content`, `=content`,
       # `name=content`, `@file`, `name@file`. Which one applies is decided by
-      # WHICH SEPARATOR COMES FIRST — so `email=kai@example.com` is
+      # WHICH SEPARATOR COMES FIRST — so `email=admin@example.com` is
       # name=content (the `=` is first) and only `password@/path` is the file
       # form. Getting this backwards makes every address with an @ in it look
       # like a filename, which is exactly the bug this stub had.

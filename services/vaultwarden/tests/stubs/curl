@@ -90,7 +90,7 @@ case "$url" in
     ;;
 
   */admin/users|*/admin/users/*)
-    [ -f "$STATE_DIR/admin_enabled" ] && emit 200 '[{"Email":"kai@example.com"}]'
+    [ -f "$STATE_DIR/admin_enabled" ] && emit 200 '[{"Email":"admin@example.com"}]'
     emit 404 '<html>Not Found</html>'
     ;;
 

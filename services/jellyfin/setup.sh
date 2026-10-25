@@ -18,7 +18,7 @@
 #   LOCAL_PORT=8097 ./setup.sh              # HTTPS follows LOCAL_PORT (8097 -> 8097)
 #   LOCAL_PORT=8097 HTTPS_PORT=8097 ./setup.sh
 #   MEDIA_DIR=/srv/media ./setup.sh         # first run only; .env wins after
-#   JELLYFIN_ADMIN_USERNAME=kai ./setup.sh  # first run only; .env wins after
+#   JELLYFIN_ADMIN_USERNAME=admin ./setup.sh  # first run only; .env wins after
 #
 # Version: pinned to the `12.0` tag (reports 12.0.0). Deliberately not
 # `latest` — a media server that jumps a major version on its own can
@@ -45,7 +45,7 @@ LOCAL_PORT="${LOCAL_PORT:-8096}"
 # two. Whether it was explicit is remembered for the .env read-back below.
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-ADMIN_USERNAME="${JELLYFIN_ADMIN_USERNAME:-kai}"
+ADMIN_USERNAME="${JELLYFIN_ADMIN_USERNAME:-admin}"
 
 # Captured before .env is sourced, because sourcing overwrites MEDIA_DIR with
 # the file's value. On a first run this seeds the file; afterwards .env wins

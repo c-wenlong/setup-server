@@ -1,7 +1,7 @@
 # metabase — locally hosted BI
 
 Dashboards, SQL questions and charts over databases you already run, on
-the tailnet: `https://kai-home-server.taild6a23f.ts.net:8104`.
+the tailnet: `https://homeserver.tail-name.ts.net:8104`.
 
 Chosen over Metabase Cloud (data leaves the tailnet) and over a pile of
 ad-hoc SQL. OSS image, not Pro/Enterprise.
@@ -13,7 +13,7 @@ upstream default is 3000; this deploy uses **8104**.
 
 ```
   phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8104
+            │  https://homeserver.tail-name.ts.net:8104
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8104

@@ -103,7 +103,7 @@ things.
 
   Quick check from the box:
   ```bash
-  curl -s https://kai-home-server.taild6a23f.ts.net/home/ | grep -o 'href="[^"]*"'
+  curl -s https://homeserver.tail-name.ts.net/home/ | grep -o 'href="[^"]*"'
   ```
   Anything starting with `/` is the bug.
 
@@ -111,7 +111,7 @@ things.
 
 It should not — `--set-path=/home` adds a mount point beside the existing `/`
 handler on `:443` and leaves it alone (verified, and asserted by the live
-test). If `https://kai-home-server.taild6a23f.ts.net/` stopped working:
+test). If `https://homeserver.tail-name.ts.net/` stopped working:
 
 ```bash
 tailscale serve status          # is there still a "/" -> 127.0.0.1:8080 line?
@@ -126,8 +126,8 @@ that on :443 on this box.
 
 - Is the client on the tailnet? None of this is reachable off-tailnet, by design.
 - First load after a new port can take ~60s while the cert is minted:
-  `curl -v https://kai-home-server.taild6a23f.ts.net:8093/healthz`
-- MagicDNS off → use the tailnet IP `100.85.87.87` (`/home/` works there too;
+  `curl -v https://homeserver.tail-name.ts.net:8093/healthz`
+- MagicDNS off → use the tailnet IP `100.77.77.77` (`/home/` works there too;
   the `:8093` form needs the port).
 - **iOS shows the old page after an update** — Safari caches aggressively for
   Home Screen apps. Long-press the icon → delete, then re-add from Safari.

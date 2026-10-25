@@ -1,12 +1,12 @@
 # launcher — the home screen for this box
 
-Every service on kai-home-server as a tile; tap to open. Tiles for services
+Every service on homeserver as a tile; tap to open. Tiles for services
 that exist in this repo but are **not deployed yet** are dimmed with a ↓ and
 carry a Deploy action that runs that service's `setup.sh` on the box. So it is
 both the index of what exists and the place you install from.
 
-Bookmark: **`https://kai-home-server.taild6a23f.ts.net/home/`**
-Also on its own port: `https://kai-home-server.taild6a23f.ts.net:8093/`
+Bookmark: **`https://homeserver.tail-name.ts.net/home/`**
+Also on its own port: `https://homeserver.tail-name.ts.net:8093/`
 
 Explicitly not a stats dashboard — no graphs, no widgets, no per-service
 metrics. Uptime Kuma and beszel already do that and are one tile away. See
@@ -193,7 +193,7 @@ Step by step:
 
 **iPhone Home Screen — this is the whole point.**
 
-1. Open `https://kai-home-server.taild6a23f.ts.net/home/` in **Safari**
+1. Open `https://homeserver.tail-name.ts.net/home/` in **Safari**
    (Safari specifically; Chrome on iOS cannot add Home Screen icons).
 2. Tap the Share button (square with an arrow).
 3. Scroll down, tap **Add to Home Screen**, name it `home`, tap **Add**.

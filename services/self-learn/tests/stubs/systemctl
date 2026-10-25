@@ -16,6 +16,25 @@ case "$unit" in
   self-learn-studio)  marker=studio_active; failed_marker=studio_failed ;;
 esac
 
+# Real systemd runs the unit's ExecStartPre= lines before every start
+# ('-' prefix means a failure is ignored; otherwise a failed pre-hook stops
+# the start). self-learn.service uses one to clear teardown's torn-down
+# marker — running it here keeps a stubbed `start` faithful.
+run_pre() {
+  local f="$HOME/.config/systemd/user/$1.service" line cmd
+  [ -f "$f" ] || return 0
+  while IFS= read -r line; do
+    cmd="${line#ExecStartPre=}"
+    [ -n "$cmd" ] || continue
+    case "$cmd" in
+      -*) sh -c "${cmd#-}" >/dev/null 2>&1 || true ;;
+      *)  sh -c "$cmd" || return 1 ;;
+    esac
+  done <<PREHOOKS
+$(grep '^ExecStartPre=' "$f")
+PREHOOKS
+}
+
 case "${2:-}" in
   is-active)
     [ -n "$marker" ] && [ -f "$STATE_DIR/$marker" ] && exit 0 || exit 3
@@ -27,11 +46,14 @@ case "${2:-}" in
     [ -n "$marker" ] && rm -f "$STATE_DIR/$marker"
     ;;
   start|restart)
-    [ -n "$marker" ] && { rm -f "$STATE_DIR/$failed_marker"; touch "$STATE_DIR/$marker"; }
+    if [ -n "$marker" ]; then
+      run_pre "$unit" || exit 3
+      rm -f "$STATE_DIR/$failed_marker"; touch "$STATE_DIR/$marker"
+    fi
     ;;
   enable)
     # `enable --now UNIT` starts it too
-    case "$*" in *--now*) [ -n "$marker" ] && touch "$STATE_DIR/$marker" ;; esac
+    case "$*" in *--now*) [ -n "$marker" ] && { run_pre "$unit" || exit 3; touch "$STATE_DIR/$marker"; } ;; esac
     ;;
   disable)
     case "$*" in *--now*) [ -n "$marker" ] && rm -f "$STATE_DIR/$marker" ;; esac

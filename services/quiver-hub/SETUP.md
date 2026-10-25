@@ -165,7 +165,7 @@ On the hub run `./pair.sh macbook`, then on the Mac (any `swe` with
 `swe remote`):
 
 ```sh
-swe remote agent --hub=https://kai-home-server.taild6a23f.ts.net:8477 --token=<token>
+swe remote agent --hub=https://homeserver.tail-name.ts.net:8477 --token=<token>
 ```
 
 The first run exchanges the token for a stored credential; after that

@@ -253,11 +253,11 @@ curl -s http://127.0.0.1:8096/System/Info/Public \
 grep JELLYFIN_PUBLISHED_URL .env
 ```
 
-Both should read `https://kai-home-server.taild6a23f.ts.net:8096`. If
+Both should read `https://homeserver.tail-name.ts.net:8096`. If
 `LocalAddress` says `127.0.0.1`, `localhost` or an old hostname/port:
 
 ```bash
-sed -i 's|^JELLYFIN_PUBLISHED_URL=.*|JELLYFIN_PUBLISHED_URL=https://kai-home-server.taild6a23f.ts.net:8096|' .env
+sed -i 's|^JELLYFIN_PUBLISHED_URL=.*|JELLYFIN_PUBLISHED_URL=https://homeserver.tail-name.ts.net:8096|' .env
 ./setup.sh
 ```
 
@@ -293,11 +293,11 @@ an unreachable address".
   after a reboot.
 - **Did you include `:8096`?** Without the port the client tries 443, which is
   code-server, and reports something unhelpful. The full address is
-  `https://kai-home-server.taild6a23f.ts.net:8096`.
+  `https://homeserver.tail-name.ts.net:8096`.
 - **Did you use `http://`?** Serve is HTTPS-only.
 - First load after a new port can take ~60s while the cert is minted:
-  `curl -v https://kai-home-server.taild6a23f.ts.net:8096/System/Info/Public`
-- MagicDNS off → use the tailnet IP `100.85.87.87:8096`. Jellyfin builds URLs
+  `curl -v https://homeserver.tail-name.ts.net:8096/System/Info/Public`
+- MagicDNS off → use the tailnet IP `100.77.77.77:8096`. Jellyfin builds URLs
   relative to the request, so unlike Forgejo nothing breaks by using the IP.
 - **Roku, or an old smart TV** — Tailscale does not run on Roku at all. That
   needs a Tailscale subnet router on the LAN, which is a different project.

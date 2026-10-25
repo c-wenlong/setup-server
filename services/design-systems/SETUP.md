@@ -49,7 +49,7 @@ immediately with `~/services/design-systems/bin/deploy.sh --force`.
                                                mirrored by tools/refero/mirror_media.py)
                                                                          ▼
                                                   Tailscale Serve  HTTPS :8108 (tailnet only)
-                        https://kai-home-server.taild6a23f.ts.net:8108/gallery/
+                        https://homeserver.tail-name.ts.net:8108/gallery/
 ```
 
 ## Why the working clone, not a deploy clone
@@ -184,6 +184,6 @@ immediately, independent of any deploy.
 ## Client side
 
 Nothing to install. Open
-`https://kai-home-server.taild6a23f.ts.net:8108/gallery/` from any tailnet
+`https://homeserver.tail-name.ts.net:8108/gallery/` from any tailnet
 device. No passphrase — the tailnet is the boundary. The scorecard is at
 `/scorecard/`, the docs site at `/`.

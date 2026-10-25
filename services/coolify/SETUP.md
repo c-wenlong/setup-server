@@ -1,7 +1,7 @@
 # coolify — self-hosted PaaS (a Heroku/Vercel you own)
 
 Push a repo, get a running app, on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8101`.
+`https://homeserver.tail-name.ts.net:8101`.
 
 Coolify is the control plane: dashboard, deployments, databases, one-click
 services. It is **not** a substitute for Tailscale Serve. Upstream wants
@@ -23,7 +23,7 @@ idle is a few hundred MiB. Unload ollama if the dashboard gets OOM-killed.
 
 ```
   phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8101
+            │  https://homeserver.tail-name.ts.net:8101
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8101
@@ -125,7 +125,7 @@ Step by step:
 
 ## Client side
 
-Any browser on the tailnet: `https://kai-home-server.taild6a23f.ts.net:8101`.
+Any browser on the tailnet: `https://homeserver.tail-name.ts.net:8101`.
 Login with `ROOT_USERNAME` / `ROOT_USER_PASSWORD` from `services/coolify/.env`.
 
 To deploy an app onto this box from the UI: Servers → localhost → SSH

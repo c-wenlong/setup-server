@@ -2,7 +2,7 @@
 
 Replaces the manual "download PDFs → parse → update Notion" loop with a
 self-hosted [Firefly III](https://www.firefly-iii.org/) ledger on
-`kai-home-server`, fed by per-institution pullers.
+`homeserver`, fed by per-institution pullers.
 
 **Not a fork of Firefly III.** This is the service directory: the deploy
 (`setup.sh`, compose, tests) plus the integration layer around it — the pullers,

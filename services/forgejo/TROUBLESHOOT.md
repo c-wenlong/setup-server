@@ -58,7 +58,7 @@ First boot creates the SQLite schema and can take a minute;
 If it never finishes:
 
 - Check the port really is on loopback: `ss -ltn | grep 3000`. Three lines are
-  expected — `127.0.0.1:3000` is Forgejo, and `100.85.87.87:3000` plus the
+  expected — `127.0.0.1:3000` is Forgejo, and `100.77.77.77:3000` plus the
   `fd7a:…` v6 address are **tailscaled's** serve frontend (HTTPS port == local
   port here, so they share the number). `0.0.0.0:3000` is the one that would
   be wrong.
@@ -79,7 +79,7 @@ install wizard can reconfigure the instance, including choosing a new admin.
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \
-  https://kai-home-server.taild6a23f.ts.net:3000/install     # must be 404
+  https://homeserver.tail-name.ts.net:3000/install     # must be 404
 ```
 
 `000` is not a status — it is curl saying it never connected (and it also
@@ -122,8 +122,8 @@ serves the install page passes every other check.
 
 - Is the client on the tailnet? This is not reachable off-tailnet, by design.
 - First load after a new port can take ~60s while the cert is minted:
-  `curl -v https://kai-home-server.taild6a23f.ts.net:3000/api/healthz`
-- MagicDNS off → use the tailnet IP `100.85.87.87` with the same port. Note
+  `curl -v https://homeserver.tail-name.ts.net:3000/api/healthz`
+- MagicDNS off → use the tailnet IP `100.77.77.77` with the same port. Note
   that `ROOT_URL` still says the DNS name, so links in the page will point
   at a name the client cannot resolve — fix MagicDNS rather than living
   with it.
@@ -131,14 +131,14 @@ serves the install page passes every other check.
 ## Login problems
 
 - **The generated password in `.env` is rejected on first login, and
-  `setup.sh` died with "Login as kai was rejected"** — this is the
+  `setup.sh` died with "Login as admin was rejected"** — this is the
   `--must-change-password` trap. The admin was created without
   `--must-change-password=false`, so Forgejo is demanding a password change
   the CLI never told you about. Fix:
 
   ```bash
   docker exec -u git forgejo forgejo admin user change-password \
-    --username kai --password "$(sed -n 's/^FORGEJO_ADMIN_PASSWORD=//p' .env)" \
+    --username admin --password "$(sed -n 's/^FORGEJO_ADMIN_PASSWORD=//p' .env)" \
     --must-change-password=false
   ```
 
@@ -165,7 +165,7 @@ serves the install page passes every other check.
   docker run --rm --entrypoint sqlite3 \
     -v ~/services/forgejo/data:/data codeberg.org/forgejo/forgejo:15 \
     /data/gitea/gitea.db \
-    "delete from two_factor where uid = (select id from user where lower_name='kai');"
+    "delete from two_factor where uid = (select id from user where lower_name='admin');"
   docker compose --project-directory . start
   ```
 
@@ -186,8 +186,8 @@ serves the install page passes every other check.
   ```bash
   docker exec forgejo grep ROOT_URL /data/gitea/conf/app.ini
   # then in .env:
-  #   FORGEJO_DOMAIN=kai-home-server.taild6a23f.ts.net
-  #   FORGEJO_ROOT_URL=https://kai-home-server.taild6a23f.ts.net:3000/
+  #   FORGEJO_DOMAIN=homeserver.tail-name.ts.net
+  #   FORGEJO_ROOT_URL=https://homeserver.tail-name.ts.net:3000/
   ./setup.sh
   ```
 
@@ -232,7 +232,7 @@ serves the install page passes every other check.
   `git/repositories` or `git/lfs`.
 - Garbage-collect the repos: Site Administration → Dashboard → maintenance
   operations → **"Run 'git gc' on all repositories"**. By hand, one repo:
-  `docker exec -u git forgejo git -C /data/git/repositories/kai/my-repo.git gc --aggressive --prune=now`
+  `docker exec -u git forgejo git -C /data/git/repositories/admin/my-repo.git gc --aggressive --prune=now`
 - LFS objects no repository references any more are only reclaimed by Site
   Administration → Dashboard → **"Garbage collect LFS meta objects"**.
 - Moving the data: stop the stack, move the directory, update `FORGEJO_DATA`

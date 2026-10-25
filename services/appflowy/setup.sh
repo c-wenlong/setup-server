@@ -33,7 +33,7 @@ set -euo pipefail
 LOCAL_PORT="${LOCAL_PORT:-8102}"
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-GOTRUE_ADMIN_EMAIL="${GOTRUE_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+GOTRUE_ADMIN_EMAIL="${GOTRUE_ADMIN_EMAIL:-admin@example.com}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"

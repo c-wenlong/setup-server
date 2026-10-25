@@ -110,8 +110,10 @@ done
 if command -v uv >/dev/null; then
   info "Seeding Kuma (admin account, monitors, ntfy alert channel)"
   # TAILNET_HOST: monitors probe the tailnet HTTPS URLs, so the seeder needs
-  # this node's MagicDNS name.
-  if (set -a; . "$ENV_FILE"; TAILNET_HOST="$host"; set +a; \
+  # this node's MagicDNS name. ADGUARD_DNS_IP: the adguard-dns monitor asks
+  # this node's resolver a question — the tailnet v4, resolved the same way.
+  dns_ip="$("$TAILSCALE" ip -4 2>/dev/null || true)"
+  if (set -a; . "$ENV_FILE"; TAILNET_HOST="$host" ADGUARD_DNS_IP="$dns_ip"; set +a; \
       uv run --with uptime-kuma-api python3 "$SERVICE_DIR/seed_kuma.py"); then
     ok "Kuma seeded"
   else

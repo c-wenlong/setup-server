@@ -56,7 +56,7 @@ progress. If it never finishes:
   → `database:5432 - accepting connections`. (There is no `nc` in that image;
   `pg_isready` is the tool it does ship.)
 - Check the port really is on loopback: `ss -ltn | grep 2283`. Three lines are
-  expected and correct — `127.0.0.1:2283` is Immich, and `100.85.87.87:2283`
+  expected and correct — `127.0.0.1:2283` is Immich, and `100.77.77.77:2283`
   plus the `fd7a:…` v6 address are **tailscaled's** own serve frontend, not a
   leak. HTTPS port == local port here, which is why they collide on one number.
   `0.0.0.0:2283` would be the real problem.
@@ -117,8 +117,8 @@ should have caught it — start by running the mocked suite.
 
 - Is the client on the tailnet? This is not reachable off-tailnet, by design.
 - First load after a new port can take ~60s while the cert is minted.
-  `curl -v https://kai-home-server.taild6a23f.ts.net:2283/api/server/ping`
-- MagicDNS off → use the tailnet IP `100.85.87.87` with the same port.
+  `curl -v https://homeserver.tail-name.ts.net:2283/api/server/ping`
+- MagicDNS off → use the tailnet IP `100.77.77.77` with the same port.
 
 ## Login problems
 
@@ -130,7 +130,7 @@ should have caught it — start by running the mocked suite.
   container: `docker exec -it immich_server immich-admin reset-admin-password`,
   then write the new one into `.env`.
 - **Phone says "server unreachable"** — the endpoint must include `/api`:
-  `https://kai-home-server.taild6a23f.ts.net:2283/api`. And Tailscale must be
+  `https://homeserver.tail-name.ts.net:2283/api`. And Tailscale must be
   connected on the phone.
 
 ## Machine learning problems
