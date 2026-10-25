@@ -512,21 +512,30 @@ test_teardown_safe() {
 
 test_teardown_foreign_units() {
   echo "• teardown: units setup.sh did not create are named, never touched"
+  # teardown scans the unit dir on Linux and ~/Library/LaunchAgents on
+  # macOS, so the fixtures go where this OS's branch looks.
+  local dir trig sync other
   deployed
+  if [ "$OS" = "Linux" ]; then
+    dir="$UNITS"; trig="designs-trigger.service"; sync="notes-sync.service"; other="unrelated.service"
+  else
+    dir="$HOME/Library/LaunchAgents"; trig="com.me.designs-trigger.plist"
+    sync="com.me.notes-sync.plist"; other="com.me.unrelated.plist"
+    mkdir -p "$dir"
+    echo trigger > "$dir/$trig"; echo other > "$dir/$other"
+  fi
   printf '[Service]\nExecStart=/bin/sh -c "ls %s/services/design-systems"\n' "$HOME" \
-    > "$UNITS/notes-sync.service"
+    > "$dir/$sync"
   run_teardown --purge "design-systems"
   check "exits zero"                    [ "$CODE" -eq 0 ]
-  if [ "$OS" = "Linux" ]; then
-    check "warns about designs-trigger" out_has "designs-trigger.service .*setup.sh did not create it"
-    check "warns about a unit that mentions it" out_has "notes-sync.service .*setup.sh did not create it"
-    check "no warning for an unrelated unit"    out_lacks "unrelated.service"
-  fi
+  check "warns about designs-trigger"   out_has "$trig .*setup.sh did not create it"
+  check "warns about a unit that mentions it" out_has "$sync .*setup.sh did not create it"
+  check "no warning for an unrelated unit"    out_lacks "$other"
   check "no call names designs-trigger" no_call "designs-trigger"
   check "no call names notes-sync"      no_call "notes-sync"
-  check "designs-trigger file kept"     [ -f "$UNITS/designs-trigger.service" ]
-  check "notes-sync file kept"          [ -f "$UNITS/notes-sync.service" ]
-  check "unrelated unit kept"           [ -f "$UNITS/unrelated.service" ]
+  check "designs-trigger file kept"     [ -f "$dir/$trig" ]
+  check "notes-sync file kept"          [ -f "$dir/$sync" ]
+  check "unrelated unit kept"           [ -f "$dir/$other" ]
   teardown
 }
 
@@ -1003,6 +1012,27 @@ test_teardown_purge_deploy_lock() {
   teardown
 }
 
+test_teardown_purge_rechecked_after_lock() {
+  echo "• teardown --purge: targets are worked out again once the lock is held; a change during the prompt deletes nothing"
+  deployed
+  rm -rf "${SH:?}/media"
+  run_purge_at_prompt "design-systems" "mkdir -p '$SH/media/refero' && echo shot > '$SH/media/refero/a.jpg'"
+  check "media/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says the list changed"     out_has "changed while the prompt waited"
+  check "  nothing changed"           nothing_changed
+  check "  media kept"                [ -f "$SH/media/refero/a.jpg" ]
+  check "  lock dropped"              [ ! -e "$SH/.deploy.lock" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
+  run_purge_at_prompt "design-systems" "rm -rf '$SH/media' && ln -s '$HOME/elsewhere' '$SH/media'"
+  check "media/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  refuses the link"          out_has "media is a symlink"
+  check "  nothing changed"           nothing_changed
+  check "  link target kept"          [ -f "$HOME/elsewhere/keep" ]
+  teardown
+}
+
 # macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it.
 test_teardown_macos_launch_agent() {
   echo "• teardown (macOS branch): only a loaded agent is booted out; a failed unload stops before --purge deletes anything"
@@ -1099,6 +1129,7 @@ test_teardown_env_lint
 test_teardown_refuses_compose_overrides
 test_teardown_unresolved_variable
 test_teardown_purge_deploy_lock
+test_teardown_purge_rechecked_after_lock
 test_teardown_macos_launch_agent
 
 if [ "${1:-}" = "--live" ]; then

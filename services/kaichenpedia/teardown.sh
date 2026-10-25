@@ -249,7 +249,14 @@ PURGE_DIR=""
 PURGE_PATHS=""
 NL='
 '
-if [ "$PURGE" -eq 1 ]; then
+# Every path --purge deletes, with every refusal. Run before the prompt (so
+# it shows the list) and again once lock_take holds the deploy lock: the
+# prompt can wait any length of time, and a deploy (or a hand edit) in that
+# window could add, swap or symlink a target. The second run must match
+# the first or nothing is deleted.
+purge_targets() {
+  PURGE_PATHS=""
+  PURGE_DIR=""
   [ -n "$SERVICE_HOME" ] || die "SERVICE_HOME is missing from $ENV_FILE — refusing to guess what to delete."
   while :; do case "$SERVICE_HOME" in */) SERVICE_HOME="${SERVICE_HOME%/}" ;; *) break ;; esac; done
   case "$SERVICE_HOME" in *..*) die "SERVICE_HOME=$SERVICE_HOME contains '..' — refusing." ;; esac
@@ -265,7 +272,7 @@ if [ "$PURGE" -eq 1 ]; then
       "$root"/?*) ;;
       *) die "SERVICE_HOME=$SERVICE_HOME resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;
     esac
-    LOCK="$PURGE_DIR/.deploy.lock"
+    [ "$LOCK_HELD" -eq 1 ] || LOCK="$PURGE_DIR/.deploy.lock"
     for item in $OWNED; do
       p="$PURGE_DIR/$item"
       [ -e "$p" ] || [ -L "$p" ] || continue
@@ -273,6 +280,9 @@ if [ "$PURGE" -eq 1 ]; then
       PURGE_PATHS="$PURGE_PATHS$r$NL"
     done
   fi
+}
+if [ "$PURGE" -eq 1 ]; then
+  purge_targets
   lock_check
   warn "--purge deletes, under ${PURGE_DIR:-(no SERVICE_HOME on disk)}: $(printf '%s' "$PURGE_PATHS" | sed 's#.*/##' | tr '\n' ' ')"
   warn "  plus $ENV_FILE and the poller unit files in $UNIT_DIR: $MINE"
@@ -284,6 +294,10 @@ if [ "$PURGE" -eq 1 ]; then
   read -r answer || true
   [ "$answer" = "$NAME" ] || die "Confirmation did not match; nothing was changed."
   lock_take
+  shown="$PURGE_DIR|$PURGE_PATHS"
+  purge_targets
+  [ "$PURGE_DIR|$PURGE_PATHS" = "$shown" ] \
+    || die "What --purge would delete changed while the prompt waited (a deploy or a hand edit ran). Nothing was deleted; re-run to see the new list."
 fi
 
 # ------------------------------------------------------- tailscale serve

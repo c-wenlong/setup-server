@@ -252,7 +252,14 @@ lock_take() {
 # SERVICE_HOME are deleted, each through real_dir; the marker dir itself is
 # only ever rmdir'd (empty-only), so anything else in it survives.
 PURGE_PATHS=""
-if [ "$PURGE" -eq 1 ]; then
+# Every path --purge deletes, with every refusal. Run before the prompt (so
+# it shows the list) and again once lock_take holds the deploy lock: the
+# prompt can wait any length of time, and a deploy (or a hand edit) in that
+# window could add, swap or symlink a target. The second run must match
+# the first or nothing is deleted.
+purge_targets() {
+  PURGE_PATHS=""
+  home_real=""
   [ -n "$SERVICE_HOME" ] || die "SERVICE_HOME is missing from $ENV_FILE — refusing to guess what to delete."
   # A relative path would be resolved against wherever teardown was run
   # from, so the overlap check below could pass on the wrong directory.
@@ -269,7 +276,7 @@ if [ "$PURGE" -eq 1 ]; then
   if [ -e "$SERVICE_HOME" ] || [ -L "$SERVICE_HOME" ]; then
     [ -d "$SERVICE_HOME" ] || die "SERVICE_HOME=$SERVICE_HOME is not a directory — refusing."
     home_real="$(real_dir "$SERVICE_HOME")" || die "SERVICE_HOME=$SERVICE_HOME is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
-    LOCK="$home_real/.deploy.lock"
+    [ "$LOCK_HELD" -eq 1 ] || LOCK="$home_real/.deploy.lock"
     # The repo the site is built from is the user's (default ~/dev/sources)
     # and must survive: refuse if any purge path is it, holds it or is in it.
     repo_real=""
@@ -288,6 +295,9 @@ if [ "$PURGE" -eq 1 ]; then
 "
     done
   fi
+}
+if [ "$PURGE" -eq 1 ]; then
+  purge_targets
   lock_check
   warn "--purge deletes, and this cannot be undone:"
   if [ -n "$PURGE_PATHS" ]; then
@@ -308,6 +318,10 @@ if [ "$PURGE" -eq 1 ]; then
   read -r answer || true
   [ "$answer" = "$NAME" ] || die "Confirmation did not match; nothing was changed."
   lock_take
+  shown="$home_real|$PURGE_PATHS"
+  purge_targets
+  [ "$home_real|$PURGE_PATHS" = "$shown" ] \
+    || die "What --purge would delete changed while the prompt waited (a deploy or a hand edit ran). Nothing was deleted; re-run to see the new list."
 fi
 
 # ------------------------------------------------------- tailscale serve

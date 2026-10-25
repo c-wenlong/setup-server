@@ -253,7 +253,14 @@ PURGE_HOME=""
 PURGE_PATHS=""
 nl='
 '
-if [ "$PURGE" -eq 1 ]; then
+# Every path --purge deletes, with every refusal. Run before the prompt (so
+# it shows the list) and again once lock_take holds the deploy lock: the
+# prompt can wait any length of time, and a deploy (or a hand edit) in that
+# window could add, swap or symlink a target. The second run must match
+# the first or nothing is deleted.
+purge_targets() {
+  PURGE_PATHS=""
+  PURGE_HOME=""
   [ -n "$SERVICE_HOME" ] || die "SERVICE_HOME is missing from $ENV_FILE — refusing to guess what to delete."
   [ -n "$SOURCE_REPO" ] || die "SOURCE_REPO is missing from $ENV_FILE — teardown cannot prove the purge stays clear of your clone, so it refuses."
   # A relative path would be resolved against wherever teardown was run
@@ -290,7 +297,7 @@ if [ "$PURGE" -eq 1 ]; then
     case "$PURGE_HOME/" in
       "$repo_real"/*) die "SOURCE_REPO=$SOURCE_REPO holds $PURGE_HOME — a purge would delete inside your clone, so it refuses." ;;
     esac
-    LOCK="$PURGE_HOME/.deploy.lock"
+    [ "$LOCK_HELD" -eq 1 ] || LOCK="$PURGE_HOME/.deploy.lock"
     for c in bin state www media nginx.conf; do
       p="$PURGE_HOME/$c"
       [ -e "$p" ] || [ -L "$p" ] || continue
@@ -298,6 +305,9 @@ if [ "$PURGE" -eq 1 ]; then
       PURGE_PATHS="$PURGE_PATHS$rp$nl"
     done
   fi
+}
+if [ "$PURGE" -eq 1 ]; then
+  purge_targets
   lock_check
   warn "--purge deletes, inside ${PURGE_HOME:-(no service dir on disk)}: bin/ (installed deploy.sh), state/, www/ (every built release), media/ (the refero mirror: re-mirroring takes a while), nginx.conf (your edits to it) and the deploy lock; plus the poller's unit files and $ENV_FILE. This cannot be undone."
   warn "Kept: your clone at $SOURCE_REPO, and anything else in the service dir."
@@ -306,6 +316,10 @@ if [ "$PURGE" -eq 1 ]; then
   read -r answer || true
   [ "$answer" = "$NAME" ] || die "Confirmation did not match; nothing was changed."
   lock_take
+  shown="$PURGE_HOME|$PURGE_PATHS"
+  purge_targets
+  [ "$PURGE_HOME|$PURGE_PATHS" = "$shown" ] \
+    || die "What --purge would delete changed while the prompt waited (a deploy or a hand edit ran). Nothing was deleted; re-run to see the new list."
 fi
 
 # ------------------------------------------------------- tailscale serve

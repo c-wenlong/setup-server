@@ -1661,22 +1661,64 @@ test_teardown_lock_after_prompt() {
 }
 
 test_teardown_foreign_units_by_content() {
-  echo "• teardown: a unit whose contents name ~/services/self-learn is listed, never touched; purge refused"
+  echo "• teardown: a unit/agent whose contents name ~/services/self-learn is listed, never touched; purge refused"
+  # teardown scans the unit dir on Linux and ~/Library/LaunchAgents on
+  # macOS, so the fixture goes where this OS's branch looks.
+  local dir job other ext=""
   deployed
-  mkdir -p "$(UNIT_DIR)"
+  if [ "$OS" = "Linux" ]; then
+    dir="$(UNIT_DIR)"; job="nightly-backup.service"; other="unrelated.service"
+  else
+    dir="$HOME/Library/LaunchAgents"; job="com.me.nightly-backup"; other="com.me.unrelated"; ext=".plist"
+  fi
+  mkdir -p "$dir"
   printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/self-learn/studio/ /backup/\n' "$HOME" \
-    > "$(UNIT_DIR)/nightly-backup.service"
-  printf '[Service]\nExecStart=/bin/true\n' > "$(UNIT_DIR)/unrelated.service"
+    > "$dir/$job$ext"
+  printf '[Service]\nExecStart=/bin/true\n' > "$dir/$other$ext"
   run_teardown --purge "self-learn"
   check "purge: exits non-zero"         [ "$CODE" -ne 0 ]
-  check "  names it"                    out_has "nightly-backup.service"
+  check "  names it"                    out_has "$job"
   check "  nothing changed"             untouched
   run_teardown
   check "default: exits zero"           [ "$CODE" -eq 0 ]
-  check "  warns, naming it"            out_has "Not touched (not created by setup.sh): nightly-backup.service"
-  check "  unrelated not named"         out_lacks "unrelated.service"
+  check "  warns, naming it"            out_has "Not touched (not created by setup.sh): $job"
+  check "  unrelated not named"         out_lacks "$other"
   check "  never addressed"             no_call "nightly-backup"
-  check "  unit kept"                   [ -f "$(UNIT_DIR)/nightly-backup.service" ]
+  check "  unit kept"                   [ -f "$dir/$job$ext" ]
+  teardown
+}
+
+test_teardown_purge_rechecked_after_lock() {
+  echo "• teardown --purge: targets are worked out again once the lock is held; a change during the prompt deletes nothing"
+  local dir job ext=""
+  deployed
+  rm -rf "$(REPO_DIR)"
+  run_purge_at_prompt "self-learn" "mkdir -p '$(REPO_DIR)/.git'"
+  check "repo/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says the list changed"       out_has "changed while the prompt waited"
+  check "  nothing changed"             untouched
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "  lock dropped"                [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
+  run_purge_at_prompt "self-learn" "rm -rf '$(SVC_HOME)/studio' && ln -s '$HOME/elsewhere' '$(SVC_HOME)/studio'"
+  check "studio/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  refuses the link"            out_has "studio is a symlink"
+  check "  nothing changed"             untouched
+  check "  link target kept"            [ -f "$HOME/elsewhere/keep" ]
+  teardown
+  deployed
+  if [ "$OS" = "Linux" ]; then
+    dir="$(UNIT_DIR)"; job="self-learn-seafile.service"
+  else
+    dir="$HOME/Library/LaunchAgents"; job="com.self-learn.seafile"; ext=".plist"
+  fi
+  run_purge_at_prompt "self-learn" "mkdir -p '$dir' && echo unit > '$dir/$job$ext'"
+  check "blob link installed during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names it"                    out_has "--purge refused: $job"
+  check "  nothing changed"             untouched
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
   teardown
 }
 
@@ -1815,6 +1857,7 @@ test_teardown_marker_refusals
 test_teardown_unresolved_variable
 test_teardown_lock_after_prompt
 test_teardown_foreign_units_by_content
+test_teardown_purge_rechecked_after_lock
 test_teardown_macos_agents
 
 if [ "${1:-}" = "--live" ]; then

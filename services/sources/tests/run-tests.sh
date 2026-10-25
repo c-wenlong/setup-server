@@ -893,6 +893,28 @@ test_teardown_purge_deploy_lock() {
   teardown
 }
 
+test_teardown_purge_rechecked_after_lock() {
+  echo "• teardown --purge: targets are worked out again once the lock is held; a change during the prompt deletes nothing"
+  deployed
+  mv "$(site_home)/bin" "$SANDBOX/bin.saved"
+  run_purge_at_prompt "sources" "mv '$SANDBOX/bin.saved' '$(site_home)/bin'"
+  check "bin/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says the list changed"     out_has "changed while the prompt waited"
+  check "  nothing changed"           nothing_changed
+  check "  bin kept"                  [ -d "$(site_home)/bin" ]
+  check "  lock dropped"              [ ! -e "$(site_home)/.deploy.lock" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
+  run_purge_at_prompt "sources" "mv '$(site_home)/www' '$SANDBOX/www.saved' && ln -s '$HOME/elsewhere' '$(site_home)/www'"
+  check "www/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  refuses the link"          out_has "www is a symlink"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ] && no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  link target kept"          [ -f "$HOME/elsewhere/keep" ]
+  teardown
+}
+
 # macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it.
 test_teardown_macos_launch_agent() {
   echo "• teardown (macOS branch): only a loaded agent is booted out; a failed unload stops before --purge deletes anything"
@@ -1032,6 +1054,7 @@ if [ "$OS" = "Linux" ]; then
 test_teardown_unresolved_variable
 test_teardown_foreign_units_by_content
 test_teardown_purge_deploy_lock
+test_teardown_purge_rechecked_after_lock
 test_teardown_macos_launch_agent
 else
   green "    ✓ (teardown tests skipped on macOS — they assert the systemd poller)"; PASS=$((PASS + 1))

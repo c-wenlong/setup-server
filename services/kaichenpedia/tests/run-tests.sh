@@ -815,6 +815,27 @@ test_teardown_purge_deploy_lock() {
   teardown
 }
 
+test_teardown_purge_rechecked_after_lock() {
+  echo "• teardown --purge: targets are worked out again once the lock is held; a change during the prompt deletes nothing"
+  deployed
+  mv "$(KP)/repo" "$SANDBOX/repo.saved"
+  run_purge_at_prompt "kaichenpedia" "mv '$SANDBOX/repo.saved' '$(KP)/repo'"
+  check "repo/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says the list changed"     out_has "changed while the prompt waited"
+  check "  nothing changed"           nothing_changed
+  check "  lock dropped"              [ ! -e "$(KP)/.deploy.lock" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
+  run_purge_at_prompt "kaichenpedia" "mv '$(KP)/www' '$SANDBOX/www.saved' && ln -s '$HOME/elsewhere' '$(KP)/www'"
+  check "www/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  refuses the link"          out_has "www is a symlink"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ] && no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  link target kept"          [ -f "$HOME/elsewhere/keep" ]
+  teardown
+}
+
 # macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it.
 test_teardown_macos_launch_agent() {
   echo "• teardown (macOS branch): only a loaded agent is booted out; a failed unload stops before --purge deletes anything"
@@ -903,6 +924,7 @@ test_teardown_env_lint
 test_teardown_refuses_compose_overrides
 test_teardown_unresolved_variable
 test_teardown_purge_deploy_lock
+test_teardown_purge_rechecked_after_lock
 test_teardown_macos_launch_agent
 
 if [ "${1:-}" = "--live" ]; then

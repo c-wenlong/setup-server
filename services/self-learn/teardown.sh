@@ -196,27 +196,31 @@ AGENTS="com.self-learn.deploy com.self-learn.export com.self-learn.studio com.se
 # runs out of ~/services/self-learn/seafile). Found by name, or by a file
 # whose contents name this service's directory (a backup job, say). Read-only
 # listing; they are never stopped, disabled or deleted here.
-FOREIGN=""
+# Run again by purge_targets after the --purge prompt.
 if [ "$OS" = "Linux" ]; then
   SCAN_DIR="$UNIT_DIR"; SCAN_NAME='self-learn*'; SCAN_MINE=" $UNIT_FILES "
 else
   SCAN_DIR="$AGENT_DIR"; SCAN_NAME='com.self-learn.*'; SCAN_MINE=" $AGENTS "
 fi
-if [ -d "$SCAN_DIR" ]; then
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    b="$(basename "$f")"
-    [ "$OS" = "Linux" ] || b="${b%.plist}"
-    case "$SCAN_MINE" in *" $b "*) continue ;; esac
-    # shellcheck disable=SC2254  # SCAN_NAME is a glob on purpose
-    case "$(basename "$f")" in
-      $SCAN_NAME) ;;
-      *) grep -qF -e "$HOME/services/$NAME" -e "$SERVICE_HOME" "$f" 2>/dev/null || continue ;;
-    esac
-    FOREIGN="$FOREIGN $b"
-  done < <(find "$SCAN_DIR" -maxdepth 1 ! -type d 2>/dev/null | sort)
-fi
-FOREIGN="${FOREIGN# }"
+scan_foreign() {
+  FOREIGN=""
+  if [ -d "$SCAN_DIR" ]; then
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      b="$(basename "$f")"
+      [ "$OS" = "Linux" ] || b="${b%.plist}"
+      case "$SCAN_MINE" in *" $b "*) continue ;; esac
+      # shellcheck disable=SC2254  # SCAN_NAME is a glob on purpose
+      case "$(basename "$f")" in
+        $SCAN_NAME) ;;
+        *) grep -qF -e "$HOME/services/$NAME" -e "$SERVICE_HOME" "$f" 2>/dev/null || continue ;;
+      esac
+      FOREIGN="$FOREIGN $b"
+    done < <(find "$SCAN_DIR" -maxdepth 1 ! -type d 2>/dev/null | sort)
+  fi
+  FOREIGN="${FOREIGN# }"
+}
+scan_foreign
 
 # Read Serve before changing anything: if it cannot be read, an empty answer
 # would look like "already off" and the mapping would come back with the
@@ -286,7 +290,15 @@ lock_check
 # leaves the service exactly as it was.
 PURGE_DIR=""
 PURGE_PATHS=""
-if [ "$PURGE" -eq 1 ]; then
+# Every path --purge deletes, with every refusal. Run before the prompt (so
+# it shows the list) and again once lock_take holds the deploy lock: the
+# prompt can wait any length of time, and a deploy, a sync.sh install or a
+# hand edit in that window could add, swap or symlink a target, or install
+# the blob link. The second run must match the first or nothing is deleted.
+purge_targets() {
+  PURGE_DIR=""
+  PURGE_PATHS=""
+  scan_foreign
   # sync.sh's blob link keeps its Seafile account password in .env and its
   # daemon state under ~/services/self-learn. Deleting .env under a live
   # link orphans that account, so the link is removed by hand first.
@@ -332,6 +344,9 @@ if [ "$PURGE" -eq 1 ]; then
 "
     done
   fi
+}
+if [ "$PURGE" -eq 1 ]; then
+  purge_targets
   KEEP_HOME="${SELF_LEARN_HOME:-$HOME/.self-learn}"
   warn "--purge deletes the Postgres volume (the whole catalog: courses, concepts, spaced-repetition history, sealed provider keys), the unit files, $ENV_FILE and:"
   if [ -n "$PURGE_PATHS" ]; then printf '%s' "$PURGE_PATHS" | sed 's/^/      /'; else echo "      (no state dirs on disk)"; fi
@@ -345,6 +360,12 @@ if [ "$PURGE" -eq 1 ]; then
   [ "$answer" = "$NAME" ] || die "Confirmation did not match; nothing was changed."
 fi
 lock_take
+if [ "$PURGE" -eq 1 ]; then
+  shown="$PURGE_DIR|$PURGE_PATHS"
+  purge_targets
+  [ "$PURGE_DIR|$PURGE_PATHS" = "$shown" ] \
+    || die "What --purge would delete changed while the prompt waited (a deploy or a hand edit ran). Nothing was deleted; re-run to see the new list."
+fi
 
 # ------------------------------------------------------- tailscale serve
 # Every HTTPS port whose handlers all proxy to this service's local port, and
