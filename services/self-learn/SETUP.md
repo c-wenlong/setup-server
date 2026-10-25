@@ -262,6 +262,17 @@ tailscale serve status
 systemctl --user status self-learn-seafile           # blob-sync daemon
 ```
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
+port that proxies to the app, disables the deploy and export timers, stops
+the studio runner, the app and Postgres (`compose down`), and keeps the
+catalog volume, `~/services/self-learn` and `.env`, so `./setup.sh` brings
+it back running. `./teardown.sh --purge` (type the name) also drops the
+volume (`down -v`), the deploy clone, state, studio and bin dirs, the unit
+files and `.env`. Neither touches `~/.self-learn` (the nightly exports in
+`archive/` survive a purge) or `sync.sh`'s `self-learn-seafile.service`;
+purge refuses while that blob link is installed. See TROUBLESHOOT.md,
+"Nuke and pave".
+
 The catalog CLI works in the checkout (`cd ~/services/self-learn/repo &&
 npm run catalog -- status`) — `services/catalog/.env` there points it at
 this database.

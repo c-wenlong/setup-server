@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # docker stub. State in $STATE_DIR:
 #   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   compose_up / compose_down — touched by `compose ... up` / `compose ... down`
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -16,7 +17,10 @@ case "$1" in
       *)
         # compose --project-directory <dir> up -d  (and ps/logs/etc.)
         for a in "$@"; do
-          [ "$a" = "up" ] && touch "$STATE_DIR/compose_up"
+          case "$a" in
+            up)   touch "$STATE_DIR/compose_up" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
         done
         ;;
     esac

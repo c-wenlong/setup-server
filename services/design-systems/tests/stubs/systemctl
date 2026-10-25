@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
-# systemctl stub: logs and succeeds.
+# systemctl stub: logs every call to $CALLS_LOG (the teardown tests assert
+# which units were disabled/stopped) and succeeds.
 echo "systemctl $*" >> "$CALLS_LOG"
 exit 0

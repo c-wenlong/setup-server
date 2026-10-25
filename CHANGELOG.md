@@ -10,6 +10,20 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for the four systemd-poller services**: kaichenpedia,
+  design-systems, sources and self-learn, so each gets the launcher's
+  Remove button. They stop and disable the units setup.sh writes (timers
+  before their services) and warn about, but never touch, other units
+  that mention the service. On purge, the unit files go too, followed by
+  a daemon-reload. On macOS they `launchctl disable` each agent after
+  bootout, and setup.sh `launchctl enable`s it before bootstrap, so a
+  removed app does not return at the next login. design-systems and sources
+  refuse a relative `SOURCE_REPO` and never delete a clone that holds the
+  checkout. self-learn holds the deploy lock for the whole run, writes a
+  `state/torn-down` marker so the next `./setup.sh` starts it again, and
+  refuses `--purge` while self-learn-seafile.service exists or
+  `SEAFILE_SYNC_USER` is set.
+
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
   gets the launcher's Remove button. The vaultwarden, immich and
