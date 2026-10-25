@@ -126,6 +126,7 @@
 
     if (entry.log) {
       var det = make('details', 'dep-log');
+      det.setAttribute('data-key', entry.key);
       var sum = make('summary');
       text(sum, 'Last deploy output');
       det.appendChild(sum);
@@ -138,7 +139,46 @@
     return wrap;
   }
 
+  /* The tick rebuilds the whole panel from scratch, which would slam shut
+     any log the user opened and drop their scroll position and focus. Take
+     a snapshot before the rebuild and restore it after. */
+  function snapshot() {
+    var open = {};
+    var focusKey = null;
+    var focusSel = null;
+    var dets = mount.querySelectorAll('details.dep-log');
+    for (var i = 0; i < dets.length; i++) {
+      var k = dets[i].getAttribute('data-key');
+      if (!k || !dets[i].open) continue;
+      var pre = dets[i].querySelector('.dep-log-tail');
+      open[k] = pre ? pre.scrollTop : 0;
+      if (document.activeElement && dets[i].contains(document.activeElement)) {
+        focusKey = k;
+        var el = document.activeElement;
+        focusSel = el.tagName === 'PRE' ? '.dep-log-tail'
+               : el.tagName === 'SUMMARY' ? 'summary' : null;
+      }
+    }
+    return { open: open, focusKey: focusKey, focusSel: focusSel };
+  }
+
+  function restore(snap) {
+    var dets = mount.querySelectorAll('details.dep-log');
+    for (var i = 0; i < dets.length; i++) {
+      var k = dets[i].getAttribute('data-key');
+      if (!k || !Object.prototype.hasOwnProperty.call(snap.open, k)) continue;
+      dets[i].open = true;
+      var pre = dets[i].querySelector('.dep-log-tail');
+      if (pre) pre.scrollTop = snap.open[k];
+      if (k === snap.focusKey && snap.focusSel) {
+        var el = dets[i].querySelector(snap.focusSel);
+        if (el) el.focus();
+      }
+    }
+  }
+
   function paint(data) {
+    var snap = snapshot();
     mount.textContent = '';
     if (!data || typeof data !== 'object') return;
 
@@ -197,6 +237,7 @@
     }
     sec.appendChild(list);
     mount.appendChild(sec);
+    restore(snap);
   }
 
   /* ---------- routing ---------- */

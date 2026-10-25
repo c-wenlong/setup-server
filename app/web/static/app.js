@@ -950,6 +950,8 @@
           if (fresh.control !== undefined) detailSvc.control = fresh.control;
           if (fresh.removable !== undefined) detailSvc.removable = fresh.removable;
           if (detailSvc.url == null) detailSvc.url = fresh.url;
+          detailSvc.receipt = fresh.receipt;
+          detailSvc.deployed_at = fresh.deployed_at;
           paintHead(detailSvc);
           /* Resources ride the same poll — cpu_pct is null until the server
              has two samples, so it appears on the second one. */
@@ -1641,9 +1643,14 @@
         window.open(svc.url, '_blank', 'noopener');
       }));
     } else if (state === 'available') {
-      elCtl.appendChild(ctlButton('Install', 'is-primary', function (node) {
-        openSheet(svc, node);
-      }));
+      /* A deploy job can already be running (kicked off from a tile). The
+         CTA then reattaches to its log instead of opening a second
+         confirmation sheet. */
+      elCtl.appendChild(ctlButton(job ? jobLabel(svc) : 'Install',
+        'is-primary', function (node) {
+          if (job) openSheet(svc, node, job, jobAction(svc));
+          else openSheet(svc, node);
+        }));
     }
 
     /* Not on the box: there is nothing to start or stop beyond the Install
