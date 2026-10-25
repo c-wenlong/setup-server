@@ -86,11 +86,40 @@ tailscale serve status
 
 ## Nuke and pave
 
-Keeps Paperclip and host Claude/Codex auth:
+Use `teardown.sh`, not a hand recipe. It unpublishes only the Serve ports
+whose handlers all point at OpenHands' local port (never `serve reset`),
+runs `compose down` on the `openhands` project with the same compose files
+setup.sh uses, and never touches Paperclip, `~/.claude`, `~/.codex` or
+`~/agent-workspaces`.
 
 ```bash
-docker compose --project-directory ~/dev/setup-server/services/openhands down
-rm -rf ~/services/openhands/data
-# then ./setup.sh  — existing .env is reused, including the API key
-tailscale serve --https=8000 off
+cd ~/dev/setup-server/services/openhands
+./teardown.sh                  # safe: data, .env (API key) and ACLs kept
+./setup.sh                     # brings it back as it was
+
+# Wipe settings, stored secrets and conversations too. Back up first
+# (prefix sudo if tar hits files the container user wrote):
+tar -C ~/services/openhands -czf ~/openhands-data-$(date +%F).tgz data
+./teardown.sh --purge          # asks you to type "openhands"
+./setup.sh                     # fresh .env, new API key
 ```
+
+What it will not do on its own:
+
+- Any other container whose name says `openhands` (a container still in the
+  old `paperclip-openhands` project, an `openhands-runtime-*` sandbox) is
+  listed and left running. `--purge` refuses until you remove it by hand.
+- A systemd unit or LaunchAgent that mentions openhands is named, never
+  stopped: setup.sh installs none.
+- The uid 10001 ACLs on `~/agent-workspaces` stay. `--purge` prints the
+  exact `setfacl -x u:10001 ...` lines to run once nothing needs them.
+- `--purge` refuses when `AGENT_WORKSPACES` (symlinks resolved) is inside
+  the data dir or holds it, or when any bind mount source lands inside it.
+  It reads mounts from `docker compose config`; without that, it reads only
+  the short `- SOURCE:TARGET` overlay lines setup.sh writes and refuses on
+  anything else (long-form `type: bind` / `source:` included).
+- `docker-compose.creds.yml` stays (it only lists mount paths). Delete it
+  to stop mounting `~/.claude` / `~/.codex` on the next `./setup.sh`.
+- If the data dir has files the container user owns and the image is no
+  longer on the box, `--purge` stops and names `sudo rm -rf <dir>`; `.env`
+  is kept for the retry.

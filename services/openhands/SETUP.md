@@ -120,6 +120,12 @@ tailscale serve status
 Upgrade: edit `OPENHANDS_VERSION` in `.env` then `./setup.sh`, or
 `docker compose --project-directory . pull && ./setup.sh`.
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes
+`:OPENHANDS_HTTPS_PORT` and runs `compose down`; data, `.env`, the creds
+overlay and `~/agent-workspaces` stay, so `./setup.sh` brings it back.
+`./teardown.sh --purge` also deletes `OPENHANDS_DATA` and `.env`, after you
+type `openhands`. See TROUBLESHOOT.md "Nuke and pave".
+
 ## What this does not do
 
 - It does not install or start Paperclip. That is `../paperclip/setup.sh`.
