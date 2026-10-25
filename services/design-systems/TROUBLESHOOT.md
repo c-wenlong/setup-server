@@ -11,8 +11,9 @@ built — same as `make serve`.
 ## Quick status
 
 ```sh
-systemctl --user list-timers design-systems-deploy.timer   # poller scheduled?
-journalctl --user -u design-systems-deploy -n 30           # last deploy runs
+~/services/deployd/bin/deployd --status                    # what deployd last saw/deployed
+systemctl --user list-timers deployd.timer                 # deployd scheduled?
+journalctl --user -u deployd -n 30                         # last poll + deploy runs
 cat ~/services/design-systems/state/built-sha              # what was last built
 git -C ~/dev/design-systems rev-parse HEAD                 # what the repo is at
 docker inspect -f '{{.State.Status}}' design-systems       # nginx up?
@@ -31,9 +32,12 @@ appearing in `tailscale serve status` proves nothing about the site.
 ## Layer 1 — deploys not happening
 
 **A push landed but the site didn't update.**
-- The poller only runs daily by default — deploy now with
-  `~/services/design-systems/bin/deploy.sh`, or check the last run:
-  `journalctl --user -u design-systems-deploy -n 30`.
+- deployd polls every minute — deploy now with
+  `~/services/design-systems/bin/deploy.sh --force`, or check the last run:
+  `journalctl --user -u deployd -n 30` /
+  `~/services/deployd/bin/deployd --status`. A `.fail` entry in
+  `~/services/deployd/state/` means the last attempt failed and deployd is
+  backing off before retrying.
 - `up to date at <sha>` with an old sha → `built-sha` equals
   `git -C ~/dev/design-systems rev-parse HEAD`, meaning the repo itself is
   behind: the push went to another branch, or was never pulled. `.env`
@@ -43,8 +47,8 @@ appearing in `tailscale serve status` proves nothing about the site.
   or offline. The build still runs on the local working tree, so this is a
   warning, not a failure — but an unexpected dirty tree means your edits
   (or a half-finished worktree cleanup) are being served.
-- No log entries at all → timer not running:
-  `systemctl --user enable --now design-systems-deploy.timer`; if the box
+- No log entries at all → deployd not running:
+  `systemctl --user enable --now deployd.timer`; if the box
   just rebooted and nothing user-level runs, re-check lingering:
   `loginctl show-user $USER -p Linger` → fix with
   `sudo loginctl enable-linger $USER`.
@@ -158,15 +162,16 @@ ls releases/                       # pick the directory to go back to
 ln -sfn releases/<name> current.new && mv -Tf current.new current
 ```
 
-(Any later successful deploy moves `current` again — pin by stopping the
-timer first: `systemctl --user stop design-systems-deploy.timer`. The
+(Any later successful deploy moves `current` again — pin by stopping
+deployd first: `systemctl --user stop deployd.timer`. The
 repo-path aliases keep serving the live checkout either way.)
 
 ## Nuke and pave
 
 `teardown.sh --purge` does it, asking you to type `design-systems` first.
 It unpublishes every Serve port that points only at `127.0.0.1:8108`,
-disables the poller timer and stops its service, runs `compose down` (same
+removes the legacy `design-systems-deploy` timer/service if one still
+exists, runs `compose down` (same
 files `up` used, so a local `docker-compose.override.yml` still applies),
 then deletes `bin/`, `state/`, `www/`, `media/` and `nginx.conf` from
 `~/services/design-systems`, the two poller unit files, and `.env`.
@@ -183,7 +188,7 @@ cd ~/dev/setup-server/services/design-systems
 ./teardown.sh --purge
 ./setup.sh
 ```
-Without `--purge`, `./teardown.sh` only unpublishes, stops the poller and
+Without `--purge`, `./teardown.sh` only unpublishes, stops any legacy poller and
 the container, and keeps everything else, so `./setup.sh` brings it back as
 it was. The source of truth is the git repo at `~/dev/design-systems` (and
 GitHub), which this never writes to beyond the repo's own gitignored build

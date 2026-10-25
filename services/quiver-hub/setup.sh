@@ -21,6 +21,8 @@
 #   ./setup.sh                          # local 8477, HTTPS 8477, quiver main
 #   LOCAL_PORT=8478 HTTPS_PORT=8478 ./setup.sh   # first run only; .env wins after
 #   QUIVER_REF=<sha|tag|branch> ./setup.sh       # install that ref this run
+#   QUIVER_TRACK=<branch|tag> ./setup.sh         # ...while .env keeps tracking
+#                                               # this ref (deployd's pin runs)
 #   ./pair.sh [device-name]             # pair a phone or a satellite (after deploy)
 #
 # Requirements: Linux (systemd) or macOS, curl, git, uv, Tailscale logged in.
@@ -40,6 +42,12 @@ HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 QUIVER_REF_EXPLICIT="${QUIVER_REF:-}"
 QUIVER_REF="${QUIVER_REF:-main}"
+# What .env records as the ref to follow on plain re-runs. Deploy tooling
+# (deployd) runs QUIVER_REF=$DEPLOY_SHA to install an exact commit while
+# QUIVER_TRACK=$DEPLOY_REF keeps .env on the branch — otherwise a first
+# run through deployd would pin .env to that SHA, and a later plain re-run
+# would read it back and downgrade the hub.
+QUIVER_TRACK="${QUIVER_TRACK:-$QUIVER_REF}"
 QUIVER_REPO="${QUIVER_REPO:-https://github.com/c-wenlong/quiver.git}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -57,6 +65,11 @@ info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+
+# A manual ./setup.sh re-installs the service: clear deployd's disabled
+# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
+# never invokes this while the flag is set, so clearing is always manual.
+rm -f "$HOME/services/deployd/state/quiver-hub.disabled"
 
 # Captured, then grepped: `cmd | grep -q` under pipefail fails spuriously when
 # grep exits on its first match and the writer takes SIGPIPE.
@@ -112,7 +125,9 @@ HTTPS_PORT=$HTTPS_PORT
 
 # Which commit of c-wenlong/quiver the hub runs: a branch, tag or full SHA.
 # A branch means "move to its current tip on every setup.sh run"; a SHA pins.
-QUIVER_REF=$QUIVER_REF
+# (Written from QUIVER_TRACK, which defaults to QUIVER_REF — deploy tooling
+# can pin this run's SHA while the file keeps following the branch.)
+QUIVER_REF=$QUIVER_TRACK
 EOF
   ok "Wrote $ENV_FILE"
 fi

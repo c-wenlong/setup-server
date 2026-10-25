@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+#
+# deployd — one poll cycle over every services/*/app.json "deploy" block in
+# the setup-server checkout: refresh the checkout, resolve each watched git
+# ref, and run that service's deploy command when the remote moved.
+#
+# This is the tailnet-only answer to GitHub webhooks: nothing can reach this
+# box inbound, so a poller pulls refs outbound instead. One oneshot per tick
+# (systemd user timer / launchd on a POLL_SECONDS cadence), never a resident
+# daemon — config changes land by re-reading .env and the checkout each run.
+#
+# Where things live:
+#   config   $SETUP_REPO/services/deployd/.env   (SETUP_REPO, RETRY_SECONDS,
+#                                                DEPLOY_TIMEOUT, PATH_PREFIX;
+#                                                POLL_SECONDS is read by
+#                                                setup.sh when it writes the
+#                                                timer, not here)
+#   state    $SERVICE_HOME/state/<key>.sha       last deployed remote sha
+#            $SERVICE_HOME/state/<key>.fail      {"sha":..,"at":..} backoff
+#            $SERVICE_HOME/state/<key>.log       tail of the last cmd output
+#   lock     $SERVICE_HOME/.poll.lock            mkdir lock, stale at 60 min
+#
+# Trust model: a "deploy" block runs its `cmd` as this user, so it carries
+# exactly the trust of pushing to the setup-server repo — the same trust as
+# editing a service's setup.sh and running it.
+#
+# Usage:
+#   deployd                  # one poll cycle (what the timer runs)
+#   deployd --force <key>    # run one service's deploy cmd now, state or not
+#   deployd --status         # table of entries, recorded shas, failures
+#
+# Exit status: 0 on a clean tick (locked-out counts as clean), 1 if any
+# deploy or lookup failed, so `systemctl --user status deployd` shows it.
+
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import time
+
+ENV_BAKED = "__ENV_FILE__"  # setup.sh rewrites this to the absolute .env path
+LOCK_STALE_SECONDS = 3600
+RETRY_SECONDS = 900         # re-try a failed deploy of the same sha
+DEPLOY_TIMEOUT = 1800       # a single deploy cmd may run this long
+GIT_TIMEOUT = 60
+
+
+def log(msg):
+    print("deployd: %s" % msg, flush=True)
+
+
+def warn(msg):
+    print("deployd: warning: %s" % msg, file=sys.stderr, flush=True)
+
+
+def env_path():
+    override = os.environ.get("DEPLOYD_ENV")
+    if override:
+        return override
+    if "/" in ENV_BAKED:
+        return ENV_BAKED
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def load_env(path):
+    """Read KEY=value lines. setup.sh writes values %q-escaped (the repo's
+    shell convention); shlex splits those back to the real value."""
+    out = {}
+    if not os.path.isfile(path):
+        return out
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        try:
+            parts = shlex.split(raw)
+            out[key.strip()] = parts[0] if parts else ""
+        except ValueError:
+            out[key.strip()] = raw
+    return out
+
+
+def run(argv, cwd=None, env=None, timeout=GIT_TIMEOUT, group_kill=False):
+    """Run argv, return (rc, combined output). Never raises on nonzero.
+    group_kill puts the child in its own process group so a timeout can
+    killpg() the whole tree — a service setup.sh spawns uv/git/docker
+    grandchildren that a plain p.kill() would orphan mid-write."""
+    merged = dict(os.environ)
+    if env:
+        merged.update(env)
+    try:
+        p = subprocess.Popen(argv, cwd=cwd, env=merged,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             universal_newlines=True,
+                             start_new_session=group_kill)
+    except OSError as e:
+        return 127, str(e)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return p.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        if group_kill:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        else:
+            p.kill()
+        try:
+            out, _ = p.communicate()
+        except Exception:
+            out = ""
+        suffix = "timed out after %ss" % timeout
+        return 124, (out + "\n" + suffix) if out else suffix
+
+
+def git(repo_dir, *args):
+    return run(["git", "-C", repo_dir] + list(args))
+
+
+def resolve_ref(repo_url, ref):
+    """Remote sha for a branch or tag name, or None on lookup failure.
+    A 40-hex ref is already a sha and needs no lookup."""
+    if len(ref) == 40 and all(c in "0123456789abcdef" for c in ref.lower()):
+        return ref
+    patterns = [ref] if ref.startswith("refs/") else [
+        "refs/heads/%s" % ref, "refs/tags/%s^{}" % ref, "refs/tags/%s" % ref]
+    rc, out = run(["git", "ls-remote", repo_url] + patterns,
+                  env={"GIT_TERMINAL_PROMPT": "0"})
+    if rc != 0:
+        warn("ls-remote %s failed: %s" % (repo_url, out.strip().splitlines()[-1]
+                                          if out.strip() else "rc=%s" % rc))
+        return None
+    found = {}
+    for line in out.splitlines():
+        sha, _, name = line.strip().partition("\t")
+        if name:
+            found[name] = sha
+    for pattern in patterns:
+        if pattern in found:
+            return found[pattern]
+    warn("no ref %r at %s" % (ref, repo_url))
+    return None
+
+
+def scan_entries(setup_repo):
+    """Every services/*/app.json 'deploy' block -> {key, repo, ref, cmd}.
+    A block needs repo and cmd; ref defaults to main. Anything malformed
+    warns and is skipped so one bad manifest cannot break the cycle."""
+    entries = []
+    svc_root = os.path.join(setup_repo, "services")
+    try:
+        names = sorted(os.listdir(svc_root))
+    except OSError:
+        warn("no services dir at %s" % svc_root)
+        return entries
+    for name in names:
+        manifest = os.path.join(svc_root, name, "app.json")
+        if not os.path.isfile(manifest):
+            continue
+        try:
+            data = json.load(open(manifest))
+        except (OSError, ValueError) as e:
+            warn("cannot parse %s: %s" % (manifest, e))
+            continue
+        deploy = data.get("deploy") if isinstance(data, dict) else None
+        if deploy is None:
+            continue
+        if not isinstance(deploy, dict):
+            warn("%s: deploy must be an object" % manifest)
+            continue
+        if deploy.get("enabled") is False:
+            continue
+        repo, cmd = deploy.get("repo"), deploy.get("cmd")
+        if not isinstance(repo, str) or not isinstance(cmd, str) \
+                or not repo or not cmd:
+            warn("%s: deploy needs string \"repo\" and \"cmd\"" % manifest)
+            continue
+        ref = deploy.get("ref") or "main"
+        key = data.get("key")
+        if not isinstance(ref, str):
+            warn("%s: deploy \"ref\" must be a string" % manifest)
+            continue
+        entries.append({
+            "key": key if isinstance(key, str) and key else name,
+            "repo": repo,
+            "ref": ref,
+            "cmd": cmd,
+        })
+    return entries
+
+
+def state_paths(state_dir, key):
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in key)
+    return (os.path.join(state_dir, safe + ".sha"),
+            os.path.join(state_dir, safe + ".fail"),
+            os.path.join(state_dir, safe + ".log"))
+
+
+def disabled_path(state_dir, key):
+    """teardown.sh drops state/<key>.disabled so a removed service stays
+    removed; a manual services/<name>/setup.sh clears it to opt back in."""
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in key)
+    return os.path.join(state_dir, safe + ".disabled")
+
+
+def read_sha(path):
+    try:
+        return open(path).read().strip() or None
+    except OSError:
+        return None
+
+
+def backoff_seconds_left(fail_file, sha, retry_seconds):
+    """Seconds until a retry of this sha is allowed, or 0."""
+    try:
+        rec = json.load(open(fail_file))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(rec, dict) or rec.get("sha") != sha:
+        return 0
+    left = retry_seconds - (time.time() - rec.get("at", 0))
+    return max(0, int(left))
+
+
+def record_fail(fail_file, sha, rc):
+    try:
+        with open(fail_file, "w") as fh:
+            json.dump({"sha": sha, "at": time.time(), "rc": rc}, fh)
+    except OSError as e:
+        warn("cannot write %s: %s" % (fail_file, e))
+
+
+def deploy(entry, sha, setup_repo, state_dir, timeout):
+    """Run one entry's cmd. Returns (ok, rc). Output tail -> state/<key>.log."""
+    sha_file, fail_file, log_file = state_paths(state_dir, entry["key"])
+    env = {
+        "DEPLOY_NAME": entry["key"],
+        "DEPLOY_REPO": entry["repo"],
+        "DEPLOY_REF": entry["ref"],
+        "DEPLOY_SHA": sha,
+    }
+    log("%s: %s -> %s" % (entry["key"], entry["ref"], sha[:12]))
+    rc, out = run(["bash", "-c", entry["cmd"]], cwd=setup_repo, env=env,
+                  timeout=timeout, group_kill=True)
+    if out:
+        # the deploy cmd's own output is the useful part of the service log
+        sys.stdout.write(out if out.endswith("\n") else out + "\n")
+    tail = "\n".join(out.splitlines()[-80:])
+    try:
+        with open(log_file, "w") as fh:
+            fh.write(out if len(out) < 200000 else out[-200000:])
+    except OSError as e:
+        warn("cannot write %s: %s" % (log_file, e))
+    if rc == 0:
+        if sha != "forced":  # a --force run while the remote was unreachable
+            try:
+                with open(sha_file, "w") as fh:
+                    fh.write(sha + "\n")
+            except OSError as e:
+                warn("cannot write %s: %s" % (sha_file, e))
+        try:
+            os.remove(fail_file)
+        except OSError:
+            pass
+        log("%s: deployed %s" % (entry["key"], sha[:12]))
+        return True, 0
+    warn("%s: deploy failed (rc=%s); tail:\n%s" % (entry["key"], rc, tail))
+    record_fail(fail_file, sha, rc)
+    return False, rc
+
+
+def refresh_checkout(setup_repo, state_dir):
+    """ff-only pull of the setup-server checkout; config lives in it, so a
+    stale checkout means stale config. Self-update: if the pull touched
+    services/deployd/, re-run its setup.sh so the installed bin and units
+    pick up the change (we keep running this copy for the rest of the tick).
+    A pending marker makes a failed self-update retry next tick — the
+    checkout has already moved by then, so sha comparison alone would never
+    run setup.sh again. Pull failures warn; pending retries still run."""
+    pending = os.path.join(state_dir, "self-update.pending")
+    rc, old = git(setup_repo, "rev-parse", "HEAD")
+    if rc != 0:
+        warn("%s is not a git checkout — scanning it as-is" % setup_repo)
+        return
+    old = old.strip()
+    rc, out = git(setup_repo, "pull", "--ff-only", "--quiet")
+    if rc == 0:
+        rc, new = git(setup_repo, "rev-parse", "HEAD")
+        new = new.strip() if rc == 0 else old
+        if new != old:
+            log("checkout moved %s -> %s" % (old[:8], new[:8]))
+            rc, diff = git(setup_repo, "diff", "--name-only", old, new)
+            if rc == 0 and any(p.startswith("services/deployd/")
+                               for p in diff.splitlines()):
+                try:
+                    with open(pending, "w") as fh:
+                        fh.write(new + "\n")
+                except OSError as e:
+                    warn("cannot write %s: %s" % (pending, e))
+    else:
+        warn("setup-server pull did not apply (dirty tree, offline, or "
+             "diverged): %s" % out.strip().splitlines()[-1]
+             if out.strip() else "setup-server pull did not apply")
+    if os.path.exists(pending):
+        setup = os.path.join(setup_repo, "services", "deployd", "setup.sh")
+        log("applying deployd self-update")
+        rc, out = run(["bash", setup], cwd=setup_repo, timeout=DEPLOY_TIMEOUT,
+                      group_kill=True, env={"DEPLOYD_SELF_UPDATE": "1"})
+        if rc == 0:
+            try:
+                os.remove(pending)
+            except OSError:
+                pass
+        else:
+            warn("deployd self-update failed (rc=%s); retrying next tick:\n%s"
+                 % (rc, "\n".join(out.splitlines()[-40:])))
+
+
+def acquire_lock(service_home):
+    """mkdir the poll lock, reclaiming it when stale. Lock path or None."""
+    lock = os.path.join(service_home, ".poll.lock")
+    if os.path.isdir(lock):
+        try:
+            stale = time.time() - os.path.getmtime(lock) > LOCK_STALE_SECONDS
+        except OSError:
+            stale = False
+        if stale:
+            log("removing a stale poll lock (>60 min old)")
+            try:
+                os.rmdir(lock)
+            except OSError:
+                pass
+    try:
+        os.mkdir(lock)
+        return lock
+    except OSError:
+        return None
+
+
+def tick(env):
+    setup_repo = env.get("SETUP_REPO")
+    if not setup_repo:
+        warn("SETUP_REPO is not set in %s" % env_path())
+        return 1
+    service_home = env.get("SERVICE_HOME") or os.path.expanduser(
+        "~/services/deployd")
+    state_dir = os.path.join(service_home, "state")
+    retry = int(env.get("RETRY_SECONDS") or RETRY_SECONDS)
+    timeout = int(env.get("DEPLOY_TIMEOUT") or DEPLOY_TIMEOUT)
+    if env.get("PATH_PREFIX"):
+        os.environ["PATH"] = env["PATH_PREFIX"] + ":" + os.environ["PATH"]
+    os.environ.setdefault("GIT_TERMINAL_PROMPT", "0")
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+    except OSError as e:
+        warn("cannot create %s: %s" % (state_dir, e))
+        return 1
+
+    lock = acquire_lock(service_home)
+    if not lock:
+        log("another poll is running — skipping this tick")
+        return 0
+    try:
+        refresh_checkout(setup_repo, state_dir)
+        entries = scan_entries(setup_repo)
+        if not entries:
+            log("no deploy entries in %s/services/*/app.json" % setup_repo)
+        failures = 0
+        for entry in entries:
+            if os.path.exists(disabled_path(state_dir, entry["key"])):
+                log("%s: disabled (state/%s.disabled) — skipping"
+                    % (entry["key"], entry["key"]))
+                continue
+            sha = resolve_ref(entry["repo"], entry["ref"])
+            if not sha:
+                failures += 1
+                continue
+            sha_file, fail_file, _ = state_paths(state_dir, entry["key"])
+            if read_sha(sha_file) == sha:
+                continue
+            left = backoff_seconds_left(fail_file, sha, retry)
+            if left:
+                log("%s: deploy of %s failed recently — retrying in %ss"
+                    % (entry["key"], sha[:12], left))
+                continue
+            ok, _ = deploy(entry, sha, setup_repo, state_dir, timeout)
+            if not ok:
+                failures += 1
+        if failures:
+            warn("%s entr%s failed this tick"
+                 % (failures, "y" if failures == 1 else "ies"))
+        return 1 if failures else 0
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
+def force(key, env):
+    setup_repo = env.get("SETUP_REPO")
+    if not setup_repo:
+        warn("SETUP_REPO is not set in %s" % env_path())
+        return 1
+    service_home = env.get("SERVICE_HOME") or os.path.expanduser(
+        "~/services/deployd")
+    state_dir = os.path.join(service_home, "state")
+    if env.get("PATH_PREFIX"):
+        os.environ["PATH"] = env["PATH_PREFIX"] + ":" + os.environ["PATH"]
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+    except OSError as e:
+        warn("cannot create %s: %s" % (state_dir, e))
+        return 1
+    # same lock as a tick: --force may jump the sha/backoff, but never runs
+    # two deploys of the same service at once
+    lock = acquire_lock(service_home)
+    if not lock:
+        warn("a poll is running — retry --force when it finishes")
+        return 1
+    try:
+        for entry in scan_entries(setup_repo):
+            if entry["key"] == key:
+                if os.path.exists(disabled_path(state_dir, key)):
+                    warn("%s: disabled (state/%s.disabled) — run its "
+                         "setup.sh to re-enable, or remove the flag"
+                         % (key, key))
+                    return 1
+                sha = resolve_ref(entry["repo"], entry["ref"]) or "forced"
+                ok, rc = deploy(entry, sha, setup_repo, state_dir,
+                                int(env.get("DEPLOY_TIMEOUT") or DEPLOY_TIMEOUT))
+                return 0 if ok else rc or 1
+        warn("no deploy entry named %r" % key)
+        return 1
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
+def status(env):
+    setup_repo = env.get("SETUP_REPO")
+    if not setup_repo:
+        warn("SETUP_REPO is not set in %s" % env_path())
+        return 1
+    service_home = env.get("SERVICE_HOME") or os.path.expanduser(
+        "~/services/deployd")
+    state_dir = os.path.join(service_home, "state")
+    entries = scan_entries(setup_repo)
+    if not entries:
+        print("no deploy entries in %s/services/*/app.json" % setup_repo)
+        return 0
+    print("%-18s %-8s %-12s %s" % ("SERVICE", "REF", "DEPLOYED", "STATE"))
+    for e in entries:
+        sha_file, fail_file, _ = state_paths(state_dir, e["key"])
+        seen = read_sha(sha_file)
+        notes = []
+        if os.path.exists(disabled_path(state_dir, e["key"])):
+            notes.append("disabled")
+        try:
+            rec = json.load(open(fail_file))
+            notes.append("last attempt failed (rc=%s) %ss ago" % (
+                rec.get("rc"), int(time.time() - rec.get("at", 0))))
+        except (OSError, ValueError):
+            pass
+        note = "; ".join(notes)
+        print("%-18s %-8s %-12s %s"
+              % (e["key"], e["ref"], (seen or "never")[:12], note))
+    return 0
+
+
+def main(argv):
+    env = load_env(env_path())
+    args = argv[1:]
+    if args == ["--status"]:
+        return status(env)
+    if len(args) == 2 and args[0] == "--force":
+        return force(args[1], env)
+    if not args:
+        if not env:
+            warn("no config at %s (run services/deployd/setup.sh)"
+                 % env_path())
+            return 1
+        return tick(env)
+    print("usage: deployd [--status | --force <key>]", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

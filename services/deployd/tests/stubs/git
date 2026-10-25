@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# git stub — two roles.
+#
+# 1) `git ls-remote <url> <ref patterns...>`: answers from
+#    $STATE_DIR/remote_<sanitized-url>, which holds raw ls-remote lines
+#    ("<sha>\t<refname>") — write one per ref you want the remote to have.
+#    The URL is sanitized with tr (https://a.invalid/r.git -> a file named
+#    remote_https___a_invalid_r_git). No file => no refs match (empty
+#    output, still rc 0), like asking a real repo for a ref it lacks.
+#    $STATE_DIR/git_fails existing => exit 128 (remote unreachable).
+#
+# 2) `git -C <dir> ...` on the setup-server checkout:
+#    rev-parse HEAD          -> $STATE_DIR/head (default aaa...)
+#    pull --ff-only --quiet  -> replaces head with $STATE_DIR/head_next when
+#                             that file exists (a new upstream commit);
+#                             fails while $STATE_DIR/pull_fails exists
+#    diff --name-only a b    -> prints $STATE_DIR/pull_diff
+#
+# Every call is logged to $CALLS_LOG.
+echo "git $*" >> "$CALLS_LOG"
+
+if [ "${1:-}" = "ls-remote" ]; then
+  [ -f "$STATE_DIR/git_fails" ] && { echo "fatal: unable to access" >&2; exit 128; }
+  url="$2"; shift 2
+  san="$(printf '%s' "$url" | tr -c 'a-zA-Z0-9' '_')"
+  table="$STATE_DIR/remote_$san"
+  [ -f "$table" ] || exit 0
+  for pat in "$@"; do
+    while IFS=$'\t' read -r sha ref; do
+      [ "$ref" = "$pat" ] && printf '%s\t%s\n' "$sha" "$ref"
+    done < "$table"
+  done
+  exit 0
+fi
+
+if [ "${1:-}" = "-C" ]; then
+  shift 2
+  case "${1:-}" in
+    rev-parse)
+      if [ "${2:-}" = "HEAD" ]; then
+        cat "$STATE_DIR/head" 2>/dev/null || echo "aaa1111111111111111111111111111111111111"
+      fi
+      ;;
+    pull)
+      if [ -f "$STATE_DIR/pull_fails" ]; then
+        echo "error: cannot pull with rebase: you have unstaged changes" >&2
+        exit 1
+      fi
+      [ -f "$STATE_DIR/head_next" ] && mv "$STATE_DIR/head_next" "$STATE_DIR/head"
+      ;;
+    diff)
+      cat "$STATE_DIR/pull_diff" 2>/dev/null || true
+      ;;
+  esac
+fi
+exit 0

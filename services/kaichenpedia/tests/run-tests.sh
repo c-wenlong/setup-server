@@ -59,6 +59,7 @@ out_lacks()  { ! grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
+env_lacks()  { ! grep -q "$1" "$SVC/.env"; }
 
 # ----------------------------------------------------------------- tests
 test_preflight_docker_perms() {
@@ -109,7 +110,7 @@ test_fresh_deploy() {
   run_deploy
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env has repo URL"           env_has "REPO_URL=https://github.com/c-wenlong/kaichenpedia.git"
-  check ".env has poll interval"      env_has "POLL_SECONDS=86400"
+  check ".env drops poll interval"                   env_lacks "POLL_SECONDS=86400"
   check ".env has public URL"         env_has "PUBLIC_URL=https://test-host.tailfake.ts.net:8091/"
   check "deploy script installed"     [ -x "$HOME/services/kaichenpedia/bin/deploy.sh" ]
   check "env path baked into script"  grep -q "$SVC/.env" "$HOME/services/kaichenpedia/bin/deploy.sh"
@@ -121,16 +122,113 @@ test_fresh_deploy() {
   check "recorded built sha"          grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
   check "compose up invoked"          [ -f "$STATE_DIR/compose_up" ]
   if [ "$OS" = "Linux" ]; then
-    check "timer unit written"        [ -f "$HOME/.config/systemd/user/kaichenpedia-deploy.timer" ]
-    check "timer enabled"             calls_have "systemctl --user enable --now kaichenpedia-deploy.timer"
-    check "lingering enabled"         calls_have "loginctl enable-linger"
+    check "no timer written"          [ ! -f "$HOME/.config/systemd/user/kaichenpedia-deploy.timer" ]
+    check "no lingering touched"      no_call "loginctl enable-linger"
   else
-    check "launch agent written"      [ -f "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist" ]
-    check "label enabled (undoes teardown's disable)" calls_have "launchctl enable gui/.*/com.kaichenpedia.deploy"
-    check "enabled before bootstrap"  [ "$(call_line "launchctl enable")" -lt "$(call_line "launchctl bootstrap")" ]
+    check "no launch agent written"   [ ! -f "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist" ]
   fi
   check "served on tailscale :8091"   calls_have "tailscale serve --bg --https=8091 http://127.0.0.1:8091"
   check "prints final URL"            out_has "https://test-host.tailfake.ts.net:8091"
+  teardown
+}
+
+fake_deployd() {
+  mkdir -p "$HOME/services/deployd/bin" "$HOME/services/deployd/state"
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/services/deployd/bin/deployd"
+  chmod +x "$HOME/services/deployd/bin/deployd"
+}
+
+seed_legacy_poller() {
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    echo x > "$HOME/.config/systemd/user/kaichenpedia-deploy.timer"
+    echo x > "$HOME/.config/systemd/user/kaichenpedia-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist"
+  fi
+}
+
+test_legacy_poller_removed() {
+  echo "• migration: a leftover per-service deploy timer/plist is removed once deployd is installed"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  seed_legacy_poller
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "timer disabled"     calls_have "disable --now kaichenpedia-deploy.timer"
+    check "timer unit gone"    [ ! -f "$HOME/.config/systemd/user/kaichenpedia-deploy.timer" ]
+    check "service unit gone"  [ ! -f "$HOME/.config/systemd/user/kaichenpedia-deploy.service" ]
+  else
+    check "agent booted out"   calls_have "launchctl bootout gui/.*/com.kaichenpedia.deploy"
+    check "plist gone"         [ ! -f "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist" ]
+  fi
+  teardown
+}
+
+test_legacy_poller_kept_without_deployd() {
+  echo "• migration: without deployd the old poller is kept, with a warning"
+  setup
+  touch "$STATE_DIR/operator"
+  seed_legacy_poller
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  check "warns about deployd"  out_has "deployd is not installed"
+  if [ "$OS" = "Linux" ]; then
+    check "timer unit kept"    [ -f "$HOME/.config/systemd/user/kaichenpedia-deploy.timer" ]
+    check "never disabled"     no_call "disable --now kaichenpedia-deploy.timer"
+  else
+    check "plist kept"         [ -f "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist" ]
+    check "never booted out"   no_call "launchctl bootout gui/.*/com.kaichenpedia.deploy"
+  fi
+  teardown
+}
+
+test_deployd_disabled_flag() {
+  echo "• teardown marks deployd disabled; a manual setup clears the flag"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  run_deploy
+  run_teardown
+  check "teardown exits zero"     [ "$CODE" -eq 0 ]
+  check "disabled flag written"   [ -f "$HOME/services/deployd/state/kaichenpedia.disabled" ]
+  run_deploy
+  check "re-setup exits zero"     [ "$CODE" -eq 0 ]
+  check "disabled flag cleared"   [ ! -f "$HOME/services/deployd/state/kaichenpedia.disabled" ]
+  teardown
+}
+
+test_deploy_sha_mismatch() {
+  echo "• deployd-requested sha: verified against the fetched ref"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  DEPLOY_SHA=aaa1111 run_poll
+  check "matching sha deploys"    [ "$CODE" -eq 0 ]
+  DEPLOY_SHA=zzz9999 run_poll
+  check "mismatch exits non-zero" [ "$CODE" -ne 0 ]
+  check "says why"                out_has "deployd asked for zzz9999"
+  teardown
+}
+
+test_path_restored_from_env() {
+  echo "• re-run under a minimal PATH finds node via the dir saved in .env"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "first run ok"            [ "$CODE" -eq 0 ]
+  nonode="$STATE_DIR/no-node-stubs"; mkdir -p "$nonode"
+  for s in "$STUBS"/*; do [ "${s##*/}" = node ] || ln -s "$s" "$nonode/${s##*/}"; done
+  nodebin="$STATE_DIR/saved-node-bin"; mkdir -p "$nodebin"
+  printf '#!/bin/sh\nexec "%s/node" "$@"\n' "$STUBS" > "$nodebin/node"; chmod +x "$nodebin/node"
+  grep -v '^NODE_BIN=' "$SVC/.env" > "$SVC/.env.tmp" && mv "$SVC/.env.tmp" "$SVC/.env"
+  printf "NODE_BIN='%s'\n" "$nodebin" >> "$SVC/.env"
+  OUT="$(printf '\n' | PATH="$nonode:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  check "exits zero without stub node" [ "$CODE" -eq 0 ]
+  check "found node via .env"          out_has "Preflight checks"
   teardown
 }
 
@@ -178,7 +276,7 @@ test_poll_lock() {
   mkdir "$HOME/services/kaichenpedia/.deploy.lock"
   : > "$CALLS_LOG"
   run_poll
-  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "exits non-zero"      [ "$CODE" -ne 0 ]
   check "reports the skip"    out_has "another deploy is running"
   check "touched no git"      no_call "git fetch"
   rmdir "$HOME/services/kaichenpedia/.deploy.lock"
@@ -239,10 +337,14 @@ test_live() {
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches origin" sh -c "[ \"\$(git -C '$svc_home/repo' rev-parse origin/main)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   if [ "$OS" = "Linux" ]; then
-    live_check "deploy timer active"    sh -c "systemctl --user is-active kaichenpedia-deploy.timer | grep -qx active"
-    live_check "lingering enabled"      sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
+    live_check "no legacy timer"        sh -c "! systemctl --user is-active kaichenpedia-deploy.timer 2>/dev/null | grep -qx active"
+    live_check "deployd timer active"   sh -c "systemctl --user is-active deployd.timer 2>/dev/null | grep -qx active"
+    live_check "lingering enabled"      sh -c "loginctl show-user \"\$USER\" -p Linger 2>/dev/null | grep -qx 'Linger=yes'"
+    live_check "deployd watches it"     sh -c "$HOME/services/deployd/bin/deployd --status | grep -q kaichenpedia"
   else
-    live_check "launch agent loaded"    sh -c "launchctl print gui/$(id -u)/com.kaichenpedia.deploy"
+    live_check "no legacy agent"        sh -c "! launchctl print gui/$(id -u)/com.kaichenpedia.deploy >/dev/null 2>&1"
+    live_check "deployd agent loaded"   sh -c "launchctl print gui/$(id -u)/com.setup-server.deployd >/dev/null 2>&1"
+    live_check "deployd watches it"     sh -c "$HOME/services/deployd/bin/deployd --status | grep -q kaichenpedia"
   fi
   live_check "serve maps :$port"        sh -c "'$ts' serve status | grep -A2 ':$port' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS responds"   curl -fsS -o /dev/null --max-time 30 "$url/"
@@ -266,6 +368,16 @@ deployed() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
+  if [ "$OS" = "Linux" ]; then
+    # Pre-migration installs ran the per-service poller; setup.sh removes it
+    # on its next run, but a box that has not re-run setup yet still has it.
+    mkdir -p "$(UDIR)"
+    printf '[Timer]\n' > "$(UDIR)/kaichenpedia-deploy.timer"
+    printf '[Service]\n' > "$(UDIR)/kaichenpedia-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist"
+  fi
   echo "my edit" >> "$(KP)/nginx.conf"
   cat > "$STATE_DIR/serve_status" <<EOF
 https://test-host.tailfake.ts.net:2283 (tailnet only)
@@ -502,7 +614,11 @@ test_teardown_purge() {
   [ "$OS" = "Linux" ] && check "daemon-reload after removing units" calls_have "systemctl --user daemon-reload"
   check "marker dir gone"             [ ! -e "$(KP)" ]
   check "services dir itself kept"    [ -d "$HOME/services" ]
-  check "timers.target.wants untouched" [ -d "$(UDIR)" ]
+  if [ "$OS" = "Linux" ]; then
+    check "timers.target.wants untouched" [ -d "$(UDIR)" ]
+  else
+    check "LaunchAgents dir kept"       [ -d "$HOME/Library/LaunchAgents" ]
+  fi
   teardown
 }
 
@@ -513,7 +629,7 @@ test_teardown_purge_rm_fails() {
   run_teardown --purge "kaichenpedia"
   chmod 755 "$(KP)/www/locked" 2>/dev/null
   check "exits non-zero"              [ "$CODE" -ne 0 ]
-  check "names sudo rm -rf and the path" out_has "sudo rm -rf $(KP)/www"
+  check "names sudo rm -rf and the path" out_has "sudo rm -rf .*/kaichenpedia/www"
   check ".env kept"                   [ -f "$SVC/.env" ]
   check "unit files kept"             units_there
   teardown
@@ -895,6 +1011,11 @@ test_preflight_tailscale_down
 test_preflight_old_node
 test_preflight_git_auth
 test_fresh_deploy
+test_legacy_poller_removed
+test_legacy_poller_kept_without_deployd
+test_deployd_disabled_flag
+test_deploy_sha_mismatch
+test_path_restored_from_env
 test_idempotent_rerun
 test_push_triggers_redeploy
 test_poll_lock
