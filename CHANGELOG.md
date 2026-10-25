@@ -10,6 +10,16 @@ first, dated by merge.
 
 ### Fixed
 
+- **A launcher Start after Remove no longer fools the next `self-learn`
+  setup.sh into restarting the app.** A plain teardown writes
+  `state/torn-down` so the next setup brings the stack back, but starting
+  and then stopping the app in between (launcher, phone or `systemctl`)
+  left the marker behind: the stop then read as the removal's, not the
+  owner's, and setup wrongly started it again. The generated unit's
+  `ExecStartPre` and the LaunchAgent's `sh -c` wrapper now delete the
+  marker before the app comes up, so any start consumes it and a later
+  stop stays stopped across a re-run.
+
 - **Stopping AdGuard from the launcher or the phone now checks tailnet DNS
   first.** Stop used to run a plain `docker stop`, skipping the check that
   `teardown.sh` makes, so one tap could cut DNS for every device. A service's

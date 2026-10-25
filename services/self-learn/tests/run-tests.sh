@@ -1102,6 +1102,32 @@ test_teardown_then_setup_restores() {
   teardown
 }
 
+test_teardown_then_start_and_stop() {
+  echo "• teardown, then Start+Stop (launcher/phone/manual): the stop reads as the owner's again"
+  deployed
+  run_teardown
+  check "marker written"                [ -f "$(SVC_HOME)/state/torn-down" ]
+  # What the launcher's Start button does: the stubs run the unit's
+  # ExecStartPre / the agent's ProgramArguments, which clear the marker.
+  if [ "$OS" = "Linux" ]; then
+    check "unit clears marker on start" grep -q '^ExecStartPre=-/bin/rm -f .*/state/torn-down' "$(UNIT_DIR)/self-learn.service"
+    PATH="$STUBS:$PATH" systemctl --user start self-learn.service >/dev/null
+    check "start consumed the marker"   [ ! -f "$(SVC_HOME)/state/torn-down" ]
+    PATH="$STUBS:$PATH" systemctl --user stop self-learn.service >/dev/null
+  else
+    check "agent clears marker on load" grep -q 'rm -f ".*state/torn-down"; exec' "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
+    PATH="$STUBS:$PATH" launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.self-learn.web.plist" >/dev/null
+    check "load consumed the marker"    [ ! -f "$(SVC_HOME)/state/torn-down" ]
+    PATH="$STUBS:$PATH" launchctl bootout "gui/$(id -u)/com.self-learn.web" >/dev/null
+  fi
+  : > "$CALLS_LOG"
+  run_deploy
+  check "setup exits zero"              [ "$CODE" -eq 0 ]
+  check "stop stays stopped"            out_has "leaving it stopped"
+  check "marker stays gone"             [ ! -f "$(SVC_HOME)/state/torn-down" ]
+  teardown
+}
+
 test_teardown_not_published() {
   echo "• teardown: nothing published is fine"
   deployed
@@ -1830,6 +1856,7 @@ test_sync_status
 test_sync_status_unreachable
 test_teardown_safe
 test_teardown_then_setup_restores
+test_teardown_then_start_and_stop
 test_teardown_not_published
 test_teardown_port_owned_by_someone_else
 test_teardown_every_port_pointing_here

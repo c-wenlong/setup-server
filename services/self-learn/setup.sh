@@ -235,7 +235,10 @@ mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SELF_LEARN_HOME/blobs"
 # interrupted and the start below repairs rather than overrides. A *failed*
 # unit is restarted too (that's the repair), so only clean-inactive counts.
 # state/torn-down is teardown.sh's note that the stop was a removal, not the
-# owner's stop: setup after a teardown brings the stack back up.
+# owner's stop: setup after a teardown brings the stack back up. Any start of
+# the app — launcher, phone or service manager — consumes it (the unit and the
+# LaunchAgent delete it before the app comes up), so a later stop reads as the
+# owner's again.
 APP_SHOULD_RUN=1
 TORN_DOWN="$SERVICE_HOME/state/torn-down"
 if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
@@ -283,6 +286,10 @@ Wants=network-online.target
 WorkingDirectory=$REPO_DIR/apps/web
 Environment=NODE_ENV=production
 Environment=PATH=$NODE_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Any start — launcher, phone, systemctl — clears teardown's torn-down marker:
+# a stopped app after an owner start must read as the owner's stop, not the
+# removal's, on the next ./setup.sh.
+ExecStartPre=-/bin/rm -f $SERVICE_HOME/state/torn-down
 ExecStart=$NODE_BIN/npm run start -- -p $LOCAL_PORT -H 127.0.0.1
 Restart=always
 RestartSec=5
@@ -371,11 +378,9 @@ else
   <key>Label</key><string>com.self-learn.web</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE_BIN/npm</string>
-    <string>run</string><string>start</string>
-    <string>--</string>
-    <string>-p</string><string>$LOCAL_PORT</string>
-    <string>-H</string><string>127.0.0.1</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>rm -f "$SERVICE_HOME/state/torn-down"; exec "$NODE_BIN/npm" run start -- -p "$LOCAL_PORT" -H 127.0.0.1</string>
   </array>
   <key>WorkingDirectory</key><string>$REPO_DIR/apps/web</string>
   <key>EnvironmentVariables</key>

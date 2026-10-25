@@ -34,6 +34,20 @@ case "${1:-}" in
     [ ! -f "$STATE_DIR/launchd_disable_fails" ] || exit 1
     ;;
   bootstrap|kickstart)
+    # launchd runs the agent's ProgramArguments on load; com.self-learn.web's
+    # is an `sh -c` wrapper that clears teardown's torn-down marker first —
+    # running it here keeps a stubbed bootstrap faithful.
+    plist="${*: -1}"
+    [ -f "$plist" ] || plist="$HOME/Library/LaunchAgents/${plist##*/}.plist"
+    args=()
+    if [ -f "$plist" ]; then
+      while IFS= read -r s; do args+=("$s"); done <<PROGARGS
+$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/s:.*<string>\(.*\)</string>.*:\1:p' "$plist")
+PROGARGS
+      if [ "${args[0]:-}" = "/bin/sh" ] && [ "${args[1]:-}" = "-c" ]; then
+        sh -c "${args[2]:-true}" || exit 5
+      fi
+    fi
     touch "$STATE_DIR/$marker"
     ;;
 esac
