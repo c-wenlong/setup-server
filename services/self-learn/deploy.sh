@@ -61,7 +61,9 @@ pid_start() {  # the start identity of pid $1; empty when it is gone
   if [ "$OS" = "Linux" ]; then
     sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
   else
-    ps -o lstart= -p "$1" 2>/dev/null
+    # lstart honours the caller's TZ, so pin both or a launchd-run
+    # deploy and a manual one would not recognise the same process.
+    TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null
   fi
 }
 if [ -d "$LOCK" ]; then

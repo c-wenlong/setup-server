@@ -430,6 +430,14 @@ test_poll_lock_identity() {
   check "unrecorded owner: reclaimed"    out_has "owner never recorded"
   check "deploy proceeds again"          calls_have "fetch --quiet"
   teardown
+  # ps -o lstart honours the caller's TZ: a deploy started by launchd and a
+  # manual one would print different strings for the same process and the
+  # identity check would steal a live lock. Every script pins TZ (and
+  # LC_ALL) on its read — this runs on Linux too, since it only greps.
+  for f in deploy.sh sync.sh teardown.sh; do
+    check "$f lstart pins TZ=UTC0" \
+      grep -qF 'TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"' "$SERVICE_DIR/$f"
+  done
 }
 
 test_skip_seed() {
@@ -1029,7 +1037,7 @@ SVC_HOME() { printf '%s' "$HOME/services/self-learn"; }
 UNIT_DIR() { printf '%s' "$HOME/.config/systemd/user"; }
 # The identity deploy.sh records in .deploy.lock/started for a live pid.
 start_of() {
-  if [ "$OS" = "Linux" ]; then sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; else ps -o lstart= -p "$1"; fi
+  if [ "$OS" = "Linux" ]; then sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; else TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"; fi
 }
 # Point SERVICE_HOME in .env somewhere else (odd-path tests).
 set_service_home() { sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME=$1#" "$SVC/.env"; }
