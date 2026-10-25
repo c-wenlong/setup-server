@@ -679,7 +679,7 @@ test_teardown_purge_refuses_repo_dir() {
   SVC="$repo"
   run_teardown --purge "appflowy"
   check "exits non-zero"              [ "$CODE" -ne 0 ]
-  check "says why"                    out_has "contains this checkout"
+  check "says why"                    out_has "holds this checkout"
   check "nginx.conf kept"             [ -f "$repo/nginx.conf" ]
   check "no down -v"                  no_call "down -v"
   teardown

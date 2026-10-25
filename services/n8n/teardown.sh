@@ -180,7 +180,7 @@ if [ "$PURGE" -eq 1 ]; then
   if [ -e "$DATA_DIR" ]; then
     [ -d "$DATA_DIR" ] || die "N8N_VOLUME=$DATA_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "DATA_DIR=$DATA_DIR is not a real directory inside $HOME/services/$NAME — refusing."
+    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "DATA_DIR=$DATA_DIR is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
     case "$PURGE_DIR" in
       "$root"/?*) ;;
       *) die "N8N_VOLUME=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;

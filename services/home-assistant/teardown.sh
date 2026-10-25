@@ -175,7 +175,7 @@ if [ "$PURGE" -eq 1 ]; then
   if [ -e "$CONFIG_DIR" ]; then
     [ -d "$CONFIG_DIR" ] || die "HA_CONFIG=$CONFIG_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    PURGE_DIR="$(real_dir "$CONFIG_DIR")" || die "CONFIG_DIR=$CONFIG_DIR is not a real directory inside $HOME/services/$NAME — refusing."
+    PURGE_DIR="$(real_dir "$CONFIG_DIR")" || die "CONFIG_DIR=$CONFIG_DIR is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
     case "$PURGE_DIR" in
       "$root"/?*) ;;
       *) die "HA_CONFIG=$CONFIG_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;

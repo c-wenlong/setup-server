@@ -192,7 +192,7 @@ if [ "$PURGE" -eq 1 ]; then
   if [ -e "$ROOT_DIR" ]; then
     [ -d "$ROOT_DIR" ] || die "PAPERLESS_ROOT=$ROOT_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    PURGE_ROOT="$(real_dir "$ROOT_DIR")" || die "PAPERLESS_ROOT=$ROOT_DIR is not a real directory inside $HOME/services/$NAME — refusing."
+    PURGE_ROOT="$(real_dir "$ROOT_DIR")" || die "PAPERLESS_ROOT=$ROOT_DIR is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
     case "$PURGE_ROOT" in
       "$root"/?*) ;;
       *) die "PAPERLESS_ROOT=$ROOT_DIR resolves to $PURGE_ROOT, which is not a folder inside $root — refusing." ;;
@@ -201,7 +201,7 @@ if [ "$PURGE" -eq 1 ]; then
       [ -e "$PURGE_ROOT/$sub" ] || [ -L "$PURGE_ROOT/$sub" ] || continue
       [ -d "$PURGE_ROOT/$sub" ] && [ ! -L "$PURGE_ROOT/$sub" ] \
         || die "$PURGE_ROOT/$sub is not a plain directory (a symlink or a file) — refusing."
-      d="$(real_dir "$PURGE_ROOT/$sub")" || die "$PURGE_ROOT/$sub is not a real directory inside $HOME/services/$NAME — refusing."
+      d="$(real_dir "$PURGE_ROOT/$sub")" || die "$PURGE_ROOT/$sub is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
       PURGE_DIRS+=("$d")
     done
   fi

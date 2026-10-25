@@ -196,7 +196,7 @@ check_purge_dir() {
   if [ -e "$dir" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    real="$(real_dir "$dir")" || die "dir=$dir is not a real directory inside $HOME/services/$NAME — refusing."
+    real="$(real_dir "$dir")" || die "dir=$dir is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
     case "$real" in
       "$root"/?*) ;;
       *) die "$var=$dir resolves to $real, which is not a folder inside $root — refusing." ;;

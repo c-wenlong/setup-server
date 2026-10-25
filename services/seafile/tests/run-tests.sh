@@ -596,7 +596,7 @@ test_teardown_purge_never_its_own_checkout() {
   sed -i.bak "s#^SEAFILE_VOLUME=.*#SEAFILE_VOLUME=$own#" "$SVC/.env"
   run_teardown --purge "seafile"
   check "exits non-zero"              [ "$CODE" -ne 0 ]
-  check "  says why"                  out_has "contains this script's own directory"
+  check "  says why"                  out_has "holds this checkout"
   check "  scripts kept"              [ -f "$own/teardown.sh" ]
   check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
   teardown
