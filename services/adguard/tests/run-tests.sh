@@ -1525,6 +1525,57 @@ test_teardown_dns_gate_clear() {
   nothing_changed "real-box shape, compact, listed"
   check "  says the tailnet still uses it" out_has "still uses $FAKE_TS_IP for DNS"
   teardown
+  # Verbatim from kai-home-server (tailscale 1.10x, 2026-10-25), addresses
+  # swapped: the CLI omits empty resolver keys (no FallbackResolvers, no
+  # Nameservers here) and adds fields of its own. Omitted means none.
+  deployed
+  cat > "$STATE_DIR/dns_status" <<'EOF_REAL'
+{
+  "TailscaleDNS": true,
+  "CurrentTailnet": {
+    "MagicDNSEnabled": true,
+    "MagicDNSSuffix": "tailfake.ts.net",
+    "SelfDNSName": "test-host.tailfake.ts.net."
+  },
+  "Resolvers": [
+    {
+      "Addr": "1.1.1.1"
+    },
+    {
+      "Addr": "2606:4700:4700::1111"
+    }
+  ],
+  "SplitDNSRoutes": {
+    "ts.net.": [
+      {
+        "Addr": "199.247.155.53"
+      }
+    ]
+  },
+  "SearchDomains": [
+    "tailfake.ts.net"
+  ],
+  "CertDomains": [
+    "test-host.tailfake.ts.net"
+  ],
+  "ExitNodeFilteredSet": [
+    ".ts.net",
+    ".tailscale.net"
+  ],
+  "SystemDNSError": "not supported on this platform"
+}
+EOF_REAL
+  run_teardown
+  check "real CLI output, keys omitted: exits zero" [ "$CODE" -eq 0 ]
+  check "  says it is not a nameserver" out_has "Not a tailnet nameserver"
+  check "  compose down"              [ -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf '{"TailscaleDNS":true,"CurrentTailnet":{"MagicDNSSuffix":"tailfake.ts.net"},"SplitDNSRoutes":{"corp.example.":[{"Addr":"%s"}]},"SystemDNSError":"not supported on this platform"}\n' "$FAKE_TS_IP" > "$STATE_DIR/dns_status"
+  run_teardown
+  nothing_changed "real CLI output, keys omitted, listed in split DNS"
+  check "  says the tailnet still uses it" out_has "still uses $FAKE_TS_IP for DNS"
+  teardown
 }
 
 test_teardown_dns_gate_unknown() {
@@ -1554,7 +1605,8 @@ test_teardown_dns_gate_unknown() {
       no-tailscaledns)
         printf '{"CurrentTailnet": {"MagicDNSSuffix": "tailfake.ts.net"}, %s}\n' "$all_null" > "$STATE_DIR/dns_status" ;;
       keys-missing)
-        printf '{%s, "Resolvers": null, "FallbackResolvers": null, "Nameservers": null}\n' "$tailnet" > "$STATE_DIR/dns_status" ;;
+        # All four resolver keys absent: a renamed field must not read as clear.
+        printf '{%s, "SearchDomains": ["tailfake.ts.net"]}\n' "$tailnet" > "$STATE_DIR/dns_status" ;;
       resolvers-string)     dns_json '  "Resolvers": "unavailable"' ;;
       resolvers-of-strings) dns_json '  "Resolvers": ["9.9.9.9"]' ;;
       resolver-no-addr)     dns_json '  "Resolvers": [{"Address": "9.9.9.9"}]' ;;
