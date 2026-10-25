@@ -1,7 +1,7 @@
 # vaultwarden — self-hosted password vault (Bitwarden-compatible)
 
 Every password, passkey, TOTP seed and secure note you own, on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8222`.
+`https://homeserver.tail-name.ts.net:8222`.
 
 Read the two warnings below before you put anything in it. They are not
 boilerplate; they are the two ways this service ruins your week.
@@ -53,7 +53,7 @@ One container, one SQLite file. That is all of it:
 
 ```
   browser extension / phone / desktop app, on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8222
+            │  https://homeserver.tail-name.ts.net:8222
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8222
@@ -270,7 +270,7 @@ per separator.
   needed; go back to the single-`$` form.
 - If it printed nothing, the compose key in step 3 is missing.
 
-Then open `https://kai-home-server.taild6a23f.ts.net:8222/admin` and enter
+Then open `https://homeserver.tail-name.ts.net:8222/admin` and enter
 the **password you typed at the prompt** (not the hash).
 
 **When you are done, take it back off** — both edits, in reverse:
@@ -288,7 +288,7 @@ in cleartext, and the argon2 form costs you one extra command.
 
 ## `DOMAIN` must be exactly right
 
-`.env` carries `VAULTWARDEN_DOMAIN=https://kai-home-server.taild6a23f.ts.net:8222`
+`.env` carries `VAULTWARDEN_DOMAIN=https://homeserver.tail-name.ts.net:8222`
 — the **full URL, scheme and port included**, no trailing slash. `setup.sh`
 resolves it from `tailscale status --json` at first run and bakes it in.
 
@@ -500,7 +500,7 @@ trust.
 **The server URL must be set before you log in**, on every client. It is on
 the login screen, not in the app's settings, and it is easy to walk past.
 
-`https://kai-home-server.taild6a23f.ts.net:8222`
+`https://homeserver.tail-name.ts.net:8222`
 
 ### Register (once, first)
 
@@ -530,7 +530,7 @@ the app is a manual copy-paste tool.
 ### CLI
 
 ```bash
-bw config server https://kai-home-server.taild6a23f.ts.net:8222
+bw config server https://homeserver.tail-name.ts.net:8222
 bw login
 ```
 

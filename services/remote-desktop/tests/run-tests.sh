@@ -118,9 +118,9 @@ red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 note()  { printf '\033[1;33m%s\033[0m\n' "$*"; }
 
-# The address the tailscale stub reports. Deliberately NOT this box's real
-# 100.85.87.87: a literal baked into docker-compose.yml or setup.sh must not
-# be able to pass by coincidence.
+# The address the tailscale stub reports. Deliberately made up: a literal
+# baked into docker-compose.yml or setup.sh must not be able to pass by
+# coincidence.
 FAKE_TS_IP=100.77.77.77
 
 # --------------------------------------------------------------- harness

@@ -78,7 +78,7 @@ first_call() { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1; }
 
 # The wizard steps the script POSTed, in order, space-separated.
 wizard_order() { tr '\n' ' ' < "$STATE_DIR/wizard_steps" 2>/dev/null; }
-# The JSON body of one wizard step, e.g. body_has User '"Name":"kai"'.
+# The JSON body of one wizard step, e.g. body_has User '"Name":"admin"'.
 body_has()     { grep -qF -- "$2" "$STATE_DIR/body_$1" 2>/dev/null; }
 auth_body_has(){ grep -qF -- "$1" "$STATE_DIR/auth_body" 2>/dev/null; }
 
@@ -153,7 +153,7 @@ test_preflight_bad_username() {
   echo "• preflight rejects an admin username that would break the JSON body"
   # The username is interpolated into {"Name":"..."} with printf, not escaped.
   setup
-  export JELLYFIN_ADMIN_USERNAME='kai" ,"x'
+  export JELLYFIN_ADMIN_USERNAME='admin" ,"x'
   run_deploy
   check "exits non-zero"         [ "$CODE" -ne 0 ]
   check "names the allowed set"  out_has "A-Za-z0-9._-"
@@ -385,7 +385,7 @@ test_stale_marker() {
   setup
   touch "$STATE_DIR/operator"
   mkdir -p "$HOME/services/jellyfin"
-  echo kai > "$HOME/services/jellyfin/.wizard-complete"
+  echo admin > "$HOME/services/jellyfin/.wizard-complete"
   run_deploy
   check "exits non-zero"             [ "$CODE" -ne 0 ]
   check "cross-checked the server"   calls_have "/System/Info/Public"

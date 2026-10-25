@@ -118,7 +118,7 @@ case "$URL" in
       emit 403 '{"message":"Invalid login","type":"INVALID_CREDENTIALS"}'
       exit 0
     fi
-    emit 200 '{"authToken":"STUBTOKEN000","username":"'"${GUAC_USER:-kaichen}"'","dataSource":"default","availableDataSources":["default"]}'
+    emit 200 '{"authToken":"STUBTOKEN000","username":"'"${GUAC_USER:-user}"'","dataSource":"default","availableDataSources":["default"]}'
     exit 0
     ;;
   */api/session/data/default/connections*)

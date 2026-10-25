@@ -3,7 +3,7 @@
 Scan or drop a PDF in; get back a document with its text extracted, its date
 and correspondent guessed, tagged, full-text searchable, and filed under a
 name you can actually read. On the tailnet at
-`https://kai-home-server.taild6a23f.ts.net:8095`.
+`https://homeserver.tail-name.ts.net:8095`.
 
 This is the box's answer to the shoebox of PDFs: tax filings, payslips,
 tenancy agreements, insurance, warranties, medical letters. Seafile (`:8443`)
@@ -23,7 +23,7 @@ requires:
 
 ```
   browser / phone on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8095
+            │  https://homeserver.tail-name.ts.net:8095
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8095       ← Host: header preserved
@@ -116,7 +116,7 @@ failures. Both halves below were read out of the shipped image
 **One variable drives all of it:**
 
 ```yaml
-PAPERLESS_URL: https://kai-home-server.taild6a23f.ts.net:8095
+PAPERLESS_URL: https://homeserver.tail-name.ts.net:8095
 ```
 
 `PAPERLESS_URL` is not cosmetic and it is not just for links in emails. The
@@ -131,7 +131,7 @@ ALLOWED_HOSTS.append(urlparse(url).hostname)      # hostname only, port dropped
 **It must carry the scheme and the port.** Django's CSRF check compares the
 browser's `Origin` header against `CSRF_TRUSTED_ORIGINS` by **exact string**.
 Serve terminates TLS and proxies plain HTTP, so Django computes its own idea of
-the origin as `http://kai-home-server.taild6a23f.ts.net:8095` while the browser
+the origin as `http://homeserver.tail-name.ts.net:8095` while the browser
 sends `https://…:8095`. Those differ, so the only thing that lets a login
 through is that exact `https://…:8095` string being in the trusted list.
 
@@ -264,8 +264,8 @@ start, which costs a slower first boot).
 ## First login
 
 ```
-URL:      https://kai-home-server.taild6a23f.ts.net:8095
-Login:    kai
+URL:      https://homeserver.tail-name.ts.net:8095
+Login:    admin
 Password: PAPERLESS_ADMIN_PASSWORD in services/paperless-ngx/.env
 ```
 
@@ -351,7 +351,7 @@ setting something else up.
 ### 3. Via Seafile — the drop-folder flow
 
 **Seafile is already running on this box** at
-`https://kai-home-server.taild6a23f.ts.net:8443`, with a desktop client and
+`https://homeserver.tail-name.ts.net:8443`, with a desktop client and
 phone photo backup. It is the natural front end for "scan this and file it"
 from anywhere: put a document in a Seafile library from your phone, have it
 sync to this box, and let Paperless consume it.

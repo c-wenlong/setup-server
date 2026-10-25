@@ -4,7 +4,7 @@
 # Seeded once by setup.sh; never overwritten on a re-run. Full reference:
 # https://gethomepage.dev/configs/settings/
 
-title: kai-home-server
+title: homeserver
 description: Self-hosted services on the tailnet
 
 # Groups render in this order, each as its own column-ish block. The names

@@ -8,6 +8,30 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Security
+
+- **Scrubbed deployment identifiers ahead of open sourcing.** The docs,
+  test stubs and seed defaults named the reference box's real tailnet
+  hostname and tailnet IPs, and a dozen `setup.sh` files shipped the
+  owner's Gmail plus real first/last names and a `kai` admin username as
+  the seeded admin. Docs now
+  use `homeserver.tail-name.ts.net`, test fixtures keep the suites'
+  `test-host.tailfake.ts.net` / `100.77.77.77`, and the admin defaults
+  are `admin@example.com` / `Admin` / `User` / `admin`. Beszel's system
+  name derives from `hostname`, self-learn's Mac Postgres URL from the
+  ssh login, and monitoring's `adguard-dns` monitor resolves
+  `tailscale ip -4` in setup.sh (unset ⇒ the monitor is skipped, never
+  pointed at a made-up address). Test comments that read
+  "not this box's real X" now read "made up", and adguard's
+  ".env is not the real IP" assertion became a comments-stripped grep
+  guard that setup.sh holds no tailnet-shaped literal at all.
+
+- **`.env` backups were not gitignored.** Only the exact name `.env`
+  was, so a `.env.bak-*` holding live credentials sat one `git add -A`
+  away from a commit. `services/*/.env*` and `.env*` now cover every
+  variant, and `services/*/docker-compose.override.yml` is ignored as
+  the same class of local-only file.
+
 ### Fixed
 
 - **Stopping AdGuard from the launcher or the phone now checks tailnet DNS
@@ -22,7 +46,7 @@ first, dated by merge.
 
 - **adguard teardown refused every Remove on a real box.** Its DNS safety
   gate required all four resolver keys in `tailscale dns status --json`,
-  but the CLI omits empty ones (kai-home-server prints only `Resolvers`
+  but the CLI omits empty ones (homeserver prints only `Resolvers`
   and `SplitDNSRoutes`), so the answer always read as "cannot tell" and
   the launcher's Remove died. An absent key now means none; all four
   absent still counts as "cannot tell". Tested against the box's real

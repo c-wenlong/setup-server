@@ -1,4 +1,4 @@
-# Competitive analysis — browser-based remote desktop for kai-home-server
+# Competitive analysis — browser-based remote desktop for homeserver
 
 _Shipped note (2026-09-12): shipped with gnome-remote-desktop as the RDP backend instead of the xrdp verdict below (see PLAN.md decision D2)._
 
@@ -88,7 +88,7 @@ a reverse proxy, and those trust `X-Real-IP`/`X-Forwarded-For` without
 validation — anyone reaching them directly spoofs arbitrary IPs and defeats
 rate limiting. Finally, unattended Wayland access is still a *preview*
 build. Worth noting for the record: on a tailnet RustDesk's entire ID/relay
-layer is redundant — Direct IP Access to `100.85.87.87` needs no server at
+layer is redundant — Direct IP Access to `100.77.77.77` needs no server at
 all, and a RustDesk maintainer says running one alongside Tailscale can
 *reduce* performance. That is a good native-app answer. It is not a browser
 answer.

@@ -30,7 +30,7 @@ web_port="$(cat "$STATE_DIR/web_port" 2>/dev/null || echo 3080)"
 
 rows=""
 add() { rows="$rows
-AdGuardH 1 kai 5u IPv4 1 0t0 ${proto:-tcp} $1:$port (LISTEN)"; }
+AdGuardH 1 admin 5u IPv4 1 0t0 ${proto:-tcp} $1:$port (LISTEN)"; }
 
 if [ "$port" = "53" ]; then
   add "127.0.0.53"

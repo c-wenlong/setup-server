@@ -61,7 +61,7 @@ ss -ltn | grep 3389
 # The real question: can anything but guacd reach it?
 nc -vz 192.168.88.11 3389     # LAN, wired      ─┐
 nc -vz 192.168.88.13 3389     # LAN, wireless    ├─ all three must REFUSE
-nc -vz 100.85.87.87  3389     # tailnet         ─┘
+nc -vz 100.77.77.77  3389     # tailnet         ─┘
 nc -vz 172.28.0.1    3389     # bridge gateway  ─── this one must SUCCEED
 ```
 
@@ -511,7 +511,7 @@ tailscale serve status | grep -A2 ':8094'
 
   ```bash
   curl -s -o /dev/null -w '%{http_code}\n' --max-time 90 \
-    https://kai-home-server.taild6a23f.ts.net:8094/guacamole/
+    https://homeserver.tail-name.ts.net:8094/guacamole/
   ```
 
 ---
@@ -531,7 +531,7 @@ tailscale serve status | grep -A2 ':8094'
   mismatch.
 - **Mouse cursor doubled or lagging** — a rendering artefact of software
   cursor mode, cosmetic. If latency is genuinely unworkable for the task,
-  the native RDP path (Microsoft Remote Desktop to `100.85.87.87:3389`
+  the native RDP path (Microsoft Remote Desktop to `100.77.77.77:3389`
   over the tailnet, using the *RDP* credentials) skips Guacamole entirely
   and is a better tool for a long session.
 

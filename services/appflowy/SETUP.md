@@ -1,7 +1,7 @@
 # appflowy — self-hosted Notion (docs, databases, wiki)
 
 A workspace you own: documents, databases, boards, and a wiki, on the
-tailnet: `https://kai-home-server.taild6a23f.ts.net:8102`.
+tailnet: `https://homeserver.tail-name.ts.net:8102`.
 
 Chosen over Outline (wiki-only) and over running Notion in a browser
 against someone else's cloud. AppFlowy Cloud is the documented production
@@ -22,7 +22,7 @@ OOM-killed.
 
 ```
   phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8102
+            │  https://homeserver.tail-name.ts.net:8102
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8102
@@ -119,7 +119,7 @@ Step by step:
 ## Client side
 
 Any browser on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8102`. Login with
+`https://homeserver.tail-name.ts.net:8102`. Login with
 `GOTRUE_ADMIN_EMAIL` / `GOTRUE_ADMIN_PASSWORD` from `services/appflowy/.env`.
 Admin console: `/console`.
 

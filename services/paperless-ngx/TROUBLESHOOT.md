@@ -65,7 +65,7 @@ docker logs --tail 50 paperless-ngx 2>&1 | grep csrf
 
 ```
 [WARNING] [django.security.csrf] Forbidden (Origin checking failed -
-  https://kai-home-server.taild6a23f.ts.net:8095 does not match any trusted
+  https://homeserver.tail-name.ts.net:8095 does not match any trusted
   origins.): /accounts/login/
 ```
 
@@ -73,17 +73,17 @@ docker logs --tail 50 paperless-ngx 2>&1 | grep csrf
 
 Tailscale Serve terminates TLS and proxies **plain HTTP** to `127.0.0.1:8095`,
 preserving the Host header. So Django sees an `http` request for
-`kai-home-server.taild6a23f.ts.net:8095` and computes its own idea of the
+`homeserver.tail-name.ts.net:8095` and computes its own idea of the
 origin as:
 
 ```
-http://kai-home-server.taild6a23f.ts.net:8095
+http://homeserver.tail-name.ts.net:8095
 ```
 
 while your browser sends:
 
 ```
-Origin: https://kai-home-server.taild6a23f.ts.net:8095
+Origin: https://homeserver.tail-name.ts.net:8095
 ```
 
 Those are different strings, so Django falls through to an **exact string**
@@ -103,7 +103,7 @@ It must be the **external** URL, with the scheme and the port, and no trailing
 slash:
 
 ```
-PAPERLESS_URL=https://kai-home-server.taild6a23f.ts.net:8095
+PAPERLESS_URL=https://homeserver.tail-name.ts.net:8095
 ```
 
 Every one of these is wrong and every one produces this exact 403:
@@ -112,7 +112,7 @@ Every one of these is wrong and every one produces this exact 403:
 |---|---|
 | unset | `CSRF_TRUSTED_ORIGINS` is empty |
 | `http://…:8095` | scheme mismatch — the browser sends `https` |
-| `https://kai-home-server.taild6a23f.ts.net` | **port missing** — the compared string includes `:8095` |
+| `https://homeserver.tail-name.ts.net` | **port missing** — the compared string includes `:8095` |
 | `https://127.0.0.1:8095` | that is the internal address, not what the browser sends |
 | `https://…:8095/` | trailing slash; the comparison is exact |
 
@@ -130,7 +130,7 @@ header and the rule only fires when one is present. Send one deliberately:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X POST \
-  -H 'Origin: https://kai-home-server.taild6a23f.ts.net:8095' \
+  -H 'Origin: https://homeserver.tail-name.ts.net:8095' \
   -d 'login=x&password=y' \
   http://127.0.0.1:8095/accounts/login/
 ```
@@ -141,7 +141,7 @@ correct for a request with no cookie jar. A 403 **without** that text is the
 origin failure still happening:
 
 ```bash
-curl -s -X POST -H 'Origin: https://kai-home-server.taild6a23f.ts.net:8095' \
+curl -s -X POST -H 'Origin: https://homeserver.tail-name.ts.net:8095' \
   -d 'login=x&password=y' http://127.0.0.1:8095/accounts/login/ \
   | grep -c 'requires a CSRF cookie'
 #   1 = origin accepted (good).   0 = origin rejected (still broken).
@@ -184,7 +184,7 @@ the entry Django adds).
 docker exec paperless-ngx env | grep -E 'PAPERLESS_(URL|ALLOWED_HOSTS)'
 curl -s -o /dev/null -w 'loopback %{http_code}\n' http://127.0.0.1:8095/accounts/login/
 curl -s -o /dev/null -w 'tailnet  %{http_code}\n' \
-     https://kai-home-server.taild6a23f.ts.net:8095/accounts/login/
+     https://homeserver.tail-name.ts.net:8095/accounts/login/
 ```
 
 A `400` on the first and `200` on the second is this problem exactly.
@@ -193,7 +193,7 @@ A `400` on the first and `200` on the second is this problem exactly.
 if you really want it narrow — include the loopback address:
 
 ```yaml
-PAPERLESS_ALLOWED_HOSTS: kai-home-server.taild6a23f.ts.net,127.0.0.1
+PAPERLESS_ALLOWED_HOSTS: homeserver.tail-name.ts.net,127.0.0.1
 ```
 
 `["*"]` is not the exposure it looks like here. The only things that can reach
@@ -410,7 +410,7 @@ It never calls `set_password`. So:
 Reset it properly:
 
 ```bash
-docker exec -it paperless-ngx python3 manage.py changepassword kai
+docker exec -it paperless-ngx python3 manage.py changepassword admin
 ```
 
 List the accounts that actually exist, if you are unsure which username you
@@ -440,7 +440,7 @@ docker exec -it paperless-ngx python3 manage.py createsuperuser
 
   ```bash
   tailscale serve status | grep -A2 ':8095'
-  #   https://kai-home-server.taild6a23f.ts.net:8095 (tailnet only)
+  #   https://homeserver.tail-name.ts.net:8095 (tailnet only)
   #   |-- / proxy http://127.0.0.1:8095
   ```
 

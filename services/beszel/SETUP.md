@@ -2,7 +2,7 @@
 
 CPU, RAM, GPU (NVIDIA), disk usage + I/O, network, and temperature graphs
 with history and threshold alerts, complementing Uptime Kuma (which only
-answers "is it up?"). Dashboard: `https://kai-home-server.taild6a23f.ts.net:8092`.
+answers "is it up?"). Dashboard: `https://homeserver.tail-name.ts.net:8092`.
 
 ## Architecture
 

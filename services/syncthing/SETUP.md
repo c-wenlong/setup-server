@@ -2,7 +2,7 @@
 
 Continuous, two-way sync of chosen folders between this box and your laptop
 and phone, with no third party in the path. GUI on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8384`.
+`https://homeserver.tail-name.ts.net:8384`.
 
 ## What this is, and how it differs from Seafile
 
@@ -36,15 +36,15 @@ One static binary, one user service, two ports published two different ways:
 
 ```
   laptop / phone Syncthing app                  browser, on the tailnet
-  (each holds its own copy)                      │  https://kai-home-server…:8384
+  (each holds its own copy)                      │  https://homeserver…:8384
             │                                    ▼
-            │  dials tcp://kai-home-server.taild6a23f.ts.net:22000   tailscaled — Tailscale Serve
+            │  dials tcp://homeserver.tail-name.ts.net:22000   tailscaled — Tailscale Serve
             │  (also quic://, same port)                              terminates TLS, tailnet only
             │                                    │  http://127.0.0.1:8384
             ▼                                    ▼
    ┌────────────────────────────────────────────────────────────────┐
    │ syncthing serve   (systemd user unit: syncthing.service)       │
-   │   BEP sync listener   100.85.87.87:22000  tcp + quic(udp)      │  ← tailnet IP,
+   │   BEP sync listener   100.77.77.77:22000  tcp + quic(udp)      │  ← tailnet IP,
    │   GUI + REST API      127.0.0.1:8384      no GUI password,     │    NOT loopback,
    │                                           REST key-gated       │    NOT 0.0.0.0
    │   relays / global discovery / LAN multicast / NAT-PMP:  OFF    │
@@ -81,7 +81,7 @@ Every web service in this repo binds `127.0.0.1` and is fronted by Tailscale
 Serve. Syncthing's GUI does exactly that. Its **sync protocol cannot**: other
 devices dial this one directly by address — the protocol has no notion of a
 reverse proxy in front of it — and half of it is QUIC over UDP, which Serve
-does not carry. So `:22000` binds `100.85.87.87`, this node's tailnet IPv4,
+does not carry. So `:22000` binds `100.77.77.77`, this node's tailnet IPv4,
 the same deliberate exception AdGuard's resolver already makes.
 
 It still meets the spirit of the rule. `tailscale0` is not the LAN and not
@@ -233,7 +233,7 @@ this box's address explicitly, and it is the device that connects.
    also on this box's GUI under Actions → Show ID). Under **Advanced →
    Addresses** replace `dynamic` with:
    ```
-   tcp://kai-home-server.taild6a23f.ts.net:22000
+   tcp://homeserver.tail-name.ts.net:22000
    ```
    Save. Within a minute the laptop connects; this box's GUI shows a
    "new device" banner.

@@ -1,7 +1,7 @@
 # umami — locally hosted web analytics
 
 Privacy-respecting pageviews and events for sites you already run, on
-the tailnet: `https://kai-home-server.taild6a23f.ts.net:8106`.
+the tailnet: `https://homeserver.tail-name.ts.net:8106`.
 
 Chosen over Google Analytics / Plausible Cloud (data leaves the
 tailnet). Umami v3 is Postgres-only.
@@ -13,7 +13,7 @@ upstream default is 3000; this deploy uses **8106**.
 
 ```
   phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8106
+            │  https://homeserver.tail-name.ts.net:8106
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8106

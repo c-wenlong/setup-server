@@ -2,7 +2,7 @@
 
 Repositories, issues, pull requests, releases, wikis, Actions-compatible CI
 and an API, on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:3000`.
+`https://homeserver.tail-name.ts.net:3000`.
 
 Chosen over Gitea, which is the same codebase up to 2022. In 2022 a
 for-profit company took control of the Gitea trademark and infrastructure;
@@ -27,7 +27,7 @@ One container. That is the whole architecture, and it is the point:
 
 ```
   phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:3000
+            │  https://homeserver.tail-name.ts.net:3000
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:3000
@@ -129,7 +129,7 @@ clone URLs do not change; SSH URLs simply start working alongside them.
 
 ## ⚠️ This box has no backup
 
-Nothing on `kai-home-server` is backed up. That has been true for every
+Nothing on `homeserver` is backed up. That has been true for every
 service here, but source code makes it sharper: a lost photo is a sad
 memory, a lost repository is lost work with no other copy.
 
@@ -190,7 +190,7 @@ rejected rather than reporting success over a locked-out account.
 
 ```bash
 docker exec -u git forgejo forgejo admin user create --admin \
-  --username kai --password '<generated>' --email <mail> \
+  --username admin --password '<generated>' --email <mail> \
   --must-change-password=false
 ```
 
@@ -271,17 +271,17 @@ Web UI → **+ → New Repository**. Or from the CLI:
 
 ```bash
 # Get a token first: Settings → Applications → Generate New Token (scope: repo)
-curl -u kai:<token> -X POST \
+curl -u admin:<token> -X POST \
   -H 'Content-Type: application/json' \
   -d '{"name":"my-repo","private":true,"auto_init":false}' \
-  https://kai-home-server.taild6a23f.ts.net:3000/api/v1/user/repos
+  https://homeserver.tail-name.ts.net:3000/api/v1/user/repos
 ```
 
 ### Push an existing project here
 
 ```bash
 cd ~/dev/my-project
-git remote add forgejo https://kai-home-server.taild6a23f.ts.net:3000/kai/my-repo.git
+git remote add forgejo https://homeserver.tail-name.ts.net:3000/admin/my-repo.git
 git push -u forgejo --all
 git push forgejo --tags        # tags are NOT included in --all
 ```
@@ -292,14 +292,14 @@ rule above. To push both at once, give `origin` a second push URL:
 
 ```bash
 git remote set-url --add --push origin git@github.com:you/my-project.git
-git remote set-url --add --push origin https://kai-home-server.taild6a23f.ts.net:3000/kai/my-repo.git
+git remote set-url --add --push origin https://homeserver.tail-name.ts.net:3000/admin/my-repo.git
 git push origin main           # goes to both
 ```
 
 ### Clone
 
 ```bash
-git clone https://kai-home-server.taild6a23f.ts.net:3000/kai/my-repo.git
+git clone https://homeserver.tail-name.ts.net:3000/admin/my-repo.git
 ```
 
 Username is your Forgejo username; **password is an access token**, not the
@@ -344,7 +344,7 @@ the risky one.
 ```bash
 git clone --mirror git@github.com:you/repo.git
 cd repo.git
-git push --mirror https://kai-home-server.taild6a23f.ts.net:3000/kai/repo.git
+git push --mirror https://homeserver.tail-name.ts.net:3000/admin/repo.git
 ```
 
 `--mirror` copies every ref including branches, tags and notes. It does not
@@ -352,7 +352,7 @@ copy issues, PRs or releases — only the migration importer does that.
 
 ### Phone / browser
 
-Any browser on the tailnet: `https://kai-home-server.taild6a23f.ts.net:3000`.
+Any browser on the tailnet: `https://homeserver.tail-name.ts.net:3000`.
 The web UI is usable on a phone for issues and code review. There is no
 mobile app worth installing.
 
@@ -373,7 +373,7 @@ mobile app worth installing.
 - Reset a password:
   ```bash
   docker exec -u git forgejo forgejo admin user change-password \
-    --username kai --password '<new>' --must-change-password=false
+    --username admin --password '<new>' --must-change-password=false
   ```
   …then mirror it into `.env`.
 - Official backup (consistent, includes the DB, repos and config):

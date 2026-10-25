@@ -36,7 +36,7 @@
 #    publish would put an open recursive resolver on the LAN.
 #
 # 4. THE TAILNET IP IS RESOLVED, NOT HARDCODED. The tailscale stub reports
-#    100.77.77.77 — deliberately NOT this box's real 100.85.87.87 — so a
+#    100.77.77.77 — a made-up address, never a real deployment's — so a
 #    literal baked into docker-compose.yml or setup.sh cannot pass by
 #    coincidence.
 #
@@ -56,8 +56,8 @@ OS="$(uname -s)"   # the mocked suite exercises the current platform's branch
 red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
-# The address the tailscale stub reports. Not this box's real tailnet IP, on
-# purpose — see note 4 above.
+# The address the tailscale stub reports. Made up, on purpose — a real
+# deployment's tailnet IP must come from `tailscale ip -4`, never a literal.
 FAKE_TS_IP=100.77.77.77
 
 # --------------------------------------------------------------- harness
@@ -244,8 +244,8 @@ test_fresh_deploy() {
   # --- the tailnet IP is RESOLVED, never assumed -------------------------
   check "asked tailscale for the v4 address" calls_have "^tailscale ip -4"
   check ".env records the resolved IP"   [ "$(env_val ADGUARD_DNS_IP)" = "$FAKE_TS_IP" ]
-  check "  and it is not this box's real one" \
-    [ "$(env_val ADGUARD_DNS_IP)" != "100.85.87.87" ]
+  check "  and no tailnet IP is baked in" \
+    sh -c "! sed 's/#.*//' '$SVC/setup.sh' | grep -qE '100\.[0-9]+\.[0-9]+\.[0-9]+'"
 
   # --- .env
   check ".env generated"                 [ -f "$SVC/.env" ]
@@ -253,7 +253,7 @@ test_fresh_deploy() {
   check "pinned to v0.107.79, not latest" grep -qx 'ADGUARD_VERSION=v0.107.79' "$SVC/.env"
   check ".env records the local port"    grep -qx 'LOCAL_PORT=3080' "$SVC/.env"
   check ".env has a hex admin password"  grep -qE '^ADGUARD_ADMIN_PASSWORD=[a-f0-9]{32}$' "$SVC/.env"
-  check ".env names the admin user"      [ "$(env_val ADGUARD_ADMIN_USER)" = "kai" ]
+  check ".env names the admin user"      [ "$(env_val ADGUARD_ADMIN_USER)" = "admin" ]
   check ".env has ADGUARD_CONF"          grep -qE '^ADGUARD_CONF=/.+' "$SVC/.env"
   check ".env has ADGUARD_WORK"          grep -qE '^ADGUARD_WORK=/.+' "$SVC/.env"
   check ".env records the rate limit"    grep -qx 'ADGUARD_RATELIMIT=0' "$SVC/.env"
@@ -303,7 +303,7 @@ test_fresh_deploy() {
   check "no sudo needed (operator set)"  no_call "^sudo "
 
   # --- VERIFICATION: the part a socket cannot fake -----------------------
-  check "signed in with the generated password" out_has "Signed in as kai"
+  check "signed in with the generated password" out_has "Signed in as admin"
   check "  and AdGuard says DNS is running"     out_has "DNS server as running"
   check "resolved a real name"           out_has "DNS is really resolving"
   check "  queried the tailnet IP"       calls_have "^dig .*@$FAKE_TS_IP example.com"
@@ -802,16 +802,16 @@ test_admin_username_override() {
   echo "• ADGUARD_ADMIN_USERNAME: honoured on the first run, .env wins after"
   setup
   touch "$STATE_DIR/operator"
-  export ADGUARD_ADMIN_USERNAME=kaichen
+  export ADGUARD_ADMIN_USERNAME=user
   run_deploy
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check ".env records the username"   [ "$(env_val ADGUARD_ADMIN_USER)" = "kaichen" ]
-  check "install used it"             body_has install_body '"username":"kaichen"'
+  check ".env records the username"   [ "$(env_val ADGUARD_ADMIN_USER)" = "user" ]
+  check "install used it"             body_has install_body '"username":"user"'
   unset ADGUARD_ADMIN_USERNAME
   export ADGUARD_ADMIN_USERNAME=someone-else
   run_deploy
-  check "re-run: .env still wins"     [ "$(env_val ADGUARD_ADMIN_USER)" = "kaichen" ]
-  check "re-run: signed in as kaichen" out_has "Signed in as kaichen"
+  check "re-run: .env still wins"     [ "$(env_val ADGUARD_ADMIN_USER)" = "user" ]
+  check "re-run: signed in as user" out_has "Signed in as user"
   teardown
 }
 
@@ -1525,7 +1525,7 @@ test_teardown_dns_gate_clear() {
   nothing_changed "real-box shape, compact, listed"
   check "  says the tailnet still uses it" out_has "still uses $FAKE_TS_IP for DNS"
   teardown
-  # Verbatim from kai-home-server (tailscale 1.10x, 2026-10-25), addresses
+  # Verbatim from homeserver (tailscale 1.10x, 2026-10-25), addresses
   # swapped: the CLI omits empty resolver keys (no FallbackResolvers, no
   # Nameservers here) and adds fields of its own. Omitted means none.
   deployed

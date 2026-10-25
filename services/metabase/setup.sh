@@ -29,7 +29,7 @@ set -euo pipefail
 LOCAL_PORT="${LOCAL_PORT:-8104}"
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-MB_ADMIN_EMAIL="${MB_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+MB_ADMIN_EMAIL="${MB_ADMIN_EMAIL:-admin@example.com}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
@@ -135,7 +135,7 @@ TZ=$tz
 METABASE_DATA=$STATE
 
 MB_SITE_URL=https://$TS_HOST:$HTTPS_PORT
-MB_SITE_NAME=kai-home-server
+MB_SITE_NAME=homeserver
 
 METABASE_DB_NAME=metabase
 METABASE_DB_USER=metabase
@@ -145,8 +145,8 @@ METABASE_DB_PASSWORD=$db_pass
 # does not rotate the live password — do that in the UI.
 MB_ADMIN_EMAIL=$MB_ADMIN_EMAIL
 MB_ADMIN_PASSWORD=$admin_pass
-MB_ADMIN_FIRST_NAME=Kai
-MB_ADMIN_LAST_NAME=Chen
+MB_ADMIN_FIRST_NAME=Admin
+MB_ADMIN_LAST_NAME=User
 
 METABASE_MEM_LIMIT=1536m
 METABASE_DB_MEM_LIMIT=256m
@@ -218,8 +218,8 @@ seed_admin() {
     return 0
   fi
   payload="$(MB_TOKEN="$token" MB_EMAIL="$MB_ADMIN_EMAIL" MB_PASS="$MB_ADMIN_PASSWORD" \
-    MB_FIRST="${MB_ADMIN_FIRST_NAME:-Kai}" MB_LAST="${MB_ADMIN_LAST_NAME:-Chen}" \
-    MB_SITE="${MB_SITE_NAME:-kai-home-server}" python3 -c '
+    MB_FIRST="${MB_ADMIN_FIRST_NAME:-Admin}" MB_LAST="${MB_ADMIN_LAST_NAME:-User}" \
+    MB_SITE="${MB_SITE_NAME:-homeserver}" python3 -c '
 import json, os
 print(json.dumps({
   "token": os.environ["MB_TOKEN"],
