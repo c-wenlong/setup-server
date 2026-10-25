@@ -71,8 +71,20 @@ systemctl --user status code-server       # is it running?
 systemctl --user restart code-server      # after config changes
 journalctl --user -u code-server -f       # live logs
 tailscale serve status                    # current proxy config
-tailscale serve --https=443 off           # unpublish from tailnet
+./teardown.sh                             # remove (also the launcher's Remove button)
 ```
+
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes only what
+points at code-server. On `:443` that is the `/` path
+(`tailscale serve --https=443 --set-path=/ off`); the launcher's `/home` on
+the same port is left on, so removing code-server does not affect the
+launcher, even when you clicked Remove from a tab that code-server served.
+It disables and stops the unit (macOS: boots out the LaunchAgent and deletes
+its plist, which `setup.sh` rewrites) and keeps `config.yaml`, extensions,
+settings and the binary; `./setup.sh` brings it back. `--purge` (terminal
+only, type the name) also deletes the unit file and prints the exact `rm` for
+everything outside `~/services` that it keeps. Never use
+`tailscale serve --https=443 off` by hand: it takes the launcher down too.
 
 Upgrade in place (settings/extensions preserved): re-run `./setup.sh`.
 
@@ -86,7 +98,11 @@ Upgrade in place (settings/extensions preserved): re-run `./setup.sh`.
 The mocked suite runs the real `setup.sh` in a sandbox (fake `$HOME`, PATH
 stubs for tailscale/sudo/systemctl/loginctl/curl/id) covering the fresh-install
 path, idempotent re-runs, `PORT` override, the Serve approval flow, and
-preflight failures.
+preflight failures. It also runs `teardown.sh` against stubbed Serve status:
+shared `:443` loses only `/`, all-code-server ports go off whole, lookalike
+ports and plain-http blocks are left alone, `config.yaml` parsing and
+refusals, `--purge` confirmation and the `~/services/code-server` marker
+guards, and the macOS branch (`FAKE_OS=Darwin`).
 
 ## Notes
 

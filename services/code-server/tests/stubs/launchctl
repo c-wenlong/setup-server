@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
-# launchctl stub (used when the mocked suite runs on macOS): logs and succeeds.
+# launchctl stub (macOS branch; FAKE_OS=Darwin runs it on Linux too): logs and
+# succeeds. $STATE_DIR/launchd_not_loaded exists => `print` says not loaded.
+# $STATE_DIR/stop_kills exists => `bootout` kills its caller, like a teardown
+# run from code-server's own terminal.
 echo "launchctl $*" >> "$CALLS_LOG"
+[ "${1:-}" != "bootout" ] || [ ! -f "$STATE_DIR/stop_kills" ] || kill -KILL "$PPID"
+if [ "${1:-}" = "print" ] && [ -f "$STATE_DIR/launchd_not_loaded" ]; then
+  echo "Could not find service" >&2
+  exit 113
+fi
 exit 0

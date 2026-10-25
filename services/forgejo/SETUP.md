@@ -385,6 +385,14 @@ mobile app worth installing.
 - Effective config, as the container actually sees it:
   `docker exec forgejo cat /data/gitea/conf/app.ini`
 - Disk usage: `du -sh ~/services/forgejo/data/git/repositories`
+- Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every
+  Serve port that points at this service (plus the SSH `--tcp` forward, if
+  you turned SSH on in `docker-compose.yml`) and runs `compose down`.
+  Repositories, `.env` and the hidden `.admin-created` marker stay, so
+  `./setup.sh` brings it back as it was. `./teardown.sh --purge` also
+  deletes the data dir, the marker and `.env`, after you type `forgejo`.
+  That is every repository with no other copy: take a dump first (see Nuke
+  and pave in TROUBLESHOOT.md).
 
 ## Tests
 
@@ -404,6 +412,15 @@ a password changed in the UI, admin-already-exists recovery, operator
 escalation and the serve-approval prompt — plus static assertions that the
 compose file binds loopback only, locks the installer, disables registration
 and stays on SQLite.
+
+`teardown.sh` runs in the same sandbox: only this service's Serve ports go
+off (neighbours, a lookalike port and a shared `:443` stay), the SSH TCP
+forward goes only when compose publishes SSH, the safe remove keeps repos,
+`.env` and the admin marker, a wrong purge confirmation changes nothing, the
+purge removes the data dir, marker and `.env` (and a fresh `setup.sh`
+re-creates the admin), container-owned files are cleared with the pinned
+image, and odd data paths, symlinks, `COMPOSE_*` overrides and ambiguous
+`.env` lines are refused.
 
 The live suite additionally proves the two things a green deploy can still
 get wrong: that `/install` really is a 404, and that the password in `.env`

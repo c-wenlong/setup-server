@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
-# systemctl stub: logs and succeeds.
+# systemctl stub: logs every call. State in $STATE_DIR (teardown tests):
+#   stop_fails     — exists => `stop` fails like a unit that is not loaded
+#   disable_fails  — exists => `disable` fails
+#   active_state   — what `show -p ActiveState --value` prints (default inactive)
+#   stop_kills     — exists => `stop` kills its caller, like a teardown run
+#                    from code-server's own terminal
 echo "systemctl $*" >> "$CALLS_LOG"
+case " $* " in
+  *" stop "*)    [ ! -f "$STATE_DIR/stop_kills" ] || kill -KILL "$PPID"
+                 [ ! -f "$STATE_DIR/stop_fails" ] || { echo "Failed to stop: Unit not loaded." >&2; exit 5; } ;;
+  *" disable "*) [ ! -f "$STATE_DIR/disable_fails" ] || { echo "Failed to disable." >&2; exit 1; } ;;
+  *" show "*)    if [ -f "$STATE_DIR/active_state" ]; then cat "$STATE_DIR/active_state"; else echo inactive; fi ;;
+esac
 exit 0

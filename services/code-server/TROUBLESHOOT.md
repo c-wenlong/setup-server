@@ -111,17 +111,32 @@ journalctl --user -u code-server -e --no-pager
 
 ## Nuke and pave
 
-```sh
-systemctl --user disable --now code-server
-tailscale serve --https=443 off        # ⚠️ clears the WHOLE :443 node
-rm -rf ~/.local/lib/code-server-* ~/.local/bin/code-server \
-       ~/.config/code-server ~/.config/systemd/user/code-server.service
-systemctl --user daemon-reload
-./setup.sh
-cd ../../app/web && ./setup.sh           # restores the /home mount
+Use `teardown.sh`, not a hand recipe. It reads code-server's port from
+`~/.config/code-server/config.yaml`, and on `:443` (shared with the
+launcher's `/home`) it removes only code-server's own path with
+`tailscale serve --https=443 --set-path=/ off`, so the launcher stays
+published. A port that is all code-server goes off whole. It never runs
+`tailscale serve reset` or `--https=443 off` on a shared port.
+
+```bash
+# 1. Backup first, if you want the editor state back later
+mkdir -p ~/code-server-backup && cp -a ~/.config/code-server ~/.local/share/code-server ~/code-server-backup/
+
+cd ~/dev/setup-server/services/code-server
+./teardown.sh            # remove: config, extensions, binary kept (the launcher's Remove)
+./teardown.sh --purge    # also delete the unit file; type the name; prints the rm
+                         # for config, extensions and binary, which it never runs
+# 2. Run the printed rm lines yourself for a truly fresh start, e.g.
+#    rm -rf ~/.config/code-server ~/.local/share/code-server \
+#           ~/.local/lib/code-server-* ~/.local/bin/code-server
+./setup.sh               # back; a fresh config.yaml if you deleted it
 ```
 
-`--https=443 off` takes the launcher's `/home` mount with it — they share the
-port. Re-running `app/web/setup.sh` puts it back; it is idempotent and
-touches nothing else. Still never `tailscale serve reset`, which would do this
-to every published port instead of one.
+Stopping is the script's last step. Run from code-server's own integrated
+terminal, the terminal closes then, with everything else already done; run it
+from SSH or the launcher to see the final lines. Your workspace folders are
+never touched. From a terminal, pause the `code-server` monitor in Uptime
+Kuma first, or it pages; the launcher's Remove does that.
+
+If something else already took `:443` down whole, re-run `app/web/setup.sh`
+to restore the `/home` mount. It is idempotent and touches nothing else.

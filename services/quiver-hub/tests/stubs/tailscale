@@ -4,7 +4,9 @@
 #   operator            — exists => serve allowed without sudo
 #   serve_fails_left    — countdown of forced serve failures (approval-link flow)
 #   serve_status        — text `tailscale serve status` prints; a successful
-#                         `serve --bg --https=P <target>` appends its block
+#                         `serve --bg --https=P <target>` appends its block,
+#                         `serve --https=P off` removes it
+#   serve_status_fails  — exists => `serve status` fails like a stopped daemon
 echo "tailscale $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -22,7 +24,22 @@ JSON
     ;;
   serve)
     if [ "${2:-}" = "status" ]; then
+      if [ -f "$STATE_DIR/serve_status_fails" ]; then
+        echo "failed to connect to local tailscaled" >&2
+        exit 1
+      fi
       [ -f "$STATE_DIR/serve_status" ] && cat "$STATE_DIR/serve_status"
+      exit 0
+    fi
+    # `serve --https=P off` (teardown): drop that port's block, then succeed.
+    if [ "${3:-}" = "off" ]; then
+      port="${2#--https=}"
+      if [ -f "$STATE_DIR/serve_status" ]; then
+        awk -v hdr="https://test-host.tailfake.ts.net:$port " '
+          index($0, "https://") == 1 { skip = (index($0, hdr) == 1) }
+          !skip' "$STATE_DIR/serve_status" > "$STATE_DIR/serve_status.new"
+        mv "$STATE_DIR/serve_status.new" "$STATE_DIR/serve_status"
+      fi
       exit 0
     fi
     if [ -f "$STATE_DIR/serve_fails_left" ]; then

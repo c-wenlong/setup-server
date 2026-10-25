@@ -106,19 +106,32 @@ curl -s -H "X-API-Key: $KEY" http://127.0.0.1:8384/rest/system/connections
 
 ## Nuke and pave
 
-This destroys the device identity: every peer will see a **new** device and
-must re-add it. The synced files under `data/` are left alone unless you
-delete them too.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at the GUI, stops and disables the `syncthing` user unit (only
+the one `setup.sh` wrote), and refuses to delete anything that is not
+really inside `~/services/syncthing/`.
+
+`--purge` destroys the device identity: every peer will see a **new**
+device and must re-add it. Back up `config/` first if you might want this
+Device ID back. The synced files under `data/` are **kept** unless you add
+`--delete-synced-files`; folders you added in the GUI at other paths are
+never deleted (the purge names them).
 
 ```bash
-systemctl --user disable --now syncthing
-rm -f ~/.config/systemd/user/syncthing.service && systemctl --user daemon-reload
-tailscale serve --https=8384 off
-rm -rf ~/services/syncthing/config ~/services/syncthing/db      # identity + index
-# rm -rf ~/services/syncthing/data                              # the files — only if you mean it
-rm -f ~/dev/setup-server/services/syncthing/.env
-cd ~/dev/setup-server/services/syncthing && ./setup.sh
+cp -a ~/services/syncthing/config ~/syncthing-config-backup   # optional: keep the identity
+cd ~/dev/setup-server/services/syncthing
+./teardown.sh            # remove, keep everything (the launcher's Remove)
+./teardown.sh --purge    # also delete config/ + db/ + .env + the unit; type the name
+# ./teardown.sh --purge --delete-synced-files   # ... and data/, the files themselves
+./setup.sh               # back; a NEW Device ID if you purged
 ```
+
+`.env` always goes together with `config/`, so the split state
+`setup.sh` refuses (a `.env` pinning a stale `SYNCTHING_LISTEN_IP` with no
+`config.xml`) cannot be left behind. The binary in `~/.local/bin/syncthing`
+is not removed (that directory is not this service's); `rm` it by hand.
+There is no undo for `--purge`. From a terminal, pause the `syncthing`
+monitor in Uptime Kuma first, or it pages; the launcher's Remove does that.
 
 To keep the identity and only reset the index (a "make it rescan
 everything" reset), stop the service, delete `db/` only, start it.

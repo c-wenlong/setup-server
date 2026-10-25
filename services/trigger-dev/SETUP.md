@@ -205,6 +205,15 @@ docker compose $D logs -f webapp          # magic links land here
 docker compose $D pull && ./setup.sh      # after bumping TRIGGER_IMAGE_TAG
 ```
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
+port pointing at `:LOCAL_PORT` and runs `compose down`; data under
+`~/services/trigger-dev` and `.env` stay, so `./setup.sh` brings it back. It
+stops without changing anything if a task-runner container outside the
+compose project is still on a `trigger-*` network, naming it. `./teardown.sh
+--purge` also deletes the state setup.sh made (Postgres, ClickHouse, Redis,
+MinIO, registry, shared worker token, magic-link marker) and `.env`, after
+you type `trigger-dev`.
+
 Kuma probes `/healthcheck` (services/monitoring/seed_kuma.py). Backup =
 `~/services/trigger-dev` plus this directory's `.env`. Rotating
 `ENCRYPTION_KEY` or `SESSION_SECRET` orphans data and sessions.

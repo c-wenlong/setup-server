@@ -82,7 +82,25 @@ opened the shell.
 - Records are per-minute; PocketBase aggregates older data. Gaps aligned
   with restarts of the agent unit are expected and harmless.
 
-## Last resort
+## Last resort: nuke and pave
 
-`docker compose --project-directory . down`, move `~/services/beszel/hub`
-aside, rerun setup.sh — fresh hub, agent re-registers, history lost.
+`./teardown.sh` is the safe half: it turns off the Tailscale Serve port(s)
+that point at the hub, stops and disables the agent unit (macOS: boots out
+and disables the LaunchAgent), and runs `docker compose down`. Data, `.env`,
+the agent binary and its unit stay, so `./setup.sh` brings it back as it was.
+
+To start over with an empty hub (all history, alert settings and the admin
+account are lost), first keep a copy if you might want it back:
+
+```bash
+sudo cp -a ~/services/beszel/hub ~/beszel-hub-backup   # optional; files are root-owned
+cp .env ~/beszel.env.backup                            # optional
+./teardown.sh --purge     # type "beszel"; deletes hub data, .env, agent binary + unit
+./setup.sh                # fresh hub, new admin password, agent re-registers
+```
+
+`--purge` clears the hub's root-owned files with an alpine/busybox image
+already on the box; if none is there it stops and prints the
+`sudo rm -rf` to run, keeping `.env`. It never touches lingering, the
+Tailscale operator, the hub image, or other units that mention beszel
+(it names those and leaves them).
