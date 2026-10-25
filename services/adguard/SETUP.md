@@ -466,6 +466,14 @@ deliberately. There is no fix for that at this layer.
   container, which takes DNS down for everyone.
 - Upgrade: bump the version in `.env`, then
   `docker compose --project-directory . pull && ./setup.sh`.
+- Remove: **first** remove this node's IP from Tailscale admin → DNS →
+  Nameservers and check another device still resolves, then `./teardown.sh`
+  (unpublishes :3080, `compose down`; config and `.env` kept, `./setup.sh`
+  restores it). It refuses while `tailscale dns status --json` still lists
+  this node as a resolver; `--dns-removed` covers only the case where it
+  cannot read that. `./teardown.sh --purge` also deletes conf/, work/ and
+  `.env` after you type `adguard`. See TROUBLESHOOT.md, "Backing it out
+  safely".
 
 ## Tests
 

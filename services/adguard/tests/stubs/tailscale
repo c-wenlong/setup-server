@@ -9,12 +9,56 @@
 #                         that bind is impossible without one, so the deploy has
 #                         to refuse rather than fall back to a wildcard.
 #   ts_ip               — override the reported v4 address (default 100.77.77.77)
+#   serve_status        — text `tailscale serve status` prints (teardown tests)
+#   serve_status_fails  — exists => `serve status` fails like a stopped daemon
+#   dns_status          — JSON `tailscale dns status --json` prints (teardown's
+#                         DNS gate). Absent => a logged-in node whose tailnet
+#                         lists no resolvers at all (all four keys null, as
+#                         the real CLI prints them).
+#   dns_status_fails    — exists => `dns status` fails ("no netmap", i.e. 503
+#                         from the local API, or a CLI without the subcommand)
 #
 # The fake address is deliberately NOT this box's real 100.85.87.87: a test that
 # passes only because it matched the live tailnet IP would be testing nothing,
 # and a stub that emitted the real one could not tell a resolved value from a
 # hardcoded literal in docker-compose.yml.
 echo "tailscale $*" >> "$CALLS_LOG"
+
+if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then
+  if [ -f "$STATE_DIR/serve_status_fails" ]; then
+    echo "failed to connect to local tailscaled" >&2
+    exit 1
+  fi
+  [ -f "$STATE_DIR/serve_status" ] && cat "$STATE_DIR/serve_status"
+  exit 0
+fi
+case " $* " in *" off "*) [ "$1" = "serve" ] && exit 0 ;; esac
+
+if [ "$1" = "dns" ] && [ "${2:-}" = "status" ]; then
+  if [ -f "$STATE_DIR/dns_status_fails" ]; then
+    echo "503 Service Unavailable: no netmap" >&2
+    exit 1
+  fi
+  if [ -f "$STATE_DIR/dns_status" ]; then
+    cat "$STATE_DIR/dns_status"
+  else
+    cat <<'JSON'
+{
+  "TailscaleDNS": true,
+  "CurrentTailnet": {
+    "MagicDNSEnabled": true,
+    "MagicDNSSuffix": "tailfake.ts.net",
+    "SelfDNSName": "test-host.tailfake.ts.net."
+  },
+  "Resolvers": null,
+  "SplitDNSRoutes": null,
+  "FallbackResolvers": null,
+  "Nameservers": null
+}
+JSON
+  fi
+  exit 0
+fi
 
 case "$1" in
   status)
@@ -34,9 +78,12 @@ EOF
       echo "no current Tailscale address" >&2
       exit 1
     fi
-    case "$2" in
+    case "${2:-}" in
       -6) echo "fd7a:115c:a1e0::1111:2222" ;;
-      *)  cat "$STATE_DIR/ts_ip" 2>/dev/null || echo "100.77.77.77" ;;
+      -4) cat "$STATE_DIR/ts_ip" 2>/dev/null || echo "100.77.77.77" ;;
+      # Bare `tailscale ip`: every address, v4 first, as the real CLI does.
+      *)  cat "$STATE_DIR/ts_ip" 2>/dev/null || echo "100.77.77.77"
+          echo "fd7a:115c:a1e0::1111:2222" ;;
     esac
     ;;
   serve)
