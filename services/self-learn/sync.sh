@@ -89,16 +89,18 @@ LINK_DIR="$BLOBS_DIR/local"
 IGNORE_FILE="$LINK_DIR/seafile-ignore.txt"
 
 MAC_SSH="${MAC_SSH:-user@100.77.77.78}"
-MAC_HOME="${MAC_HOME:-/Users/user/.self-learn}"
+# The account ssh logs in as owns the home, the nix profile and Postgres.
+MAC_USER="${MAC_SSH%%@*}"
+MAC_HOME="${MAC_HOME:-/Users/$MAC_USER/.self-learn}"
 MAC_REPO="${MAC_REPO:-$MAC_HOME/checkout}"
 MAC_PGBIN="${MAC_PGBIN:-/opt/homebrew/opt/postgresql@17/bin}"
 MAC_DB="${MAC_DB:-self_learn}"
 MAC_PGPORT="${MAC_PGPORT:-5432}"
 # The Postgres superuser on the Mac is the account ssh logs in as.
-MAC_DB_URL="${MAC_DB_URL:-postgres://${MAC_SSH%%@*}@127.0.0.1:$MAC_PGPORT/$MAC_DB}"
+MAC_DB_URL="${MAC_DB_URL:-postgres://$MAC_USER@127.0.0.1:$MAC_PGPORT/$MAC_DB}"
 MAC_DUMP="$MAC_HOME/self_learn-sync.dump"   # staging path on the Mac (not shared /tmp)
 # nix-installed node/npm are not on a bare ssh PATH
-MAC_PATH_PREFIX="${MAC_PATH_PREFIX:-/etc/profiles/per-user/user/bin}"
+MAC_PATH_PREFIX="${MAC_PATH_PREFIX:-/etc/profiles/per-user/$MAC_USER/bin}"
 
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10"
 SCP="scp -o BatchMode=yes -o ConnectTimeout=10"

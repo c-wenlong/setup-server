@@ -116,7 +116,8 @@ BESZEL_PORT=$PORT
 BESZEL_VOLUME=$STATE/hub
 BESZEL_ADMIN_EMAIL=$ADMIN_EMAIL
 BESZEL_ADMIN_PASSWORD=$(randhex)
-SYSTEM_NAME=$SYSTEM_NAME
+# Quoted: a name like 'Home Server' must survive `.env` being sourced.
+SYSTEM_NAME="$SYSTEM_NAME"
 EOF
   chmod 600 "$ENV_FILE"
 fi

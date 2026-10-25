@@ -273,11 +273,11 @@ test_admin_email_override() {
   echo "• ADMIN_EMAIL override is baked into .env on first run"
   setup
   touch "$STATE_DIR/operator"
-  export ADMIN_EMAIL=admin@example.com
+  export ADMIN_EMAIL=operator@example.com
   run_deploy
   check "exits zero"                 [ "$CODE" -eq 0 ]
-  check ".env records the email"     grep -qx 'ADMIN_EMAIL=admin@example.com' "$SVC/.env"
-  check "whitelist matches it"       grep -q 'admin@example\.com' "$SVC/.env"
+  check ".env records the email"     grep -qx 'ADMIN_EMAIL=operator@example.com' "$SVC/.env"
+  check "whitelist matches it"       grep -q 'operator@example\.com' "$SVC/.env"
   teardown
 }
 
