@@ -107,8 +107,10 @@ BLOBS_DIR="$GNOSIA_HOME/blobs"
 LINK_DIR="$BLOBS_DIR/local"
 IGNORE_FILE="$LINK_DIR/seafile-ignore.txt"
 # Staging for a catalog.db in flight: a single directory on each side, next
-# to the file it replaces, so the final mv is a same-filesystem rename.
-STAGE_LOCAL="$BUILD_STATE/.sync-stage"
+# to the file it replaces, so the final mv is a same-filesystem rename — a
+# cross-device mv copies instead, and an interrupted copy leaves a torn db.
+STAGE_DIR="$(dirname "$CATALOG_DB")"
+STAGE_LOCAL="$STAGE_DIR/.sync-stage"
 
 # sqlite3 makes the consistent-snapshot path (`sqlite3 db ".backup out"`).
 # SQLITE3 may name a binary; an explicitly empty value forces the fallback
@@ -159,7 +161,9 @@ resolve_mac_paths() {
   esac
   MAC_REPO="${MAC_REPO:-$MAC_GNOSIA_HOME/checkout}"
   MAC_DB_FILE="${MAC_DB_FILE:-$MAC_GNOSIA_HOME/catalog.db}"
-  MAC_STAGE="$MAC_GNOSIA_HOME/.sync-stage"
+  # Same rule as the local side: stage beside the file being replaced so the
+  # mv is a rename, not a copy that can die halfway.
+  MAC_STAGE="$(dirname "$MAC_DB_FILE")/.sync-stage"
 }
 
 # A single key from the sibling seafile service's .env — never source it
@@ -322,17 +326,38 @@ left_stopped() {
 # replace — running `next` would keep writing the old inode, and its next
 # connection would see the new file beside the old one's -wal, which reads
 # as a hot WAL and can corrupt the incoming db.
-mac_app_running() {
-  $SSH "$MAC_SSH" "pgrep -f '$MAC_APP_PATTERN' >/dev/null 2>&1"
+# Pids running the checkout's app on the Mac, and only those: the pattern
+# matches every Next.js dev/server process on the machine, so each match is
+# confirmed by its cwd (under $MAC_REPO) or its command line (naming the
+# checkout) before it counts — a pkill on the bare pattern would stop any
+# other Next.js project the account is running.
+mac_app_pids() {
+  $SSH "$MAC_SSH" "
+    for pid in \$(pgrep -f '$MAC_APP_PATTERN' 2>/dev/null); do
+      cmd=\$(ps -o command= -p \"\$pid\" 2>/dev/null)
+      case \"\$cmd\" in *'$MAC_REPO'*) echo \"\$pid\"; continue;; esac
+      cwd=\$(lsof -a -p \"\$pid\" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+      case \"\$cwd\" in '$MAC_REPO'|'$MAC_REPO'/*) echo \"\$pid\";; esac
+    done"
 }
+mac_app_running() { [ -n "$(mac_app_pids)" ]; }
 mac_app_stop() {
-  local procs
-  procs="$($SSH "$MAC_SSH" "pgrep -fl '$MAC_APP_PATTERN' 2>/dev/null || true")"
-  [ -n "$procs" ] || return 1
-  warn "stopping the Mac's running app so its catalog.db can be replaced:"
-  printf '%s\n' "$procs" | sed 's/^/    /'
-  $SSH "$MAC_SSH" "pkill -f '$MAC_APP_PATTERN'" \
+  local pids
+  pids="$(mac_app_pids)"
+  [ -n "$pids" ] || return 1
+  warn "stopping the Mac's app under $MAC_REPO so its catalog.db can be replaced:"
+  $SSH "$MAC_SSH" "ps -o pid=,command= -p $(printf %s "$pids" | tr '\n' ',' | sed 's/,$//')" | sed 's/^/    /'
+  $SSH "$MAC_SSH" "kill $(printf %s "$pids" | tr '\n' ' ')" \
     || die "could not stop the Mac's app — stop it there and re-run"
+  # SIGTERM is a request, not an outcome: wait for the pids to actually go
+  # before touching the file they still hold open.
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(mac_app_pids)" ] && break
+    sleep 1
+  done
+  [ -z "$(mac_app_pids)" ] \
+    || die "the Mac's app ignored SIGTERM — stop it there and re-run"
   MAC_APP_WAS_RUNNING=1
   return 0
 }
@@ -740,8 +765,9 @@ cmd_push() {
   ok "Snapshotted $(du -h "$STAGE_LOCAL/catalog.db" | cut -f1)"
 
   info "copying to the Mac"
-  $SSH "$MAC_SSH" "mkdir -p '$MAC_GNOSIA_HOME' && rm -rf '$MAC_STAGE'" || die "could not prep the Mac's staging dir"
-  $SCP -pr "$STAGE_LOCAL" "$MAC_SSH:$MAC_GNOSIA_HOME/" >/dev/null || die "scp failed"
+  MAC_STAGE_PARENT="$(dirname "$MAC_DB_FILE")"
+  $SSH "$MAC_SSH" "mkdir -p '$MAC_STAGE_PARENT' && rm -rf '$MAC_STAGE'" || die "could not prep the Mac's staging dir"
+  $SCP -pr "$STAGE_LOCAL" "$MAC_SSH:$MAC_STAGE_PARENT/" >/dev/null || die "scp failed"
   rm -rf "$STAGE_LOCAL"
 
   info "placing catalog.db on the Mac"
@@ -770,8 +796,9 @@ cmd_pull() {
   snapshot_mac
 
   info "copying back"
+  mkdir -p "$STAGE_DIR"   # a first pull may find no local catalog.db yet
   rm -rf "$STAGE_LOCAL"   # scp -r recreates it from the remote dir's basename
-  $SCP -pr "$MAC_SSH:$MAC_STAGE" "$BUILD_STATE/" >/dev/null || die "scp failed"
+  $SCP -pr "$MAC_SSH:$MAC_STAGE" "$STAGE_DIR/" >/dev/null || die "scp failed"
   $SSH "$MAC_SSH" "rm -rf '$MAC_STAGE'" || true
   [ -f "$STAGE_LOCAL/catalog.db" ] || die "the pull staged no catalog.db — scp failed?"
   ok "Pulled $(du -h "$STAGE_LOCAL/catalog.db" | cut -f1)"

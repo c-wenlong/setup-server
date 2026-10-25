@@ -3940,8 +3940,8 @@ class SharedControlRegistryTest(unittest.TestCase):
     def test_gnosia_learn_stops_the_studio_runner_first_and_starts_it_last(self):
         # The runner's unit exists only while STUDIO_ENABLED=1, so it is an
         # optional part; it is listed first so stop takes it down before the
-        # app whose node_modules it runs against, and start (the reverse)
-        # brings it back up after.
+        # app (and the catalog file it talks to), and start (the reverse)
+        # brings it back up after both.
         self.assertEqual(self.names("gnosia-learn"),
                          ["gnosia-learn-studio.service", "gnosia-learn.service"])
         optional = [p for p in self.control("gnosia-learn")["parts"]

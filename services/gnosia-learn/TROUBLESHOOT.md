@@ -267,7 +267,7 @@ Back up first. A copy of `catalog.db` plus the newest export in
 
 ```sh
 systemctl --user start gnosia-learn-export.service       # fresh export into ~/.gnosia/archive
-cp ~/.gnosia/catalog.db ~/catalog-$(date +%F).db   # the whole catalog, sealed provider keys included
+sqlite3 ~/.gnosia/catalog.db ".backup ~/catalog-$(date +%F).db"  # consistent while the app runs — never a bare cp of a live WAL-mode db (no sqlite3? stop gnosia-learn + gnosia-learn-studio first, then cp)
 cp ~/dev/setup-server/services/gnosia-learn/.env ~/gnosia-learn.env.bak  # AUTH_SECRET unseals those keys
 ```
 

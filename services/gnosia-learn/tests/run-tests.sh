@@ -852,18 +852,18 @@ test_sync_push() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "snapshot via .backup"    calls_have "sqlite3 .*\.backup"
   check "sender app never stopped" no_call "systemctl --user stop gnosia-learn.service"
-  check "Mac app probed over ssh" calls_have "pgrep -fl 'next"
-  check "Mac app killed"          calls_have "pkill -f 'next"
+  check "Mac app probed over ssh" calls_have "pgrep -f 'next"
+  check "Mac app killed"          calls_have "kill 1234"
   check "staged dir scp'd"        calls_have "scp .*-pr .*\.sync-stage"
   check "old wal/shm dropped"     calls_have "rm -f '/Users/tester/.gnosia/catalog.db-wal'"
   check "staged file moved in"    calls_have "mv '/Users/tester/.gnosia/.sync-stage/catalog.db' '/Users/tester/.gnosia/catalog.db'"
-  check "stop before ship"        before "pkill -f 'next" "scp .*-pr"
+  check "stop before ship"        before "kill 1234" "scp .*-pr"
   check "Mac audit ran"           calls_have "npm run catalog -- blob audit"
   check "  with its CATALOG_DB"   calls_have "CATALOG_DB='/Users/tester/.gnosia/catalog.db'"
   check "  with its GNOSIA_HOME"  calls_have "GNOSIA_HOME='/Users/tester/.gnosia'"
   check "restart hint printed"    out_has "npm run dev"
   check "vault warned"            out_has "vault"
-  check "staging cleaned"         test ! -e "$HOME/services/self-learn/state/.sync-stage"
+  check "staging cleaned"         test ! -e "$HOME/.self-learn/.sync-stage"
   teardown
 }
 
@@ -874,7 +874,7 @@ test_sync_push_quiet_mac() {
   run_sync push
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "snapshot taken"          calls_have "sqlite3 .*\.backup"
-  check "nothing killed"          no_call "pkill"
+  check "nothing killed"          no_call " kill "
   check "no restart hint"         out_lacks "npm run dev"
   check "file placed remotely"    calls_have "mv '/Users/tester/.gnosia/.sync-stage/catalog.db'"
   teardown
@@ -926,7 +926,7 @@ test_sync_pull() {
   check "no DATABASE_URL passed"  grep -qx "DATABASE_URL=" "$STATE_DIR/catalog_env.log"
   check "app restarted"           calls_have "systemctl --user start gnosia-learn.service"
   check "stop before start"       before "stop gnosia-learn.service" "start gnosia-learn.service"
-  check "staging cleaned"         test ! -e "$HOME/services/self-learn/state/.sync-stage"
+  check "staging cleaned"         test ! -e "$HOME/.self-learn/.sync-stage"
   check "vault warned"            out_has "vault"
   teardown
 }

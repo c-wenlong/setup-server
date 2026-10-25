@@ -208,7 +208,7 @@ built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
 # something to deploy even when origin has not moved. Without this a setup.sh
 # re-run after flipping STUDIO_ENABLED exits "up to date" here, and the web
 # app keeps hiding (or exposing) Studio against the runner's new state.
-env_sig="STUDIO_ENABLED=${STUDIO_ENABLED:-0} ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-0}"
+env_sig="STUDIO_ENABLED=${STUDIO_ENABLED:-0} ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-0} GNOSIA_HOME=$GNOSIA_HOME CATALOG_DB=$CATALOG_DB"
 built_env_sig="$(cat "$BUILD_STATE/env-sig" 2>/dev/null || echo none)"
 
 if [ "$target_sha" = "$built_sha" ] && [ "$env_sig" = "$built_env_sig" ] \

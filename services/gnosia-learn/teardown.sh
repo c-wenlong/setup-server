@@ -152,6 +152,11 @@ LOCAL_PORT="$(env_get LOCAL_PORT)"
 SERVICE_HOME="$(env_get SERVICE_HOME)"
 SELF_LEARN_HOME="$(env_get SELF_LEARN_HOME)"
 GNOSIA_HOME="$(env_get GNOSIA_HOME)"
+CATALOG_DB="$(env_get CATALOG_DB)"
+# Same derivation as setup.sh/deploy.sh: a Postgres-era .env names only
+# SELF_LEARN_HOME, which was also the data root the catalog file lived under.
+GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
+CATALOG_DB="${CATALOG_DB:-${GNOSIA_HOME:+$GNOSIA_HOME/catalog.db}}"
 case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric (got: $LOCAL_PORT)";; esac
 [ -n "$SERVICE_HOME" ] || die "SERVICE_HOME is missing from $ENV_FILE — setup.sh always writes it, so this .env is not one teardown can trust."
 # env_get expands $HOME and ${HOME} only, but setup.sh sources .env and so
@@ -345,14 +350,20 @@ purge_targets() {
       [ -e "$PURGE_DIR/$child" ] || [ -L "$PURGE_DIR/$child" ] || continue
       p="$(real_dir "$PURGE_DIR/$child")" \
         || die "$PURGE_DIR/$child is a symlink or holds this checkout — refusing to delete it. Nothing was changed."
-      # The data root (blobs, vault, exports) is never purged, wherever
-      # .env points it.
-      if [ -n "$GNOSIA_HOME" ] && [ -d "$GNOSIA_HOME" ]; then
-        keep="$(cd "$GNOSIA_HOME" && pwd -P)" || die "Cannot resolve GNOSIA_HOME=$GNOSIA_HOME."
-        case "$keep/" in
-          "$p"/*) die "GNOSIA_HOME=$GNOSIA_HOME is inside $p — refusing to delete the blob store and exports. Nothing was changed." ;;
+      # The data root (blobs, vault, exports) and the catalog file are never
+      # purged, wherever .env points them — GNOSIA_HOME and CATALOG_DB are
+      # independently overrideable, so each keep root is checked on its own.
+      check_keep() {  # $1 var name, $2 dir (the catalog's parent for CATALOG_DB), $3 what it holds
+        [ -n "$2" ] && [ -d "$2" ] || return 0
+        local k
+        k="$(cd "$2" && pwd -P)" || die "Cannot resolve $1=$2."
+        case "$k/" in
+          "$p"/*) die "$1=$2 is inside $p — refusing to delete $3. Nothing was changed." ;;
         esac
-      fi
+      }
+      check_keep SELF_LEARN_HOME "$SELF_LEARN_HOME" "the blob store and exports"
+      check_keep GNOSIA_HOME "$GNOSIA_HOME" "the blob store and exports"
+      [ -n "$CATALOG_DB" ] && check_keep CATALOG_DB "$(dirname "$CATALOG_DB")" "the catalog"
       PURGE_PATHS="$PURGE_PATHS$p
 "
     done
@@ -360,7 +371,7 @@ purge_targets() {
 }
 if [ "$PURGE" -eq 1 ]; then
   purge_targets
-  KEEP_HOME="${GNOSIA_HOME:-$HOME/.gnosia}"
+  KEEP_HOME="${GNOSIA_HOME:-${SELF_LEARN_HOME:-$HOME/.gnosia}}"
   warn "--purge deletes the unit files, $ENV_FILE and:"
   if [ -n "$PURGE_PATHS" ]; then printf '%s' "$PURGE_PATHS" | sed 's/^/      /'; else echo "      (no state dirs on disk)"; fi
   warn "This cannot be undone. Kept: $KEEP_HOME — blobs, vault, the nightly exports in $KEEP_HOME/archive, and catalog.db itself (the catalog is a SQLite file under the data root, which is never purged)."
