@@ -42,6 +42,28 @@ first, dated by merge.
   form expands to nothing instead, which is all the branch needs. Every
   touched suite gains a static check so the length read cannot come back.
 
+- **teardown.sh hardening across the merged scripts.** `--purge` no
+  longer reads a data dir behind a folder this user cannot search (a
+  root-owned 0700 parent) as already gone and then deletes `.env` anyway.
+  A new `dir_state` check walks down from `~/services`. Where the script has
+  a cleanup container, it deletes the hidden path by mounting that folder
+  (which must sit strictly inside `~/services/<service>`), checking inside
+  that the target is the kind `.env` names: a directory where a file was
+  expected is refused, never `rm -rf`'d. Where it has no container it stops
+  before any change and names the `sudo rm -rf` to run — except syncthing
+  and jellyfin, which say to restore search access instead, since the
+  hidden dir could hold files `--purge` promises to keep. A symlink it
+  cannot follow is refused the same way. seafile and trigger-dev now treat a
+  `docker compose down` that fails only because outside containers still use
+  their network (seafile-net add-ons, trigger-dev task runs) the way coolify
+  does: they check their own containers are gone, warn, and carry on, and
+  trigger-dev no longer reports such networks as removed. Every
+  teardown now says how many shared Serve ports still route to the service,
+  instead of "already off", when it leaves them on. firefly-iii's hidden-path
+  queue is also counted at append now, so a purge with no hidden dirs no
+  longer dies on the empty-array length read under macOS's Bash 3.2 —
+  halfway through, after the data but before `.env`.
+
 - **A live deploy can no longer lose self-learn's lock to the 60-minute
   rule.** `deploy.sh`, `sync.sh` and `teardown.sh` reclaimed
   `.deploy.lock` on age alone, so a deploy or restore still running past

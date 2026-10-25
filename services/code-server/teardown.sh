@@ -259,14 +259,15 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
   port != "" && /\|-- / { n++; if ($3 == "proxy" && $NF == t) { mine++; paths[mine] = $2 } }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port path; do
   [ -n "${verdict:-}" ] || continue
-  case "$port" in ''|*[!0-9]*) warn "Unexpected Serve port '$port' — left alone."; continue ;; esac
+  case "$port" in ''|*[!0-9]*) warn "Unexpected Serve port '$port' — left alone."; kept=$((kept + 1)); continue ;; esac
   if [ "$verdict" = "off" ]; then
     "$TAILSCALE" serve --https="$port" off >/dev/null
     ok "Tailscale Serve: HTTPS :$port off"
   else
-    case "$path" in /*) ;; *) warn "Unexpected Serve path '$path' on :$port — left alone."; continue ;; esac
+    case "$path" in /*) ;; *) warn "Unexpected Serve path '$path' on :$port — left alone."; kept=$((kept + 1)); continue ;; esac
     "$TAILSCALE" serve --https="$port" --set-path="$path" off >/dev/null
     ok "Tailscale Serve: HTTPS :$port$path off; the other handlers on :$port (e.g. the launcher's /home) stay published"
   fi
@@ -274,7 +275,12 @@ while read -r verdict port path; do
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+# A route left on still points here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept Serve route(s) still point at $TARGET (left on, see above); $unpublished route(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+fi
 
 [ -z "$OTHER_UNITS" ] || warn "Also mention code-server, but setup.sh did not create them, so they are left alone:$OTHER_UNITS (in $scan_dir)"
 

@@ -925,6 +925,7 @@ EOF
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:$PORT (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -1240,6 +1241,153 @@ test_teardown_env_lint() {
   teardown
 }
 
+# data/ and media/ behind a folder this user cannot search (a root-owned
+# 0700 dir, faked with chmod 000): `[ -e ]` cannot see them, which must not
+# read as "already gone" while .env is deleted. The pinned image mounts that
+# folder and deletes only data/ and media/ below it; export/ stays.
+unhide_state() { chmod -R u+rwX "$HOME/services/paperless-ngx" 2>/dev/null; }
+# Move the archive under ~/services/paperless-ngx/$1 and point .env at it.
+move_root() {
+  local r new="$HOME/services/paperless-ngx/$1" sub
+  r="$(pl_root)"
+  mkdir -p "$new"
+  for sub in data media consume export; do
+    [ ! -e "$r/$sub" ] || mv "$r/$sub" "$new/$sub"
+  done
+  set_root "$new"
+}
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: data/ and media/ behind an unsearchable folder are deleted, not taken as gone"
+  local st a pl
+  # The folder above the archive root is hidden: the root itself is out of
+  # sight, so only data/ and media/ below it go.
+  deployed
+  pl="$HOME/services/paperless-ngx"; st="$pl/storage"; a="$st/archive"
+  move_root storage/archive
+  mkdir -p "$a/export"; echo m > "$a/export/manifest.json"
+  chmod 000 "$st"
+  run_teardown --purge "paperless-ngx"
+  unhide_state
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "confirmation names data/ and media/" out_has "deletes $a/data $a/media and"
+  check "says export/ cannot be counted" out_has "Kept: $a/export"
+  check "mounted the unsearchable folder" calls_have "docker run --rm --pull never -v $st:/x --entrypoint sh ghcr.io/paperless-ngx/paperless-ngx:3.1.3"
+  check "no sudo"                     no_call "^sudo"
+  check "data/ gone"                  [ ! -e "$a/data" ]
+  check "media/ gone"                 [ ! -e "$a/media" ]
+  check "says what it deleted"        out_has "Deleted $a/media"
+  check "export kept"                 [ -f "$a/export/manifest.json" ]
+  check "no mount source created"     [ ! -e "$STATE_DIR/docker_created_mount" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+  # The archive root itself is unsearchable: it is the folder mounted.
+  deployed
+  pl="$HOME/services/paperless-ngx"; a="$pl/archive"
+  move_root archive
+  mkdir -p "$a/export"; echo m > "$a/export/manifest.json"
+  chmod 000 "$a"
+  run_teardown --purge "paperless-ngx"
+  unhide_state
+  check "unsearchable root: exits zero" [ "$CODE" -eq 0 ]
+  check "  confirmation names data/ and media/" out_has "deletes $a/data $a/media and"
+  check "  does not count what it cannot see" out_lacks "(0 files"
+  check "  mounted the root"          [ "$(call_count "-v $a:/x")" -eq 2 ]
+  check "  data/ gone"                [ ! -e "$a/data" ]
+  check "  media/ gone"               [ ! -e "$a/media" ]
+  check "  export kept"               [ -f "$a/export/manifest.json" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  # Only data/ there: deleting it empties the root, so hidden_rm removes it;
+  # media/ must then not mount a folder that is gone, which a real dockerd
+  # would create as root.
+  deployed
+  pl="$HOME/services/paperless-ngx"; a="$pl/archive"
+  move_root archive
+  rm -rf "${a:?}/media" "${a:?}/consume" "${a:?}/export"
+  chmod 000 "$a"
+  run_teardown --purge "paperless-ngx"
+  unhide_state
+  check "root emptied by data/: exits zero" [ "$CODE" -eq 0 ]
+  check "  one cleanup container"     [ "$(call_count "-v $a:/x")" -eq 1 ]
+  check "  no mount source created"   [ ! -e "$STATE_DIR/docker_created_mount" ]
+  check "  says media/ was already gone" out_has "$a/media is already gone"
+  check "  root gone"                 [ ! -e "$a" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  pl="$HOME/services/paperless-ngx"; a="$pl/archive"
+  move_root archive
+  chmod 000 "$a"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "paperless-ngx"
+  unhide_state
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $a/data $a/media"
+  check "  never says data/ was deleted" out_lacks "Deleted $a/data"
+  check "  never says .env was deleted" out_lacks "Deleted $SVC/.env"
+  check "  database kept"             [ -f "$a/data/db.sqlite3" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  pl="$HOME/services/paperless-ngx"; a="$pl/archive"
+  move_root archive
+  rm -rf "${a:?}/data"
+  mkdir -p "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$a/data"
+  chmod 000 "$a"
+  run_teardown --purge "paperless-ngx"
+  unhide_state
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/paperless-ngx itself unsearchable (the default root): not
+  # strictly inside it, so no mount; stop before anything changes.
+  deployed
+  pl="$HOME/services/paperless-ngx"
+  chmod 000 "$pl"
+  run_teardown --purge "paperless-ngx"
+  unhide_state
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $pl/data $pl/media"
+  check "  no cleanup container"      no_call "docker run"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  serve untouched"           no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  database kept"             [ -f "$pl/data/db.sqlite3" ]
+  teardown
+  # And ~/services itself.
+  deployed
+  chmod 000 "$HOME/services"
+  run_teardown --purge "paperless-ngx"
+  chmod 755 "$HOME/services"
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  database kept"             [ -f "$(pl_root)/data/db.sqlite3" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /paperless proxy http://127.0.0.1:$PORT
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:$PORT (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
 # ------------------------------------------------- sandbox integrity proof
 # Recorded before the mocked suite runs, checked after it. A mocked suite that
 # quietly wrote to ~/services/paperless-ngx or to the repo's real .env would be
@@ -1517,6 +1665,8 @@ test_teardown_purge_services_root_is_a_link
 test_teardown_quoted_env
 test_teardown_home_variable_in_env
 test_teardown_env_lint
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 test_teardown_no_empty_array_length
 test_sandbox_was_hermetic
 

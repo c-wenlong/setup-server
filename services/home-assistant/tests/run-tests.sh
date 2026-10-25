@@ -1372,6 +1372,7 @@ EOF
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8123 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -1429,6 +1430,109 @@ test_teardown_purge_missing_config_dir() {
   run_teardown --purge "home-assistant"
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+}
+
+# HA_CONFIG under a folder this user cannot search (a root-owned 0700
+# storage/, faked with chmod 000): `[ -e ]` cannot see the config, which must
+# not read as "already gone" while .env is deleted. The pinned image mounts
+# that folder and deletes only the path below it.
+hide_config_under_storage() {
+  local st="$HOME/services/home-assistant/storage"
+  mkdir -p "$st"
+  mv "$(config_dir)" "$st/config"
+  sed -i.bak "s#^HA_CONFIG=.*#HA_CONFIG=\"$st/config\"#" "$SVC/.env"
+  chmod 000 "$st"
+}
+unhide_storage() {
+  chmod u+rwx "$HOME/services" 2>/dev/null
+  chmod -R u+rwX "$HOME/services/home-assistant" 2>/dev/null
+}
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: config behind an unsearchable folder is deleted, not taken as gone"
+  local st
+  deployed
+  st="$HOME/services/home-assistant/storage"
+  hide_config_under_storage
+  run_teardown --purge "home-assistant"
+  unhide_storage
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "mounted the unsearchable folder" grep -q -- "-v $st:/x" "$STATE_DIR/cleanup_run"
+  check "used the pinned image"       grep -q "ghcr.io/home-assistant/home-assistant:2026.9.1" "$STATE_DIR/cleanup_run"
+  check "never pulled for it"         grep -q "pull never" "$STATE_DIR/cleanup_run"
+  check "no sudo"                     no_call "^sudo"
+  check "config gone"                 [ ! -e "$st/config" ]
+  check "emptied folder gone"         [ ! -e "$st" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "state dir removed"           [ ! -e "$HOME/services/home-assistant" ]
+  teardown
+  deployed
+  st="$HOME/services/home-assistant/storage"
+  hide_config_under_storage
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "home-assistant"
+  unhide_storage
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/config"
+  check "  never says deleted"        out_lacks "Deleted"
+  check "  config kept"               [ -f "$st/config/.storage/core.config_entries" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  st="$HOME/services/home-assistant/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/config"
+  sed -i.bak "s#^HA_CONFIG=.*#HA_CONFIG=\"$st/config\"#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "home-assistant"
+  unhide_storage
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/home-assistant itself unsearchable: not strictly inside it,
+  # so no mount; stop before anything changes and name the sudo command.
+  deployed
+  chmod 000 "$HOME/services/home-assistant"
+  run_teardown --purge "home-assistant"
+  unhide_storage
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $(config_dir)"
+  check "  no cleanup container"      [ ! -f "$STATE_DIR/cleanup_run" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  serve untouched"           no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  config kept"               [ -f "$(config_dir)/.storage/core.config_entries" ]
+  teardown
+  # ~/services itself unsearchable: same, nothing changes.
+  deployed
+  chmod 000 "$HOME/services"
+  run_teardown --purge "home-assistant"
+  unhide_storage
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  config kept"               [ -f "$(config_dir)/.storage/core.config_entries" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /ha proxy http://127.0.0.1:8123
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8123 (left on, see above); 0 port(s) unpublished"
   teardown
 }
 
@@ -1516,6 +1620,8 @@ test_teardown_quoted_env
 test_teardown_purge_trailing_slashes
 test_teardown_purge_missing_config_dir
 test_teardown_home_variable_in_env
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 echo "• sandbox isolation: the mocked suite changed nothing on this host"
 AFTER_FP="$(host_fingerprint)"

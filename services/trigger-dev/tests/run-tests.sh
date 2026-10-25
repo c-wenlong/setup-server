@@ -512,6 +512,23 @@ EOF
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8030 (left on, see above); 2 port(s) unpublished"
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /trigger proxy http://127.0.0.1:8030
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8030 (left on, see above); 0 port(s) unpublished"
   teardown
 }
 
@@ -583,15 +600,55 @@ test_teardown_task_runners_left_alone() {
   teardown
 }
 
+# A task run started after the pre-check keeps a trigger-* network in use, so
+# `down` exits non-zero once it has removed the stack. That alone must not
+# stop the teardown halfway; anything else still does, data and .env kept.
 test_teardown_down_fails() {
-  echo "• teardown: a failed compose down (network still in use) stops, data kept"
+  echo "• teardown: a failed down because a task run still uses a trigger-* network warns and goes on"
   deployed
   touch "$STATE_DIR/compose_down_fails"
-  run_teardown --purge "trigger-dev"
-  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  printf 'run_cm9late-attempt-1 ' > "$STATE_DIR/network_users_trigger-webapp"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "checked this project's containers" calls_have "ps -aq --filter label=com.docker.compose.project=trigger-dev"
+  check "names the network and who keeps it" out_has "trigger-webapp (run_cm9late-attempt-1)"
   check "points at the attached runner" out_has "network=trigger-webapp"
+  check "does not claim they went"    out_lacks "networks removed"
+  check "says they stay"              out_has "networks still in use stay"
+  check "killed nothing"              no_call "docker rm"
   check "data kept"                   all_data_kept
   check ".env kept"                   [ -f "$SVC/.env" ]
+  run_teardown --purge "trigger-dev"
+  check "purge: exits zero"           [ "$CODE" -eq 0 ]
+  check "  warns about the network"   out_has "trigger-webapp (run_cm9late-attempt-1)"
+  check "  postgres gone"             [ ! -e "$(state_dir)/postgres" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  check "  marker gone"               [ ! -e "$(state_dir)" ]
+  teardown
+  # This project's own containers are still there: a real failure.
+  deployed
+  touch "$STATE_DIR/compose_down_fails"
+  printf 'run_cm9late-attempt-1 ' > "$STATE_DIR/network_users_trigger-webapp"
+  printf 'f00dfeed\n' > "$STATE_DIR/project_left"
+  run_teardown --purge "trigger-dev"
+  check "own containers left: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                  out_has "own containers are still there"
+  check "  data kept"                 all_data_kept
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  rm -f "$STATE_DIR/project_left"
+  touch "$STATE_DIR/ps_label_fails"
+  run_teardown --purge "trigger-dev"
+  check "cannot list what is left: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  data and .env kept"        all_data_kept && [ -f "$SVC/.env" ]
+  rm -f "$STATE_DIR/ps_label_fails" "$STATE_DIR/network_users_trigger-webapp"
+  run_teardown --purge "trigger-dev"
+  check "networks already gone: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it was not a network" out_has "not because a trigger-\* network is still in use"
+  check "  data and .env kept"        all_data_kept && [ -f "$SVC/.env" ]
+  : > "$STATE_DIR/network_users_trigger-supervisor"
+  run_teardown --purge "trigger-dev"
+  check "network empty: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  data and .env kept"        all_data_kept && [ -f "$SVC/.env" ]
   teardown
 }
 
@@ -904,6 +961,130 @@ test_teardown_purge_refuses_linked_files() {
   teardown
 }
 
+# State behind a folder this user cannot search (a root-owned 0700 parent,
+# faked with chmod 000): `[ -e ]` cannot see it, which must not read as
+# "already gone" while .env is deleted. The Postgres image (as root) mounts
+# that folder and deletes only the paths below it.
+unhide()    { chmod -R u+rwX "$HOME/services" 2>/dev/null; }
+mounts_of() { grep -c -- "-v $1:/x" "$CALLS_LOG"; }
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: state behind an unsearchable folder is deleted, not taken as gone"
+  local st reg
+  # registry/ holds both the registry data dir and auth.htpasswd: two
+  # targets, one unsearchable folder, two mounts of it.
+  deployed
+  reg="$(cd "$(state_dir)" && pwd -P)/registry"
+  chmod 000 "$reg"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "lists both behind the folder" out_has "$reg/data   (behind a folder"
+  check "  and the auth file"         out_has "$reg/auth.htpasswd   (behind a folder"
+  check "mounted the unsearchable folder once per target" [ "$(mounts_of "$reg")" -eq 2 ]
+  check "as root in the Postgres image" calls_have "pull never --user 0 -v $reg:/x --entrypoint sh postgres:14"
+  check "never mounted a missing folder" [ ! -f "$STATE_DIR/mounted_missing" ]
+  check "no sudo"                     no_call "^sudo"
+  check "says the data dir went"      out_has "Deleted $reg/data"
+  check "says the auth file went"     out_has "Deleted $reg/auth.htpasswd"
+  check "registry folder gone"        [ ! -e "$reg" ]
+  check "postgres gone too"           [ ! -e "$(state_dir)/postgres" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "marker gone"                 [ ! -e "$(state_dir)" ]
+  teardown
+  # The hidden folder sits inside another (searchable) data dir, which is
+  # cleared first; the hidden target is then gone and nothing is mounted.
+  deployed
+  local shared; shared="$(cd "$(env_val TRIGGER_SHARED)" && pwd -P)"
+  mkdir -p "$shared/locked"
+  mv "$(env_val TRIGGER_REDIS)" "$shared/locked/redis"
+  set_env TRIGGER_REDIS "$shared/locked/redis"
+  chmod 000 "$shared/locked"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "hidden inside another dir: exits zero" [ "$CODE" -eq 0 ]
+  check "  that dir cleared by the container" [ "$(mounts_of "$shared")" -eq 1 ]
+  check "  hidden folder never mounted once gone" [ "$(mounts_of "$shared/locked")" -eq 0 ]
+  check "  never mounted a missing folder" [ ! -f "$STATE_DIR/mounted_missing" ]
+  check "  says it is already gone"   out_has "$shared/locked/redis is already gone"
+  check "  shared gone"               [ ! -e "$shared" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  # The cleanup container fails: non-zero, sudo named, data and .env kept.
+  deployed
+  st="$(cd "$(state_dir)" && pwd -P)/storage"
+  mkdir -p "$st"
+  mv "$(env_val TRIGGER_POSTGRES)" "$st/postgres"
+  set_env TRIGGER_POSTGRES "$st/postgres"
+  chmod 000 "$st"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/postgres"
+  check "  never says deleted"        out_lacks "Deleted"
+  check "  postgres kept"             [ -f "$st/postgres/keep" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  st="$(cd "$(state_dir)" && pwd -P)/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/minio"
+  set_env TRIGGER_MINIO "$st/minio"
+  chmod 000 "$st"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  link kept"                 [ -L "$st/minio" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # A file-kind target that is a directory behind the unsearchable folder:
+  # never rm -rf'd (it could hold anything), and no sudo rm is offered.
+  deployed
+  st="$(cd "$(state_dir)" && pwd -P)/storage"
+  mkdir -p "$st/auth.htpasswd"; echo keep > "$st/auth.htpasswd/keep"
+  set_env TRIGGER_REGISTRY_AUTH "$st/auth.htpasswd"
+  chmod 000 "$st"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "file-kind hidden dir: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it is a directory"    out_has "is a directory, not the file"
+  check "  offers no rm -rf on it"    out_lacks "sudo rm -rf $st/auth.htpasswd"
+  check "  dir kept"                  [ -f "$st/auth.htpasswd/keep" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # And the mirror image: a dir-kind target that is a plain file.
+  deployed
+  st="$(cd "$(state_dir)" && pwd -P)/storage"
+  mkdir -p "$st"; echo keep > "$st/redis"
+  set_env TRIGGER_REDIS "$st/redis"
+  chmod 000 "$st"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "dir-kind hidden file: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it is not a directory" out_has "is not a directory"
+  check "  file kept"                 [ -f "$st/redis" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/trigger-dev itself unsearchable: not strictly inside it, so
+  # no mount; stop before anything changes and name the sudo command.
+  deployed
+  chmod 000 "$(state_dir)"
+  run_teardown --purge "trigger-dev"
+  unhide
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $(state_dir)/"
+  check "  no cleanup container"      no_call "entrypoint sh"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  serve untouched"           no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  data kept"                 all_data_kept
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/trigger-dev/setup.sh or services/trigger-dev/docker-compose.yml is missing — nothing to test."
@@ -946,6 +1127,8 @@ test_teardown_quoted_env
 test_teardown_home_variable_in_env
 test_teardown_env_lint
 test_teardown_refuses_compose_overrides
+test_teardown_only_shared_ports
+test_teardown_purge_unsearchable_parent
 
 if [ "${1:-}" = "--live" ]; then
   echo

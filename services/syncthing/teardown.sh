@@ -172,6 +172,39 @@ env_lint() {
     }' "$ENV_FILE")"
   [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
 }
+
+# Is a purge target there? `[ -e ]` is false both when it is gone and when a
+# folder on the way (e.g. a root-owned 0700 dir) cannot be searched, and only
+# the first means "nothing to delete". So walk down from ~/services: a
+# component absent under a searchable parent means gone (DIR_STATE=missing);
+# one that exists but cannot be searched hides the target (DIR_STATE=hidden,
+# HIDDEN_DIR that folder, HIDDEN_REST the path below it). $2 must already be
+# checked to sit inside ~/services/ with no `..` and no trailing slash.
+DIR_STATE=""
+HIDDEN_DIR=""
+HIDDEN_REST=""
+dir_state() {
+  local var="$1" target="$2" p="$HOME/services" rest
+  rest="${target#"$HOME/services/"}"
+  DIR_STATE="present"; HIDDEN_DIR=""; HIDDEN_REST=""
+  while :; do
+    if [ ! -e "$p" ]; then
+      # A symlink that does not resolve may be dangling or point into a
+      # folder this user cannot search; the two look the same from here.
+      [ ! -L "$p" ] || die "$p is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+      DIR_STATE="missing"; return 0
+    fi
+    [ -d "$p" ] || die "$p (on the way to $var=$target) is not a directory, refusing. Nothing was changed."
+    if [ ! -x "$p" ]; then DIR_STATE="hidden"; HIDDEN_DIR="$p"; HIDDEN_REST="$rest"; return 0; fi
+    case "$rest" in */*) ;; *) break ;; esac
+    p="$p/${rest%%/*}"
+    rest="${rest#*/}"
+  done
+  if [ ! -e "$target" ]; then
+    [ ! -L "$target" ] || die "$target is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+    DIR_STATE="missing"
+  fi
+}
 env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 CONFIG_DIR="$(env_get SYNCTHING_CONFIG)"
@@ -233,7 +266,20 @@ guard_dir() {  # guard_dir VARNAME VALUE
     "$HOME/services/"?*) ;;
     *) die "$var=$dir is not a folder inside $HOME/services/ — refusing to delete it. Remove it by hand if you are sure." ;;
   esac
-  if [ -e "$dir" ]; then
+  # `[ -e ]` alone reads a dir behind an unsearchable folder (a root-owned
+  # 0700 parent) as gone, and the purge would then delete .env and report
+  # success while the state stays. No cleanup container here, so stop before
+  # anything changes. Never suggest deleting the hidden dir: SYNCTHING_DATA
+  # holds the synced files and config/ or db/ could sit over one. Restore
+  # search access instead — offered only when the hidden folder is provably
+  # this service's own (real_dir); otherwise say where to look first.
+  dir_state "$var" "$dir"
+  if [ "$DIR_STATE" = "hidden" ]; then
+    real_dir "$HIDDEN_DIR" >/dev/null \
+      || die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME, so teardown cannot tell whether $var=$dir is there (and will not delete .env while it might be) — refusing. Check what it is first; if it is $NAME's own state, give this user access to it (sudo chown -R $(id -un) $HIDDEN_DIR) and re-run ./teardown.sh --purge. Nothing was changed."
+    die "$HIDDEN_DIR cannot be searched, so teardown cannot tell whether $var=$dir is there (and will not delete .env while it might be). Give this user access to it (sudo chown -R $(id -un) $HIDDEN_DIR) and re-run ./teardown.sh --purge. Nothing was changed."
+  fi
+  if [ "$DIR_STATE" = "present" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
     RESOLVED="$(real_dir "$dir")" || die "$var=$dir is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
@@ -294,6 +340,15 @@ if [ "$PURGE" -eq 1 ]; then
   # template folder (skipped). Prints P<path> per folder, E for a folder tag
   # this reader cannot be sure of, and T<count> of all folder tags seen; any
   # E, or a '<folder' in the file with no tag counted, refuses the purge.
+  #
+  # A config dir this user cannot search (itself, or a folder on the way)
+  # hides config.xml, and an empty folder list would then protect nothing
+  # inside config/ or db/. guard_dir stops on a hidden path; the dir itself
+  # being unsearchable is checked here.
+  guard_dir SYNCTHING_CONFIG "$CONFIG_DIR"
+  if [ -n "$RESOLVED" ] && [ ! -x "$RESOLVED" ]; then
+    die "SYNCTHING_CONFIG=$CONFIG_DIR cannot be searched by this user, so config.xml (where the synced folders are listed) cannot be read — refusing to purge. Give it back (sudo chown -R $(id -un) $CONFIG_DIR) and re-run. Nothing was changed."
+  fi
   FOLDERS=()
   cfg_xml="$(strip_slashes "${CONFIG_DIR:-}")/config.xml"
   if [ -n "$CONFIG_DIR" ] && [ -f "$cfg_xml" ]; then
@@ -462,6 +517,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
   port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -470,11 +526,17 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+# A shared port left on still routes here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
 # Disable + stop through the unit file setup.sh wrote. With that file gone,

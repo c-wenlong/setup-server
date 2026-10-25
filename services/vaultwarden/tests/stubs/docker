@@ -103,24 +103,31 @@ case "$1" in
     ;;
 
   run)
-    # teardown --purge's root-owned-file cleanup:
+    # teardown --purge's cleanups of root-owned files:
     #   docker run --rm --pull never -v DIR:/data --entrypoint sh <image> \
     #     -c 'find /data -mindepth 1 -delete'
+    #   docker run --rm --pull never -v BASE:/x --entrypoint sh <image> \
+    #     -c SCRIPT sh REST          (data behind an unsearchable folder)
     # The real container is root, so it can delete what the host user
-    # cannot. Model that by making the tree writable first, then running the
-    # real `find ... -delete` on the host side of the mount.
-    entry=""; mount_host=""
-    for a in "$@"; do
-      [ "${prev:-}" = "--entrypoint" ] && entry="$a"
-      [ "${prev:-}" = "-v" ] && mount_host="${a%%:*}"
-      prev="$a"
+    # cannot. Model that by making the mounted tree accessible first, then
+    # running the real SCRIPT on the host with the mount point pointing at
+    # the host side of the mount.
+    entry=""; mount_host=""; mount_ctr=""; script=""; prev=""
+    argv="$*"
+    while [ $# -gt 0 ]; do
+      case "$prev" in
+        --entrypoint) entry="$1" ;;
+        -v) mount_host="${1%%:*}"; mount_ctr="${1#*:}" ;;
+        -c) script="$1"; shift; break ;;
+      esac
+      prev="$1"; shift
     done
     if [ "$entry" = "sh" ]; then
-      printf '%s\n' "$*" >> "$STATE_DIR/cleanup_run"
+      printf '%s\n' "$argv" >> "$STATE_DIR/cleanup_run"
       [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
-      [ -n "$mount_host" ] || exit 1
+      [ -n "$mount_host" ] && [ -n "$mount_ctr" ] && [ -n "$script" ] || exit 1
       chmod -R u+rwX "$mount_host" 2>/dev/null
-      find "$mount_host" -mindepth 1 -delete
+      sh -c "${script//"$mount_ctr"/$mount_host}" "$@"
       exit $?
     fi
     # `docker run -it ... /vaultwarden hash` is documented but never
