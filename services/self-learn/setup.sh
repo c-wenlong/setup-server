@@ -7,8 +7,9 @@
 #   - machine-managed clone of github.com/c-wenlong/self-learn at
 #     ~/services/self-learn/repo (hard-reset on every deploy — not a
 #     working copy; write app config via this service's .env)
-#   - Postgres 17 container (docker-compose.yml) on 127.0.0.1:PG_PORT only —
-#     published because the catalog CLI runs on the host
+#   - the catalog as one SQLite file at $CATALOG_DB under the data root
+#     ($GNOSIA_HOME, the same path as SELF_LEARN_HOME) — no database
+#     server runs (upstream docs/SQLITE-MIGRATION.md)
 #   - production Next.js app (`next build` + `next start`) on
 #     127.0.0.1:LOCAL_PORT, under a systemd user unit (Linux) or launchd
 #     LaunchAgent (macOS)
@@ -21,13 +22,14 @@
 # Usage:
 #   ./setup.sh                              # deploy with defaults
 #   LOCAL_PORT=8200 ./setup.sh              # HTTPS follows LOCAL_PORT
-#   SKIP_SEED=1 ./setup.sh                  # no seed import/flips — restore a
-#                                           # pg_dump from the laptop instead
+#   SKIP_SEED=1 ./setup.sh                  # no seed import/flips — drop the
+#                                           # laptop's catalog.db in place
+#                                           # instead
 #   OWNER_PASSWORD=x AUTH_SECRET=y ./setup.sh   # set on first run only
 #                                           # (use the laptop's AUTH_SECRET so
 #                                           # provider keys stay readable)
 #
-# Requirements beyond the repo baseline (curl, Docker, Tailscale): git with
+# Requirements beyond the repo baseline (curl, Tailscale): git with
 # non-interactive access to the private repo (gh auth setup-git, or a deploy
 # key), Node.js >= 22.22.2 (engines field in upstream's package.json).
 #
@@ -41,7 +43,6 @@ set -euo pipefail
 LOCAL_PORT="${LOCAL_PORT:-8107}"
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-PG_PORT="${PG_PORT:-5432}"
 REPO_URL="${REPO_URL:-https://github.com/c-wenlong/self-learn.git}"
 BRANCH="${BRANCH:-main}"
 POLL_SECONDS="${POLL_SECONDS:-86400}"   # daily; deploy.sh --force deploys now
@@ -54,7 +55,7 @@ ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
 
-# Hex is URL-safe and survives .env + postgres URLs without quoting.
+# Hex is URL-safe and survives .env without quoting.
 randhex() {
   local n="${1:-16}"
   if command -v python3 >/dev/null 2>&1; then
@@ -94,16 +95,6 @@ command -v node >/dev/null || die "Node.js >= 22.22.2 is required (upstream engi
 node_at_least "22.22.2" \
   || die "Node.js >= 22.22.2 is required (found: $(node --version)). Upgrade node and re-run."
 
-if ! command -v docker >/dev/null; then
-  [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
-  die "Docker is not installed. On macOS install Docker Desktop or OrbStack."
-fi
-if ! docker ps >/dev/null 2>&1; then
-  [ "$OS" = "Linux" ] && die "Cannot talk to the Docker daemon. Fix: sudo usermod -aG docker $USER, then log out/in (or run via: sg docker -c ./setup.sh)"
-  die "Cannot talk to the Docker daemon. Is Docker Desktop/OrbStack running?"
-fi
-docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)."
-
 if command -v tailscale >/dev/null; then
   TAILSCALE="tailscale"
 elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
@@ -121,8 +112,7 @@ fi
 
 case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
 case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
-case "$PG_PORT" in ''|*[!0-9]*) die "PG_PORT must be numeric (got: $PG_PORT)";; esac
-ok "$OS + curl + git (repo reachable) + node $(node --version) + Docker + Compose v2 + Tailscale (running)"
+ok "$OS + curl + git (repo reachable) + node $(node --version) + Tailscale (running)"
 
 host="$("$TAILSCALE" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
@@ -132,13 +122,6 @@ if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
 else
   info "Writing .env (ports, paths, generated secrets — mode 600)"
-  tz="Etc/UTC"
-  if [ -L /etc/localtime ]; then
-    tz="$(readlink /etc/localtime | sed 's#.*/zoneinfo/##')"
-  elif [ -f /etc/timezone ]; then
-    tz="$(cat /etc/timezone)"
-  fi
-  db_pass="$(randhex 16)"
   owner_pass="${OWNER_PASSWORD:-$(randhex 12)}"
   auth_secret="${AUTH_SECRET:-$(randhex 32)}"
   ( umask 077
@@ -149,7 +132,6 @@ BRANCH=$BRANCH
 
 LOCAL_PORT=$LOCAL_PORT
 HTTPS_PORT=$HTTPS_PORT
-PG_PORT=$PG_PORT
 POLL_SECONDS=$POLL_SECONDS
 
 SERVICE_HOME=$HOME/services/self-learn
@@ -157,6 +139,12 @@ SERVICE_HOME=$HOME/services/self-learn
 # live under SELF_LEARN_HOME, outside ~/services — it is the rsync target
 # when the laptop's blob store is copied over.
 SELF_LEARN_HOME=$HOME/.self-learn
+# Upstream reads GNOSIA_HOME as its data root and keeps the catalog as one
+# SQLite file under it (docs/SQLITE-MIGRATION.md) — no database server runs.
+# Both names hold the same path on purpose: the data root stays put, so
+# blobs/ needs no move.
+GNOSIA_HOME=$HOME/.self-learn
+CATALOG_DB=$HOME/.self-learn/catalog.db
 NODE_BIN=$(dirname "$(command -v node)")
 PUBLIC_URL=https://$host:$HTTPS_PORT
 
@@ -166,14 +154,6 @@ PUBLIC_URL=https://$host:$HTTPS_PORT
 # its credentials logged in.
 STUDIO_ENABLED=${STUDIO_ENABLED:-0}
 ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-1}
-
-POSTGRES_VERSION=17-alpine
-POSTGRES_USER=catalog
-POSTGRES_PASSWORD=$db_pass
-POSTGRES_DB=self_learn
-POSTGRES_MEM_LIMIT=512m
-TZ=$tz
-DATABASE_URL=postgres://catalog:$db_pass@127.0.0.1:$PG_PORT/self_learn
 
 # What is typed on /sign-in, and the key sealing the session cookie and any
 # provider keys saved in Settings. Set AUTH_SECRET to the LAPTOP's value on
@@ -194,7 +174,16 @@ REQUESTED_HTTPS="$HTTPS_PORT"   # only meaningful when HTTPS_PORT_EXPLICIT is se
 set -a; . "$ENV_FILE"; set +a
 SERVICE_HOME="${SERVICE_HOME:?SERVICE_HOME missing from $ENV_FILE}"
 SELF_LEARN_HOME="${SELF_LEARN_HOME:?SELF_LEARN_HOME missing from $ENV_FILE}"
-DATABASE_URL="${DATABASE_URL:?DATABASE_URL missing from $ENV_FILE}"
+# An .env written before the SQLite cut-over holds a postgres DATABASE_URL
+# and POSTGRES_* keys instead of the two below; the URL is simply unused now
+# and the leftovers are harmless, so neither is read or required here. The
+# data root and catalog file are derived the way upstream resolves them
+# (docs/SQLITE-MIGRATION.md): CATALOG_DB under GNOSIA_HOME, which defaults to
+# the same path SELF_LEARN_HOME already names. Exported so host-side
+# `npm run catalog` calls below (the bootstrap) reach the same file.
+GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
+CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
+export GNOSIA_HOME CATALOG_DB
 NODE_BIN="${NODE_BIN:?NODE_BIN missing from $ENV_FILE}"
 PUBLIC_URL="${PUBLIC_URL:?PUBLIC_URL missing from $ENV_FILE}"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
@@ -225,7 +214,11 @@ if [ "$STUDIO_ENABLED" = "1" ] && [ -z "$CLAUDE_BIN" ]; then
   warn "STUDIO_ENABLED=1 but no claude CLI found — studio jobs will fail until it is installed."
 fi
 
-mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SELF_LEARN_HOME/blobs"
+# GNOSIA_HOME normally equals SELF_LEARN_HOME, but .env may point either
+# elsewhere — the blob root upstream derives is $GNOSIA_HOME/blobs, and
+# better-sqlite3 will not create a missing parent for $CATALOG_DB.
+mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SELF_LEARN_HOME/blobs" \
+  "$GNOSIA_HOME/blobs" "$(dirname "$CATALOG_DB")"
 
 # ------------------------------------------- existing deployment state
 # Captured before anything is touched: a previously deployed app that is
@@ -255,17 +248,10 @@ if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
     fi
   fi
 fi
-# Same for Postgres: remember whether it was running so the end of setup can
-# leave a deliberately stopped stack fully stopped.
-DB_WAS_UP=0
-if docker compose --project-directory "$SERVICE_DIR" ps --status running -q db 2>/dev/null | grep -q .; then
-  DB_WAS_UP=1
-fi
-
 # ------------------------------------------------------------ deploy script
 # Code, not config: refreshed on every run (edit the repo copy, re-run setup).
 info "Installing deploy script -> $SERVICE_HOME/bin/deploy.sh"
-sed -e "s|__ENV_FILE__|$ENV_FILE|" -e "s|__COMPOSE_DIR__|$SERVICE_DIR|" \
+sed -e "s|__ENV_FILE__|$ENV_FILE|" \
   "$SERVICE_DIR/deploy.sh" > "$SERVICE_HOME/bin/deploy.sh"
 chmod +x "$SERVICE_HOME/bin/deploy.sh"
 ok "Deploy script installed"
@@ -279,12 +265,14 @@ if [ "$OS" = "Linux" ]; then
 # $ENV_FILE and re-run instead of editing here.
 [Unit]
 Description=self-learn (Gnosia study hub, next start)
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 WorkingDirectory=$REPO_DIR/apps/web
 Environment=NODE_ENV=production
+Environment=GNOSIA_HOME=$GNOSIA_HOME
+Environment=CATALOG_DB=$CATALOG_DB
 Environment=PATH=$NODE_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Any start — launcher, phone, systemctl — clears teardown's torn-down marker:
 # a stopped app after an owner start must read as the owner's stop, not the
@@ -328,11 +316,12 @@ Description=self-learn nightly catalog export
 Type=oneshot
 WorkingDirectory=$REPO_DIR
 Environment=SELF_LEARN_HOME=$SELF_LEARN_HOME
-Environment=DATABASE_URL=$DATABASE_URL
+Environment=GNOSIA_HOME=$GNOSIA_HOME
+Environment=CATALOG_DB=$CATALOG_DB
 Environment=PATH=$NODE_BIN:/usr/local/bin:/usr/bin:/bin
 ExecStart=$NODE_BIN/node scripts/nightly-export.mjs
 EOF
-  chmod 600 "$UNIT_DIR/self-learn-export.service"   # embeds DATABASE_URL
+  chmod 600 "$UNIT_DIR/self-learn-export.service"   # names .env-derived paths
   cat > "$UNIT_DIR/self-learn-export.timer" <<EOF
 # Generated by services/self-learn/setup.sh — regenerated on every re-run.
 [Unit]
@@ -349,7 +338,7 @@ EOF
 # Generated by services/self-learn/setup.sh — regenerated on every re-run.
 [Unit]
 Description=self-learn studio (diagram job runner, loopback API on 127.0.0.1:7250)
-After=network-online.target docker.service self-learn.service
+After=network-online.target self-learn.service
 Wants=network-online.target
 
 [Service]
@@ -390,6 +379,8 @@ else
   <key>EnvironmentVariables</key>
   <dict>
     <key>NODE_ENV</key><string>production</string>
+    <key>GNOSIA_HOME</key><string>$GNOSIA_HOME</string>
+    <key>CATALOG_DB</key><string>$CATALOG_DB</string>
     <key>PATH</key><string>$NODE_BIN:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
@@ -462,7 +453,8 @@ EOF
   <key>EnvironmentVariables</key>
   <dict>
     <key>SELF_LEARN_HOME</key><string>$SELF_LEARN_HOME</string>
-    <key>DATABASE_URL</key><string>$DATABASE_URL</string>
+    <key>GNOSIA_HOME</key><string>$GNOSIA_HOME</string>
+    <key>CATALOG_DB</key><string>$CATALOG_DB</string>
     <key>PATH</key><string>$NODE_BIN:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StartCalendarInterval</key>
@@ -472,7 +464,7 @@ EOF
 </dict>
 </plist>
 EOF
-  chmod 600 "$HOME/Library/LaunchAgents/com.self-learn.export.plist"  # embeds DATABASE_URL
+  chmod 600 "$HOME/Library/LaunchAgents/com.self-learn.export.plist"  # names .env-derived paths
 fi
 
 # ------------------------------------------------------------ initial deploy
@@ -480,23 +472,18 @@ info "Deploy (clone + npm ci + catalog migrate + next build — several minutes 
 "$SERVICE_HOME/bin/deploy.sh" || die "Initial deploy failed — see output above."
 ok "Built: $REPO_DIR"
 
-# deploy.sh only runs `compose up` when it has work to do; on an up-to-date
-# re-run this is the line that repairs a stopped Postgres.
-info "Ensuring Postgres is up (docker compose up -d)"
-docker compose --project-directory "$SERVICE_DIR" up -d
-
 # ---------------------------------------------------------- catalog bootstrap
 # Once, ever: seed + six flips + claim the blob root. SKIP_SEED=1 leaves the
-# database empty for a pg_restore of the laptop's dump (docs/HOMESERVER.md
-# steps 3-6 upstream). The app reads content per request, so flipping after
-# the app is already up needs no restart.
+# catalog file empty so the laptop's catalog.db can be dropped in its place
+# (SETUP.md, 'Bringing the laptop's data over'). The app reads content per
+# request, so flipping after the app is already up needs no restart.
 BOOTSTRAP_MARK="$SERVICE_HOME/state/db-bootstrapped"
 if [ -f "$BOOTSTRAP_MARK" ]; then
   ok "Catalog already bootstrapped, leaving untouched"
 elif [ "$SKIP_SEED" = "1" ]; then
   echo "skipped" > "$BOOTSTRAP_MARK"
-  warn "SKIP_SEED=1 — catalog left empty for pg_restore of the laptop's dump."
-  warn "  Restoring later? See SETUP.md, 'Bringing the laptop's data over'."
+  warn "SKIP_SEED=1 — catalog left empty for the laptop's catalog.db."
+  warn "  Bringing it over? See SETUP.md, 'Bringing the laptop's data over'."
 else
   info "Bootstrapping the catalog: import seed + flips + claim blob root"
   (
@@ -570,13 +557,6 @@ else
   ok "LaunchAgents loaded (logs: ~/Library/Logs/self-learn*.log)"
 fi
 rm -f "$TORN_DOWN"   # the stack is enabled again; a later stop is the owner's
-
-# The `compose up -d` above was needed by the deploy and any bootstrap — if
-# Postgres was stopped along with the app, put it back the way it was found.
-if [ "$APP_SHOULD_RUN" = "0" ] && [ "$DB_WAS_UP" = "0" ]; then
-  docker compose --project-directory "$SERVICE_DIR" stop >/dev/null 2>&1 || true
-  ok "Postgres left stopped, matching how it was found"
-fi
 
 if [ "$APP_SHOULD_RUN" = "1" ]; then
   info "Waiting for the app on 127.0.0.1:$LOCAL_PORT"
@@ -659,8 +639,8 @@ fi
 echo
 echo "  Sign in at $PUBLIC_URL/sign-in with OWNER_PASSWORD from $ENV_FILE"
 echo "  Auto-deploy: pushes to $BRANCH are picked up every ${POLL_SECONDS}s; $SERVICE_HOME/bin/deploy.sh --force does it now."
-echo "  Database: 'docker compose --project-directory $SERVICE_DIR exec db psql -U $POSTGRES_USER $POSTGRES_DB' (password in .env)"
-echo "  Restoring the laptop's dump instead of the seed: SETUP.md, 'Bringing the laptop's data over'."
+echo "  Catalog: one SQLite file at $CATALOG_DB — 'cd $REPO_DIR && npm run catalog -- status'"
+echo "  Bringing the laptop's catalog.db over instead of the seed: SETUP.md, 'Bringing the laptop's data over'."
 echo
 echo "Manage:"
 if [ "$OS" = "Linux" ]; then
@@ -672,5 +652,4 @@ else
   echo "  launchctl kickstart -k gui/\$(id -u)/com.self-learn.web  # restart"
   echo "  tail -f ~/Library/Logs/self-learn.log"
 fi
-echo "  docker compose --project-directory $SERVICE_DIR ps|logs  # Postgres"
 echo "  tailscale serve status        # or: tailscale serve --https=$HTTPS_PORT off"

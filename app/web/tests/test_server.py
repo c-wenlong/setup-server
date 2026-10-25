@@ -3940,11 +3940,10 @@ class SharedControlRegistryTest(unittest.TestCase):
     def test_self_learn_stops_the_studio_runner_first_and_starts_it_last(self):
         # The runner's unit exists only while STUDIO_ENABLED=1, so it is an
         # optional part; it is listed first so stop takes it down before the
-        # app and the database it talks to, and start (the reverse) brings it
-        # back up after both.
+        # app (and the catalog file it talks to), and start (the reverse)
+        # brings it back up after both.
         self.assertEqual(self.names("self-learn"),
-                         ["self-learn-studio.service", "self-learn.service",
-                          "self-learn-db"])
+                         ["self-learn-studio.service", "self-learn.service"])
         optional = [p for p in self.control("self-learn")["parts"]
                     if p.get("optional")]
         self.assertEqual([p["unit"] for p in optional],

@@ -4,43 +4,78 @@
 # State in $STATE_DIR:
 #   mac_unreachable    — exists => every call exits 255
 #   mac_seaf_cli       — file content is the remote seaf-cli path (absent => none)
-#   mac_devserver      — exists => pgrep finds a next dev server
-#   mac_pg_fails       — exists => remote psql/createdb/pg_restore exit 1
-#   mac_psql_meta      — file content: canned rows for the snapshot meta query
-#   mac_psql_rows      — file content: canned rows for the snapshot union query
+#   mac_devserver      — exists => pgrep finds a next dev server; pkill clears it
+#   mac_no_sqlite3     — exists => remote `command -v sqlite3` fails
+#   mac_sqlite_fails   — exists => remote sqlite3 invocations exit 1
+#   mac_db_missing     — exists => the status section says the db is gone and
+#                        remote `[ -f ...]` tests fail
+#   mac_db_count       — file content: what a remote count query answers (40)
+#   mac_db_size        — file content: bytes the status section reports
+#   mac_db_mtime       — file content: mtime the status section reports
+#   mac_audit_fails    — exists => remote `npm run catalog` exits 1
 # Writes captured stdin payloads to $STATE_DIR/mac_ignore.txt /
 # mac_owner.txt / mac_plist.xml when the remote command is a `cat >` write.
 echo "ssh $*" >> "$CALLS_LOG"
 [ -f "$STATE_DIR/mac_unreachable" ] && exit 255
 
 remote="${*: -1}"   # last arg = the remote command string
+# The Mac's user, from the ssh destination (tester@mac.invalid -> tester).
+mac_user=""
+for a in "$@"; do case "$a" in *@*) mac_user="${a%%@*}" ;; esac; done
 
 case "$remote" in
+  *'$HOME'*)
+    # resolve_mac_paths: printf %s "$HOME"
+    echo "/Users${mac_user:+/$mac_user}" ;;
+
+  *stat\ -f%z*)
+    # `sync status`'s one remote command — answer the whole section at once.
+    # Checked before the single-purpose probes: the status remote command
+    # itself mentions `command -v sqlite3`, pgrep and [ -f ].
+    db="$(printf '%s' "$remote" | sed -n "s/^db='\([^']*\)'.*/\1/p")"
+    if [ -f "$STATE_DIR/mac_db_missing" ]; then
+      printf 'db    : %s missing\n' "$db"
+    else
+      size="$(cat "$STATE_DIR/mac_db_size" 2>/dev/null || echo 29851648)"
+      mtime="$(cat "$STATE_DIR/mac_db_mtime" 2>/dev/null || echo '2026-10-25 17:07')"
+      count="$(cat "$STATE_DIR/mac_db_count" 2>/dev/null || echo 40)"
+      printf 'db    : %s (%s bytes, modified %s)\n' "$db" "$size" "$mtime"
+      for t in catalog_instance learner asset event review progress blob_object provider_key; do
+        printf '  %-15s %s\n' "$t" "$count"
+      done
+      echo "  instance type : primary"
+    fi
+    echo 'owner : {"database": "stub-mac-catalog.db", "port": ""}'
+    echo "blobs : 100 files, 1.0G"
+    echo "seaf  : client running"
+    ;;
   *"command -v seaf-cli"*)
     if [ -f "$STATE_DIR/mac_seaf_cli" ]; then
       cat "$STATE_DIR/mac_seaf_cli"; exit 0
     fi
     exit 1
     ;;
+  *"command -v sqlite3"*)
+    [ -f "$STATE_DIR/mac_no_sqlite3" ] && exit 1
+    echo /usr/bin/sqlite3 ;;
   *"cat > "*"seafile-ignore.txt"*) cat > "$STATE_DIR/mac_ignore.txt" ;;
   *"cat > "*"/blobs/.owner"*)      cat > "$STATE_DIR/mac_owner.txt" ;;
   *"cat > "*"LaunchAgents"*)       cat > "$STATE_DIR/mac_plist.xml" ;;
-  *pg_dump*)
-    [ -f "$STATE_DIR/mac_pg_fails" ] && exit 1 ;;
-  *psql*)
-    [ -f "$STATE_DIR/mac_pg_fails" ] && exit 1
-    sql="$(cat)"
-    echo "$sql" >> "$STATE_DIR/mac_sql.log"
-    case "$sql" in
-      *information_schema*) [ -f "$STATE_DIR/mac_psql_meta" ] && cat "$STATE_DIR/mac_psql_meta" ;;
-      *"UNION ALL"*)         [ -f "$STATE_DIR/mac_psql_rows" ] && cat "$STATE_DIR/mac_psql_rows" ;;
-      *pg_database*)         echo "33692" ;;
-      *row_to_json*)         echo 'instance|{"id":1,"type":"primary"}' ;;
-      *"DROP DATABASE"*)     [ -f "$STATE_DIR/mac_pg_fails" ] && exit 1 ;;
-    esac
+  *for\ pid\ in*pgrep*)
+    # mac_app_pids: emits bare pids when the dev server is "running".
+    [ -f "$STATE_DIR/mac_devserver" ] || exit 0
+    echo "1234"
     ;;
-  *createdb*|*pg_restore*)
-    [ -f "$STATE_DIR/mac_pg_fails" ] && exit 1 ;;
+  *ps\ -o\ pid=,command=*)
+    # mac_app_stop's "what is being stopped" listing.
+    [ -f "$STATE_DIR/mac_devserver" ] || exit 0
+    echo " 1234 next dev"
+    ;;
+  *pkill*)
+    rm -f "$STATE_DIR/mac_devserver" ;;
+  *kill\ *)
+    # mac_app_stop's SIGTERM: the dev server exits.
+    rm -f "$STATE_DIR/mac_devserver" ;;
   *pgrep*)
     if echo "$remote" | grep -q 'next.*dev\|next-server'; then
       [ -f "$STATE_DIR/mac_devserver" ] || exit 1
@@ -50,7 +85,11 @@ case "$remote" in
       echo "5678 seaf-daemon"
     fi
     ;;
+  *sqlite3*)
+    [ -f "$STATE_DIR/mac_sqlite_fails" ] && exit 1 ;;
   *"npm run catalog"*)
     [ -f "$STATE_DIR/mac_audit_fails" ] && exit 1 ;;
+  *"[ -f"*|*"test -f"*|*"test ! -f"*)
+    [ -f "$STATE_DIR/mac_db_missing" ] && exit 1 ;;
 esac
 exit 0

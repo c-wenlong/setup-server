@@ -11,9 +11,9 @@
 #   deploy.sh --sha <r>  # redeploy a specific commit (rollback — pause the
 #                        # timer first, or the next poll redeploys BRANCH)
 #
-# Installed by setup.sh into $SERVICE_HOME/bin/ (ENV_FILE and COMPOSE_DIR are
-# baked in at install time — edit the copy in the setup-server repo, then
-# re-run setup.sh).
+# Installed by setup.sh into $SERVICE_HOME/bin/ (ENV_FILE is baked in at
+# install time — edit the copy in the setup-server repo, then re-run
+# setup.sh).
 #
 # Update order follows docs/HOMESERVER.md step 14 in the self-learn repo:
 # stop the app, pull, npm ci when the lockfile moved, catalog migrate, build,
@@ -22,15 +22,21 @@
 # Before those steps the previous node_modules/.next are renamed aside, so a
 # failed step restores and restarts the previous build instead of a
 # half-written tree. A deliberately stopped service is left stopped — the
-# poller maintains the deployment (Postgres included, which is returned to
-# the state it was found in), it does not override the owner's stop.
+# poller maintains the deployment, it does not override the owner's stop.
 
 set -euo pipefail
 
 ENV_FILE="__ENV_FILE__"
-COMPOSE_DIR="__COMPOSE_DIR__"
 [ -f "$ENV_FILE" ] || { echo "env file missing: $ENV_FILE (re-run setup.sh)" >&2; exit 1; }
 set -a; . "$ENV_FILE"; set +a
+
+# An .env written before the SQLite cut-over lacks the two catalog paths
+# (and its postgres DATABASE_URL is simply unused now). Derive them the way
+# upstream resolves them — CATALOG_DB under GNOSIA_HOME, which defaults to
+# the SELF_LEARN_HOME data root — so the stamped checkout env files below
+# always carry real paths.
+GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
+CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
 
 # systemd/launchd PATH won't include a nix/nvm/brew node — use the baked path.
 export PATH="$NODE_BIN:$PATH"
@@ -146,14 +152,6 @@ studio_installed() {
   [ -f "$HOME/.config/systemd/user/$STUDIO_UNIT" ] \
     || [ -f "$HOME/Library/LaunchAgents/$STUDIO_LABEL.plist" ]
 }
-# Postgres is started below for the migrate; if it was not running before and
-# the app is staying stopped, the operator's stop covered it — put it back.
-DB_WAS_UP=1
-db_as_found() {
-  if [ "$DB_WAS_UP" = "0" ] && [ "$WAS_ACTIVE" = "0" ]; then
-    docker compose --project-directory "$COMPOSE_DIR" stop >/dev/null 2>&1 || true
-  fi
-}
 die_deploy() {
   echo "deploy failed: $1" >&2
   # Restore the rename-aside snapshot: restarting a half-ci'd node_modules or
@@ -182,7 +180,6 @@ die_deploy() {
     fi
     rm -rf "$TL_SNAP"
   fi
-  db_as_found
   if [ "$WAS_ACTIVE" = "1" ]; then
     echo "restarting the previous build" >&2
     svc_start "$WEB_SVC" || true
@@ -209,7 +206,7 @@ built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
 # something to deploy even when origin has not moved. Without this a setup.sh
 # re-run after flipping STUDIO_ENABLED exits "up to date" here, and the web
 # app keeps hiding (or exposing) Studio against the runner's new state.
-env_sig="STUDIO_ENABLED=${STUDIO_ENABLED:-0} ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-0}"
+env_sig="STUDIO_ENABLED=${STUDIO_ENABLED:-0} ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-0} GNOSIA_HOME=$GNOSIA_HOME CATALOG_DB=$CATALOG_DB"
 built_env_sig="$(cat "$BUILD_STATE/env-sig" 2>/dev/null || echo none)"
 
 if [ "$target_sha" = "$built_sha" ] && [ "$env_sig" = "$built_env_sig" ] \
@@ -239,11 +236,10 @@ git -C "$REPO_DIR" reset --hard --quiet "$target_sha" || die_deploy "git reset"
 # .env, then run this script (or setup.sh) again. NEXT_PUBLIC_* is inlined at
 # build time, which is why this step sits between reset and build.
 # umask 077 for creation; the chmod covers rewrites too (cat > keeps an
-# existing file's mode). These carry OWNER_PASSWORD/AUTH_SECRET/DATABASE_URL.
+# existing file's mode). These carry OWNER_PASSWORD/AUTH_SECRET.
 ( umask 077
 cat > "$REPO_DIR/apps/web/.env.local" <<EOF
 # Written by deploy.sh from $ENV_FILE. Do not edit here — edit that file.
-DATABASE_URL=$DATABASE_URL
 OWNER_PASSWORD=$OWNER_PASSWORD
 AUTH_SECRET=$AUTH_SECRET
 NEXT_PUBLIC_SITE_URL=$PUBLIC_URL
@@ -253,8 +249,8 @@ EOF
 
 cat > "$REPO_DIR/services/catalog/.env" <<EOF
 # Written by deploy.sh from $ENV_FILE. Do not edit here — edit that file.
-DATABASE_URL=$DATABASE_URL
-SELF_LEARN_HOME=$SELF_LEARN_HOME
+GNOSIA_HOME=$GNOSIA_HOME
+CATALOG_DB=$CATALOG_DB
 EOF
 )
 chmod 600 "$REPO_DIR/apps/web/.env.local" "$REPO_DIR/services/catalog/.env"
@@ -303,25 +299,9 @@ if [ "${STUDIO_ENABLED:-0}" = "1" ]; then
 fi
 
 # ------------------------------------------------------------------ database
-# A stopped app may mean a stopped Postgres too (launcher stop covers both) —
-# record which it was so db_as_found can leave it that way again.
-DB_WAS_UP=0
-if docker compose --project-directory "$COMPOSE_DIR" ps --status running -q db 2>/dev/null | grep -q .; then
-  DB_WAS_UP=1
-fi
-docker compose --project-directory "$COMPOSE_DIR" up -d || die_deploy "docker compose up"
-echo "waiting for Postgres on 127.0.0.1:$PG_PORT"
-ready=0
-for _ in $(seq 1 30); do
-  if docker compose --project-directory "$COMPOSE_DIR" exec -T db \
-      pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
-    ready=1
-    break
-  fi
-  sleep 1
-done
-[ "$ready" = "1" ] || die_deploy "Postgres did not become ready"
-
+# The catalog is one SQLite file at $CATALOG_DB (upstream
+# docs/SQLITE-MIGRATION.md): no server to start or wait on — migrate creates
+# the file on first connect and advances it to head.
 npm run catalog -- migrate || die_deploy "catalog migrate"
 
 # --------------------------------------------------------------------- build
@@ -335,7 +315,6 @@ echo "$target_sha" > "$BUILD_STATE/built-sha"
 echo "$env_sig" > "$BUILD_STATE/env-sig"
 
 # ---------------------------------------------------------------- start again
-db_as_found
 if [ "$WAS_ACTIVE" = "1" ]; then
   svc_start "$WEB_SVC" || die_deploy "start $WEB_UNIT"
   echo "web app restarted"

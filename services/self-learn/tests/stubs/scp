@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# scp stub — logs; for a remote->local pull it writes a canned dump so the
-# rest of the pipeline has bytes to move.
+# scp stub — logs; for a remote->local pull of the .sync-stage directory it
+# materialises the staged set so the rest of the pipeline has bytes to move.
+# State in $STATE_DIR:
+#   mac_db_wal — exists => the staged set includes catalog.db-wal/-shm
 echo "scp $*" >> "$CALLS_LOG"
 [ -f "$STATE_DIR/mac_unreachable" ] && exit 1
 
 src="${*: -2:1}"; dst="${*: -1}"
 case "$src" in
-  *:*) echo "STUB-DUMP" > "$dst" ;;   # remote -> local
+  *:*)
+    # remote -> local: `scp -pr mac:<dir> <local>/` lands as <local>/<basename>
+    base="$(basename "$src")"
+    mkdir -p "$dst/$base"
+    echo "STUB-MAC-DB" > "$dst/$base/catalog.db"
+    if [ -f "$STATE_DIR/mac_db_wal" ]; then
+      echo "STUB-MAC-WAL" > "$dst/$base/catalog.db-wal"
+      echo "STUB-MAC-SHM" > "$dst/$base/catalog.db-shm"
+    fi
+    ;;
 esac
 exit 0

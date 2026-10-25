@@ -8,6 +8,29 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Fixed
+
+- **self-learn deploys died at `catalog migrate` after upstream's
+  Postgres→SQLite migration.** The gnosia catalog is now one SQLite
+  file and refuses a `postgres://` `DATABASE_URL` — the value this
+  service's `.env` wrote and every deploy stamped into the checkout.
+  `setup.sh` now writes `GNOSIA_HOME` + `CATALOG_DB` into a fresh `.env`
+  (the same data root `SELF_LEARN_HOME` already names, so `blobs/` does
+  not move) and derives both from `SELF_LEARN_HOME` when an older `.env`
+  lacks them; `POSTGRES_*` leftovers in it are ignored. `deploy.sh`
+  stamps the two paths into `services/catalog/.env` instead of
+  `DATABASE_URL`, drops the line from `apps/web/.env.local`, and no
+  longer starts or waits on Postgres — the `catalog migrate` step
+  itself is unchanged. The Postgres container is gone entirely:
+  `docker-compose.yml` is deleted, the docker preflights and the
+  compose up/down + `pg_isready` waits are out of all three scripts,
+  the app and export units/LaunchAgents carry
+  `GNOSIA_HOME`/`CATALOG_DB`, and the launcher's control list drops
+  `self-learn-db`. Bringing the laptop's data over is now a `catalog.db`
+  file copy, and because the file lives under `~/.self-learn`,
+  `teardown.sh --purge` keeps it the way it already kept blobs and the
+  nightly exports.
+
 ### Security
 
 - **Scrubbed deployment identifiers ahead of open sourcing.** The docs,
