@@ -45,7 +45,6 @@ SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 SERVICE_HOME="$HOME/services/$NAME"
 BIN_DIR="$SERVICE_HOME/bin"
-STATE_DIR="$SERVICE_HOME/state"
 UNIT_DIR="$HOME/.config/systemd/user"
 SERVICE_UNIT="$UNIT_DIR/deployd.service"
 TIMER_UNIT="$UNIT_DIR/deployd.timer"
@@ -114,7 +113,7 @@ fi
 # back unescaped — the same format every service's .env uses).
 set -a; . "$ENV_FILE"; set +a
 
-mkdir -p "$BIN_DIR" "$STATE_DIR"
+mkdir -p "$BIN_DIR" "$SERVICE_HOME/state"
 
 # ----------------------------------------------------------- install poller
 # Atomic: write to a temp file and mv, so a tick already running the old
