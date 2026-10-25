@@ -2178,7 +2178,8 @@ test_teardown_macos_agents() {
   teardown
   deployed
   export FAKE_UNAME=Darwin
-  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.gnosia-learn.web"
+  mkdir -p "$STATE_DIR/launchd"
+  for a in deploy export web; do touch "$STATE_DIR/launchd/com.gnosia-learn.$a"; done
   touch "$STATE_DIR/launchd_bootout_fails"
   run_teardown --purge "gnosia-learn"
   check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
