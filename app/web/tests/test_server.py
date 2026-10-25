@@ -886,6 +886,37 @@ class ProbeCacheTest(SandboxTest):
             server.probe = real
         self.assertEqual(len(calls), 1)
 
+    def test_index_redirects_path_mounts_to_slash_form(self):
+        """index.html must self-redirect /home -> /home/ before any asset
+        loads: relative hrefs under a slashless path mount resolve at the
+        vhost root and land on whatever service owns `/` instead."""
+        real_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "static", "index.html")
+        with open(real_path, encoding="utf-8") as fh:
+            html = fh.read()
+        # The redirect must run before the first stylesheet/script tag,
+        # i.e. inside the inline head script.
+        head = html.split("<link", 1)[0]
+        # Assert the exact statements: a negated guard (missing `!`, or a
+        # reversed condition) or a different destination must fail here.
+        self.assertIn(
+            "if (!location.pathname.endsWith('/')"
+            " && !/\\.html?$/i.test(location.pathname)) {", head)
+        self.assertIn(
+            "location.replace(location.pathname + '/'"
+            " + location.search + location.hash);", head)
+        # And the guard must fire on the mount shapes actually in use:
+        # bare mounts redirect (dotted ones included), trailing-slash and
+        # page URLs do not.
+        for path, want in (("/", False), ("/home/", False),
+                           ("/index.html", False), ("/home", True),
+                           ("/console", True), ("/home.v2", True)):
+            tail = path.rpartition("/")[2]
+            is_page = tail.lower().endswith((".html", ".htm"))
+            redirect = not path.endswith("/") and not is_page
+            self.assertEqual(redirect, want, path)
+
     def test_registry_file_parses_and_is_self_consistent(self):
         """The real services.json must load and satisfy the schema."""
         real_path = os.path.join(
