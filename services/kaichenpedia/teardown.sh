@@ -428,6 +428,14 @@ EOF
   ok "Deleted the state under ${PURGE_DIR:-(nothing on disk)}, the unit files and $ENV_FILE"
 fi
 
+# Tell deployd not to resurrect this on the next push: the flag lives in
+# deployd's own state dir so it survives --purge too. Re-run ./setup.sh to
+# clear it and re-enable auto-deploy.
+if [ -d "$HOME/services/deployd/state" ]; then
+  touch "$HOME/services/deployd/state/$NAME.disabled"
+  ok "deployd will skip $NAME until its setup.sh runs again"
+fi
+
 echo
 if [ "$PURGE" -eq 1 ]; then
   printf '\033[1;32mDone.\033[0m %s is removed and its state is gone. ./setup.sh starts fresh (re-clones from GitHub).\n' "$NAME"

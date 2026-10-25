@@ -66,6 +66,11 @@ ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
 
+# A manual ./setup.sh re-installs the service: clear deployd's disabled
+# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
+# never invokes this while the flag is set, so clearing is always manual.
+rm -f "$HOME/services/deployd/state/quiver-hub.disabled"
+
 # Captured, then grepped: `cmd | grep -q` under pipefail fails spuriously when
 # grep exits on its first match and the writer takes SIGPIPE.
 # The hub needs `swe remote serve --public-url` (quiver 6c70755, #570) to run

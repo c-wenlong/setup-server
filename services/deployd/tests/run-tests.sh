@@ -359,6 +359,30 @@ test_poll_force_and_status() {
   teardown
 }
 
+test_poll_disabled() {
+  echo "• poll: a .disabled flag skips the service, blocks --force, shows in --status"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  printf '%s\t%s\n' "$SHA_A2" "refs/heads/main" \
+    > "$STATE_DIR/remote_https___a_invalid_repo_git"
+  touch "$DSTATE/svc-a.disabled"
+  run_poll
+  check "tick clean"              [ "$CODE" -eq 0 ]
+  check "skip explained"          out_has "svc-a: disabled"
+  check "no deploy ran"           no_call "DEPLOY svc-a"
+  run_poll --force svc-a
+  check "force refuses"           [ "$CODE" -ne 0 ]
+  check "says how to re-enable"   out_has "re-enable"
+  check "still no deploy"         no_call "DEPLOY svc-a"
+  run_poll --status
+  check "status shows disabled"   out_has "disabled"
+  rm "$DSTATE/svc-a.disabled"
+  run_poll
+  check "deploys once cleared"    calls_have "DEPLOY svc-a"
+  teardown
+}
+
 test_teardown() {
   echo "• teardown stops the poller and keeps state + unit files"
   setup
@@ -423,6 +447,7 @@ for t in \
   test_poll_pull_failure_keeps_going \
   test_poll_lock \
   test_poll_force_and_status \
+  test_poll_disabled \
   test_teardown \
   test_teardown_lock_refusal \
   test_teardown_purge; do

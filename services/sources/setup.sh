@@ -50,6 +50,18 @@ ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
 
+# A manual ./setup.sh re-installs the service: clear deployd's disabled
+# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
+# never invokes this while the flag is set, so clearing is always manual.
+rm -f "$HOME/services/deployd/state/sources.disabled"
+
+# A re-run (e.g. under deployd, whose PATH is minimal) finds tools where
+# the first install recorded them in .env — put those dirs on PATH first.
+if [ -f "$ENV_FILE" ]; then
+  d="$(sed -n "s/^UV_BIN=\(.*\)\$/\1/p" "$ENV_FILE" | sed "s/^'//; s/'\$//")"
+  [ -n "$d" ] && [ -d "$d" ] && PATH="$PATH:$d"
+fi
+
 # ---------------------------------------------------------------- preflight
 OS="$(uname -s)"
 info "Preflight checks ($OS)"
@@ -192,11 +204,14 @@ done
 # ------------------------------------------------- legacy poller removal
 # deployd (services/deployd) polls the remote and re-runs this script now;
 # a host installed before the migration still has the per-service timer or
-# LaunchAgent — stop and remove it. teardown.sh deletes the same files.
+# LaunchAgent — stop and remove it, but only once deployd itself is
+# installed to take over scheduling. teardown.sh deletes the same files.
 UNIT_DIR="$HOME/.config/systemd/user"
 PLIST_LABEL="com.sources.deploy"
 PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
-if [ "$OS" = "Linux" ]; then
+if [ ! -x "$HOME/services/deployd/bin/deployd" ]; then
+  warn "deployd is not installed — keeping any old poller; auto-deploy is off until services/deployd/setup.sh runs"
+elif [ "$OS" = "Linux" ]; then
   if [ -f "$UNIT_DIR/sources-deploy.timer" ]; then
     systemctl --user disable --now sources-deploy.timer >/dev/null 2>&1 || true
     rm -f "$UNIT_DIR/sources-deploy.timer" "$UNIT_DIR/sources-deploy.service"

@@ -105,6 +105,9 @@ not trigger a deploy.
    check.
 7. Removes the old per-service `sources-deploy` timer / LaunchAgent if a
    host still has one — deployd (`services/deployd`) owns scheduling now.
+   Removal only happens once deployd itself is installed
+   (`~/services/deployd/bin/deployd`); without it the old poller stays and
+   setup warns, so install `services/deployd` first for auto-deploy.
 8. Publishes via `tailscale serve --bg --https=8098` and verifies
    end-to-end.
 
@@ -115,7 +118,11 @@ cd services/sources && SITE_PASSPHRASE='the site passphrase' ./setup.sh
 ```
 
 Overrides: `LOCAL_PORT` / `HTTPS_PORT` (default 8098), `SOURCE_REPO`
-(default `~/dev/sources`), `BRANCH` (main).
+(default `~/dev/sources`), `BRANCH` (main). Overriding `BRANCH` or pointing
+`SOURCE_REPO` at a different remote desyncs auto-deploy: deployd polls the
+repo/ref declared in `services/sources/app.json`'s `deploy` block
+(`main` on `https://github.com/c-wenlong/sources`), so edit the manifest to
+match or pushes to the override never trigger a deploy.
 
 ## Ops
 

@@ -142,7 +142,9 @@ skips the wait entirely.
    check on `/gallery/`.
 7. Removes the old per-service `design-systems-deploy` timer / LaunchAgent
    if a host still has one — deployd (`services/deployd`) owns scheduling
-   now.
+   now. Removal only happens once deployd itself is installed
+   (`~/services/deployd/bin/deployd`); without it the old poller stays and
+   setup warns, so install `services/deployd` first for auto-deploy.
 8. Publishes via `tailscale serve --bg --https=8108` and verifies
    `/gallery/` end-to-end.
 
@@ -153,7 +155,11 @@ cd services/design-systems && ./setup.sh
 ```
 
 Overrides: `LOCAL_PORT` / `HTTPS_PORT` (default 8108), `SOURCE_REPO`
-(default `~/dev/design-systems`), `BRANCH` (main).
+(default `~/dev/design-systems`), `BRANCH` (main). Overriding `BRANCH` or
+pointing `SOURCE_REPO` at a different remote desyncs auto-deploy: deployd
+polls the repo/ref declared in `services/design-systems/app.json`'s `deploy`
+block (`main` on `https://github.com/c-wenlong/designs.git`), so edit the
+manifest to match or pushes to the override never trigger a deploy.
 
 ## Ops
 

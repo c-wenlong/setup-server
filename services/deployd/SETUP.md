@@ -98,6 +98,14 @@ tail -f ~/Library/Logs/deployd.log              # macOS
 systemctl --user list-timers deployd.timer      # next tick
 ```
 
+## Disable / re-enable a service
+
+A service's `teardown.sh` drops `state/<key>.disabled` so the next push to
+its repo does not resurrect a service you just removed. Ticks skip it,
+`--force` refuses it, and `--status` marks it `disabled`. To re-enable: run
+the service's `setup.sh` again (it clears the flag), or delete the flag file
+by hand.
+
 ## Notes
 
 - No port, no container, nothing published — deployd is outbound-only. It

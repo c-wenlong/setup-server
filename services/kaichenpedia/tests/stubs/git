@@ -27,6 +27,10 @@ case "${1:-}" in
   rev-parse)
     cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111
     ;;
+  merge-base)
+    # --is-ancestor <sha> <head>: true only when <sha> is the known ref tip
+    [ "$3" = "$(cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111)" ] && exit 0 || exit 1
+    ;;
   fetch|reset) ;;
 esac
 exit 0

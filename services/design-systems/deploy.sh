@@ -49,8 +49,8 @@ if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ];
   rmdir "$LOCK" 2>/dev/null || true
 fi
 if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "another deploy is running — skipping"
-  exit 0
+  echo "another deploy is running — skipping" >&2
+  exit 1
 fi
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
@@ -72,6 +72,14 @@ if ! git -C "$REPO_DIR" pull --ff-only --quiet 2>/dev/null; then
 fi
 
 local_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
+# deployd asked for a specific remote sha (DEPLOY_SHA). If the pull could
+# not bring it down, building HEAD would deploy something else and deployd
+# would still record the requested sha as done — fail instead so it retries.
+if [ -n "${DEPLOY_SHA:-}" ] \
+    && ! git -C "$REPO_DIR" merge-base --is-ancestor "$DEPLOY_SHA" "$local_sha" 2>/dev/null; then
+  echo "deployd asked for $DEPLOY_SHA but the clone is at $local_sha (pull failed or diverged) — failing so it retries" >&2
+  exit 1
+fi
 built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
 
 if [ "$local_sha" = "$built_sha" ] && [ -d "$WWW_DIR/current" ] && [ "$FORCE" -eq 0 ]; then

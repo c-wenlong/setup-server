@@ -80,7 +80,9 @@ webhooks can't reach it. The push-to-deploy options were:
    check.
 7. Removes the old per-service `kaichenpedia-deploy` timer / LaunchAgent
    if a host still has one — deployd (`services/deployd`) owns scheduling
-   now.
+   now. Removal only happens once deployd itself is installed
+   (`~/services/deployd/bin/deployd`); without it the old poller stays and
+   setup warns, so install `services/deployd` first for auto-deploy.
 8. Publishes via `tailscale serve --bg --https=8091` and verifies
    end-to-end.
 
@@ -91,7 +93,10 @@ cd services/kaichenpedia && ./setup.sh
 ```
 
 Overrides: `LOCAL_PORT` / `HTTPS_PORT` (default 8091), `REPO_URL`, `BRANCH`
-(main).
+(main). Overriding `BRANCH` or `REPO_URL` desyncs auto-deploy: deployd polls
+the repo/ref declared in `services/kaichenpedia/app.json`'s `deploy` block
+(`main` on `https://github.com/c-wenlong/kaichenpedia.git`), so edit the
+manifest to match or pushes to the override never trigger a deploy.
 
 ## Ops
 
