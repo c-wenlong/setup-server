@@ -715,6 +715,20 @@ if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" 
   exit 1
 fi
 
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/plane survives"
+  deployed
+  local repo="$HOME/services/plane/setup-server/services/plane"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/plane/setup-server/other.env"
+  OUT="$(printf '%s\n' "plane" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "checkout intact"             [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"  [ -f "$HOME/services/plane/setup-server/other.env" ]
+  teardown
+}
+
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_root
 test_preflight_docker_perms
@@ -730,6 +744,7 @@ test_web_url_drift
 test_operator_escalation
 test_serve_approval_prompt
 test_teardown_safe
+test_teardown_purge_keeps_a_checkout_inside
 test_teardown_https_port_detected
 test_teardown_not_published
 test_teardown_port_owned_by_someone_else

@@ -675,6 +675,20 @@ if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" 
   exit 1
 fi
 
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/stirling-pdf survives"
+  deployed
+  local repo="$HOME/services/stirling-pdf/setup-server/services/stirling-pdf"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/stirling-pdf/setup-server/other.env"
+  OUT="$(printf '%s\n' "stirling-pdf" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "checkout intact"             [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"  [ -f "$HOME/services/stirling-pdf/setup-server/other.env" ]
+  teardown
+}
+
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_root
 test_preflight_docker_perms
@@ -690,6 +704,7 @@ test_frontend_url_drift
 test_operator_escalation
 test_serve_approval_prompt
 test_teardown_safe
+test_teardown_purge_keeps_a_checkout_inside
 test_teardown_refuses_compose_overrides
 test_teardown_https_port_from_frontend_url
 test_teardown_not_published

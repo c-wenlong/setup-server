@@ -12,8 +12,9 @@ first, dated by merge.
 
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
-  gets the launcher's Remove button. Every `--purge` warns that nothing
-  backs the box up and says what to export first. Service-specific:
+  gets the launcher's Remove button. The vaultwarden, immich and
+  paperless-ngx purges warn that nothing backs the box up and say what to
+  export first. Service-specific:
   immich stops the server and ML before the database and always includes
   the `ml` profile; paperless keeps a non-empty `export/` (your backup) and
   `consume/` (unfiled originals); seafile purges both data and MySQL dirs

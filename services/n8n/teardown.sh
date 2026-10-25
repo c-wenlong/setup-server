@@ -96,7 +96,7 @@ env_get() {
 # component, a newline or a colon (which would split a list or a -v mount)
 # is never accepted.
 real_dir() {
-  local d="$1" parent leaf home services own nl
+  local d="$1" parent leaf home services own nl checkout
   nl='
 '
   case "$d" in *"$nl"*|*:*) return 1 ;; esac
@@ -112,6 +112,10 @@ real_dir() {
   [ ! -L "$HOME/services/$NAME" ] || return 1
   own="$services/$NAME"
   case "$parent/$leaf" in "$own"|"$own"/*) ;; *) return 1 ;; esac
+  # Never a directory that holds this checkout (and so every other service's
+  # .env): a repo cloned inside ~/services/<name> must survive a purge.
+  checkout="$(cd "$SERVICE_DIR" && pwd -P)" || return 1
+  case "$checkout/" in "$parent/$leaf"/*) return 1 ;; esac
   printf '%s/%s' "$parent" "$leaf"
 }
 
