@@ -10,6 +10,14 @@ first, dated by merge.
 
 ### Fixed
 
+- **Stop and Remove now pause every Kuma monitor a service has.** A
+  service's `kuma` field may now be a list of monitor names as well as one
+  name. The launcher and ntfy-control pause each one on stop and remove,
+  and resume each one on start, restart, a failed teardown and a
+  reinstall, with one log line per monitor. AdGuard lists `adguard` and
+  `adguard-dns`, so removing or stopping it no longer leaves the DNS
+  monitor alerting.
+
 - **coolify setup.sh no longer breaks the last line of
   `~/.ssh/authorized_keys`.** When that file did not end in a newline,
   the Coolify key was glued onto the user's last key, breaking both. It now

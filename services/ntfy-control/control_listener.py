@@ -156,10 +156,7 @@ def load_registry():
             parts = _parts(block)
             if not parts:
                 continue
-            monitor = block.get("kuma")
-            if not (isinstance(monitor, str) and NAME_RE.match(monitor)):
-                monitor = None
-            services[key] = {"parts": parts, "kuma": monitor,
+            services[key] = {"parts": parts, "kuma": _monitors(block),
                              "primary": block.get("primary")}
         _registry.update(path=path, mtime=mtime, services=services)
         print(f"control registry: {len(services)} services from {path}",
@@ -298,15 +295,29 @@ def states():
 
 # ------------------------------------------------------------------ kuma
 
+def _monitors(block):
+    """`kuma` as a list of valid monitor names: one name or a list of them."""
+    raw = block.get("kuma")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    names = []
+    for name in raw:
+        if isinstance(name, str) and NAME_RE.match(name) and name not in names:
+            names.append(name)
+    return names
+
+
 def kuma(action, control):
-    """Pause/resume the service's Kuma monitor. Best-effort: returns a note
-    for the reply on failure, '' on success or when not applicable.
+    """Pause/resume each of the service's Kuma monitors. Best-effort: returns
+    a note for the reply naming any that failed, '' otherwise.
 
     Deliberately never contributes to the command's own exit status —
     stopping a service must not depend on the monitoring stack being up.
     """
-    monitor = control.get("kuma")
-    if not monitor or not KUMA_ENV_FILE or not os.path.isfile(KUMA_ENV_FILE):
+    monitors = control.get("kuma") or []
+    if not monitors or not KUMA_ENV_FILE or not os.path.isfile(KUMA_ENV_FILE):
         return ""
     env = dict(os.environ)
     with open(KUMA_ENV_FILE) as f:
@@ -315,12 +326,16 @@ def kuma(action, control):
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 env[k] = v
-    code, _ = run(
-        ["uv", "run", "--with", "uptime-kuma-api", "python3",
-         os.path.join(BIN_DIR, "kuma_toggle.py"), action, monitor],
-        env=env, timeout=90,
-    )
-    return "" if code == 0 else f" (kuma {action} failed)"
+    failed = []
+    for monitor in monitors:
+        code, _ = run(
+            ["uv", "run", "--with", "uptime-kuma-api", "python3",
+             os.path.join(BIN_DIR, "kuma_toggle.py"), action, monitor],
+            env=env, timeout=90,
+        )
+        if code != 0:
+            failed.append(monitor)
+    return f" (kuma {action} failed: {', '.join(failed)})" if failed else ""
 
 
 # --------------------------------------------------------------- lifecycle
