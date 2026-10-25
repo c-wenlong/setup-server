@@ -291,6 +291,11 @@ if [ "$OS" = "Linux" ]; then
   if [ "$PURGE" -eq 1 ]; then
     rm -f -- "$UNIT"
     ok "Deleted $UNIT"
+    # Safe while code-server still runs: systemd keeps a loaded unit until it
+    # stops, even with its file gone, so the stop below still works.
+    systemctl --user daemon-reload \
+      || die "systemctl --user daemon-reload failed. Run it by hand, then: systemctl --user stop $UNIT_NAME"
+    ok "systemd user daemon reloaded"
   fi
 else
   # launchd loads every plist in ~/Library/LaunchAgents at login, so a kept
@@ -335,34 +340,6 @@ if [ "$PURGE" -eq 1 ]; then
   echo "  Your workspace folders are never touched."
 fi
 
-# ---------------------------------------------------------------- stop
-# Last, so a terminal inside code-server that dies with it has nothing left
-# undone. The unit file may be gone by now (purge) but systemd still holds
-# the loaded unit until the daemon-reload after.
-info "Stopping code-server (a terminal opened inside code-server closes now)"
-if [ "$OS" = "Linux" ]; then
-  if ! systemctl --user stop "$UNIT_NAME" 2>/dev/null; then
-    state="$(systemctl --user show -p ActiveState --value "$UNIT_NAME" 2>/dev/null || true)"
-    case "$state" in
-      ""|inactive|failed) ;;
-      *) die "Could not stop $UNIT_NAME (state: $state). Try: systemctl --user stop $UNIT_NAME" ;;
-    esac
-  fi
-  ok "$UNIT_NAME stopped"
-  if [ "$PURGE" -eq 1 ]; then
-    systemctl --user daemon-reload
-    ok "systemd user daemon reloaded"
-  fi
-else
-  domain="gui/$(id -u)/$PLIST_LABEL"
-  if launchctl print "$domain" >/dev/null 2>&1; then
-    launchctl bootout "$domain" || die "launchctl bootout $domain failed. Try it by hand."
-    ok "LaunchAgent $PLIST_LABEL booted out"
-  else
-    ok "LaunchAgent $PLIST_LABEL was not loaded"
-  fi
-fi
-
 echo
 if [ "$PURGE" -eq 1 ]; then
   printf '\033[1;32mDone.\033[0m %s is removed along with its unit file. ./setup.sh starts it again with the kept config.\n' "$NAME"
@@ -373,4 +350,29 @@ fi
 echo "  The launcher at https://<host>/home/ is not affected."
 echo "  Uptime Kuma will now report it down. The launcher's Remove pauses that"
 echo "  monitor for you; from a terminal, pause it in Kuma."
+
+# ---------------------------------------------------------------- stop
+# The very last action, in every mode: a terminal opened inside code-server
+# dies with it, so everything above (Serve off, unit disabled or deleted and
+# reloaded, marker, summary) has already happened, and nothing is left after.
+info "Stopping code-server (a terminal opened inside code-server closes now)"
+if [ "$OS" = "Linux" ]; then
+  if ! systemctl --user stop "$UNIT_NAME" 2>/dev/null; then
+    state="$(systemctl --user show -p ActiveState --value "$UNIT_NAME" 2>/dev/null || true)"
+    case "$state" in
+      ""|inactive|failed) ;;
+      *) die "Could not stop $UNIT_NAME (state: $state). Try: systemctl --user stop $UNIT_NAME" ;;
+    esac
+  fi
+  ok "$UNIT_NAME stopped"
+else
+  domain="gui/$(id -u)/$PLIST_LABEL"
+  if launchctl print "$domain" >/dev/null 2>&1; then
+    launchctl bootout "$domain" || die "launchctl bootout $domain failed. Try it by hand."
+    ok "LaunchAgent $PLIST_LABEL booted out"
+  else
+    ok "LaunchAgent $PLIST_LABEL was not loaded"
+  fi
+fi
+
 exit 0

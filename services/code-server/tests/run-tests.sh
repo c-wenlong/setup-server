@@ -157,6 +157,8 @@ run_teardown() {
 
 # line number of the first call matching $1 (0 if none) — for ordering checks
 call_line() { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1 | grep . || echo 0; }
+# true when the last logged call matches $1 — the stop must be the final change
+last_call_is() { tail -n 1 "$CALLS_LOG" | grep -q -- "$1"; }
 
 # A deployed sandbox, shaped like the real box: setup.sh has run; :443 carries
 # code-server at / and the launcher at /home; the launcher has its own :8093;
@@ -198,7 +200,8 @@ test_teardown_safe() {
   check "unit disabled"                  calls_have "systemctl --user disable code-server.service"
   check "unit stopped"                   calls_have "systemctl --user stop code-server.service"
   check "serve off before disable"       [ "$(call_line 'set-path=/ off')" -lt "$(call_line 'disable code-server')" ]
-  check "stop is the last change"        [ "$(call_line 'disable code-server')" -lt "$(call_line 'stop code-server')" ]
+  check "disable before stop"            [ "$(call_line 'disable code-server')" -lt "$(call_line 'stop code-server')" ]
+  check "stop is the last call"          last_call_is "stop code-server"
   check "no daemon-reload without purge" no_call "daemon-reload"
   check "unit file kept"                 [ -f "$HOME/.config/systemd/user/code-server.service" ]
   check "config kept"                    [ -f "$HOME/.config/code-server/config.yaml" ]
@@ -417,7 +420,8 @@ test_teardown_purge() {
   check ":443 / off via --set-path"   calls_have "serve --https=443 --set-path=/ off"
   check "launcher /home untouched"    no_call "set-path=/home"
   check "unit file gone"              [ ! -e "$HOME/.config/systemd/user/code-server.service" ]
-  check "stop before daemon-reload"   [ "$(call_line 'stop code-server')" -lt "$(call_line 'daemon-reload')" ]
+  check "daemon-reload before stop"   [ "$(call_line 'daemon-reload')" -lt "$(call_line 'stop code-server')" ]
+  check "stop is the last call"       last_call_is "stop code-server"
   check "empty marker removed"        [ ! -e "$HOME/services/code-server" ]
   check "services dir itself kept" [ -d "$HOME/services" ]
   check "config kept"                 [ -f "$HOME/.config/code-server/config.yaml" ]
@@ -489,6 +493,48 @@ test_teardown_purge_keeps_a_checkout_inside() {
   teardown
 }
 
+# Run from code-server's integrated terminal, the stop kills teardown.sh
+# itself. Every change and the whole summary must already be done by then.
+test_teardown_killed_by_stop() {
+  echo "• teardown killed by its own stop (run inside code-server): nothing left undone"
+  deployed
+  mkdir -p "$HOME/services/code-server"
+  touch "$STATE_DIR/stop_kills"
+  run_teardown --purge "code-server"
+  check "purge: really was killed"     [ "$CODE" -ne 0 ]
+  check "  :443 / already off"         calls_have "serve --https=443 --set-path=/ off"
+  check "  unit already disabled"      calls_have "disable code-server"
+  check "  unit file already gone"     [ ! -e "$HOME/.config/systemd/user/code-server.service" ]
+  check "  daemon already reloaded"    calls_have "daemon-reload"
+  check "  marker already removed"     [ ! -e "$HOME/services/code-server" ]
+  check "  rm hints already printed"   out_has "rm -rf $HOME/.config/code-server "
+  check "  summary already printed"    out_has "Done."
+  check "  stop was the last call"     last_call_is "stop code-server"
+  teardown
+  deployed
+  touch "$STATE_DIR/stop_kills"
+  run_teardown
+  check "safe: really was killed"      [ "$CODE" -ne 0 ]
+  check "  :443 / already off"         calls_have "serve --https=443 --set-path=/ off"
+  check "  unit already disabled"      calls_have "disable code-server"
+  check "  summary already printed"    out_has "./setup.sh brings it back"
+  check "  stop was the last call"     last_call_is "stop code-server"
+  teardown
+  setup
+  export FAKE_OS=Darwin
+  run_deploy
+  printf 'https://test-host.tailfake.ts.net (tailnet only)\n|-- / proxy http://127.0.0.1:8080\n' > "$STATE_DIR/serve_status"
+  touch "$STATE_DIR/stop_kills"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "macOS: really was killed"     [ "$CODE" -ne 0 ]
+  check "  :443 already off"           calls_have "serve --https=443 off"
+  check "  plist already removed"      [ ! -e "$HOME/Library/LaunchAgents/com.coder.code-server.plist" ]
+  check "  summary already printed"    out_has "./setup.sh brings it back"
+  check "  bootout was the last call"  last_call_is "launchctl bootout"
+  teardown
+}
+
 test_teardown_macos() {
   echo "• teardown on macOS (FAKE_OS=Darwin): LaunchAgent booted out, plist removed, no systemctl"
   setup
@@ -503,6 +549,7 @@ test_teardown_macos() {
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ":443 / off via --set-path"   calls_have "serve --https=443 --set-path=/ off"
   check "booted out the agent"        calls_have "launchctl bootout gui/1000/com.coder.code-server"
+  check "bootout is the last call"    last_call_is "launchctl bootout"
   check "plist removed (no relaunch at login)" [ ! -e "$HOME/Library/LaunchAgents/com.coder.code-server.plist" ]
   check "other agent named, kept"     out_has "com.example.cs-helper.plist"
   check "  and never touched"         [ -f "$HOME/Library/LaunchAgents/com.example.cs-helper.plist" ]
@@ -579,6 +626,7 @@ test_teardown_other_units
 test_teardown_purge
 test_teardown_purge_marker_shapes
 test_teardown_purge_keeps_a_checkout_inside
+test_teardown_killed_by_stop
 test_teardown_macos
 
 if [ "${1:-}" = "--live" ]; then
