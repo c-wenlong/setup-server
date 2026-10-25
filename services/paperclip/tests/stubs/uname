@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# uname stub — FAKE_OS overrides `uname -s` (macOS teardown path on Linux CI);
+# everything else goes to the real uname.
+if [ "${1:-}" = "-s" ] && [ -n "${FAKE_OS:-}" ]; then
+  echo "$FAKE_OS"
+  exit 0
+fi
+for u in /usr/bin/uname /bin/uname; do
+  [ -x "$u" ] && exec "$u" "$@"
+done
+echo "uname stub: no real uname found" >&2
+exit 1

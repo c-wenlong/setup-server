@@ -3,7 +3,18 @@
 #   backend_state       — override BackendState (default Running)
 #   operator            — exists => serve allowed without sudo
 #   serve_fails_left    — countdown of forced serve failures
+#   serve_status        — text `tailscale serve status` prints (teardown tests)
+#   serve_status_fails  — exists => `serve status` fails like a stopped daemon
 echo "tailscale $*" >> "$CALLS_LOG"
+
+if [ "${1:-}" = "serve" ] && [ "${2:-}" = "status" ]; then
+  if [ -f "$STATE_DIR/serve_status_fails" ]; then
+    echo "failed to connect to local tailscaled" >&2
+    exit 1
+  fi
+  [ -f "$STATE_DIR/serve_status" ] && cat "$STATE_DIR/serve_status"
+  exit 0
+fi
 
 case "$1" in
   status)

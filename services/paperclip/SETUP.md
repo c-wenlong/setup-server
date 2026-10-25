@@ -133,6 +133,8 @@ paperclipai service status|restart|logs
 tailscale serve status
 ./tests/run-tests.sh          # mocked
 ./tests/run-tests.sh --live   # this box
+./teardown.sh                 # Remove: Serve off, unit disabled; data, .env, ~/.paperclip kept
+./teardown.sh --purge         # also .env, unit file, markers (back up master.key first)
 ```
 
 Upgrade: `paperclipai update` (hot-restarts the service), then re-run

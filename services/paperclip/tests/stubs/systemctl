@@ -1,3 +1,42 @@
 #!/usr/bin/env bash
+# systemctl stub: logs every call and succeeds. Unit state for teardown's
+# checks lives in $STATE_DIR (a unit is named without its .service suffix):
+#   active.<unit>  exists => running; `start`/`restart` create it, `stop` and
+#                  `disable --now` remove it. A running unit stays loaded
+#                  after its file is deleted, as in systemd.
+#   show_fails     exists => `show` fails, like a session with no user bus
+#   stop_fails     exists => `stop` exits non-zero and changes nothing
+#   stop_ignored   exists => `stop` / `disable --now` succeed but leave the
+#                  unit running
 echo "systemctl $*" >> "$CALLS_LOG"
+[ -n "${STATE_DIR:-}" ] && [ -d "$STATE_DIR" ] || exit 0
+verb=""; now=0; units=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--quiet|-q|--no-pager|--) ;;
+    --now) now=1 ;;
+    -p|--property) shift ;;
+    -*) ;;
+    *) if [ -z "$verb" ]; then verb="$1"; else units+=("${1%.service}"); fi ;;
+  esac
+  shift
+done
+for u in ${units[@]+"${units[@]}"}; do
+  case "$verb" in
+    start|restart) touch "$STATE_DIR/active.$u" ;;
+    stop)
+      [ ! -f "$STATE_DIR/stop_fails" ] || { echo "Failed to stop $u.service" >&2; exit 1; }
+      [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
+    disable) [ "$now" -eq 0 ] || [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
+    show)
+      [ ! -f "$STATE_DIR/show_fails" ] || { echo "Failed to connect to bus" >&2; exit 1; }
+      if [ -e "$HOME/.config/systemd/user/$u.service" ] || [ -f "$STATE_DIR/active.$u" ]; then
+        echo "LoadState=loaded"
+      else
+        echo "LoadState=not-found"
+      fi
+      if [ -f "$STATE_DIR/active.$u" ]; then echo "ActiveState=active"; else echo "ActiveState=inactive"; fi
+      ;;
+  esac
+done
 exit 0

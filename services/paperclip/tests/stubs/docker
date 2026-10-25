@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# docker stub — Paperclip never uses Docker; teardown only lists containers
+# (read-only) to name OpenHands ones it leaves alone.
+#   docker_ps — names `docker ps` prints
+echo "docker $*" >> "$CALLS_LOG"
+if [ "${1:-}" = "ps" ]; then
+  [ -f "$STATE_DIR/docker_ps" ] && cat "$STATE_DIR/docker_ps"
+fi
+exit 0
