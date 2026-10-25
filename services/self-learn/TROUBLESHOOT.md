@@ -282,8 +282,11 @@ Then, from `~/dev/setup-server/services/self-learn`:
 ./setup.sh               # bring it back (after a plain teardown it starts the stack again)
 ```
 
-A `./setup.sh` re-run after a plain teardown restarts the app even if you
-have started and stopped it from the launcher since; to keep it stopped,
+A `./setup.sh` re-run after a plain teardown restarts the app. Starting it
+in between — launcher, phone or `systemctl --user start` — clears
+`~/services/self-learn/state/torn-down` (the unit's `ExecStartPre` and the
+LaunchAgent's wrapper do it), so a later stop reads as yours and stays
+stopped across the re-run. To keep it stopped without ever starting it,
 delete `~/services/self-learn/state/torn-down` before re-running.
 
 `--purge` refuses while `sync.sh`'s blob link is installed
