@@ -71,6 +71,10 @@ and `GPU=true` is left out (that flag is nvidia-smi). Two things to know:
   `tail -f ~/Library/Logs/beszel-agent.log`), `docker logs beszel`
 - Upgrade: `docker compose --project-directory . pull && ./setup.sh`;
   agent: delete `~/.local/bin/beszel-agent`, rerun setup.sh
+- Remove: `./teardown.sh` (Serve off, agent unit disabled, hub `compose
+  down`; data, `.env` and agent files kept). `./teardown.sh --purge` also
+  deletes the hub data, `.env`, the agent binary and its unit or plist,
+  after you type `beszel`. See TROUBLESHOOT.md "Last resort".
 - Alerts: configure per-metric thresholds in the UI (user icon → Notifications
   → add ntfy URL `http://127.0.0.1:3003/alerts`) — RAM% is the one that
   matters most on this 7.7 GB box.
@@ -83,3 +87,10 @@ and `GPU=true` is left out (that flag is nvidia-smi). Two things to know:
 service's setup leans on the hub's live API, so the full PATH-stub sandbox
 used by older services would mostly test the stubs); `--live` verifies the
 real deployment end to end, including that stats are fresh.
+
+`teardown.sh` is the exception inside the exception: it makes no API calls,
+so the mocked run executes it for real in a temp `$HOME` with a handful of
+PATH stubs (docker, tailscale, systemctl, launchctl, id, uname, sudo) that
+the test file writes into the sandbox at run time. There is still no
+`tests/stubs/` directory, and the sandbox's `.env`, unit and plist are cut
+from setup.sh's own heredocs so the two cannot drift.

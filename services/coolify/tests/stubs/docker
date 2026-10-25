@@ -1,7 +1,26 @@
 #!/usr/bin/env bash
 # docker stub. State in $STATE_DIR:
-#   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
-#   compose_up         — touched by `compose ... up`
+#   docker_no_perm      — exists => `docker ps` fails like a non-docker-group user
+#   compose_up          — touched by `compose ... up`
+#   compose_down        — touched by `compose ... down` (with or without -v)
+#   compose_down_v      — touched by `compose ... down -v`
+#   managed_containers  — lines `name state` that `docker ps -a --filter
+#                         label=coolify.managed` prints (teardown tests)
+#   managed_ps_fails    — exists => that filtered listing fails
+#   docker_run_fails    — exists => `docker run --entrypoint sh` (purge cleanup) fails
+#   down_network_busy   — exists => `compose down` exits 1 like older Compose
+#                         when the coolify network still has endpoints
+#   own_left            — what `docker ps -aq --filter
+#                         label=com.docker.compose.project=coolify` prints
+#   volumes_left        — what `docker volume ls -q` prints
+#   network_users       — exists => `docker network inspect coolify` succeeds
+#                         and prints it (else: no such network)
+#   compose_stop        — touched by `compose ... stop`
+#   managed_after_stop  — appended to managed_containers by `compose ... stop`
+#                         (an app Coolify deployed while teardown's prompt waited)
+#   busy_after_stop     — a path; `compose ... stop` creates it with a file in it
+#                         (a user-deployed dir that appeared during the prompt)
+#   stop_fails          — exists => `compose ... stop` exits 1
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -10,10 +29,48 @@ case "$1" in
       echo "permission denied while trying to connect to the docker API" >&2
       exit 1
     fi
+    case " $* " in
+      *" label=com.docker.compose.project=coolify "*)
+        [ -f "$STATE_DIR/own_left" ] && cat "$STATE_DIR/own_left"
+        ;;
+      *" --filter "*)
+        [ -f "$STATE_DIR/managed_ps_fails" ] && { echo "Error: listing failed" >&2; exit 1; }
+        [ -f "$STATE_DIR/managed_containers" ] && cat "$STATE_DIR/managed_containers"
+        ;;
+    esac
     ;;
 
   inspect)
     echo running
+    ;;
+
+  volume)
+    [ "$2" = ls ] && [ -f "$STATE_DIR/volumes_left" ] && cat "$STATE_DIR/volumes_left"
+    ;;
+
+  network)
+    [ "$2" = inspect ] || exit 0
+    [ -f "$STATE_DIR/network_users" ] || { echo "Error: No such network: coolify" >&2; exit 1; }
+    cat "$STATE_DIR/network_users"
+    ;;
+
+  run)
+    # teardown --purge's container-owned-file cleanup: the real container runs
+    # as root, so it can delete what the host user cannot. Model that by
+    # making the tree writable first, then running the real `find ... -delete`.
+    mount_host=""; entry=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
+        --entrypoint) entry="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ "$entry" = "sh" ] || exit 0
+    [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+    chmod -R u+rwX "$mount_host" 2>/dev/null
+    find "$mount_host" -mindepth 1 -delete
+    exit $?
     ;;
 
   compose)
@@ -25,8 +82,28 @@ case "$1" in
             up)   touch "$STATE_DIR/compose_up" ;;
             pull) touch "$STATE_DIR/compose_pull" ;;
             down) touch "$STATE_DIR/compose_down" ;;
+            stop)
+              [ -f "$STATE_DIR/stop_fails" ] && { echo "stop failed" >&2; exit 1; }
+              touch "$STATE_DIR/compose_stop"
+              [ -f "$STATE_DIR/managed_after_stop" ] \
+                && cat "$STATE_DIR/managed_after_stop" >> "$STATE_DIR/managed_containers"
+              if [ -f "$STATE_DIR/busy_after_stop" ]; then
+                busy="$(cat "$STATE_DIR/busy_after_stop")"
+                case "$busy" in "$HOME"/?*) ;; *) echo "stub: path outside sandbox HOME: $busy" >&2; exit 97 ;; esac
+                mkdir -p "$busy" && echo deployed > "$busy/app.yml"
+              fi
+              ;;
+            -v)   [ -f "$STATE_DIR/compose_down" ] && touch "$STATE_DIR/compose_down_v" ;;
           esac
         done
+        case " $* " in
+          *" down "*)
+            if [ -f "$STATE_DIR/down_network_busy" ]; then
+              echo "failed to remove network coolify: Error response from daemon: error while removing network: network coolify has active endpoints" >&2
+              exit 1
+            fi
+            ;;
+        esac
         ;;
     esac
     ;;
