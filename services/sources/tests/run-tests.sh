@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/sources/setup.sh + deploy.sh.
+# Tests for services/sources/setup.sh + deploy.sh + teardown.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -25,7 +25,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 
   # A fake fetch clone: .git/ + scripts/build_site.py is all setup.sh checks.
   export SOURCE_REPO="$SANDBOX/repo"
@@ -39,7 +39,7 @@ setup() {
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT SOURCE_REPO BRANCH POLL_SECONDS SITE_PASSPHRASE STATE_DIR CALLS_LOG
+  unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT SOURCE_REPO BRANCH POLL_SECONDS SITE_PASSPHRASE STATE_DIR CALLS_LOG
 }
 
 run_deploy() {
@@ -62,9 +62,9 @@ check() {
   fi
 }
 
-out_has()    { grep -q "$1" <<<"$OUT"; }
-calls_have() { grep -q "$1" "$CALLS_LOG"; }
-no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
+out_has()    { grep -q -- "$1" <<<"$OUT"; }
+calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
+no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
 
 # ----------------------------------------------------------------- tests
@@ -136,6 +136,7 @@ test_fresh_deploy() {
     check "lingering enabled"         calls_have "loginctl enable-linger"
   else
     check "launch agent written"      [ -f "$HOME/Library/LaunchAgents/com.sources.deploy.plist" ]
+    check "label enabled before bootstrap" sh -c 'grep -n "launchctl \(enable\|bootstrap\)" "$1" | head -1 | grep -q "enable gui/.*/com.sources.deploy"' _ "$CALLS_LOG"
   fi
   check "served on tailscale :8098"   calls_have "tailscale serve --bg --https=8098 http://127.0.0.1:8098"
   check "prints final URL"            out_has "https://test-host.tailfake.ts.net:8098"
@@ -272,6 +273,700 @@ test_operator_escalation() {
   teardown
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+site_home() { echo "$HOME/services/sources"; }
+unit_dir()  { echo "$HOME/.config/systemd/user"; }
+set_env()   { sed -i.bak "s#^$1=.*#$1=$2#" "$SVC/.env"; }
+
+# A deployed sandbox: setup.sh has run, Serve maps this port to this service,
+# neighbours sit on other ports (one a lookalike suffix), and units this
+# setup.sh never writes (sources-trigger.service and its backup) exist.
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  mkdir -p "$(unit_dir)"
+  echo "[Service]" > "$(unit_dir)/sources-trigger.service"
+  echo "[Service]" > "$(unit_dir)/sources-trigger.service.bak-2026-10-24"
+  echo "stub content" > "$SOURCE_REPO/keep.md"
+  cat > "$STATE_DIR/serve_status" <<EOF_SERVE_FIXTURE
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8098 (tailnet only)
+|-- / proxy http://127.0.0.1:8098
+
+https://test-host.tailfake.ts.net:18098 (tailnet only)
+|-- / proxy http://127.0.0.1:18098
+EOF_SERVE_FIXTURE
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+# Back-date a deploy lock past deploy.sh's 60-minute stale mark.
+age_lock() { touch -t 202001010000 "$1"; }
+
+# teardown.sh --purge, with a hook run while the confirmation prompt waits:
+# $1 is the answer, $2 a snippet run once the prompt is on screen (before
+# the answer is sent). Sets OUT and CODE like run_teardown.
+run_purge_at_prompt() {
+  local out="$SANDBOX/teardown.out"
+  : > "$out"
+  { for _ in $(seq 1 100); do grep -q "to confirm" "$out" && break; sleep 0.1; done
+    eval "$2"
+    printf '%s\n' "$1"; } | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge > "$out" 2>&1
+  CODE=$?
+  OUT="$(cat "$out")"
+}
+
+# Nothing a teardown changes happened.
+nothing_changed() {
+  [ ! -f "$STATE_DIR/compose_down" ] && no_call " off" && no_call "systemctl" && no_call "launchctl" \
+    && [ -f "$SVC/.env" ] && [ -f "$(site_home)/www/current/index.html" ] && [ -d "$(site_home)/state" ]
+}
+# Line number of the first call matching $1 (0 when absent).
+call_line() { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1 | grep . || echo 0; }
+out_lacks() { ! grep -q -- "$1" <<<"$OUT"; }
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps files and .env, unpublishes only its port, stops the poller"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8098"         calls_have "tailscale serve --https=8098 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18098 untouched"  no_call "https=18098"
+  check "never serve reset"           no_call "serve reset"
+  check "timer disabled + stopped"    calls_have "systemctl --user disable --now sources-deploy.timer"
+  check "deploy service stopped"      calls_have "systemctl --user stop sources-deploy.service"
+  check "timer before service"        sh -c 'grep -n "systemctl --user" "$1" | head -1 | grep -q sources-deploy.timer' _ "$CALLS_LOG"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "down via project dir"        calls_have "docker compose --project-directory $SVC down"
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "site files kept"             [ -f "$(site_home)/www/current/index.html" ]
+  check "nginx.conf kept"             [ -f "$(site_home)/nginx.conf" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "unit files kept"             [ -f "$(unit_dir)/sources-deploy.timer" ]
+  check "no daemon-reload"            no_call "daemon-reload"
+  check "trigger unit never touched"  no_call "sources-trigger"
+  check "  but named in a warning"    out_has "sources-trigger.service mentions sources but setup.sh does not create it"
+  check "  backup named too"          out_has "sources-trigger.service.bak-2026-10-24"
+  check "trigger unit kept"           [ -f "$(unit_dir)/sources-trigger.service" ]
+  check "lingering untouched"         no_call "linger"
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_units_already_gone() {
+  echo "• teardown: missing unit files are fine (nothing to stop)"
+  deployed
+  rm -f "$(unit_dir)/sources-deploy.timer" "$(unit_dir)/sources-deploy.service"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no disable call"             no_call "disable"
+  check "says already gone"           out_has "sources-deploy.timer not installed"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8098 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF_SERVE_FIXTURE
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:8098
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8098
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /sources proxy http://127.0.0.1:8098
+EOF_SERVE_FIXTURE
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8110 off"                   calls_have "serve --https=8110 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "poller left running"         no_call "systemctl"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "nothing stopped"             no_call "systemctl"
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then setup.sh's files, .env and units go"
+  deployed
+  local home; home="$(site_home)"
+  run_teardown --purge "source"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: site kept"       [ -f "$home/www/current/index.html" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: poller running"  no_call "systemctl"
+  check "wrong name: serve untouched" no_call " off"
+  check "warns the passphrase goes"   out_has "holds SITE_PASSPHRASE"
+  check "lists what it deletes"       out_has "$home/www"
+  run_teardown --purge "sources"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "bin gone"                    [ ! -e "$home/bin" ]
+  check "state gone"                  [ ! -e "$home/state" ]
+  check "www gone"                    [ ! -e "$home/www" ]
+  check "nginx.conf gone"             [ ! -e "$home/nginx.conf" ]
+  check "marker dir gone"             [ ! -e "$home" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "timer unit file gone"        [ ! -e "$(unit_dir)/sources-deploy.timer" ]
+  check "service unit file gone"      [ ! -e "$(unit_dir)/sources-deploy.service" ]
+  check "daemon-reload after"         calls_have "systemctl --user daemon-reload"
+  check "serve off for :8098"         calls_have "tailscale serve --https=8098 off"
+  check "down without -v"             no_call "down -v"
+  check "sources repo kept"           [ -f "$SOURCE_REPO/keep.md" ]
+  check "repo .git kept"              [ -d "$SOURCE_REPO/.git" ]
+  check "trigger unit kept"           [ -f "$(unit_dir)/sources-trigger.service" ]
+  check "trigger backup kept"         [ -f "$(unit_dir)/sources-trigger.service.bak-2026-10-24" ]
+  check "trigger never touched"       no_call "sources-trigger"
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "says starts fresh"           out_has "starts fresh"
+  teardown
+}
+
+test_teardown_purge_keeps_foreign_files() {
+  echo "• teardown --purge: files setup.sh did not write stay, and so does the marker"
+  deployed
+  local home; home="$(site_home)"
+  echo old > "$home/nginx.conf.bak"
+  run_teardown --purge "sources"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "setup's files gone"          [ ! -e "$home/www" ]
+  check "foreign backup kept"         [ -f "$home/nginx.conf.bak" ]
+  check "marker kept (not empty)"     [ -d "$home" ]
+  check "warns what is left"          out_has "nginx.conf.bak"
+  teardown
+}
+
+test_teardown_purge_missing_site_files() {
+  echo "• teardown --purge: site files already gone is fine; marker still removed"
+  deployed
+  local home; home="$(site_home)"
+  rm -rf "${home:?}/bin" "${home:?}/state" "${home:?}/www" "${home:?}/nginx.conf"
+  run_teardown --purge "sources"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "empty marker removed"        [ ! -e "$(site_home)" ]
+  teardown
+  deployed
+  rm -rf "$(site_home)"
+  run_teardown --purge "sources"
+  check "no site home at all: exits zero" [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_purge_marker_symlink() {
+  echo "• teardown --purge: a symlinked ~/services/sources is refused"
+  deployed
+  mv "$(site_home)" "$HOME/real-sources"
+  ln -s "$HOME/real-sources" "$(site_home)"
+  run_teardown --purge "sources"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "real dir kept"               [ -f "$HOME/real-sources/www/current/index.html" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_purge_symlinked_leaf() {
+  echo "• teardown --purge: a symlinked www is refused, its target kept"
+  deployed
+  mv "$(site_home)/www" "$HOME/elsewhere-www"
+  ln -s "$HOME/elsewhere-www" "$(site_home)/www"
+  run_teardown --purge "sources"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "link target kept"            [ -f "$HOME/elsewhere-www/current/index.html" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_purge_repo_inside() {
+  echo "• teardown --purge: the sources repo is never deleted, wherever it lives"
+  deployed
+  local home; home="$(site_home)"
+  mkdir -p "$home/www/repo/.git"; echo mine > "$home/www/repo/notes.md"
+  set_env SOURCE_REPO "$home/www/repo"
+  run_teardown --purge "sources"
+  check "repo inside www: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  repo kept"                 [ -f "$home/www/repo/notes.md" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  home="$(site_home)"
+  cp -R "$SOURCE_REPO" "$home/clone"
+  set_env SOURCE_REPO "$home/clone"
+  run_teardown --purge "sources"
+  check "clone beside setup's files: exits zero" [ "$CODE" -eq 0 ]
+  check "  clone kept"                [ -f "$home/clone/keep.md" ]
+  check "  www gone"                  [ ! -e "$home/www" ]
+  check "  marker kept (holds the clone)" [ -d "$home" ]
+  teardown
+  deployed
+  home="$(site_home)"
+  mkdir -p "$home/.git"
+  set_env SOURCE_REPO "$home"
+  run_teardown --purge "sources"
+  check "repo is the marker itself: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  www kept"                  [ -d "$home/www" ]
+  teardown
+  # Relative (or ~, which Compose does not expand): resolved against the
+  # caller's cwd, so the overlap check cannot be trusted. Run from inside
+  # the marker dir, where "www/repo" is a repo under the purge.
+  local rel
+  # shellcheck disable=SC2088  # a literal ~ is the point: Compose does not expand it
+  for rel in "www/repo" "dev/sources" "~/dev/sources"; do
+    deployed
+    home="$(site_home)"
+    mkdir -p "$home/www/repo/.git"; echo mine > "$home/www/repo/notes.md"
+    set_env SOURCE_REPO "$rel"
+    OUT="$(cd "$home" && printf '%s\n' sources | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge 2>&1)"; CODE=$?
+    check "relative SOURCE_REPO=$rel: exits non-zero" [ "$CODE" -ne 0 ]
+    check "  says it is not absolute"   out_has "is not an absolute path"
+    check "  repo kept"                 [ -f "$home/www/repo/notes.md" ]
+    check "  nothing unpublished"       no_call " off"
+    check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a SERVICE_HOME outside ~/services/sources"
+  deployed
+  set_env SERVICE_HOME "$HOME"
+  run_teardown --purge "sources"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  set_env SERVICE_HOME "$HOME/services/../x"
+  run_teardown --purge "sources"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  set_env SERVICE_HOME "$HOME/services/"
+  run_teardown --purge "sources"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  mkdir -p "$HOME/services/neighbour/www"; echo x > "$HOME/services/neighbour/www/keep"
+  local dotted
+  for dotted in "$HOME/services/." "$HOME/services/./sources" "$HOME/services/sources/.."; do
+    set_env SERVICE_HOME "$dotted"
+    run_teardown --purge "sources"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  set_env SERVICE_HOME "$HOME/services/neighbour"
+  run_teardown --purge "sources"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/www/keep" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  mkdir -p "$HOME/services/sources/a:b"
+  set_env SERVICE_HOME "$HOME/services/sources/a:b"
+  run_teardown --purge "sources"
+  check "a colon in the path refused" [ "$CODE" -ne 0 ]
+  check "site still there"            [ -f "$(site_home)/www/current/index.html" ]
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  mkdir -p "$HOME/services/neighbour/www"; echo x > "$HOME/services/neighbour/www/keep"
+  set_env SERVICE_HOME "$HOME/services//"
+  run_teardown --purge "sources"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/www/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  set_env SERVICE_HOME "$HOME/services/alias"
+  run_teardown --purge "sources"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/www/keep" ]
+  set_env SERVICE_HOME "$HOME/services/sources///"
+  run_teardown --purge "sources"
+  check "own dir with trailing slashes: exits zero" [ "$CODE" -eq 0 ]
+  check "  www gone"                  [ ! -e "$(site_home)/www" ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/sources/www"; echo x > "$HOME/sources/www/keep"
+  run_teardown --purge "sources"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"   [ -f "$HOME/sources/www/keep" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/sources survives"
+  deployed
+  local repo="$HOME/services/sources/setup-server/services/sources"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/sources/setup-server/other.env"
+  OUT="$(printf '%s\n' "sources" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "checkout intact"             [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"  [ -f "$HOME/services/sources/setup-server/other.env" ]
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  set_env SERVICE_HOME "\"\${HOME}/services/sources\""
+  run_teardown --purge "sources"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  www gone"                  [ ! -e "$(site_home)/www" ]
+  teardown
+  deployed
+  set_env SERVICE_HOME "'\$HOME/services/sources'"
+  run_teardown --purge "sources"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  www kept"                  [ -d "$(site_home)/www" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8098'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8098 off"                   calls_have "serve --https=8098 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8098"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8098 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'SERVICE_HOME=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "SERVICE_HOME is set more than once"
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nSERVICE_HOME=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+  deployed
+  run_teardown
+  check "setup's %q passphrase line passes lint" [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_FILE / COMPOSE_PROJECT_NAME in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "sources"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  nothing unpublished"       no_call " off"
+    check "  poller untouched"          no_call "systemctl"
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_compose_override_file() {
+  echo "• teardown: a local docker-compose.override.yml rides along like setup.sh's up"
+  deployed
+  printf 'services:\n  sources:\n    extra_hosts: ["host.docker.internal:host-gateway"]\n' \
+    > "$SVC/docker-compose.override.yml"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "same down as setup's up (no -f)" calls_have "docker compose --project-directory $SVC down"
+  check "no explicit -f"              no_call "compose -f"
+  check "override file kept"          [ -f "$SVC/docker-compose.override.yml" ]
+  teardown
+}
+
+test_teardown_unresolved_variable() {
+  echo "• teardown: a path in .env that still names another variable is refused before anything changes"
+  deployed
+  local home; home="$(site_home)"
+  # To a reader that expands it, this is a repo inside www/; left literal,
+  # the overlap check would test a path that does not exist.
+  mkdir -p "$home/www/repo/.git"; echo mine > "$home/www/repo/notes.md"
+  set_env SOURCE_REPO "\$SERVICE_HOME/www/repo"
+  run_teardown --purge "sources"
+  check "SOURCE_REPO=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                  out_has "SOURCE_REPO .*still refers to another variable"
+  check "  refused before the prompt" out_lacks "to confirm"
+  check "  repo kept"                 [ -f "$home/www/repo/notes.md" ]
+  check "  nothing changed"           nothing_changed
+  run_teardown
+  check "plain run: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+  deployed
+  set_env SERVICE_HOME "\$HOME/services/\${NAME}"
+  run_teardown --purge "sources"
+  check "SERVICE_HOME=...\${NAME}: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  teardown
+}
+
+test_teardown_foreign_units_by_content() {
+  echo "• teardown: a unit or agent whose contents name ~/services/sources is listed, never touched"
+  deployed
+  printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/sources/www/ /backup/\n' "$HOME" \
+    > "$(unit_dir)/nightly-mirror.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$(unit_dir)/unrelated.service"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "names the unit by its contents" out_has "nightly-mirror.service mentions sources but setup.sh does not create it"
+  check "unrelated unit not named"    out_lacks "unrelated.service"
+  check "never addressed"             no_call "nightly-mirror"
+  run_teardown --purge "sources"
+  check "purge: exits zero"           [ "$CODE" -eq 0 ]
+  check "  unit kept"                 [ -f "$(unit_dir)/nightly-mirror.service" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$HOME/Library/LaunchAgents"
+  printf '<string>%s/services/sources/bin/deploy.sh</string>\n' "$HOME" \
+    > "$HOME/Library/LaunchAgents/com.me.mirror.plist"
+  echo other > "$HOME/Library/LaunchAgents/com.me.unrelated.plist"
+  echo own > "$HOME/Library/LaunchAgents/com.sources.deploy.plist"
+  run_teardown
+  check "macOS: exits zero"           [ "$CODE" -eq 0 ]
+  check "  names the agent by its contents" out_has "com.me.mirror.plist mentions sources"
+  check "  unrelated agent not named" out_lacks "com.me.unrelated.plist"
+  check "  its own plist not named"   out_lacks "com.sources.deploy.plist mentions"
+  check "  agent never addressed"     no_call "com.me.mirror"
+  check "  agent kept"                [ -f "$HOME/Library/LaunchAgents/com.me.mirror.plist" ]
+  teardown
+}
+
+test_teardown_purge_deploy_lock() {
+  echo "• teardown --purge: a live deploy lock refuses up front; a stale one is cleared; teardown holds it through the purge"
+  local lock
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  mkdir "$lock"
+  run_teardown --purge "sources"
+  check "live lock: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "  says a deploy is running"  out_has "A deploy is running"
+  check "  refused before the prompt" out_lacks "to confirm"
+  check "  nothing changed"           nothing_changed
+  check "  lock left to its owner"    [ -d "$lock" ]
+  run_teardown
+  check "plain teardown (deletes nothing) still runs" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  run_purge_at_prompt "sources" "mkdir '$lock'"
+  check "deploy started during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says a deploy is running"  out_has "A deploy is running"
+  check "  nothing changed"           nothing_changed
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  run_purge_at_prompt "sources" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
+  check "no lock: exits zero"         [ "$CODE" -eq 0 ]
+  check "  not taken while the prompt waits" grep -qx free "$STATE_DIR/lock_at_prompt"
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  mkdir "$lock"; age_lock "$lock"
+  printf '%s' "$lock" > "$STATE_DIR/lock_probe"
+  run_teardown --purge "sources"
+  check "stale lock: exits zero"      [ "$CODE" -eq 0 ]
+  check "  says it cleared it"        out_has "Cleared a stale deploy lock"
+  check "  teardown holds it during down" grep -qx held "$STATE_DIR/lock_at_down"
+  check "  gone after the purge"      [ ! -e "$lock" ]
+  check "  marker dir gone"           [ ! -e "$(site_home)" ]
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  mkdir "$lock"; echo mine > "$lock/notes"; age_lock "$lock"
+  run_teardown --purge "sources"
+  check "old lock holding files: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  check "  its files kept"            [ -f "$lock/notes" ]
+  teardown
+  deployed
+  lock="$(site_home)/.deploy.lock"
+  mkdir -p "$HOME/elsewhere"; ln -s "$HOME/elsewhere" "$lock"
+  run_teardown --purge "sources"
+  check "symlinked lock: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"           nothing_changed
+  check "  link left as it was"       [ -L "$lock" ] && [ -d "$HOME/elsewhere" ]
+  teardown
+}
+
+test_teardown_purge_rechecked_after_lock() {
+  echo "• teardown --purge: targets are worked out again once the lock is held; a change during the prompt deletes nothing"
+  deployed
+  mv "$(site_home)/bin" "$SANDBOX/bin.saved"
+  run_purge_at_prompt "sources" "mv '$SANDBOX/bin.saved' '$(site_home)/bin'"
+  check "bin/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says the list changed"     out_has "changed while the prompt waited"
+  check "  nothing changed"           nothing_changed
+  check "  bin kept"                  [ -d "$(site_home)/bin" ]
+  check "  lock dropped"              [ ! -e "$(site_home)/.deploy.lock" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
+  run_purge_at_prompt "sources" "mv '$(site_home)/www' '$SANDBOX/www.saved' && ln -s '$HOME/elsewhere' '$(site_home)/www'"
+  check "www/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  refuses the link"          out_has "www is a symlink"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ] && no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  link target kept"          [ -f "$HOME/elsewhere/keep" ]
+  teardown
+}
+
+# macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it.
+test_teardown_macos_launch_agent() {
+  echo "• teardown (macOS branch): only a loaded agent is booted out; a failed unload stops before --purge deletes anything"
+  deployed
+  export FAKE_UNAME=Darwin
+  run_teardown
+  check "loaded agent: exits zero"    [ "$CODE" -eq 0 ]
+  check "  checked with print first"  [ "$(call_line "launchctl print gui/.*/com.sources.deploy")" -gt 0 ] && [ "$(call_line "launchctl print")" -lt "$(call_line "launchctl bootout")" ]
+  check "  booted out"                calls_have "launchctl bootout gui/.*/com.sources.deploy"
+  check "  disabled"                  calls_have "launchctl disable gui/.*/com.sources.deploy"
+  check "  no systemctl"              no_call "systemctl"
+  : > "$CALLS_LOG"
+  touch "$STATE_DIR/launchd_not_loaded"
+  run_teardown
+  check "agent not loaded: exits zero" [ "$CODE" -eq 0 ]
+  check "  no bootout attempted"      no_call "launchctl bootout"
+  check "  still disabled"            calls_have "launchctl disable gui/.*/com.sources.deploy"
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  touch "$STATE_DIR/launchd_bootout_fails"
+  run_teardown --purge "sources"
+  check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says so"                   out_has "Could not unload LaunchAgent com.sources.deploy"
+  check "  no compose down"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  state kept"                [ -f "$(site_home)/www/current/index.html" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  echo async > "$STATE_DIR/launchd_bootout_fails"
+  run_teardown
+  check "bootout errors but the agent unloads: exits zero" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  touch "$STATE_DIR/launchd_disable_fails"
+  run_teardown --purge "sources"
+  check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it would reload"      out_has "would load again at the next login"
+  check "  state kept"                [ -f "$(site_home)/www/current/index.html" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  run_teardown --purge "sources"
+  check "purge on macOS: exits zero"  [ "$CODE" -eq 0 ]
+  check "  state gone"                [ ! -e "$(site_home)/www" ]
+  check "  no daemon-reload"          no_call "daemon-reload"
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -331,6 +1026,39 @@ test_poll_lock
 test_fetch_lock
 test_port_override
 test_operator_escalation
+# teardown tests assert the systemd poller path; the launchd path is not
+# exercised by this suite (verify it on a real Mac).
+if [ "$OS" = "Linux" ]; then
+  test_teardown_safe
+  test_teardown_units_already_gone
+  test_teardown_not_published
+  test_teardown_port_owned_by_someone_else
+  test_teardown_every_port_pointing_here
+  test_teardown_serve_status_fails
+  test_teardown_preflight
+  test_teardown_purge
+  test_teardown_purge_keeps_foreign_files
+  test_teardown_purge_missing_site_files
+  test_teardown_purge_marker_symlink
+  test_teardown_purge_symlinked_leaf
+  test_teardown_purge_repo_inside
+  test_teardown_purge_refuses_odd_paths
+  test_teardown_purge_trailing_slashes
+  test_teardown_purge_services_root_is_a_link
+  test_teardown_purge_keeps_a_checkout_inside
+  test_teardown_home_variable_in_env
+  test_teardown_quoted_env
+  test_teardown_env_lint
+  test_teardown_refuses_compose_overrides
+  test_teardown_compose_override_file
+test_teardown_unresolved_variable
+test_teardown_foreign_units_by_content
+test_teardown_purge_deploy_lock
+test_teardown_purge_rechecked_after_lock
+test_teardown_macos_launch_agent
+else
+  green "    ✓ (teardown tests skipped on macOS — they assert the systemd poller)"; PASS=$((PASS + 1))
+fi
 
 if [ "${1:-}" = "--live" ]; then
   echo

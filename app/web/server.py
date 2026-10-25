@@ -2011,35 +2011,39 @@ def is_removed(receipt, active):
 
 
 def _resume_after_reinstall(job):
-    """A Remove paused the service's Kuma monitor; a reinstall resumes it.
+    """A Remove paused the service's Kuma monitors; a reinstall resumes them.
 
-    Best effort, but never silent: the outcome is appended to the deploy's
-    job log, so a monitor left paused shows up where the deploy is read.
+    Best effort, but never silent: each monitor's outcome is appended to the
+    deploy's job log, so a monitor left paused shows up where the deploy is
+    read. One failed resume does not skip the others.
     """
     key = job["key"]
     svc = find_service(key)
-    monitor = control_monitor(control_block(svc)) if svc else None
-    step = kuma_step("resume", monitor) if monitor else None
-    if not step:
-        return
-    try:
-        with open(job["log_path"], "ab", buffering=0) as logfile:
-            logfile.write(("$ %s\n" % " ".join(step["argv"])).encode())
-            try:
-                proc = subprocess.Popen(step["argv"], stdout=logfile,
-                                        stderr=subprocess.STDOUT,
-                                        stdin=subprocess.DEVNULL, env=step["env"])
-                code = proc.wait()
-            except Exception as exc:
-                code = -1
-                logfile.write(("could not run: %s\n" % exc).encode())
-            if code != 0:
-                logfile.write(("[warning: Kuma monitor %s is still paused "
-                               "(exited %d); resume it in Uptime Kuma]\n"
-                               % (monitor, code)).encode())
-                log("kuma resume for %s exited %d" % (key, code))
-    except OSError as exc:
-        log("kuma resume for %s not run: %s" % (key, exc))
+    monitors = control_monitors(control_block(svc)) if svc else []
+    for monitor in monitors:
+        step = kuma_step("resume", monitor)
+        if not step:
+            continue
+        try:
+            with open(job["log_path"], "ab", buffering=0) as logfile:
+                logfile.write(("$ %s\n" % " ".join(step["argv"])).encode())
+                try:
+                    proc = subprocess.Popen(step["argv"], stdout=logfile,
+                                            stderr=subprocess.STDOUT,
+                                            stdin=subprocess.DEVNULL,
+                                            env=step["env"])
+                    code = proc.wait()
+                except Exception as exc:
+                    code = -1
+                    logfile.write(("could not run: %s\n" % exc).encode())
+                if code != 0:
+                    logfile.write(("[warning: Kuma monitor %s is still paused "
+                                   "(exited %d); resume it in Uptime Kuma]\n"
+                                   % (monitor, code)).encode())
+                    log("kuma resume of %s for %s exited %d"
+                        % (monitor, key, code))
+        except OSError as exc:
+            log("kuma resume of %s for %s not run: %s" % (monitor, key, exc))
 
 
 def write_receipt(key, job_id, source=None):
@@ -2091,7 +2095,9 @@ def write_receipt(key, job_id, source=None):
 #     "primary": "immich_server",   # ntfy-control only: which part reports
 #                                   # state on the phone panel (default: first);
 #                                   # this server never reads it
-#     "kuma": "immich",             # monitor paused on stop, resumed on start
+#     "kuma": "immich",             # monitor paused on stop, resumed on start;
+#                                   # a list (["adguard", "adguard-dns"]) when
+#                                   # the service has several monitors
 #     "locked": "why this one is deliberately not controllable"
 #   }
 
@@ -2145,12 +2151,24 @@ def control_parts(block):
     return parts
 
 
-def control_monitor(block):
-    """The Kuma monitor name for a service, or None."""
-    name = block.get("kuma")
-    if isinstance(name, str) and _CONTROL_NAME_RE.match(name):
-        return name
-    return None
+def control_monitors(block):
+    """The Kuma monitor names for a service, in order. [] when it has none.
+
+    `kuma` is one name or a list of names (a service with more than one
+    monitor, like AdGuard's web UI and its DNS check). Malformed names are
+    dropped, the same as malformed parts, and duplicates are kept once.
+    """
+    raw = block.get("kuma")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    names = []
+    for name in raw:
+        if (isinstance(name, str) and _CONTROL_NAME_RE.match(name)
+                and name not in names):
+            names.append(name)
+    return names
 
 
 def control_status(svc):
@@ -2210,6 +2228,10 @@ def _find_uv():
 def kuma_step(action, monitor):
     """A step that pauses/resumes one Kuma monitor, or None if it can't run.
 
+    A service with several monitors gets one step per monitor (see
+    _kuma_steps), so each has its own line in the job log and its own exit
+    code.
+
     Calls the EXISTING services/ntfy-control/kuma_toggle.py — the launcher does not
     talk to Kuma itself, so there is one implementation of "pause a monitor"
     on this box. Everything about this is best-effort: no uv, no toggle
@@ -2256,6 +2278,18 @@ def kuma_step(action, monitor):
     }
 
 
+def _kuma_steps(action, monitors, on_failure=False):
+    """One kuma_step per monitor, skipping any that cannot run."""
+    steps = []
+    for monitor in monitors:
+        step = kuma_step(action, monitor)
+        if step:
+            if on_failure:
+                step["on_failure"] = True
+            steps.append(step)
+    return steps
+
+
 def _part_step(part, verb):
     """One container or one unit, one verb. Argument list, never a string."""
     if part["kind"] == "container":
@@ -2282,7 +2316,7 @@ def plan_action(svc, action):
     """
     block = control_block(svc)
     parts = control_parts(block)
-    monitor = control_monitor(block)
+    monitors = control_monitors(block)
     steps = []
 
     if action == "remove":
@@ -2293,33 +2327,20 @@ def plan_action(svc, action):
         teardown = teardown_script(svc)
         if not teardown:
             return []
-        if monitor:
-            step = kuma_step("pause", monitor)
-            if step:
-                steps.append(step)
+        steps.extend(_kuma_steps("pause", monitors))
         steps.append({"argv": build_command(teardown), "optional": False,
                       "always": False, "env": None})
-        # A teardown that fails leaves the service up, so its monitor must
+        # A teardown that fails leaves the service up, so its monitors must
         # not stay paused. Runs only after a failure (see _run_steps).
-        if monitor:
-            step = kuma_step("resume", monitor)
-            if step:
-                step["on_failure"] = True
-                steps.append(step)
+        steps.extend(_kuma_steps("resume", monitors, on_failure=True))
         return steps
 
     if action in ("stop", "restart"):
-        if monitor:
-            step = kuma_step("pause", monitor)
-            if step:
-                steps.append(step)
+        steps.extend(_kuma_steps("pause", monitors))
         steps.extend(_part_step(p, "stop") for p in parts)
     if action in ("start", "restart"):
         steps.extend(_part_step(p, "start") for p in reversed(parts))
-        if monitor:
-            step = kuma_step("resume", monitor)
-            if step:
-                steps.append(step)
+        steps.extend(_kuma_steps("resume", monitors))
     return steps
 
 

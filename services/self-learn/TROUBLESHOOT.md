@@ -254,19 +254,54 @@ rolled-back app against a migrated DB is upstream's expected state
 
 ## Nuke and pave
 
+Use `teardown.sh`, not a hand recipe. It unpublishes only the Serve ports
+that proxy to the app's port, disables the deploy + export timers first (so
+the poller cannot restart anything mid-teardown), then stops the studio
+runner, the app and Postgres, and refuses to start while a deploy or
+`sync.sh` push/pull holds the deploy lock, then holds that lock itself until
+it finishes. It never touches
+`~/.self-learn` (blobs, vault, nightly exports) or anything `sync.sh`
+installed.
+
+Back up first. `--purge` drops the Postgres volume, and the newest export
+in `~/.self-learn/archive/` is then the only copy of the catalog:
+
 ```sh
-systemctl --user disable --now self-learn-deploy.timer self-learn-export.timer self-learn.service
-rm -f ~/.config/systemd/user/self-learn.service \
-      ~/.config/systemd/user/self-learn-deploy.{service,timer} \
-      ~/.config/systemd/user/self-learn-export.{service,timer}
-systemctl --user daemon-reload
-docker compose --project-directory ~/dev/setup-server/services/self-learn down -v   # -v drops the Postgres volume
-rm -rf ~/services/self-learn
-rm -rf ~/.self-learn                # blob store + vault + archives — only if unwanted
-rm -f ~/dev/setup-server/services/self-learn/.env
-tailscale serve --https=8107 off
-cd ~/dev/setup-server/services/self-learn && ./setup.sh
+systemctl --user start self-learn-export.service       # fresh export into ~/.self-learn/archive
+docker compose --project-directory ~/dev/setup-server/services/self-learn exec -T db \
+  pg_dump -U catalog -Fc self_learn > ~/self_learn-$(date +%F).dump   # also keeps sealed provider keys
+cp ~/dev/setup-server/services/self-learn/.env ~/self-learn.env.bak  # AUTH_SECRET unseals those keys
 ```
+
+Then, from `~/dev/setup-server/services/self-learn`:
+
+```sh
+./teardown.sh            # remove, keep the volume, state + .env (the launcher's Remove)
+./teardown.sh --purge    # also drop the volume (down -v), the deploy clone, state/,
+                         # studio/, bin/, the unit files and .env; type the name
+./setup.sh               # bring it back (after a plain teardown it starts the stack again)
+```
+
+A `./setup.sh` re-run after a plain teardown restarts the app even if you
+have started and stopped it from the launcher since; to keep it stopped,
+delete `~/services/self-learn/state/torn-down` before re-running.
+
+`--purge` refuses while `sync.sh`'s blob link is installed
+(`self-learn-seafile.service`, or `SEAFILE_SYNC_USER` in `.env`): that
+unit is not `setup.sh`'s, and `.env` holds the sync account's password.
+Plain `teardown.sh` leaves it running and says so. To remove the link by
+hand first:
+
+```sh
+systemctl --user disable --now self-learn-seafile
+rm -f ~/.config/systemd/user/self-learn-seafile.service && systemctl --user daemon-reload
+rm -rf ~/services/self-learn/seafile
+# then delete the "blob/db sync (written by sync.sh install)" block from .env;
+# the self-learn-sync account and its library stay in Seafile until you delete them there
+```
+
+`rm -rf ~/.self-learn` (blobs, vault, exports) is never scripted; do it by
+hand only if you really want the blob store gone.
 
 The only irreplaceable state is the Postgres volume (learner history) and
 `~/.self-learn/blobs` (videos, diagrams). A `pg_dump` plus the latest

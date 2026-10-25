@@ -3,6 +3,11 @@
 #   docker_no_perm   — exists => `docker ps` fails like a non-docker-group user
 #   db_running       — exists => `compose ps` reports the db container up;
 #                      written by `compose up`, removed by `compose stop|down`
+#   compose_down     — written by `compose down`; content is its args (-v or
+#                      empty), so teardown tests can tell down from down -v
+#   lock_probe       — file content: a lock dir path. On `compose down` its
+#                      state is written to lock_at_down ("live <pid>" when
+#                      it holds the pid of a running process, else "none")
 #   pg_fails         — exists => `exec` psql/createdb/pg_restore/pg_dump exit 1
 #   psql_meta        — file content: canned rows for the snapshot meta query
 #   psql_rows        — file content: canned rows for the snapshot union query
@@ -47,7 +52,15 @@ case "$1" in
         for a in "$@"; do
           case "$a" in
             up)        touch "$STATE_DIR/compose_up" "$STATE_DIR/db_running" ;;
-            stop|down) rm -f "$STATE_DIR/db_running" ;;
+            stop)      rm -f "$STATE_DIR/db_running" ;;
+            down)      rm -f "$STATE_DIR/db_running"
+                       case " $* " in *" -v "*) echo "-v" ;; *) echo "" ;; esac \
+                         > "$STATE_DIR/compose_down"
+                       if [ -f "$STATE_DIR/lock_probe" ]; then
+                         l="$(cat "$STATE_DIR/lock_probe")"; p="$(cat "$l/pid" 2>/dev/null || true)"
+                         if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "live $p"; else echo none; fi \
+                           > "$STATE_DIR/lock_at_down"
+                       fi ;;
             ps)        [ -f "$STATE_DIR/db_running" ] && echo "cafe0123" ;;
             exec)      exit 0 ;;
           esac

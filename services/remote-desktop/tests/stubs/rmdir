@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# rmdir stub — the delete side of the shadow root the `install` stub writes.
+# teardown.sh --system removes the files setup.sh put under /etc and
+# /var/lib; in the sandbox those live in $STATE_DIR/rootfs, and the REAL
+# paths on this box must never be touched by a test run. Same predicate as
+# the install and cmp stubs. Everything else (the sandbox) goes to the real rm.
+ROOTFS="$STATE_DIR/rootfs"
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    /etc/*|/usr/*|/var/*|/lib/*|/opt/*) echo "rmdir $a" >> "$CALLS_LOG"; ARGS+=("$ROOTFS$a") ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+for p in /bin/rmdir /usr/bin/rmdir; do [ -x "$p" ] && exec "$p" "${ARGS[@]}"; done
+exit 127

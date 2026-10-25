@@ -119,14 +119,42 @@ tailscale serve status
 
 ## Nuke and pave
 
-Does **not** delete `~/.claude`, `~/.codex`, or `~/.paperclip/cli`:
+Use [teardown.sh](teardown.sh); do not hand-run a recipe that can drift.
 
 ```bash
-paperclipai service uninstall || true
-rm -rf ~/services/paperclip
-# instance data, including the secrets master key:
-# rm -rf ~/.paperclip/instances/default
-# YOU WILL LOSE STORED CREDENTIALS. Copy master.key off the box first.
-# .env is yours; delete it only if you want a fresh port/path file
-tailscale serve --https=3100 off
+cd ~/dev/setup-server/services/paperclip
+./teardown.sh            # Serve off, paperclipai.service disabled; everything kept
+./setup.sh               # brings it back as it was
 ```
+
+What it guards against:
+
+- **Port hop.** Serve is dropped *before* the unit stops. Serve ports are
+  found from `tailscale serve status`: every port whose handlers all
+  proxy to `PAPERCLIP_PORT`, plus the hopped port (e.g. 3101) in
+  `~/.paperclip/instances/default/runtime-info.json`, but only while that
+  pid is still a running `paperclipai run`. A stale record, or a
+  `config.json` port that disagrees with `.env`, is reported and left
+  alone. A port shared with another handler stays on with a warning.
+  Never `serve reset`.
+- **The CLI.** It calls `systemctl --user` / `launchctl` directly, never
+  `paperclipai uninstall` (that deletes the managed CLI store).
+- **Neighbours.** OpenHands units and containers, and other
+  `paperclipai-*` instances, are named and left alone.
+
+For a fresh start, **back up the secrets key first**:
+`~/.paperclip/instances/default/secrets/master.key` decrypts every stored
+secret, so without it any backup of the database is useless. Copy it off
+the box (Seafile `:8443`), then:
+
+```bash
+./teardown.sh --purge    # type "paperclip"; also deletes .env, the unit file,
+                         # and the CEO invite + agent markers in ~/services/paperclip
+```
+
+`--purge` never deletes `~/.paperclip` (instance and managed CLI),
+`~/agent-workspaces`, `~/.claude` or `~/.codex`. It refuses a `.env` whose
+`PAPERCLIP_DATA` / `AGENT_WORKSPACES` points into `~/.claude`, `~/.codex`,
+`$HOME` or another service's folder. It prints the exact `rm` commands for
+the instance and the CLI store; run them yourself once `master.key` is safe.
+Until the instance is gone, `./setup.sh` reuses it.

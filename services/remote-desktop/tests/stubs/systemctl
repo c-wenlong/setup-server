@@ -31,6 +31,7 @@
 #                           exactly how a firewall becomes a comment
 #   fw_dies                 it enables, then is not active afterwards
 #   restart_grd_fails       restarting the RDP daemon fails
+#   fw_table_lingers        stopping the firewall unit leaves its nft table
 echo "systemctl $*" >> "$CALLS_LOG"
 
 verb=""; unit=""
@@ -109,6 +110,15 @@ case "$verb" in
         # wildcard listener on the LAN.
         [ -f "$STATE_DIR/fw_dies" ] || touch "$STATE_DIR/fw_installed" ;;
       *) : ;;
+    esac ;;
+
+  disable|stop)
+    case "$unit" in
+      remote-desktop-firewall.service)
+        # `disable --now` stops it, and its ExecStop deletes the nft table
+        # (unless fw_table_lingers: a table that outlived its unit).
+        rm -f "$FW_MARK"
+        [ -f "$STATE_DIR/fw_table_lingers" ] || rm -f "$STATE_DIR/fw_installed" ;;
     esac ;;
 
   restart)

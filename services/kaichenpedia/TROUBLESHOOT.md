@@ -124,13 +124,17 @@ timer first: `systemctl --user stop kaichenpedia-deploy.timer`.)
 ## Nuke and pave
 
 ```sh
-systemctl --user disable --now kaichenpedia-deploy.timer
-rm -f ~/.config/systemd/user/kaichenpedia-deploy.{service,timer}
-systemctl --user daemon-reload
-docker compose --project-directory ~/dev/setup-server/services/kaichenpedia down
-rm -rf ~/services/kaichenpedia
-rm -f ~/dev/setup-server/services/kaichenpedia/.env
-tailscale serve --https=8091 off
-cd ~/dev/setup-server/services/kaichenpedia && ./setup.sh
+cd ~/dev/setup-server/services/kaichenpedia
+cp ~/services/kaichenpedia/nginx.conf ~/kaichenpedia-nginx.conf.bak   # only if you edited it
+./teardown.sh --purge     # asks you to type "kaichenpedia"
+./setup.sh
 ```
+
+`--purge` unpublishes the Serve port(s) pointing at the wiki, disables and
+stops `kaichenpedia-deploy.timer` then `.service`, runs `docker compose down`,
+then deletes what setup.sh / deploy.sh made under `SERVICE_HOME` (`repo/`,
+`www/`, `bin/`, `state/`, `nginx.conf`, `.deploy.lock`), the two unit files and
+`.env`. A file you put in `SERVICE_HOME` yourself is kept. Plain `./teardown.sh` (what the launcher's
+Remove runs) stops everything but keeps all of that on disk.
+
 Nothing of value lives on the box — the wiki's source of truth is GitHub.

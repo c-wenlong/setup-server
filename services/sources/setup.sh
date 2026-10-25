@@ -246,6 +246,8 @@ else
 </plist>
 EOF
   launchctl bootout "gui/$(id -u)/com.sources.deploy" 2>/dev/null || true
+  # teardown.sh disables the label so login does not reload it; undo that.
+  launchctl enable "gui/$(id -u)/com.sources.deploy" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
   ok "LaunchAgent loaded (logs: ~/Library/Logs/sources-deploy.log)"
 fi

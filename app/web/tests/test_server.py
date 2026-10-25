@@ -2993,6 +2993,8 @@ class ControlTestBase(SandboxTest):
             svc("manimkc", {"parts": [{"unit": "manimkc.service"}],
                             "kuma": "manimkc"}),
             svc("n8n", {"parts": [{"container": "n8n"}], "kuma": "n8n"}),
+            svc("adguard", {"parts": [{"container": "adguard"}],
+                            "kuma": ["adguard", "adguard-dns"]}),
             svc("uptime-kuma", {"parts": [{"container": "uptime-kuma"}],
                                 "kuma": None}),
             svc("ntfy", {"locked": "ntfy is how you start things again"}),
@@ -3152,9 +3154,19 @@ class ControlStatusTest(ControlTestBase):
         self.assertFalse(self.status("evil")["controllable"])
 
     def test_monitor_name_is_gated_too(self):
-        self.assertIsNone(server.control_monitor({"kuma": "a; curl evil"}))
-        self.assertIsNone(server.control_monitor({"kuma": None}))
-        self.assertEqual(server.control_monitor({"kuma": "immich"}), "immich")
+        self.assertEqual(server.control_monitors({"kuma": "a; curl evil"}), [])
+        self.assertEqual(server.control_monitors({"kuma": None}), [])
+        self.assertEqual(server.control_monitors({}), [])
+        self.assertEqual(server.control_monitors({"kuma": "immich"}), ["immich"])
+
+    def test_monitor_list_keeps_order_and_drops_junk(self):
+        self.assertEqual(
+            server.control_monitors(
+                {"kuma": ["adguard", "a; curl evil", 7, "adguard-dns",
+                          "adguard"]}),
+            ["adguard", "adguard-dns"])
+        self.assertEqual(server.control_monitors({"kuma": []}), [])
+        self.assertEqual(server.control_monitors({"kuma": {"a": 1}}), [])
 
 
 class ControlPlanTest(ControlTestBase):
@@ -3311,6 +3323,46 @@ class ControlKumaTest(ControlTestBase):
         plan = self.plan("immich", "restart")
         self.assertEqual(plan[0][-2:], ["pause", "immich"])
         self.assertEqual(plan[-1][-2:], ["resume", "immich"])
+
+    def test_every_monitor_is_paused_before_anything_stops(self):
+        self.enable_kuma()
+        plan = self.plan("adguard", "stop")
+        self.assertEqual([a[-2:] for a in plan[:2]],
+                         [["pause", "adguard"], ["pause", "adguard-dns"]])
+        self.assertEqual(plan[2:], [["docker", "stop", "adguard"]])
+
+    def test_every_monitor_is_resumed_after_everything_starts(self):
+        self.enable_kuma()
+        plan = self.plan("adguard", "start")
+        self.assertEqual(plan[0], ["docker", "start", "adguard"])
+        self.assertEqual([a[-2:] for a in plan[1:]],
+                         [["resume", "adguard"], ["resume", "adguard-dns"]])
+
+    def test_restart_pauses_and_resumes_every_monitor(self):
+        self.enable_kuma()
+        plan = self.plan("adguard", "restart")
+        self.assertEqual([a[-2:] for a in plan], [
+            ["pause", "adguard"], ["pause", "adguard-dns"],
+            ["stop", "adguard"], ["start", "adguard"],
+            ["resume", "adguard"], ["resume", "adguard-dns"]])
+
+    def test_one_failed_pause_does_not_skip_the_next_monitor(self):
+        self.enable_kuma()
+        payload = self.run_action("adguard", "stop",
+                                  failures={"pause adguard": 1})
+        self.assertEqual(payload["status"], "done")
+        self.assertIn(["docker", "stop", "adguard"], self.argvs())
+        pauses = [a[-1] for a in self.argvs() if a[-2:-1] == ["pause"]]
+        self.assertEqual(pauses, ["adguard", "adguard-dns"])
+        self.assertIn("pause adguard-dns", payload["log"])
+
+    def test_a_failed_restart_still_resumes_every_monitor(self):
+        self.enable_kuma()
+        payload = self.run_action("adguard", "restart",
+                                  failures={"docker start adguard": 1})
+        self.assertEqual(payload["status"], "failed")
+        resumes = [a[-1] for a in self.argvs() if a[-2:-1] == ["resume"]]
+        self.assertEqual(resumes, ["adguard", "adguard-dns"])
 
     def test_the_existing_toggle_script_is_called_not_reimplemented(self):
         toggle = self.enable_kuma()
@@ -3741,8 +3793,7 @@ class SharedControlRegistryTest(unittest.TestCase):
         with open(seed, encoding="utf-8") as fh:
             text = fh.read()
         for key in self.services:
-            monitor = self.control(key).get("kuma")
-            if monitor:
+            for monitor in server.control_monitors(self.control(key)):
                 self.assertIn('"%s"' % monitor, text, monitor)
 
     def test_every_container_part_is_declared_by_a_compose_file(self):
@@ -3852,7 +3903,7 @@ class SharedControlRegistryTest(unittest.TestCase):
             self.assertEqual([p["optional"] for p in control["parts"]],
                              [p["optional"] for p in web_parts], key)
             self.assertEqual(control["kuma"],
-                             server.control_monitor(
+                             server.control_monitors(
                                  server.control_block(svc)), key)
 
     def test_neither_front_end_will_touch_the_locked_three(self):
@@ -4989,9 +5040,9 @@ class RemoveTest(ControlTestBase):
     def control_registry(self):
         self.marker = os.path.join(self.tmp, "data", "n8n")
         os.makedirs(self.marker)
-        for key in ("n8n", "bare", "launcher", "ntfy"):
+        for key in ("n8n", "bare", "launcher", "ntfy", "adguard"):
             self.make_script("%s/setup.sh" % key)
-        for key in ("n8n", "launcher", "ntfy"):
+        for key in ("n8n", "launcher", "ntfy", "adguard"):
             self.make_script("%s/teardown.sh" % key)
 
         def svc(key, control, marker=None, health=None):
@@ -5002,6 +5053,9 @@ class RemoveTest(ControlTestBase):
             svc("n8n", {"parts": [{"container": "n8n"}], "kuma": "n8n"},
                 marker=self.marker),
             svc("bare", {"parts": [{"container": "bare"}], "kuma": None},
+                marker=self.marker),
+            svc("adguard", {"parts": [{"container": "adguard"}],
+                            "kuma": ["adguard", "adguard-dns"]},
                 marker=self.marker),
             svc("launcher", {"parts": [{"unit": "launcher.service"}]},
                 marker=self.marker),
@@ -5094,6 +5148,48 @@ class RemoveTest(ControlTestBase):
             text = fh.read()
         self.assertIn("deploy output", text)
         self.assertIn("still paused", text)
+        self.assertNotIn(SECRET_VALUE, text)
+
+    def test_remove_pauses_every_monitor_then_tears_down(self):
+        self.enable_kuma()
+        argvs = self.plan("adguard", "remove")
+        self.assertEqual([a[-2:] for a in argvs[:2]],
+                         [["pause", "adguard"], ["pause", "adguard-dns"]])
+        self.assertTrue(argvs[2][0].endswith("adguard/teardown.sh"))
+        self.assertEqual([a[-2:] for a in argvs[3:]],
+                         [["resume", "adguard"], ["resume", "adguard-dns"]])
+        steps = server.plan_action(server.find_service("adguard"), "remove")
+        self.assertEqual([bool(s.get("on_failure")) for s in steps],
+                         [False, False, False, True, True])
+
+    def test_successful_remove_leaves_every_monitor_paused(self):
+        self.enable_kuma()
+        job = self.run_action("adguard", "remove")
+        self.assertEqual(job["status"], "done")
+        self.assertFalse(any(a[-2:-1] == ["resume"] for a in self.argvs()))
+
+    def test_failed_teardown_resumes_every_monitor(self):
+        self.enable_kuma()
+        job = self.run_action("adguard", "remove",
+                              failures={"teardown.sh": 3})
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual([a[-2:] for a in self.argvs()[-2:]],
+                         [["resume", "adguard"], ["resume", "adguard-dns"]])
+
+    def test_reinstall_resumes_every_monitor_and_logs_each_failure(self):
+        self.enable_kuma()
+        self.run_action("adguard", "remove")
+        self.record_popen(failures={"resume adguard-dns": 2})
+        job = server.register_job("adguard", "deploy")
+        with open(job["log_path"], "wb") as fh:
+            fh.write(b"deploy output\n")
+        server._reap(job, ExitedProc(0), open(os.devnull, "wb"))
+        resumes = [a[-1] for a in self.argvs() if a[-2:-1] == ["resume"]]
+        self.assertEqual(resumes, ["adguard", "adguard-dns"])
+        with open(job["log_path"], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("monitor adguard-dns is still paused", text)
+        self.assertNotIn("monitor adguard is still paused", text)
         self.assertNotIn(SECRET_VALUE, text)
 
     def test_failed_teardown_records_nothing(self):

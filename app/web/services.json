@@ -43,6 +43,9 @@
     "            kuma    - Uptime Kuma monitor paused on stop and resumed on",
     "                      start, so deliberate downtime does not page the",
     "                      phone. null when the service has no monitor.",
+    "                      A list of names when the service has several",
+    "                      monitors (adguard: [\"adguard\", \"adguard-dns\"]);",
+    "                      each is paused and resumed on its own.",
     "            locked  - present means NOT controllable, and the string is",
     "                      the reason both UIs show and the API refuses with.",
     "          Absent control entirely also means not controllable. Three keys",
@@ -664,7 +667,10 @@
             "container": "adguard"
           }
         ],
-        "kuma": "adguard",
+        "kuma": [
+          "adguard",
+          "adguard-dns"
+        ],
         "_comment": "Single container. Stopping it is safe ONLY while the tailnet is not pointed at it as a nameserver — see the description."
       }
     },

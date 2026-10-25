@@ -24,6 +24,14 @@ first, dated by merge.
   teardown now says how many shared Serve ports still route to the service,
   instead of "already off", when it leaves them on.
 
+- **Stop and Remove now pause every Kuma monitor a service has.** A
+  service's `kuma` field may now be a list of monitor names as well as one
+  name. The launcher and ntfy-control pause each one on stop and remove,
+  and resume each one on start, restart, a failed teardown and a
+  reinstall, with one log line per monitor. AdGuard lists `adguard` and
+  `adguard-dns`, so removing or stopping it no longer leaves the DNS
+  monitor alerting.
+
 - **coolify setup.sh no longer breaks the last line of
   `~/.ssh/authorized_keys`.** When that file did not end in a newline,
   the Coolify key was glued onto the user's last key, breaking both. It now
@@ -33,6 +41,56 @@ first, dated by merge.
   never joined by an unrestricted copy).
 
 ### Added
+
+- **teardown.sh for paperclip**, so it gets the launcher's Remove button.
+  It finds the port Paperclip actually bound (it can hop off the default)
+  from its own runtime record, counted only while that pid is still a
+  running `paperclipai run`. Default disables `paperclipai.service` and
+  keeps everything. `--purge` deletes only the four files setup.sh
+  writes in `~/services/paperclip`, the unit and `.env`; it never deletes
+  `~/.paperclip` (instance, CLI store, `master.key`), `~/agent-workspaces`,
+  `~/.claude` or `~/.codex`, and prints a backup line and the `rm` for
+  each instead. It never runs `paperclipai uninstall`.
+
+- **teardown.sh for the four systemd-poller services**: kaichenpedia,
+  design-systems, sources and self-learn, so each gets the launcher's
+  Remove button. They stop and disable the units setup.sh writes (timers
+  before their services) and warn about, but never touch, other units
+  that mention the service. On purge, the unit files go too, followed by
+  a daemon-reload. On macOS they `launchctl disable` each agent after
+  bootout, and setup.sh `launchctl enable`s it before bootstrap, so a
+  removed app does not return at the next login. design-systems and sources
+  refuse a relative `SOURCE_REPO` and never delete a clone that holds the
+  checkout. self-learn holds the deploy lock for the whole run, writes a
+  `state/torn-down` marker so the next `./setup.sh` starts it again, and
+  refuses `--purge` while self-learn-seafile.service exists or
+  `SEAFILE_SYNC_USER` is set.
+
+- **teardown.sh for remote-desktop**, so it gets the launcher's Remove
+  button. The default (what the launcher runs) needs no sudo: it turns
+  off the Guacamole Serve port and runs `compose down`, and lists the
+  system half it keeps (GNOME Remote Login RDP, the `inet remote_desktop`
+  nftables filter, the TLS keypair) with the commands to undo it. The
+  filter stays up, so nothing is exposed. `--system` (terminal only)
+  turns RDP off, waits until :3389 refuses, and only then removes the
+  filter by table name (never a ruleset flush). GDM is never touched.
+
+- **teardown.sh for adguard**, so it gets the launcher's Remove button,
+  behind a DNS safety gate. Before changing anything it reads
+  `tailscale dns status --json` and dies if this node's tailnet address
+  is still a tailnet DNS resolver (stopping AdGuard then would cut DNS
+  for every device). If the answer cannot be read it dies unless you
+  pass `--dns-removed`. Default keeps `conf/`, `work/` and `.env`;
+  `--purge` deletes them, using a throwaway container of the pinned image
+  for root-owned files.
+
+- **teardown.sh for openhands**, so it gets the launcher's Remove button.
+  It stops only containers in the `openhands` compose project (with the
+  creds overlay file when present); any other container named like
+  OpenHands is listed and left running, and `--purge` refuses while one
+  exists. It never touches `~/.claude`, `~/.codex`, the creds overlay
+  sources or `~/agent-workspaces`, and prints the `setfacl -x` lines for
+  the uid 10001 ACLs instead of running them.
 
 - **teardown.sh for forgejo**, so it gets the launcher's Remove button.
   The default keeps repos, `.env` and the hidden `.admin-created` marker.

@@ -1,19 +1,37 @@
 #!/usr/bin/env bash
-# launchctl stub (used when the mocked suite runs on macOS): logs and tracks
-# agent loaded state in $STATE_DIR — web_active for com.self-learn.web (and
-# anything else, matching the historical single-marker behaviour),
-# studio_active for com.self-learn.studio.
+# launchctl stub (used when the mocked suite runs on macOS, or fakes it with
+# FAKE_UNAME=Darwin): logs and tracks agent loaded state in $STATE_DIR —
+# web_active for com.self-learn.web (and anything else, matching the
+# historical single-marker behaviour), studio_active for
+# com.self-learn.studio. When $STATE_DIR/launchd/ exists (teardown tests),
+# each label has its own marker there instead: launchd/<label>.
+# Failure switches:
+#   launchd_bootout_fails  — exists => `bootout` fails and the agent stays
+#                            loaded; content "async" => it fails but unloads
+#   launchd_disable_fails  — exists => `disable` fails
 echo "launchctl $*" >> "$CALLS_LOG"
 
 marker=web_active
 case " ${*: -1} " in *studio*) marker=studio_active ;; esac
+if [ -d "$STATE_DIR/launchd" ]; then
+  last="${*: -1}"; last="${last##*/}"
+  marker="launchd/${last%.plist}"
+fi
 
 case "${1:-}" in
   print)
     [ -f "$STATE_DIR/$marker" ] && exit 0 || exit 1
     ;;
   bootout)
+    if [ -f "$STATE_DIR/launchd_bootout_fails" ]; then
+      [ "$(cat "$STATE_DIR/launchd_bootout_fails")" != "async" ] || rm -f "$STATE_DIR/$marker"
+      echo "Boot-out failed: 5: Input/output error" >&2
+      exit 5
+    fi
     rm -f "$STATE_DIR/$marker"
+    ;;
+  disable)
+    [ ! -f "$STATE_DIR/launchd_disable_fails" ] || exit 1
     ;;
   bootstrap|kickstart)
     touch "$STATE_DIR/$marker"

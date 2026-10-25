@@ -99,6 +99,8 @@ journalctl --user -u kaichenpedia-deploy -n 50       # deploy history
 systemctl --user list-timers kaichenpedia-deploy.timer
 docker compose --project-directory ~/dev/setup-server/services/kaichenpedia ps|logs|restart
 tailscale serve status
+./teardown.sh               # Remove: unpublish, stop poller + container; keeps clone, site, .env
+./teardown.sh --purge       # also delete the clone, site, units and .env (GitHub stays canonical)
 ```
 
 A failed build leaves the previous `www/current` serving untouched — broken
