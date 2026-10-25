@@ -108,6 +108,8 @@ class SandboxTest(unittest.TestCase):
             "NOTES_PATH": server.NOTES_PATH,
             "USAGE_PATH": server.USAGE_PATH,
             "INSTANCES_DIR": server.INSTANCES_DIR,
+            "DEPLOYD_HOME": server.DEPLOYD_HOME,
+            "deployd_timer": server.deployd_timer,
             "CGROUP_ROOT": server.CGROUP_ROOT,
             "RESOURCE_TTL": server.RESOURCE_TTL,
             "DOCKER_MAP_TTL": server.DOCKER_MAP_TTL,
@@ -132,6 +134,11 @@ class SandboxTest(unittest.TestCase):
         server.NOTES_PATH = os.path.join(self.tmp, "state", "notes.json")
         server.USAGE_PATH = os.path.join(self.tmp, "state", "usage.json")
         server.INSTANCES_DIR = os.path.join(self.tmp, "state", "instances")
+        # deployd's service home under the sandbox too; and its timer probe
+        # defaults to "unknowable" so no test can reach a real systemctl
+        # (which subprocess.run would route into the unstubbed-Popen guard).
+        server.DEPLOYD_HOME = os.path.join(self.tmp, "deployd-home")
+        server.deployd_timer = lambda: None
         # Never the real /sys/fs/cgroup either: a tree under the sandbox that
         # a test builds if it cares, and that otherwise simply does not
         # exist, so resources measure nothing rather than this box.
@@ -5527,6 +5534,138 @@ class RemoveTest(ControlTestBase):
         job = server.register_job("n8n", "deploy")
         server._reap(job, ExitedProc(0), open(os.devnull, "wb"))
         self.assertEqual(self.argvs(), [])
+
+
+# ------------------------------------------------------------------ deployd
+
+class DeploydTest(SandboxTest):
+    """GET /api/deployd: watched rows from registry deploy blocks plus the
+    <key>.sha/.fail/.log triplets under the state dir."""
+
+    REGISTRY = {"services": [
+        {"key": "alpha", "name": "Alpha", "tagline": "t",
+         "deploy": {"repo": "https://example/alpha.git", "ref": "main",
+                    "cmd": "run alpha"}},
+        {"key": "beta", "name": "Beta", "tagline": "t",
+         "deploy": {"repo": "https://example/beta.git", "cmd": "run beta"}},
+        {"key": "gamma", "name": "Gamma", "tagline": "t",
+         "deploy": {"repo": "https://example/g.git", "ref": "v2",
+                    "cmd": "run g"}},
+        {"key": "unwatched", "name": "Nope", "tagline": "t"},
+    ]}
+
+    def state_dir(self):
+        path = os.path.join(server.DEPLOYD_HOME, "state")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def test_empty_state_everything_pending(self):
+        payload = server.deployd_payload()
+        self.assertFalse(payload["installed"])
+        self.assertIsNone(payload["timer"])
+        self.assertFalse(payload["self_update_pending"])
+        rows = {w["key"]: w for w in payload["watched"]}
+        self.assertEqual(sorted(rows), ["alpha", "beta", "gamma"])
+        for row in rows.values():
+            self.assertEqual(row["state"], "pending")
+            self.assertIsNone(row["sha"])
+            self.assertIsNone(row["fail"])
+            self.assertIsNone(row["log"])
+        self.assertEqual(rows["beta"]["ref"], "main")   # default
+        self.assertEqual(rows["gamma"]["ref"], "v2")
+        self.assertEqual(payload["orphans"], [])
+
+    def test_deployed_failed_disabled(self):
+        state = self.state_dir()
+        with open(os.path.join(state, "alpha.sha"), "w") as fh:
+            fh.write("abc123def456\n")
+        with open(os.path.join(state, "beta.fail"), "w") as fh:
+            json.dump({"sha": "deadbeef", "at": 1700000000, "rc": 17}, fh)
+        with open(os.path.join(state, "beta.sha"), "w") as fh:
+            fh.write("older123\n")
+        with open(os.path.join(state, "gamma.disabled"), "w") as fh:
+            fh.write("")
+        rows = {w["key"]: w for w in server.deployd_payload()["watched"]}
+        self.assertEqual(rows["alpha"]["state"], "deployed")
+        self.assertEqual(rows["alpha"]["sha"], "abc123def456")
+        # A recorded failure wins over the older sha: backoff, not success.
+        self.assertEqual(rows["beta"]["state"], "failed")
+        self.assertEqual(rows["beta"]["fail"]["rc"], 17)
+        self.assertEqual(rows["beta"]["fail"]["sha"], "deadbeef")
+        self.assertEqual(rows["gamma"]["state"], "disabled")
+        self.assertTrue(rows["gamma"]["disabled"])
+
+    def test_unreadable_fail_still_fails(self):
+        with open(os.path.join(self.state_dir(), "alpha.fail"), "w") as fh:
+            fh.write("not json")
+        row = server.deployd_payload()["watched"][0]
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(row["fail"], {})
+
+    def test_log_tail_stripped_and_truncated(self):
+        state = self.state_dir()
+        lines = ["\x1b[1;32m ok \x1b[0m line %d" % i for i in range(60)]
+        with open(os.path.join(state, "alpha.log"), "w") as fh:
+            fh.write("\n".join(lines))
+        row = server.deployd_payload()["watched"][0]
+        tail = row["log"].splitlines()
+        self.assertEqual(len(tail), server.DEPLOYD_LOG_TAIL)
+        self.assertNotIn("\x1b", row["log"])
+        self.assertEqual(tail[0], " ok  line 20")
+        self.assertIsNotNone(row["log_mtime"])
+
+    def test_orphans_and_self_update_pending(self):
+        state = self.state_dir()
+        open(os.path.join(state, "ghost.sha"), "w").write("x\n")
+        open(os.path.join(state, "self-update.pending"), "w").write("")
+        payload = server.deployd_payload()
+        self.assertTrue(payload["installed"])
+        self.assertTrue(payload["self_update_pending"])
+        self.assertEqual(payload["orphans"], ["ghost"])
+
+    def test_service_home_env_override(self):
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            fh.write("SERVICE_HOME=%s\n" % elsewhere)
+        os.makedirs(os.path.join(elsewhere, "state"))
+        open(os.path.join(elsewhere, "state", "alpha.sha"), "w").write("e5e5\n")
+        payload = server.deployd_payload()
+        self.assertTrue(payload["installed"])
+        self.assertEqual(payload["state_dir"],
+                         os.path.join(elsewhere, "state"))
+        self.assertEqual(payload["watched"][0]["sha"], "e5e5")
+
+    def test_timer_passthrough(self):
+        server.deployd_timer = lambda: "active"
+        self.assertEqual(server.deployd_payload()["timer"], "active")
+
+
+class DeploydHttpTest(HttpTest):
+
+    def setUp(self):
+        super().setUp()
+        # Same "alpha" tile the parent's tests assert on, plus a deploy
+        # block so it also shows up as a watched service.
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
+             "author": "c-wenlong",
+             "url": "https://HOST:1/", "health": None, "marker": None,
+             "setup": "alpha/setup.sh",
+             "deploy": {"repo": "https://example/a.git", "cmd": "x"}},
+        ]})
+
+    def test_deployd_route(self):
+        status, body = self.get("/api/deployd")
+        self.assertEqual(status, 200)
+        doc = json.loads(body)
+        self.assertEqual([w["key"] for w in doc["watched"]], ["alpha"])
+        self.assertEqual(doc["watched"][0]["state"], "pending")
+        # And the /home path mount serves it too.
+        status2, _ = self.get("/home/api/deployd")
+        self.assertEqual(status2, 200)
 
 
 if __name__ == "__main__":

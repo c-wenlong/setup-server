@@ -97,6 +97,12 @@ USAGE_PATH = os.path.expanduser("~/services/launcher/usage.json")
 # never make a removed service look installed.
 INSTANCES_DIR = os.path.expanduser("~/services/launcher/instances")
 
+# deployd's service home: one state/<key>.sha/.fail/.log triplet per watched
+# service, which is what GET /api/deployd renders. $SERVICE_HOME in
+# services/deployd/.env can move it, so the payload resolves the env file
+# first and only falls back here.
+DEPLOYD_HOME = os.path.expanduser("~/services/deployd")
+
 # Deploy scripts may only live under one of these roots. The repo is the
 # normal case; ~/dev is needed because some services keep their code in
 # their own repo (manimkc lives at ~/dev/manimkc/server/setup.sh) while
@@ -1139,6 +1145,146 @@ def service_detail(key):
         "env": env_payload(svc),
         "receipt": receipt,
         "removable": removable(svc),
+    }
+
+
+# ---- deployd
+
+# deployd writes ANSI-coloured setup.sh output into <key>.log; the detail
+# page shows the tail as plain text.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+DEPLOYD_LOG_TAIL = 40      # lines shown per watched service
+DEPLOYD_LOG_BYTES = 65536  # never read a whole deploy log into the payload
+
+
+def _deployd_state_dir():
+    """deployd's state dir: $SERVICE_HOME/state when its .env sets one."""
+    home = None
+    env_path = os.path.join(REPO_ROOT, "services", "deployd", ".env")
+    try:
+        with open(env_path, encoding="utf-8") as fh:
+            for line in fh:
+                key, _, value = line.strip().partition("=")
+                if key.strip() == "SERVICE_HOME" and value.strip():
+                    home = value.strip().strip("'\"")
+    except OSError:
+        pass
+    return os.path.join(home or DEPLOYD_HOME, "state")
+
+
+def deployd_timer():
+    """`systemctl --user is-active deployd.timer` verbatim, or None.
+
+    None means unknowable from here — no systemd (macOS), no unit, dbus
+    down — and the UI shows a muted "unknown" rather than pretending the
+    poller is off. Never raises: this runs on every detail-page poll.
+    """
+    if sys.platform == "darwin":
+        return None
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "is-active", "deployd.timer"],
+            capture_output=True, text=True, timeout=5, check=False)
+        state = out.stdout.strip()
+        return state or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _deployd_log_tail(path):
+    """Last DEPLOYD_LOG_TAIL lines of a <key>.log, ANSI stripped."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > DEPLOYD_LOG_BYTES:
+                fh.seek(-DEPLOYD_LOG_BYTES, os.SEEK_END)
+            raw = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    lines = _ANSI_RE.sub("", raw).splitlines()
+    return "\n".join(lines[-DEPLOYD_LOG_TAIL:])
+
+
+def _deployd_entry(state_dir, svc):
+    """One watched service's row for the payload, from its state triplet.
+
+    `deploy` may be absent (deployd watches it anyway only via a manifest
+    block — a service without one is not in `watched`), `sha` None means
+    never deployed, `fail` is the backoff record verbatim."""
+    key = svc["key"]
+    deploy = svc.get("deploy") or {}
+    base = os.path.join(state_dir, re.sub(r"[^A-Za-z0-9._-]", "_", key))
+    sha = fail = None
+    try:
+        with open(base + ".sha", encoding="utf-8") as fh:
+            sha = fh.read().strip() or None
+    except OSError:
+        pass
+    try:
+        with open(base + ".fail", encoding="utf-8") as fh:
+            data = json.load(fh)
+        fail = ({"sha": data.get("sha"), "at": data.get("at"),
+                 "rc": data.get("rc")} if isinstance(data, dict) else {})
+    except ValueError:
+        fail = {}  # present but unreadable: still a failure state
+    except OSError:
+        pass  # absent: no recorded failure
+    disabled = os.path.exists(base + ".disabled")
+    log_tail = _deployd_log_tail(base + ".log")
+    try:
+        log_mtime = os.path.getmtime(base + ".log")
+    except OSError:
+        log_mtime = None
+    if disabled:
+        state = "disabled"
+    elif fail is not None:
+        state = "failed"
+    elif sha:
+        state = "deployed"
+    else:
+        state = "pending"  # watched, never deployed
+    return {
+        "key": key,
+        "repo": deploy.get("repo"),
+        "ref": deploy.get("ref") or "main",
+        "sha": sha,
+        "fail": fail,
+        "disabled": disabled,
+        "state": state,
+        "log": log_tail,
+        "log_mtime": log_mtime,
+    }
+
+
+def deployd_payload():
+    """Everything the deployd detail page shows.
+
+    `watched` is keyed off the registry (the same manifests deployd scans),
+    not the state dir, so a service deployd has never reached still shows as
+    pending instead of being invisible. A state file for a key that left
+    the registry is reported under `orphans` so it can be cleaned up.
+    """
+    state_dir = _deployd_state_dir()
+    registry = load_registry()
+    watched = [svc for svc in registry
+               if isinstance(svc.get("deploy"), dict)]
+    known = {svc["key"] for svc in watched}
+    orphans = []
+    try:
+        for name in sorted(os.listdir(state_dir)):
+            key, dot, ext = name.rpartition(".")
+            if dot and ext == "sha" and key not in known:
+                orphans.append(key)
+    except OSError:
+        pass
+    return {
+        "installed": os.path.isdir(state_dir),
+        "timer": deployd_timer(),
+        "self_update_pending": os.path.exists(
+            os.path.join(state_dir, "self-update.pending")),
+        "state_dir": state_dir,
+        "watched": [_deployd_entry(state_dir, svc) for svc in watched],
+        "orphans": orphans,
     }
 
 
@@ -2694,6 +2840,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path == "api/services":
             self._json(200, services_payload())
+            return
+        if path == "api/deployd":
+            self._json(200, deployd_payload())
             return
         if path.startswith("api/services/"):
             rest = path[len("api/services/"):].strip("/")

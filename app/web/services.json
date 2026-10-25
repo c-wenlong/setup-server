@@ -1032,6 +1032,25 @@
         "kuma": "forgejo",
         "_comment": "Single container with an embedded SQLite database, so there is no ordering to respect — unlike immich, nothing else has to come down first."
       }
+    },
+    {
+      "key": "deployd",
+      "name": "Deployd",
+      "tagline": "Push-to-deploy",
+      "group": "infra",
+      "icon": "workflow",
+      "author": "c-wenlong",
+      "marker": "~/services/deployd",
+      "setup": "services/deployd/setup.sh",
+      "env": "services/deployd/.env",
+      "control": {
+        "parts": [
+          {
+            "unit": "deployd.timer"
+          }
+        ]
+      },
+      "description": "The tailnet-only answer to webhooks: a systemd user timer that polls every services/*/app.json deploy block, ff-pulls this checkout, resolves each watched git ref, and runs that service's deploy command when the remote moved. State lives under ~/services/deployd/state — one <key>.sha/.fail/.log triplet per service — which is what the launcher's /api/deployd surface reads. Stop pauses the timer (no more polls); start resumes it."
     }
   ]
 }
