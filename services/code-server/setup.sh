@@ -152,7 +152,7 @@ if ! "$TAILSCALE" serve --bg "http://127.0.0.1:$PORT" >/dev/null 2>&1; then
   until "$TAILSCALE" serve --bg "http://127.0.0.1:$PORT"; do
     echo
     info "Tailscale Serve needs one-time enablement — open the URL above, approve, then press Enter to retry."
-    read -r
+    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
   done
 fi
 ok "Tailscale Serve: HTTPS :443 -> http://127.0.0.1:$PORT (tailnet only)"

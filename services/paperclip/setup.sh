@@ -565,7 +565,7 @@ publish() { # publish <https_port> <local_port>
     until "$TAILSCALE" serve --bg --https="$1" "http://127.0.0.1:$2"; do
       echo
       info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
-      read -r
+      read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
     done
   fi
   ok "Tailscale Serve: HTTPS :$1 -> http://127.0.0.1:$2"

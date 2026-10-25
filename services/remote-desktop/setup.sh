@@ -821,7 +821,7 @@ if ! tailscale serve --bg --https="$GUAC_PORT" "$BASE/" >/dev/null 2>&1; then
   until tailscale serve --bg --https="$GUAC_PORT" "$BASE/"; do
     echo
     info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
-    read -r
+    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
   done
 fi
 ok "Tailscale Serve: HTTPS :$GUAC_PORT -> $BASE/"

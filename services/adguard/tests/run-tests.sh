@@ -84,6 +84,13 @@ run_deploy() {
   CODE=$?
 }
 
+# stdin is /dev/null: the deployd/systemd case — `read` sees instant EOF and
+# the approval loop must die, not spin serve forever.
+run_deploy_no_stdin() {
+  OUT="$(PATH="$STUBS:$PATH" bash "$SVC/setup.sh" </dev/null 2>&1)"
+  CODE=$?
+}
+
 # A PATH containing ONLY what we hand it — used to prove the preflight
 # branches that turn on a command being absent. Appending the stub dir to the
 # real PATH cannot express "dig does not exist": /usr/bin/dig would still be
@@ -851,6 +858,18 @@ test_serve_approval_prompt() {
   check "exits zero"                [ "$CODE" -eq 0 ]
   check "printed the approval hint" out_has "approve, then press Enter"
   check "published on retry"        calls_have "tailscale serve --bg --https=3080 http://127.0.0.1:3080"
+  teardown
+}
+
+test_serve_approval_no_stdin() {
+  echo "• serve approval with no stdin (deployd): dies, does not spin"
+  setup
+  touch "$STATE_DIR/operator"
+  echo 2 > "$STATE_DIR/serve_fails_left"
+  run_deploy_no_stdin
+  check "exits non-zero"        [ "$CODE" -ne 0 ]
+  check "says why"              out_has "stdin closed or no TTY"
+  check "serve tried few times" sh -c '[ "$(grep -c "tailscale serve" "$CALLS_LOG")" -le 5 ]'
   teardown
 }
 
@@ -2034,6 +2053,7 @@ test_admin_username_override
 test_python3_dns_fallback
 test_operator_escalation
 test_serve_approval_prompt
+test_serve_approval_no_stdin
 test_teardown_safe
 test_teardown_https_port_override
 test_teardown_not_published

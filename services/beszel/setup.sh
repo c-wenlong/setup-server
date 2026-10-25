@@ -303,7 +303,7 @@ if ! serve_out="$("$TAILSCALE" serve --bg --https="$PORT" "http://127.0.0.1:$POR
     esac
     echo
     info "Tailscale Serve needs one-time enablement — open the URL above, approve, then press Enter to retry."
-    read -r
+    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
   done
 fi
 ok "Tailscale Serve: HTTPS :$PORT -> http://127.0.0.1:$PORT (tailnet only)"
