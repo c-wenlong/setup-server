@@ -170,12 +170,14 @@ rsync -a --exclude .owner ~/.self-learn/blobs/ homeserver:~/.self-learn/blobs/
 cd services/self-learn && SKIP_SEED=1 AUTH_SECRET=<laptop's> ./setup.sh
 
 # swap the laptop's file in for the migrated-but-empty one the deploy
-# left (the app must be stopped while the file is replaced), then claim
-# the blob root for it
-systemctl --user stop self-learn
+# left — every writer goes down first: the studio runner also holds the
+# db open when STUDIO_ENABLED=1 (ignore its "not loaded" error when off)
+systemctl --user stop self-learn-studio self-learn
+rm -f ~/.self-learn/catalog.db-wal ~/.self-learn/catalog.db-shm
 mv ~/catalog.db ~/.self-learn/catalog.db
 cd ~/services/self-learn/repo && npm run catalog -- doctor && npm run catalog -- blob audit --fix
 systemctl --user start self-learn
+systemctl --user start self-learn-studio   # only if it was running
 ```
 
 (The same swap covers a catalog that *was* seeded — `mv` replaces the
@@ -256,12 +258,18 @@ server                          Seafile                          MacBook
   `seaf-cli` for macOS, so pairing is the four
   GUI steps it prints (if a nix `seaf-cli` is ever present it pairs
   headless plus a LaunchAgent instead).
-- `push`/`pull` rewrite the receiver's `blobs/.owner` for its own
-  `catalog.db` path after every swap, and warn that the receiver's
-  `vault/` is stale — rebuild it with `learn vault pull` on that
-  machine. `pull` stops `self-learn.service` for the swap (and
-  restarts it only if it was running); `push` warns if a Next dev server
-  is holding the file open on the Mac.
+- `push`/`pull` replace the receiver's `catalog.db` wholesale: the sender
+  is snapshotted consistently (`sqlite3 .backup`, or a stopped-writer copy
+  of the db/`-wal`/`-shm` set when no sqlite3), staged beside the file it
+  replaces so the final `mv` is a rename, and the receiver's writers go
+  down first — `pull` stops `self-learn.service` and the studio runner
+  (restarting only what was running); `push` stops the checkout's `next`
+  processes on the Mac (scoped to `$MAC_REPO`, waited on) and tells you to
+  restart them yourself. `.owner` is **not** restamped — it names the
+  resolved db path, unchanged by a same-path replace. A plain `blob audit`
+  runs after the swap (never `--fix`: it deletes day-old orphans on a
+  store Seafile shares). The receiver's `vault/` is left stale — rebuild
+  with `learn vault pull` on that machine.
 - Both directions take the same `.deploy.lock` the poller uses: a sync
   blocks a deploy and vice versa — a deploy must never migrate a
   database mid-swap.

@@ -267,7 +267,7 @@ Back up first. A copy of `catalog.db` plus the newest export in
 
 ```sh
 systemctl --user start self-learn-export.service       # fresh export into ~/.self-learn/archive
-cp ~/.self-learn/catalog.db ~/catalog-$(date +%F).db   # the whole catalog, sealed provider keys included
+sqlite3 ~/.self-learn/catalog.db ".backup ~/catalog-$(date +%F).db"  # consistent while the app runs — never a bare cp of a live WAL-mode db (no sqlite3? stop self-learn + self-learn-studio first, then cp)
 cp ~/dev/setup-server/services/self-learn/.env ~/self-learn.env.bak  # AUTH_SECRET unseals those keys
 ```
 
