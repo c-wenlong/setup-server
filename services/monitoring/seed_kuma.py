@@ -200,6 +200,20 @@ if not ADGUARD_DNS_IP:
 
 have = {m["name"]: m for m in api.get_monitors()}
 
+# Rename-era monitors: a seeded `self-learn*` monitor still points at :8107
+# but control.kuma now pauses `gnosia-learn*` only, so a launcher/phone stop
+# would leave the old monitor alerting. Re-key it in place — same monitor
+# id, so its settings and paused state survive. When both names exist the
+# operator already split them deliberately; leave both.
+for old, new in {"self-learn": "gnosia-learn",
+                 "self-learn-studio": "gnosia-learn-studio"}.items():
+    monitor = have.pop(old, None)
+    if monitor is not None and new not in have:
+        api.edit_monitor(monitor["id"], name=new)
+        monitor["name"] = new
+        have[new] = monitor
+        print(f"renamed monitor: {old} -> {new}")
+
 for name, hostname, resolver, port in DNS_MONITORS:
     if name in have:
         continue

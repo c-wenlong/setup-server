@@ -200,8 +200,21 @@ class UptimeKumaApi:
     def login(self, *a): pass
     def get_notifications(self): return []
     def add_notification(self, **kw): return {"id": 1}
-    def get_monitors(self): return []
-    def edit_monitor(self, *a, **kw): pass
+    def get_monitors(self):
+        # one canned monitor per line of $FAKE_KUMA_HAVE: "id name url"
+        path = os.environ.get("FAKE_KUMA_HAVE", "")
+        out = []
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    mid, name, url = line.split(None, 2)
+                    out.append({"id": int(mid), "name": name, "url": url.strip()})
+        except OSError:
+            pass
+        return out
+    def edit_monitor(self, mid, **kw):
+        with open(os.environ["FAKE_KUMA_LOG"], "a") as fh:
+            fh.write("edit:%d:%s\n" % (mid, kw.get("name") or kw.get("url", "")))
     def disconnect(self): pass
 
     def add_monitor(self, **kw):
@@ -218,6 +231,7 @@ PYEOF
 
 seeded()     { grep -qx -- "$1" "$SANDBOX/kuma.log"; }
 not_seeded() { ! seeded "$1"; }
+no_edit()    { ! grep -q -- "edit:$1:" "$SANDBOX/kuma.log"; }
 
 test_seed_studio_monitor() {
   echo "• seed: the studio monitor exists only while STUDIO_ENABLED=1 in services/gnosia-learn/.env"
@@ -237,6 +251,23 @@ test_seed_studio_monitor() {
   teardown
 }
 
+test_seed_renamed_monitors() {
+  echo "• seed: a pre-rename self-learn monitor is re-keyed, not duplicated"
+  setup
+  printf '7 self-learn https://old-host:8107/\n' > "$SANDBOX/have"
+  FAKE_KUMA_HAVE="$SANDBOX/have" run_seed "$SANDBOX/absent.env"
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "old monitor re-keyed"           grep -qx 'edit:7:gnosia-learn' "$SANDBOX/kuma.log"
+  check "url repointed too"              grep -qx 'edit:7:https://homeserver.tail-name.ts.net:8107/' "$SANDBOX/kuma.log"
+  check "not duplicated"                 not_seeded gnosia-learn
+  # both names already present: the operator split them, leave both alone
+  printf '7 self-learn https://a/\n8 gnosia-learn https://b/\n' > "$SANDBOX/have"
+  FAKE_KUMA_HAVE="$SANDBOX/have" run_seed "$SANDBOX/absent.env"
+  check "both kept: monitor 7 untouched" no_edit 7
+  check "both kept: new one repointed"   grep -q 'edit:8:' "$SANDBOX/kuma.log"
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
@@ -246,6 +277,7 @@ test_idempotent_rerun
 test_port_override
 test_operator_escalation
 test_seed_studio_monitor
+test_seed_renamed_monitors
 
 if [ "${1:-}" = "--live" ]; then
   echo

@@ -11,6 +11,10 @@ red tile with fresh deploy logs means stopped-on-purpose, not broken —
 
 ## Quick status
 
+The commands below show the fresh-install data root `~/.gnosia`; a
+pre-rename install keeps `~/.self-learn` — substitute your `GNOSIA_HOME`
+from `services/gnosia-learn/.env` throughout.
+
 ```sh
 systemctl --user is-active gnosia-learn                  # app up?
 systemctl --user list-timers gnosia-learn-*              # poller + export scheduled?
@@ -259,15 +263,20 @@ the poller cannot restart anything mid-teardown), then stops the studio
 runner and the app, and refuses to start while a deploy or
 `sync.sh` push/pull holds the deploy lock, then holds that lock itself until
 it finishes. It never touches
-`~/.gnosia` (catalog.db, blobs, vault, nightly exports) or anything
+the data root (catalog.db, blobs, vault, nightly exports — `~/.gnosia` on a
+fresh install, `~/.self-learn` on a pre-rename one) or anything
 `sync.sh` installed.
 
-Back up first. A copy of `catalog.db` plus the newest export in
-`~/.gnosia/archive/` is a full backup:
+Back up first. A copy of `catalog.db` plus the newest export in the data
+root's `archive/` is a full backup — derive the path from `.env` the way
+setup.sh does so this works on either layout:
 
 ```sh
-systemctl --user start gnosia-learn-export.service       # fresh export into ~/.gnosia/archive
-sqlite3 ~/.gnosia/catalog.db ".backup ~/catalog-$(date +%F).db"  # consistent while the app runs — never a bare cp of a live WAL-mode db (no sqlite3? stop gnosia-learn + gnosia-learn-studio first, then cp)
+set -a; . ~/dev/setup-server/services/gnosia-learn/.env; set +a
+GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
+CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
+systemctl --user start gnosia-learn-export.service       # fresh export into $GNOSIA_HOME/archive
+sqlite3 "$CATALOG_DB" ".backup '$HOME/catalog-$(date +%F).db'"  # consistent while the app runs — never a bare cp of a live WAL-mode db (no sqlite3? stop gnosia-learn + gnosia-learn-studio first, then cp)
 cp ~/dev/setup-server/services/gnosia-learn/.env ~/gnosia-learn.env.bak  # AUTH_SECRET unseals those keys
 ```
 

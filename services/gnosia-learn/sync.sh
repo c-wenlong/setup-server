@@ -609,6 +609,16 @@ cmd_mac_setup() {
   resolve_mac_paths
   ok "ssh reachable"
 
+  # The instructions name the library to pair; a pre-rename install kept
+  # its self-learn-blobs library, so ask the daemon for the real name
+  # behind SEAFILE_SYNC_REPO rather than printing the fresh-install one.
+  SYNC_LIB_NAME="gnosia-learn-blobs"
+  if seaf_bin="$(command -v seaf-cli 2>/dev/null)"; then
+    listed="$("$seaf_bin" list -c "$SEAF_DIR/ccnet" 2>/dev/null \
+      | awk -v r="$SEAFILE_SYNC_REPO" '$2 == r {print $1}')"
+    [ -n "$listed" ] && SYNC_LIB_NAME="$listed"
+  fi
+
   # Written before any pairing — a synced .owner/.tmp on either side would
   # poison the other machine's blob root.
   info "Writing $MAC_GNOSIA_HOME/blobs/local/seafile-ignore.txt"
@@ -669,8 +679,8 @@ there is no seaf-cli for macOS). On the MacBook, once:
        server   $MAC_SEAFILE_URL
        user     $SEAFILE_SYNC_USER
        password $SEAFILE_SYNC_PASSWORD   (also in .env)
-  3. Right-click the "gnosia-learn-blobs" library -> "Sync this library" ->
-     "sync with an existing folder" -> pick ~/.gnosia/blobs/local.
+  3. Right-click the "$SYNC_LIB_NAME" library -> "Sync this library" ->
+     "sync with an existing folder" -> pick $MAC_GNOSIA_HOME/blobs/local.
   4. Enable auto-start on login in the client's settings if it is off.
 
 seafile-ignore.txt is already in place, so the Mac's own .owner never

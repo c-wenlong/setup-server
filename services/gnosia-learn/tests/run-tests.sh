@@ -818,6 +818,26 @@ EOF
   check "prints GUI steps"        out_has "Seafile Client"
   check "prints the account"      out_has "gnosia-learn-sync@test"
   check "prints tailnet URL"      out_has "https://test-host.tailfake.ts.net:8443"
+  check "names the library"       out_has '"gnosia-learn-blobs"'
+  teardown
+}
+
+test_sync_mac_setup_legacy_lib_name() {
+  echo "• sync mac-setup: a pre-rename library keeps its self-learn-blobs name in the steps"
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  # the daemon reports the library under its pre-rename name
+  mkdir -p "$STATE_DIR"
+  touch "$STATE_DIR/seaf_synced_stub-repo-777"
+  echo "self-learn-blobs" > "$STATE_DIR/seaf_name_stub-repo-777"
+  run_sync mac-setup
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "names the saved library"   out_has '"self-learn-blobs"'
+  check "not the fresh name"        out_lacks '"gnosia-learn-blobs"'
   teardown
 }
 
@@ -2054,6 +2074,7 @@ test_sync_install_idempotent
 test_sync_install_old_layout
 test_sync_install_already_linked
 test_sync_mac_setup_gui
+test_sync_mac_setup_legacy_lib_name
 test_sync_mac_setup_headless
 test_sync_push
 test_sync_push_quiet_mac
