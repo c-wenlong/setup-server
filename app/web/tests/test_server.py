@@ -886,6 +886,21 @@ class ProbeCacheTest(SandboxTest):
             server.probe = real
         self.assertEqual(len(calls), 1)
 
+    def test_index_redirects_path_mounts_to_slash_form(self):
+        """index.html must self-redirect /home -> /home/ before any asset
+        loads: relative hrefs under a slashless path mount resolve at the
+        vhost root and land on whatever service owns `/` instead."""
+        real_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "static", "index.html")
+        with open(real_path, encoding="utf-8") as fh:
+            html = fh.read()
+        # The redirect must run before the first stylesheet/script tag,
+        # i.e. inside the inline head script.
+        head = html.split("<link", 1)[0]
+        self.assertIn("location.pathname.endsWith('/')", head)
+        self.assertIn("location.replace(", head)
+
     def test_registry_file_parses_and_is_self_consistent(self):
         """The real services.json must load and satisfy the schema."""
         real_path = os.path.join(
