@@ -5,6 +5,9 @@
 #   serve_fails_left    — countdown of forced serve failures (approval-link flow)
 #   serve_status        — text `tailscale serve status` prints (teardown tests)
 #   serve_status_fails  — exists => `serve status` fails like a stopped daemon
+#   lock_probe          — file content: a lock dir path. On `serve off` its
+#                         state is written to lock_at_down ("live <pid>" when
+#                         it holds the pid of a running process, else "none")
 echo "tailscale $*" >> "$CALLS_LOG"
 
 if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then
@@ -15,7 +18,18 @@ if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then
   [ -f "$STATE_DIR/serve_status" ] && cat "$STATE_DIR/serve_status"
   exit 0
 fi
-case " $* " in *" off "*) [ "$1" = "serve" ] && exit 0 ;; esac
+case " $* " in *" off "*)
+  if [ "$1" = "serve" ]; then
+    # teardown's Serve sweep happens while it holds the deploy lock —
+    # record who holds it right now, so tests can assert the lock was live.
+    if [ -f "$STATE_DIR/lock_probe" ]; then
+      l="$(cat "$STATE_DIR/lock_probe")"; p="$(cat "$l/pid" 2>/dev/null || true)"
+      if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "live $p"; else echo none; fi \
+        > "$STATE_DIR/lock_at_down"
+    fi
+    exit 0
+  fi ;;
+esac
 
 case "$1" in
   status)

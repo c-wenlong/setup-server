@@ -28,7 +28,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/docker-compose.yml" \
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" \
     "$SERVICE_DIR/teardown.sh" \
     "$SERVICE_DIR/sync.sh" "$SVC/"
 }
@@ -41,16 +41,28 @@ mk_env() {
   cat > "$SVC/.env" <<EOF
 SERVICE_HOME=$HOME/services/self-learn
 SELF_LEARN_HOME=$HOME/.self-learn
+GNOSIA_HOME=$HOME/.self-learn
+CATALOG_DB=$HOME/.self-learn/catalog.db
 MAC_SSH=tester@mac.invalid
 NODE_BIN=/usr/bin
 LOCAL_PORT=8107
+EOF
+  chmod 600 "$SVC/.env"
+}
+
+# The same .env as the Postgres era left it: no GNOSIA_HOME/CATALOG_DB, the
+# old DATABASE_URL/POSTGRES_* keys still present. sync.sh must derive the
+# new names and ignore the leftovers.
+mk_env_old() {
+  mk_env
+  sed -i.bak '/^GNOSIA_HOME=/d;/^CATALOG_DB=/d' "$SVC/.env" && rm -f "$SVC/.env.bak"
+  cat >> "$SVC/.env" <<EOF
 PG_PORT=5432
 POSTGRES_USER=catalog
 POSTGRES_PASSWORD=pw
 POSTGRES_DB=self_learn
 DATABASE_URL=postgres://catalog:pw@127.0.0.1:5432/self_learn
 EOF
-  chmod 600 "$SVC/.env"
 }
 
 # The sibling seafile service's .env, at the default sibling path
@@ -66,42 +78,24 @@ INIT_SEAFILE_ADMIN_PASSWORD=adminpw
 EOF
 }
 
-# Canned snapshot query answers (name|ts_col|present meta, then union rows).
-mk_psql_canned() {
-  cat > "$STATE_DIR/psql_meta" <<'EOF'
-asset|created_at|t
-catalog_instance||t
-event|at|t
-review|last_reviewed|t
-EOF
-  cat > "$STATE_DIR/psql_rows" <<'EOF'
-asset|42|2026-10-06 10:00:00
-catalog_instance|1|-
-event|510|2026-10-06 18:00:00
-review|77|2026-10-06 12:00:00
-EOF
-  cat > "$STATE_DIR/mac_psql_meta" <<'EOF'
-asset|created_at|t
-catalog_instance||t
-event|at|t
-review|last_reviewed|t
-EOF
-  cat > "$STATE_DIR/mac_psql_rows" <<'EOF'
-asset|40|2026-10-05 10:00:00
-catalog_instance|1|-
-event|505|2026-10-05 18:00:00
-review|70|2026-10-05 12:00:00
-EOF
+# A local catalog.db to snapshot (push) or be replaced (pull), with a stale
+# -wal a replace must drop. The Mac's side is canned inside the stubs.
+mk_db_files() {
+  mkdir -p "$HOME/.self-learn"
+  echo "LOCAL-DB-BYTES" > "$HOME/.self-learn/catalog.db"
+  echo "LOCAL-STALE-WAL" > "$HOME/.self-learn/catalog.db-wal"
+  echo "42" > "$STATE_DIR/db_count"
+  echo "40" > "$STATE_DIR/mac_db_count"
 }
 
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT PG_PORT REPO_URL BRANCH POLL_SECONDS \
+  unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT REPO_URL BRANCH POLL_SECONDS \
     SKIP_SEED OWNER_PASSWORD AUTH_SECRET STATE_DIR CALLS_LOG \
-    STUDIO_ENABLED ASSET_FILES_ENABLED \
-    SEAFILE_ENV MAC_SSH MAC_HOME MAC_REPO MAC_PGBIN MAC_DB MAC_DB_URL \
-    MAC_PGPORT MAC_SEAFILE_URL SEAFILE_URL SEAFILE_SYNC_USER \
+    STUDIO_ENABLED ASSET_FILES_ENABLED SQLITE3 \
+    SEAFILE_ENV MAC_SSH MAC_GNOSIA_HOME MAC_REPO MAC_DB_FILE \
+    MAC_SEAFILE_URL SEAFILE_URL SEAFILE_SYNC_USER \
     SEAFILE_SYNC_PASSWORD SEAFILE_SYNC_REPO
 }
 
@@ -154,16 +148,6 @@ mk_studio_unit() {
 }
 
 # ----------------------------------------------------------------- tests
-test_preflight_docker_perms() {
-  echo "• preflight fails when user cannot reach the docker daemon"
-  setup
-  touch "$STATE_DIR/docker_no_perm"
-  run_deploy
-  check "exits non-zero" [ "$CODE" -ne 0 ]
-  check "wrote no .env"  [ ! -f "$SVC/.env" ]
-  teardown
-}
-
 test_preflight_tailscale_down() {
   echo "• preflight fails when tailscale is not running"
   setup
@@ -206,13 +190,15 @@ test_preflight_root() {
 }
 
 test_fresh_deploy() {
-  echo "• fresh deploy: full happy path (clone, ci, db, seed, units, timers, serve)"
+  echo "• fresh deploy: full happy path (clone, ci, catalog.db, seed, units, timers, serve)"
   setup
   touch "$STATE_DIR/operator"
   run_deploy
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check ".env has repo URL"             env_has "REPO_URL=https://github.com/c-wenlong/self-learn.git"
-  check ".env has generated DB URL"     grep -qE '^DATABASE_URL=postgres://catalog:[0-9a-f]+@127.0.0.1:5432/self_learn$' "$SVC/.env"
+  check ".env has data root"            env_has "GNOSIA_HOME=$HOME/.self-learn"
+  check ".env has catalog file"         env_has "CATALOG_DB=$HOME/.self-learn/catalog.db"
+  check ".env has no postgres url"      sh -c "! grep -q '^DATABASE_URL=postgres://' '$SVC/.env'"
   check ".env has owner password"       grep -qE '^OWNER_PASSWORD=.+$' "$SVC/.env"
   check ".env has auth secret"          grep -qE '^AUTH_SECRET=.{32,}$' "$SVC/.env"
   check ".env mode is 600"              sh -c "[ \"$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")\" = 600 ]"
@@ -220,11 +206,13 @@ test_fresh_deploy() {
   check "env path baked into script"    grep -q "$SVC/.env" "$HOME/services/self-learn/bin/deploy.sh"
   check "cloned the repo"               calls_have "git clone --branch main"
   check "installed deps (npm ci)"       calls_have "npm ci"
-  check "web env written"               grep -q "^DATABASE_URL=postgres://catalog:" "$(REPO_DIR)/apps/web/.env.local"
-  check "catalog env written"           grep -q "^SELF_LEARN_HOME=" "$(REPO_DIR)/services/catalog/.env"
+  check "web env has no DATABASE_URL"   sh -c "! grep -q '^DATABASE_URL=' '$(REPO_DIR)/apps/web/.env.local'"
+  check "catalog env has GNOSIA_HOME"   grep -q "^GNOSIA_HOME=" "$(REPO_DIR)/services/catalog/.env"
+  check "catalog env has CATALOG_DB"    grep -q "^CATALOG_DB=" "$(REPO_DIR)/services/catalog/.env"
+  check "catalog env has no pg url"     sh -c "! grep -q 'postgres://' '$(REPO_DIR)/services/catalog/.env'"
   check "web env mode is 600"           sh -c "[ \"$(stat -c %a "$(REPO_DIR)/apps/web/.env.local" 2>/dev/null || stat -f %Lp "$(REPO_DIR)/apps/web/.env.local")\" = 600 ]"
   check "catalog env mode is 600"       sh -c "[ \"$(stat -c %a "$(REPO_DIR)/services/catalog/.env" 2>/dev/null || stat -f %Lp "$(REPO_DIR)/services/catalog/.env")\" = 600 ]"
-  check "compose up invoked"            [ -f "$STATE_DIR/compose_up" ]
+  check "no docker touched"             no_call "docker"
   check "catalog migrated"              calls_have "npm run catalog -- migrate"
   check "seed imported"                 calls_have "npm run catalog -- import seed"
   check "six flips run"                 sh -c '[ "$(grep -c "npm run catalog -- flip" "$CALLS_LOG")" -eq 6 ]'
@@ -236,6 +224,11 @@ test_fresh_deploy() {
   if [ "$OS" = "Linux" ]; then
     check "app unit written"            [ -f "$HOME/.config/systemd/user/self-learn.service" ]
     check "app binds loopback+port"     grep -q -- "-p 8107 -H 127.0.0.1" "$HOME/.config/systemd/user/self-learn.service"
+    check "app unit gets GNOSIA_HOME"   grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/self-learn.service"
+    check "app unit gets CATALOG_DB"    grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/self-learn.service"
+    check "app unit has no postgres"    sh -c "! grep -q 'postgres\|DATABASE_URL' '$HOME/.config/systemd/user/self-learn.service'"
+    check "export unit gets GNOSIA_HOME" grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/self-learn-export.service"
+    check "export unit gets CATALOG_DB" grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/self-learn-export.service"
     check "deploy timer written"        [ -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
     check "export timer written"        [ -f "$HOME/.config/systemd/user/self-learn-export.timer" ]
     check "studio unit written"         [ -f "$HOME/.config/systemd/user/self-learn-studio.service" ]
@@ -253,6 +246,10 @@ test_fresh_deploy() {
     check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.studio.plist" ]
     check "deploy agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
     check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
+    check "web agent gets GNOSIA_HOME"  grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
+    check "web agent gets CATALOG_DB"   grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
+    check "export agent gets GNOSIA_HOME" grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.self-learn.export.plist"
+    check "export agent gets CATALOG_DB" grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.self-learn.export.plist"
     check "deploy agent sets PATH"      grep -q "/opt/homebrew/bin" "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
     check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.self-learn.web"
     check "studio agent not loaded"     no_call "launchctl bootstrap .*com.self-learn.studio"
@@ -285,7 +282,7 @@ test_idempotent_rerun() {
   check "no re-seed"              no_call "npm run catalog -- import"
   check "no git clone"            no_call "git clone"
   check "never invoked sudo"      no_call "^sudo "
-  check "compose up re-invoked"   [ -f "$STATE_DIR/compose_up" ]
+  check "no docker anywhere"      no_call "^docker "
   teardown
 }
 
@@ -350,29 +347,30 @@ test_stopped_app_stays_stopped() {
     check "no stop attempted" no_call "launchctl bootout"
     check "not restarted"     no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
   fi
-  check "postgres left up"    no_call "compose --project-directory .* stop$"
+  check "no docker touched"   no_call "^docker "
   check "says it was left"    out_has "left stopped"
   teardown
 }
 
 test_stopped_stack_stays_stopped() {
-  echo "• poller: app + Postgres both stopped -> updated, both left stopped"
+  echo "• poller: app + studio both stopped -> updated, both left stopped"
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  rm -f "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  # studio_active was never set (STUDIO_ENABLED=0 disables it); the app was.
+  rm -f "$STATE_DIR/web_active" "$STATE_DIR/studio_active"
   echo "bbb2222" > "$STATE_DIR/remote_sha"
   : > "$CALLS_LOG"
   run_poll
   check "exits zero"               [ "$CODE" -eq 0 ]
   check "rebuilt"                  calls_have "npm run build"
   check "catalog migrated"         calls_have "npm run catalog -- migrate"
-  check "postgres put back down"   calls_have "compose --project-directory .* stop$"
-  check "db marked down again"     [ ! -f "$STATE_DIR/db_running" ]
   if [ "$OS" = "Linux" ]; then
-    check "app not restarted"      no_call "systemctl --user start self-learn"
+    check "app not restarted"      no_call "systemctl --user start self-learn.service"
+    check "studio not started"     no_call "systemctl --user start self-learn-studio"
   else
     check "app not restarted"      no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+    check "studio not started"     no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.studio"
   fi
   teardown
 }
@@ -491,12 +489,12 @@ test_setup_leaves_stopped() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  rm -f "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  rm -f "$STATE_DIR/web_active"
   : > "$CALLS_LOG"
   run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "says it left it stopped" out_has "leaving it stopped"
-  check "postgres put back down"  calls_have "compose --project-directory .* stop$"
+  check "no docker touched"       no_call "^docker "
   check "serve still configured"  calls_have "tailscale serve --bg --https=8107"
   check "no health checks"        no_call "^curl "
   if [ "$OS" = "Linux" ]; then
@@ -818,8 +816,8 @@ EOF
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
   # MAC_HOME derives from MAC_SSH (tester@mac.invalid), proving the account,
-  # not a hardcoded user, owns the paths.
-  check "remote links blobs/local" calls_have "-d '/Users/tester/.self-learn/blobs/local'"
+  # not a hardcoded user, owns the paths. The Mac's data root is ~/.gnosia.
+  check "remote links blobs/local" calls_have "-d '/Users/tester/.gnosia/blobs/local'"
   check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.self-learn.seafile.plist"
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
@@ -828,52 +826,155 @@ EOF
 }
 
 test_sync_push() {
-  echo "• sync push: dump server db, restore it on the Mac"
-  setup; mk_env; mk_psql_canned
+  echo "• sync push: .backup snapshot -> scp -> replace the Mac's catalog.db, audit after"
+  setup; mk_env; mk_db_files
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/mac_devserver"
+  run_sync push
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "snapshot via .backup"    calls_have "sqlite3 .*\.backup"
+  check "sender app never stopped" no_call "systemctl --user stop self-learn.service"
+  check "Mac app probed over ssh" calls_have "pgrep -fl 'next"
+  check "Mac app killed"          calls_have "pkill -f 'next"
+  check "staged dir scp'd"        calls_have "scp .*-pr .*\.sync-stage"
+  check "old wal/shm dropped"     calls_have "rm -f '/Users/tester/.gnosia/catalog.db-wal'"
+  check "staged file moved in"    calls_have "mv '/Users/tester/.gnosia/.sync-stage/catalog.db' '/Users/tester/.gnosia/catalog.db'"
+  check "stop before ship"        before "pkill -f 'next" "scp .*-pr"
+  check "Mac audit ran"           calls_have "npm run catalog -- blob audit"
+  check "  with its CATALOG_DB"   calls_have "CATALOG_DB='/Users/tester/.gnosia/catalog.db'"
+  check "  with its GNOSIA_HOME"  calls_have "GNOSIA_HOME='/Users/tester/.gnosia'"
+  check "restart hint printed"    out_has "npm run dev"
+  check "vault warned"            out_has "vault"
+  check "staging cleaned"         test ! -e "$HOME/services/self-learn/state/.sync-stage"
+  teardown
+}
+
+test_sync_push_quiet_mac() {
+  echo "• sync push: no app running on the Mac -> snapshot still ships, no pkill"
+  setup; mk_env; mk_db_files
   mkdir -p "$HOME/services/self-learn/repo"
   run_sync push
-  check "exits zero"          [ "$CODE" -eq 0 ]
-  check "dumped locally"      calls_have "docker exec -i self-learn-db pg_dump -Fc -U catalog self_learn"
-  check "scp to mac"          calls_have "scp .*-p .*self_learn-sync.dump"
-  check "not staged in /tmp"  no_call ":/tmp/"
-  check "drop sent"           grep -q "DROP DATABASE" "$STATE_DIR/mac_sql.log"
-  check "createdb on mac"     calls_have "createdb"
-  check "restore on mac"      calls_have "pg_restore --no-owner"
-  check "owner rewritten"     grep -q '"self_learn:33692"' "$STATE_DIR/mac_owner.txt"
-  check "mac audit ran"       calls_have "npm run catalog -- blob audit"
-  check "vault warned"        out_has "vault"
-  check "dump cleaned"        test ! -f "$HOME/services/self-learn/state/self_learn-push.dump"
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "snapshot taken"          calls_have "sqlite3 .*\.backup"
+  check "nothing killed"          no_call "pkill"
+  check "no restart hint"         out_lacks "npm run dev"
+  check "file placed remotely"    calls_have "mv '/Users/tester/.gnosia/.sync-stage/catalog.db'"
+  teardown
+}
+
+test_sync_push_no_sqlite3() {
+  echo "• sync push with no sqlite3: sender's app stops for the copy, restarts after"
+  setup; mk_env; mk_db_files
+  mkdir -p "$HOME/services/self-learn/repo"
+  export SQLITE3=
+  touch "$STATE_DIR/web_active"
+  run_sync push
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "no .backup attempted"    no_call "sqlite3 .*\.backup"
+  check "sender stopped for copy" calls_have "systemctl --user stop self-learn.service"
+  check "sender restarted"        calls_have "systemctl --user start self-learn.service"
+  check "staged set shipped"      calls_have "scp .*-pr"
+  check "wal moves in too"        calls_have "catalog.db-wal"
+  teardown
+}
+
+test_sync_push_no_local_db() {
+  echo "• sync push: no local catalog.db refuses before the Mac is touched"
+  setup; mk_env
+  run_sync push
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says why"                out_has "nothing to push"
+  check "nothing shipped"         no_call "scp"
+  check "mac app never probed"    no_call "pgrep"
   teardown
 }
 
 test_sync_pull() {
-  echo "• sync pull: dump Mac db, restore here, app restarted"
-  setup; mk_env; mk_psql_canned
+  echo "• sync pull: Mac .backup snapshot -> scp back -> replace catalog.db, app restarted"
+  setup; mk_env; mk_db_files
   mkdir -p "$HOME/services/self-learn/repo"
-  touch "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  touch "$STATE_DIR/web_active"
   run_sync pull
-  check "exits zero"          [ "$CODE" -eq 0 ]
-  check "remote dump"         calls_have "pg_dump -Fc"
-  check "scp back"            calls_have "scp .*-p .*self_learn-sync.dump"
-  check "app stopped"         calls_have "systemctl --user stop self-learn.service"
-  check "compose up"          calls_have "compose --project-directory .* up -d"
-  check "drop sent locally"   grep -q "DROP DATABASE" "$STATE_DIR/local_sql.log"
-  check "local restore"       calls_have "pg_restore --no-owner"
-  check "owner rewritten"     grep -q '"self_learn:16384"' "$HOME/.self-learn/blobs/.owner"
-  check "audit ran"           calls_have "npm run catalog -- blob audit"
-  check "app restarted"       calls_have "systemctl --user start self-learn.service"
-  check "postgres left up"    no_call "compose --project-directory .* stop$"
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "remote db checked"       calls_have "ssh .*-f '/Users/tester/.gnosia/catalog.db'"
+  check "remote .backup"          calls_have "sqlite3 .*\.backup"
+  check "staged dir scp'd back"   calls_have "scp .*-pr"
+  check "app stopped"             calls_have "systemctl --user stop self-learn.service"
+  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
+  check "stale wal dropped"       test ! -e "$HOME/.self-learn/catalog.db-wal"
+  check "audit ran"               calls_have "npm run catalog -- blob audit"
+  check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.self-learn/catalog.db" "$STATE_DIR/catalog_env.log"
+  check "audit got GNOSIA_HOME"   grep -qx "GNOSIA_HOME=$HOME/.self-learn" "$STATE_DIR/catalog_env.log"
+  check "no DATABASE_URL passed"  grep -qx "DATABASE_URL=" "$STATE_DIR/catalog_env.log"
+  check "app restarted"           calls_have "systemctl --user start self-learn.service"
+  check "stop before start"       before "stop self-learn.service" "start self-learn.service"
+  check "staging cleaned"         test ! -e "$HOME/services/self-learn/state/.sync-stage"
+  check "vault warned"            out_has "vault"
+  teardown
+}
+
+test_sync_pull_old_env() {
+  echo "• sync pull on a Postgres-era .env: paths derived, DATABASE_URL ignored"
+  setup; mk_env_old; mk_db_files
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/web_active"
+  run_sync pull
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
+  check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.self-learn/catalog.db" "$STATE_DIR/catalog_env.log"
+  check "audit got GNOSIA_HOME"   grep -qx "GNOSIA_HOME=$HOME/.self-learn" "$STATE_DIR/catalog_env.log"
+  teardown
+}
+
+test_sync_pull_no_remote_db() {
+  echo "• sync pull: no catalog.db on the Mac refuses before anything ships"
+  setup; mk_env; mk_db_files
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/mac_db_missing"
+  run_sync pull
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says why"                out_has "nothing to pull"
+  check "nothing shipped"         no_call "scp"
+  check "local db untouched"      grep -qx LOCAL-DB-BYTES "$HOME/.self-learn/catalog.db"
+  check "app never stopped"       no_call "systemctl --user stop self-learn.service"
+  teardown
+}
+
+test_sync_pull_no_mac_sqlite3() {
+  echo "• sync pull, no sqlite3 on the Mac: stopped-sender file copy, wal set included"
+  setup; mk_env; mk_db_files
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/mac_no_sqlite3" "$STATE_DIR/mac_db_wal" "$STATE_DIR/web_active"
+  run_sync pull
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "no .backup attempted"    no_call "sqlite3 .*\.backup"
+  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
+  check "wal landed"              grep -qx STUB-MAC-WAL "$HOME/.self-learn/catalog.db-wal"
+  check "shm landed"              grep -qx STUB-MAC-SHM "$HOME/.self-learn/catalog.db-shm"
+  teardown
+}
+
+test_sync_pull_no_mac_sqlite3_app_running() {
+  echo "• sync pull, no sqlite3 on the Mac + its app up: refuses rather than kill the dev session"
+  setup; mk_env; mk_db_files
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/mac_no_sqlite3" "$STATE_DIR/mac_devserver"
+  run_sync pull
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says to stop the app"    out_has "app is running"
+  check "nothing shipped"         no_call "scp"
+  check "local db untouched"      grep -qx LOCAL-DB-BYTES "$HOME/.self-learn/catalog.db"
   teardown
 }
 
 test_sync_pull_studio() {
-  echo "• sync pull: a running studio runner is stopped before the restore and restarted after"
-  setup; mk_env; mk_psql_canned; mk_studio_unit
+  echo "• sync pull: a running studio runner is stopped before the replace and restarted after"
+  setup; mk_env; mk_db_files; mk_studio_unit
   mkdir -p "$HOME/services/self-learn/repo"
-  touch "$STATE_DIR/web_active" "$STATE_DIR/db_running" "$STATE_DIR/studio_active"
+  touch "$STATE_DIR/web_active" "$STATE_DIR/studio_active"
   run_sync pull
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check "restore ran"                 calls_have "pg_restore --no-owner"
+  check "db replaced"                 grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
   if [ "$OS" = "Linux" ]; then
     check "studio stopped"            calls_have "systemctl --user stop self-learn-studio.service"
     check "studio started again"      calls_have "systemctl --user start self-learn-studio.service"
@@ -891,70 +992,102 @@ test_sync_pull_studio() {
 
 test_sync_pull_stopped_studio() {
   echo "• sync pull: a stopped studio runner is left stopped"
-  setup; mk_env; mk_psql_canned; mk_studio_unit
+  setup; mk_env; mk_db_files; mk_studio_unit
   mkdir -p "$HOME/services/self-learn/repo"
-  touch "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  touch "$STATE_DIR/web_active"
   run_sync pull
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check "restore ran"                 calls_have "pg_restore --no-owner"
+  check "db replaced"                 grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
   check "studio never stopped"        no_call "stop self-learn-studio"
   check "studio never started"        no_call "start self-learn-studio"
   teardown
 }
 
 test_sync_pull_stopped_app() {
-  echo "• sync pull: a stopped app is restored without being started"
-  setup; mk_env; mk_psql_canned
+  echo "• sync pull: a stopped app stays stopped across the replace"
+  setup; mk_env; mk_db_files
   mkdir -p "$HOME/services/self-learn/repo"
   run_sync pull
   check "exits zero"          [ "$CODE" -eq 0 ]
-  check "restore ran"         calls_have "pg_restore --no-owner"
-  check "no stop call"        no_call "systemctl --user stop self-learn.service"
-  check "no start call"       no_call "systemctl --user start self-learn.service"
-  check "postgres back down"  calls_have "compose --project-directory .* stop$"
-  check "db marker gone"      test ! -f "$STATE_DIR/db_running"
+  check "db replaced"         grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
+  if [ "$OS" = "Linux" ]; then
+    check "no stop call"      no_call "systemctl --user stop self-learn.service"
+    check "no start call"     no_call "systemctl --user start self-learn.service"
+  else
+    check "no bootout"        no_call "launchctl bootout"
+    check "no bootstrap"      no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+  fi
+  check "audit still ran"     calls_have "npm run catalog -- blob audit"
+  check "no docker touched"   no_call "^docker "
   teardown
 }
 
 test_sync_push_locked() {
   echo "• sync push: a live deploy/sync lock refuses to run"
-  setup; mk_env; mk_psql_canned
+  setup; mk_env; mk_db_files
   mkdir "$HOME/services/self-learn/.deploy.lock"
   echo $$ > "$HOME/services/self-learn/.deploy.lock/pid"
   run_sync push
   check "exits non-zero"      [ "$CODE" -ne 0 ]
   check "says why"            out_has "deploy or sync is running"
-  check "no dump taken"       no_call "pg_dump"
-  teardown
-}
-
-test_sync_push_pg_fails() {
-  echo "• sync push: a failed local dump ships nothing"
-  setup; mk_env; mk_psql_canned
-  touch "$STATE_DIR/pg_fails"
-  run_sync push
-  check "exits non-zero"      [ "$CODE" -ne 0 ]
-  check "says why"            out_has "pg_dump failed"
+  check "no snapshot taken"   no_call "\.backup"
   check "nothing shipped"     no_call "scp"
   teardown
 }
 
+test_sync_push_snapshot_fails() {
+  echo "• sync push: a failed .backup snapshot ships nothing"
+  setup; mk_env; mk_db_files
+  touch "$STATE_DIR/sqlite3_fails"
+  run_sync push
+  check "exits non-zero"      [ "$CODE" -ne 0 ]
+  check "says why"            out_has "sqlite3 .backup"
+  check "nothing shipped"     no_call "scp"
+  teardown
+}
+
+test_sync_pull_audit_fails() {
+  echo "• sync pull: a failing blob audit warns but does not roll back"
+  setup; mk_env; mk_db_files
+  mkdir -p "$HOME/services/self-learn/repo"
+  touch "$STATE_DIR/web_active" "$STATE_DIR/audit_fails"
+  run_sync pull
+  check "exits zero (informational)" [ "$CODE" -eq 0 ]
+  check "warns about gaps"           out_has "audit reported gaps"
+  check "db still replaced"          grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
+  check "app still restarted"        calls_have "systemctl --user start self-learn.service"
+  teardown
+}
+
 test_sync_status() {
-  echo "• sync status: both sides tabled; unreachable Mac degrades"
-  setup; mk_env; mk_psql_canned
+  echo "• sync status: both catalog.db files tabled; unreachable Mac degrades"
+  setup; mk_env; mk_db_files
   run_sync status
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "server section"      out_has "SERVER"
   check "mac section"         out_has "MAC"
+  check "server db file"      out_has "$HOME/.self-learn/catalog.db"
   check "server rows"         out_has "asset.*42"
+  check "mac db file"         out_has "/Users/tester/.gnosia/catalog.db"
   check "mac rows"            out_has "asset.*40"
   check "mac client noted"    out_has "seaf"
   teardown
 }
 
+test_sync_status_no_sqlite3() {
+  echo "• sync status with no sqlite3: file facts still print, counts degrade"
+  setup; mk_env; mk_db_files
+  export SQLITE3=
+  run_sync status
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "server db file"      out_has "$HOME/.self-learn/catalog.db"
+  check "counts skipped"      out_has "no sqlite3"
+  teardown
+}
+
 test_sync_status_unreachable() {
   echo "• sync status: unreachable Mac reports cleanly"
-  setup; mk_env; mk_psql_canned
+  setup; mk_env; mk_db_files
   touch "$STATE_DIR/mac_unreachable"
   run_sync status
   check "exits zero"          [ "$CODE" -eq 0 ]
@@ -984,20 +1117,26 @@ no_external_listener() {
 
 test_live() {
   echo "• live: verify the real deployment on this machine"
-  local ts port pg_port url svc_home
+  local ts port url svc_home gnosia_home catalog_db
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
-  pg_port="$(sed -n 's/^PG_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
   url="$(sed -n 's|^PUBLIC_URL=\(.*\)$|\1|p' "$SERVICE_DIR/.env")"
   svc_home="$(sed -n 's/^SERVICE_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
-  live_check "postgres container running"  sh -c "docker inspect -f '{{.State.Status}}' self-learn-db | grep -qx running"
+  # Postgres-era .env files lack both names; derive them like the scripts do.
+  gnosia_home="$(sed -n 's/^GNOSIA_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  [ -n "$gnosia_home" ] || gnosia_home="$(sed -n 's/^SELF_LEARN_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  catalog_db="$(sed -n 's/^CATALOG_DB=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  [ -n "$catalog_db" ] || catalog_db="$gnosia_home/catalog.db"
+  live_check "catalog.db exists"           test -s "$catalog_db"
+  live_check "no postgres container"       sh -c "! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx self-learn-db"
   live_check "app responds locally"        curl -fsS "http://127.0.0.1:$port/"
   live_check "no wildcard app listener"    no_external_listener "$port"
-  live_check "no wildcard pg listener"     no_external_listener "$pg_port"
   live_check "built sha matches origin"    sh -c "[ \"\$(git -C '$svc_home/repo' rev-parse origin/main)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   live_check "web .env.local exists"       test -f "$svc_home/repo/apps/web/.env.local"
   live_check "catalog .env exists"         test -f "$svc_home/repo/services/catalog/.env"
+  live_check "web env has no postgres url" sh -c "! grep -q '^DATABASE_URL=postgres://' '$svc_home/repo/apps/web/.env.local'"
+  live_check "catalog env has CATALOG_DB"  sh -c "grep -q '^CATALOG_DB=' '$svc_home/repo/services/catalog/.env'"
   live_check "web .env.local is 600"       test "$(stat -c %a "$svc_home/repo/apps/web/.env.local" 2>/dev/null || stat -f %Lp "$svc_home/repo/apps/web/.env.local")" = 600
   live_check "catalog .env is 600"         test "$(stat -c %a "$svc_home/repo/services/catalog/.env" 2>/dev/null || stat -f %Lp "$svc_home/repo/services/catalog/.env")" = 600
   live_check "bootstrap marker exists"     test -f "$svc_home/state/db-bootstrapped"
@@ -1050,7 +1189,7 @@ before() {
 }
 # Nothing a teardown changes happened.
 untouched() {
-  [ ! -f "$STATE_DIR/compose_down" ] && no_call " off" \
+  no_call "^docker " && no_call " off" \
     && no_call "systemctl --user disable" && no_call "launchctl bootout" \
     && no_call "launchctl disable" \
     && [ -f "$SVC/.env" ]
@@ -1067,6 +1206,7 @@ deployed() {
   echo wal > "$(SVC_HOME)/studio/jobs/wal"
   echo export > "$HOME/.self-learn/archive/latest/catalog.json"
   echo blob > "$HOME/.self-learn/blobs/b1"
+  echo db > "$HOME/.self-learn/catalog.db"
   cat > "$STATE_DIR/serve_status" <<EOF
 https://test-host.tailfake.ts.net:2283 (tailnet only)
 |-- / proxy http://127.0.0.1:2283
@@ -1078,11 +1218,10 @@ https://test-host.tailfake.ts.net:18107 (tailnet only)
 |-- / proxy http://127.0.0.1:18107
 EOF
   : > "$CALLS_LOG"
-  rm -f "$STATE_DIR/compose_down"
 }
 
 test_teardown_safe() {
-  echo "• teardown: safe remove stops timers, studio, app, then Postgres; keeps data"
+  echo "• teardown: safe remove stops timers, studio, app (no Postgres anymore); keeps data"
   deployed
   run_teardown
   check "exits zero"                    [ "$CODE" -eq 0 ]
@@ -1090,8 +1229,7 @@ test_teardown_safe() {
   check "neighbour :2283 untouched"     no_call "https=2283"
   check "lookalike :18107 untouched"    no_call "https=18107"
   check "never serve reset"             no_call "serve reset"
-  check "compose down"                  [ -f "$STATE_DIR/compose_down" ]
-  check "down keeps the volume (no -v)" [ -z "$(cat "$STATE_DIR/compose_down" 2>/dev/null)" ]
+  check "no docker touched"             no_call "^docker "
   if [ "$OS" = "Linux" ]; then
     check "deploy timer disabled"       calls_have "systemctl --user disable --now self-learn-deploy.timer"
     check "export timer disabled"       calls_have "systemctl --user disable --now self-learn-export.timer"
@@ -1101,7 +1239,7 @@ test_teardown_safe() {
     check "app disabled"                calls_have "systemctl --user disable --now self-learn.service"
     check "timers before studio"        before "disable --now self-learn-export.timer" "disable --now self-learn-studio.service"
     check "studio before app"           before "disable --now self-learn-studio.service" "disable --now self-learn.service"
-    check "app before Postgres"         before "disable --now self-learn.service" "compose --project-directory .* down"
+    check "serve off before stops"      before "tailscale serve --https=8107 off" "disable --now self-learn.service"
     check "app inactive"                [ ! -f "$STATE_DIR/web_active" ]
     check "unit files kept"             [ -f "$(UNIT_DIR)/self-learn.service" ] && [ -f "$(UNIT_DIR)/self-learn-deploy.timer" ]
     check "no daemon-reload"            no_call "daemon-reload"
@@ -1134,14 +1272,14 @@ test_teardown_then_setup_restores() {
   check "setup exits zero"              [ "$CODE" -eq 0 ]
   check "not left stopped"              out_lacks "leaving it stopped"
   check "marker consumed"               [ ! -f "$(SVC_HOME)/state/torn-down" ]
-  check "postgres up again"             [ -f "$STATE_DIR/db_running" ]
+  check "app marked active again"       [ -f "$STATE_DIR/web_active" ]
   if [ "$OS" = "Linux" ]; then
     check "app restarted"               calls_have "systemctl --user restart self-learn"
     check "timers re-enabled"           calls_have "systemctl --user enable --now self-learn-deploy.timer"
   fi
   check "serve republished"             calls_have "tailscale serve --bg --https=8107"
   # A later plain stop is the owner's again.
-  rm -f "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  rm -f "$STATE_DIR/web_active"
   : > "$CALLS_LOG"
   run_deploy
   check "next stop respected again"     out_has "leaving it stopped"
@@ -1183,7 +1321,8 @@ test_teardown_not_published() {
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check "no serve off"                  no_call " off"
   check "says already off"              out_has "already off"
-  check "still compose down"            [ -f "$STATE_DIR/compose_down" ]
+  check "stack still stopped"           calls_have "disable"
+  check "no docker touched"             no_call "^docker "
   teardown
 }
 
@@ -1244,7 +1383,7 @@ test_teardown_preflight() {
   run_teardown
   check "no .env: exits non-zero"       [ "$CODE" -ne 0 ]
   check "no .env: explains"             out_has "nothing to tear down"
-  check "no .env: touched nothing"      [ ! -f "$STATE_DIR/compose_down" ]
+  check "no .env: touched nothing"      no_call " off"
   teardown
   deployed
   export FAKE_UID=0
@@ -1255,11 +1394,6 @@ test_teardown_preflight() {
   run_teardown --force
   check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
   check "unknown flag: touched nothing" untouched
-  touch "$STATE_DIR/docker_no_perm"
-  run_teardown
-  check "no docker: exits non-zero"     [ "$CODE" -ne 0 ]
-  check "no docker: touched nothing"    untouched
-  rm -f "$STATE_DIR/docker_no_perm"
   sed -i.bak '/^SERVICE_HOME=/d' "$SVC/.env"
   run_teardown
   check "no SERVICE_HOME: exits non-zero" [ "$CODE" -ne 0 ]
@@ -1311,26 +1445,6 @@ test_teardown_env_lint() {
   teardown
 }
 
-test_teardown_refuses_compose_overrides() {
-  echo "• teardown: COMPOSE_FILE / COMPOSE_PROJECT_NAME / ... in .env or the shell are refused"
-  local v
-  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_PROFILES; do
-    deployed
-    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
-    run_teardown --purge "self-learn"
-    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
-    check "  no compose call"           no_call "compose --project-directory"
-    check "  touched nothing"           untouched
-    check "  state kept"                [ -d "$(SVC_HOME)/state" ]
-    teardown
-  done
-  deployed
-  COMPOSE_PROJECT_NAME=other run_teardown
-  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  touched nothing"             untouched
-  teardown
-}
-
 test_teardown_purge() {
   echo "• teardown --purge: typed confirmation, then volume, state, units, .env and marker go"
   deployed
@@ -1344,7 +1458,7 @@ test_teardown_purge() {
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check "warns where the exports are"   out_has "$HOME/.self-learn/archive"
   check "serve off for :8107"           calls_have "tailscale serve --https=8107 off"
-  check "down -v (volume dropped)"      [ "$(cat "$STATE_DIR/compose_down" 2>/dev/null)" = "-v" ]
+  check "no docker touched"             no_call "^docker "
   check "clone gone"                    [ ! -e "$(REPO_DIR)" ]
   check "bin gone"                      [ ! -e "$(SVC_HOME)/bin" ]
   check "state gone"                    [ ! -e "$(SVC_HOME)/state" ]
@@ -1355,7 +1469,8 @@ test_teardown_purge() {
   check "exports kept"                  [ -f "$HOME/.self-learn/archive/latest/catalog.json" ]
   check "blobs kept"                    [ -f "$HOME/.self-learn/blobs/b1" ]
   check "vault kept"                    [ -d "$HOME/.self-learn/vault" ]
-  check "repo files kept"               [ -f "$SVC/docker-compose.yml" ] && [ -f "$SVC/setup.sh" ]
+  check "catalog.db kept"               [ -f "$HOME/.self-learn/catalog.db" ]
+  check "repo files kept"               [ -f "$SVC/setup.sh" ] && [ -f "$SVC/deploy.sh" ]
   if [ "$OS" = "Linux" ]; then
     local u
     for u in self-learn.service self-learn-studio.service self-learn-deploy.service \
@@ -1363,7 +1478,7 @@ test_teardown_purge() {
       check "unit $u gone"              [ ! -e "$(UNIT_DIR)/$u" ]
     done
     check "neighbour unit kept"         [ -f "$(UNIT_DIR)/neighbour.service" ]
-    check "daemon-reload after"         before "compose --project-directory .* down" "systemctl --user daemon-reload"
+    check "daemon-reload after"         before "disable --now self-learn.service" "systemctl --user daemon-reload"
   fi
   teardown
 }
@@ -1375,7 +1490,7 @@ test_teardown_purge_missing_data_dir() {
   run_teardown --purge "self-learn"
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check ".env gone"                     [ ! -f "$SVC/.env" ]
-  check "down -v"                       [ "$(cat "$STATE_DIR/compose_down" 2>/dev/null)" = "-v" ]
+  check "no docker touched"             no_call "^docker "
   teardown
 }
 
@@ -1633,7 +1748,7 @@ test_teardown_marker_refusals() {
   check "symlinked state/: exits zero"  [ "$CODE" -eq 0 ]
   check "  warns, no marker"            out_has "not writing the torn-down marker"
   check "  file behind the link intact" [ "$(cat "$HOME/elsewhere/torn-down")" = precious ]
-  check "  still stopped Postgres"      [ -f "$STATE_DIR/compose_down" ]
+  check "  stack still stopped"         calls_have "disable"
   teardown
   deployed
   mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/file"
@@ -1832,7 +1947,7 @@ test_teardown_macos_agents() {
   run_teardown --purge "self-learn"
   check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
   check "  says so"                     out_has "Could not unload LaunchAgent com.self-learn.web"
-  check "  Postgres left up (no down -v)" [ ! -f "$STATE_DIR/compose_down" ]
+  check "  deletion not reached"        [ -d "$(REPO_DIR)/.git" ]
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
   check "  .env kept"                   [ -f "$SVC/.env" ]
   check "  lock dropped"                [ ! -e "$(SVC_HOME)/.deploy.lock" ]
@@ -1865,7 +1980,6 @@ test_teardown_macos_agents() {
 }
 
 echo "Mocked suite (sandboxed, no system changes):"
-test_preflight_docker_perms
 test_preflight_tailscale_down
 test_preflight_old_node
 test_preflight_git_auth
@@ -1899,13 +2013,22 @@ test_sync_install_already_linked
 test_sync_mac_setup_gui
 test_sync_mac_setup_headless
 test_sync_push
+test_sync_push_quiet_mac
+test_sync_push_no_sqlite3
+test_sync_push_no_local_db
 test_sync_pull
+test_sync_pull_old_env
+test_sync_pull_no_remote_db
+test_sync_pull_no_mac_sqlite3
+test_sync_pull_no_mac_sqlite3_app_running
 test_sync_pull_studio
 test_sync_pull_stopped_studio
 test_sync_pull_stopped_app
 test_sync_push_locked
-test_sync_push_pg_fails
+test_sync_push_snapshot_fails
+test_sync_pull_audit_fails
 test_sync_status
+test_sync_status_no_sqlite3
 test_sync_status_unreachable
 test_teardown_safe
 test_teardown_then_setup_restores
@@ -1917,7 +2040,6 @@ test_teardown_serve_status_fails
 test_teardown_preflight
 test_teardown_quoted_env
 test_teardown_env_lint
-test_teardown_refuses_compose_overrides
 test_teardown_purge
 test_teardown_purge_missing_data_dir
 test_teardown_purge_refuses_odd_paths

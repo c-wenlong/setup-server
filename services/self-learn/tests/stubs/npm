@@ -5,6 +5,18 @@
 # Inside tools/tldrawkc, `npm run build` emits dist/ instead, and
 # $STATE_DIR/tldrawkc_build_fails => it clobbers dist/ and exits 1.
 echo "npm $*" >> "$CALLS_LOG"
+# sync.sh's blob audit must run against the .env-derived paths — record the
+# env it was invoked with so a test can check CATALOG_DB/GNOSIA_HOME were set.
+case "$*" in
+  *"blob audit"*)
+    printf 'CATALOG_DB=%s\nGNOSIA_HOME=%s\nDATABASE_URL=%s\n' \
+      "${CATALOG_DB:-}" "${GNOSIA_HOME:-}" "${DATABASE_URL:-}" >> "$STATE_DIR/catalog_env.log"
+    if [ -f "$STATE_DIR/audit_fails" ]; then
+      echo "blob audit: 3 objects missing" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 case "$PWD" in
   */tools/tldrawkc)

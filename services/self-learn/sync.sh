@@ -4,7 +4,7 @@
 #
 # Two halves, following docs/HOMESERVER.md in the self-learn repo (S1–S3):
 #
-#   blobs — ~/.self-learn/blobs/local rides a dedicated Seafile library
+#   blobs — $GNOSIA_HOME/blobs/local rides a dedicated Seafile library
 #           ("self-learn-blobs") continuously. The store is content-addressed,
 #           so both sides union without conflicts. `.owner` and `.tmp` sit
 #           beside local/, outside the synced tree: the marker names one
@@ -12,33 +12,49 @@
 #           refuse the root. Server side: seaf-cli under a systemd user
 #           unit. Mac side: the installed Seafile Client.app pairs the
 #           library once (no seaf-cli exists for macOS) — `mac-setup`
-#           writes the ignore file and prints the pairing steps.
+#           writes the ignore file and prints the pairing steps, or pairs
+#           headless when a seaf-cli is found on the Mac.
 #
-#   db    — the two Postgres catalogs are separate primaries that are meant
-#           to diverge (S1). `push`/`pull` copy one over the other with
-#           pg_dump -> drop -> create -> pg_restore. Never a merge: the
-#           receiving side's history is replaced wholesale. The receiving
-#           side's `.owner` is rewritten for the new pg_database oid, and
-#           its vault/ is left stale on purpose (rebuild with `learn vault
-#           pull` — it is a per-database projection). Provider keys survive
-#           because both ends share AUTH_SECRET (S4). Blobs do not travel
-#           with the dump; the Seafile link converges them.
+#   db    — the catalog is ONE SQLite file per side (upstream
+#           docs/SQLITE-MIGRATION.md): $CATALOG_DB under this machine's
+#           $GNOSIA_HOME, $MAC_DB_FILE under the Mac's. `push`/`pull` copy
+#           that file — never a merge: the receiving side's catalog.db is
+#           replaced wholesale.
+#
+#           The sending side is snapshotted consistently: `sqlite3 .backup`
+#           while the app stays up, or — with no sqlite3 — a plain copy of
+#           the db/-wal/-shm set taken while the sender's app is stopped.
+#           The receiving side always stops its app first, drops its old
+#           -wal/-shm (a WAL that is not the new file's own must never sit
+#           beside it), then the staged file moves into place next to it.
+#           `blob audit` then re-validates the store against the incoming
+#           database (informational — Seafile may still be delivering).
+#
+#           `.owner` needs no restamp: upstream names a database by its
+#           resolved file path, which a same-path replace does not change.
+#           vault/ stays stale on purpose (it is a per-database projection;
+#           rebuild with `learn vault pull`). Provider keys survive because
+#           both ends share AUTH_SECRET (S4). Blobs do not travel with the
+#           db; the Seafile link converges them.
 #
 #   sync.sh install     server side of the Seafile link (account, library,
 #                       seaf-cli daemon under systemd, ignore file)
 #   sync.sh mac-setup   prep the MacBook over ssh + print pairing steps
-#   sync.sh status      both databases and both blob stores, side by side
-#   sync.sh push        dump THIS server's catalog, restore it on the Mac
-#   sync.sh pull        dump the Mac's catalog, restore it here
+#   sync.sh status      both catalog.db files and both blob stores, side by side
+#   sync.sh push        copy THIS server's catalog.db over the Mac's
+#   sync.sh pull        copy the Mac's catalog.db over this server's
 #
-# Reads this service's .env (ports, credentials, SERVICE_HOME); Seafile
-# admin credentials come from the sibling seafile service's .env. Sync
-# settings written by install (SEAFILE_SYNC_*, MAC_*) live in .env too.
-# Every SQL query travels on stdin, so local docker-exec and remote ssh
-# transports see identical text — no quoting anywhere.
+# Reads this service's .env (ports, paths, SERVICE_HOME, GNOSIA_HOME,
+# CATALOG_DB); Seafile admin credentials come from the sibling seafile
+# service's .env. Sync settings written by install (SEAFILE_SYNC_*, MAC_*)
+# live in .env too. An .env written before the SQLite cut-over lacks
+# GNOSIA_HOME/CATALOG_DB — both are derived below, and its DATABASE_URL /
+# POSTGRES_* leftovers are simply unused now.
 #
-# Mac overrides (defaults match the MacBook): MAC_SSH, MAC_HOME, MAC_REPO,
-# MAC_PGBIN, MAC_DB, MAC_DB_URL, MAC_PGPORT, MAC_SEAFILE_URL.
+# Mac overrides (defaults match the MacBook): MAC_SSH, MAC_GNOSIA_HOME
+# (the Mac's data root, ~/.gnosia), MAC_DB_FILE, MAC_REPO, MAC_SEAFILE_URL,
+# MAC_PATH_PREFIX. SQLITE3 may name a sqlite3 binary for the snapshot step;
+# an explicitly empty value forces the stop-and-copy fallback.
 
 set -euo pipefail
 
@@ -67,10 +83,12 @@ set -a; . "$ENV_FILE"; set +a
 SERVICE_HOME="${SERVICE_HOME:?SERVICE_HOME missing from $ENV_FILE}"
 SELF_LEARN_HOME="${SELF_LEARN_HOME:?SELF_LEARN_HOME missing from $ENV_FILE}"
 NODE_BIN="${NODE_BIN:-/usr/bin}"
-POSTGRES_USER="${POSTGRES_USER:-catalog}"
-POSTGRES_DB="${POSTGRES_DB:-self_learn}"
-PG_PORT="${PG_PORT:-5432}"
-DB_CONTAINER="${DB_CONTAINER:-self-learn-db}"
+# Upstream resolves the data root as GNOSIA_HOME and the catalog as one
+# SQLite file under it (docs/SQLITE-MIGRATION.md). An .env from the Postgres
+# era lacks both, so derive them the way setup.sh/deploy.sh do — GNOSIA_HOME
+# is the same path SELF_LEARN_HOME already names on this box.
+GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
+CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
 REPO_DIR="$SERVICE_HOME/repo"
 BUILD_STATE="$SERVICE_HOME/state"
 LOCK="$SERVICE_HOME/.deploy.lock"   # shared with deploy.sh: a live sync blocks the poller
@@ -80,47 +98,67 @@ STUDIO_UNIT="self-learn-studio.service"
 STUDIO_LABEL="com.self-learn.studio"
 SEAF_UNIT="self-learn-seafile.service"
 SEAF_DIR="$SERVICE_HOME/seafile"    # ccnet config root for the sync daemon
-BLOBS_DIR="$SELF_LEARN_HOME/blobs"
+BLOBS_DIR="$GNOSIA_HOME/blobs"
 # Only blobs/local is the library worktree. .owner and .tmp sit beside it at
 # blobs/ root — outside the tree entirely, so a seafile-ignore miss or a
 # merge conflict can never carry a foreign .owner onto this machine (the
 # ignore file inside local/ is a second line of defence, not the first).
 LINK_DIR="$BLOBS_DIR/local"
 IGNORE_FILE="$LINK_DIR/seafile-ignore.txt"
+# Staging for a catalog.db in flight: a single directory on each side, next
+# to the file it replaces, so the final mv is a same-filesystem rename.
+STAGE_LOCAL="$BUILD_STATE/.sync-stage"
+
+# sqlite3 makes the consistent-snapshot path (`sqlite3 db ".backup out"`).
+# SQLITE3 may name a binary; an explicitly empty value forces the fallback
+# (stop the writer, copy the file set) — mostly so tests can reach it.
+if [ -z "${SQLITE3+x}" ]; then SQLITE3="$(command -v sqlite3 2>/dev/null || true)"; fi
 
 MAC_SSH="${MAC_SSH:-user@100.77.77.78}"
-# The account ssh logs in as owns the home, the nix profile and Postgres.
+# The account ssh logs in as owns the home and the nix profile.
 MAC_USER="${MAC_SSH%%@*}"
-MAC_HOME="${MAC_HOME:-/Users/$MAC_USER/.self-learn}"
-MAC_REPO="${MAC_REPO:-$MAC_HOME/checkout}"
-MAC_PGBIN="${MAC_PGBIN:-/opt/homebrew/opt/postgresql@17/bin}"
-MAC_DB="${MAC_DB:-self_learn}"
-MAC_PGPORT="${MAC_PGPORT:-5432}"
-# The Postgres superuser on the Mac is the account ssh logs in as.
-MAC_DB_URL="${MAC_DB_URL:-postgres://$MAC_USER@127.0.0.1:$MAC_PGPORT/$MAC_DB}"
-MAC_DUMP="$MAC_HOME/self_learn-sync.dump"   # staging path on the Mac (not shared /tmp)
+# The Mac's data root: catalog.db, blobs/ and the checkout all live under
+# it. `~/.gnosia` expands on the Mac side, resolved over ssh (see
+# resolve_mac_paths) so scp and remote commands always see absolute paths.
+MAC_GNOSIA_HOME="${MAC_GNOSIA_HOME:-~/.gnosia}"
+MAC_REPO="${MAC_REPO:-}"                  # default: $MAC_GNOSIA_HOME/checkout
+MAC_DB_FILE="${MAC_DB_FILE:-}"            # default: $MAC_GNOSIA_HOME/catalog.db
 # nix-installed node/npm are not on a bare ssh PATH
 MAC_PATH_PREFIX="${MAC_PATH_PREFIX:-/etc/profiles/per-user/$MAC_USER/bin}"
+# The Mac's app is a manually run `npm run dev`, not a launchd job — there
+# is no label to boot out, so a replace stops it by process match instead.
+MAC_APP_PATTERN='next.*dev|next-server'
 
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10"
 SCP="scp -o BatchMode=yes -o ConnectTimeout=10"
 OS="$(uname -s)"
-
-# ------------------------------------------------------------- transports
-# Local psql runs inside the Postgres container (the image's local socket is
-# trust); the Mac's Homebrew postgres trusts the owner over loopback. Both
-# take the database as the only argument and read the query on stdin.
-lpsql() { docker exec -i "$DB_CONTAINER" psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1" -tA; }
-mpsql() { $SSH "$MAC_SSH" "$MAC_PGBIN/psql -v ON_ERROR_STOP=1 -d $1 -tA"; }
-psql_on() { local side="$1"; shift; if [ "$side" = local ]; then lpsql "$@"; else mpsql "$@"; fi; }
 
 require_ssh() {
   $SSH "$MAC_SSH" true 2>/dev/null || die "cannot ssh $MAC_SSH — tailscale up? key installed?"
 }
 
 usage() {
-  sed -n '27,41p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '/^#   sync.sh install/,/^#   sync.sh pull/p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
+}
+
+# Resolve the Mac-side paths that start with `~`: expand the remote $HOME
+# once, then default MAC_REPO and MAC_DB_FILE under the data root. Called by
+# every command that touches the Mac (status, mac-setup, push, pull).
+MAC_HOME_RESOLVED=""
+resolve_mac_paths() {
+  [ -n "$MAC_HOME_RESOLVED" ] && return 0
+  # $HOME expands on the Mac, not here.
+  MAC_HOME_RESOLVED="$($SSH "$MAC_SSH" 'printf %s "$HOME"')" \
+    || die "could not resolve the Mac's home directory"
+  [ -n "$MAC_HOME_RESOLVED" ] || die "could not resolve the Mac's home directory"
+  case "$MAC_GNOSIA_HOME" in
+    \~)   MAC_GNOSIA_HOME="$MAC_HOME_RESOLVED" ;;
+    \~/*) MAC_GNOSIA_HOME="$MAC_HOME_RESOLVED/${MAC_GNOSIA_HOME#\~/}" ;;
+  esac
+  MAC_REPO="${MAC_REPO:-$MAC_GNOSIA_HOME/checkout}"
+  MAC_DB_FILE="${MAC_DB_FILE:-$MAC_GNOSIA_HOME/catalog.db}"
+  MAC_STAGE="$MAC_GNOSIA_HOME/.sync-stage"
 }
 
 # A single key from the sibling seafile service's .env — never source it
@@ -142,7 +180,7 @@ seafile_api() {
 # --------------------------------------------------------------------- lock
 # Same mkdir+pid lock deploy.sh takes: while a sync holds it a firing poller
 # sees a live owner and skips — a deploy must never migrate a database that
-# is mid-restore. The holder writes its start identity, then its pid: pid +
+# is mid-replace. The holder writes its start identity, then its pid: pid +
 # start uniquely names a process instance, so a dead holder, a reused pid
 # or a lock whose pid was never written all reclaim — while a live holder
 # is never raced, no matter how old the lock is. A lock with a pid but no
@@ -188,7 +226,7 @@ acquire_lock() {
   trap '[ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"' EXIT
 }
 
-# --------------------------------------------------------------- web service
+# --------------------------------------------------------------- app services
 web_is_active() {
   if [ "$OS" = "Linux" ]; then
     systemctl --user is-active --quiet "$WEB_UNIT"
@@ -213,7 +251,7 @@ web_start() {
 }
 
 # The studio runner (STUDIO_ENABLED=1) shells `npm run catalog` against this
-# database and is not covered by the web app's stop, so a restore has to take
+# database and is not covered by the web app's stop, so a replace has to take
 # it down itself. Same service names as deploy.sh.
 studio_installed() {
   [ -f "$HOME/.config/systemd/user/$STUDIO_UNIT" ] \
@@ -242,6 +280,32 @@ studio_start() {
       2>/dev/null || launchctl kickstart -k "gui/$(id -u)/$STUDIO_LABEL"
   fi
 }
+
+# This machine's writers, stopped in dependency order (the runner shells the
+# catalog, so it goes first) and restarted only if they were running — a
+# deliberately stopped service stays stopped.
+WAS_ACTIVE=0
+STUDIO_WAS_ACTIVE=0
+stop_local_writers() {
+  if studio_is_active; then
+    STUDIO_WAS_ACTIVE=1
+    info "stopping $STUDIO_UNIT during the replace"
+    studio_stop
+  fi
+  if web_is_active; then
+    WAS_ACTIVE=1
+    info "stopping $WEB_UNIT during the replace"
+    web_stop
+  fi
+}
+start_local_writers() {
+  if [ "$WAS_ACTIVE" = "1" ]; then
+    web_start && ok "$WEB_UNIT restarted"
+  fi
+  if [ "$STUDIO_WAS_ACTIVE" = "1" ]; then
+    studio_start && ok "$STUDIO_UNIT restarted"
+  fi
+}
 # What a failed pull leaves down, for its error messages.
 left_stopped() {
   if [ "${STUDIO_WAS_ACTIVE:-0}" = "1" ]; then
@@ -251,105 +315,80 @@ left_stopped() {
   fi
 }
 
-wait_pg() {
-  for _ in $(seq 1 30); do
-    docker exec -i "$DB_CONTAINER" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && return 0
-    sleep 1
-  done
-  die "Postgres did not become ready"
+# ------------------------------------------------------------- the Mac's app
+# Nothing on the Mac supervises the app (a manual `npm run dev`), so the
+# only handle on it is the process table. mac_app_stop kills it before a
+# replace — running `next` would keep writing the old inode, and its next
+# connection would see the new file beside the old one's -wal, which reads
+# as a hot WAL and can corrupt the incoming db.
+mac_app_running() {
+  $SSH "$MAC_SSH" "pgrep -f '$MAC_APP_PATTERN' >/dev/null 2>&1"
+}
+mac_app_stop() {
+  local procs
+  procs="$($SSH "$MAC_SSH" "pgrep -fl '$MAC_APP_PATTERN' 2>/dev/null || true")"
+  [ -n "$procs" ] || return 1
+  warn "stopping the Mac's running app so its catalog.db can be replaced:"
+  printf '%s\n' "$procs" | sed 's/^/    /'
+  $SSH "$MAC_SSH" "pkill -f '$MAC_APP_PATTERN'" \
+    || die "could not stop the Mac's app — stop it there and re-run"
+  MAC_APP_WAS_RUNNING=1
+  return 0
 }
 
-# ------------------------------------------------------------------ snapshot
-# `status` table: for each catalog table, row count and its newest timestamp
-# where the schema has one (schema drift between checkouts makes a fixed
-# column list fragile). Same SQL on stdin on both ends; only the psql
-# transport differs.
-SNAP_META_SQL='
-SELECT t.name,
-       (SELECT c.column_name FROM information_schema.columns c
-         WHERE c.table_schema = '"'"'public'"'"' AND c.table_name = t.name
-           AND c.data_type LIKE '"'"'timestamp%'"'"'
-           AND c.column_name IN ('"'"'at'"'"','"'"'last_reviewed'"'"','"'"'created_at'"'"','"'"'updated_at'"'"','"'"'due'"'"')
-         ORDER BY CASE c.column_name WHEN '"'"'at'"'"' THEN 0
-                                     WHEN '"'"'last_reviewed'"'"' THEN 1
-                                     WHEN '"'"'created_at'"'"' THEN 2
-                                     ELSE 3 END
-         LIMIT 1) AS ts_col,
-       to_regclass('"'"'public.'"'"' || t.name) IS NOT NULL AS present
-FROM (VALUES ('"'"'catalog_instance'"'"'),('"'"'learner'"'"'),('"'"'asset'"'"'),
-             ('"'"'collection'"'"'),('"'"'collection_item'"'"'),('"'"'concept'"'"'),
-             ('"'"'curriculum_item'"'"'),('"'"'content_revision'"'"'),('"'"'event'"'"'),
-             ('"'"'mastery'"'"'),('"'"'review'"'"'),('"'"'progress'"'"'),('"'"'recap'"'"'),
-             ('"'"'job'"'"'),('"'"'session'"'"'),('"'"'draft'"'"'),('"'"'blob_object'"'"'),
-             ('"'"'provider_key'"'"'),('"'"'content_source'"'"')) AS t(name)
-ORDER BY t.name;'
+# --------------------------------------------------------------- snapshots
+# A copy of a live SQLite file is only consistent taken one of two ways:
+# `sqlite3 .backup` (the online-backup API — the sender's app keeps running)
+# or, with no sqlite3, a plain copy of the db/-wal/-shm set taken while the
+# writer is stopped. Both fill a staging directory that ships as one scp.
+snapshot_local() {  # $1 = staging dir to fill
+  local dir="$1"
+  rm -rf "$dir"; mkdir -p "$dir"
+  if [ -n "$SQLITE3" ]; then
+    info "snapshotting $CATALOG_DB (sqlite3 .backup)"
+    ( umask 077; "$SQLITE3" "$CATALOG_DB" ".backup '$dir/catalog.db'" ) \
+      || die "sqlite3 .backup of $CATALOG_DB failed"
+  else
+    # No sqlite3: the only consistent copy is a stopped writer's files. The
+    # -wal/-shm siblings come along so uncheckpointed commits survive.
+    warn "no sqlite3 found — stopping the app briefly to copy the database files"
+    stop_local_writers
+    ( umask 077
+      cp -p "$CATALOG_DB" "$dir/catalog.db" \
+        || exit 1
+      [ ! -f "$CATALOG_DB-wal" ] || cp -p "$CATALOG_DB-wal" "$dir/catalog.db-wal" || exit 1
+      [ ! -f "$CATALOG_DB-shm" ] || cp -p "$CATALOG_DB-shm" "$dir/catalog.db-shm" || exit 1
+    ) || { start_local_writers; die "copy of $CATALOG_DB failed"; }
+    start_local_writers
+  fi
+}
 
-db_snapshot() {  # $1 = local|mac, $2 = database name
-  local side="$1" db="$2"
-  local meta name ts present sql=""
-  meta="$(psql_on "$side" "$db" <<<"$SNAP_META_SQL")" || return 1
-  while IFS='|' read -r name ts present; do
-    [ -n "$name" ] || continue
-    if [ "$present" != "t" ]; then
-      printf '%-22s %8s %s\n' "$name" "absent" "-"
-      continue
+snapshot_mac() {  # fills the remote staging dir $MAC_STAGE
+  if $SSH "$MAC_SSH" "command -v sqlite3 >/dev/null 2>&1"; then
+    info "snapshotting $MAC_DB_FILE on the Mac (sqlite3 .backup)"
+    $SSH "$MAC_SSH" "umask 077; rm -rf '$MAC_STAGE' && mkdir -p '$MAC_STAGE' && sqlite3 '$MAC_DB_FILE' \".backup '$MAC_STAGE/catalog.db'\"" \
+      || die "sqlite3 .backup on the Mac failed"
+  else
+    if mac_app_running; then
+      die "the Mac has no sqlite3 and its app is running — a live catalog.db cannot be copied safely. Stop the app there (or install sqlite3) and re-run."
     fi
-    if [ -n "$ts" ]; then
-      sql="${sql}SELECT '${name}' AS t, count(*)::text AS n, COALESCE(max(\"${ts}\")::text,'-') AS newest FROM \"${name}\" UNION ALL "
-    else
-      sql="${sql}SELECT '${name}' AS t, count(*)::text AS n, '-' AS newest FROM \"${name}\" UNION ALL "
-    fi
-  done <<<"$meta"
-  sql="${sql% UNION ALL } ORDER BY t"
-  psql_on "$side" "$db" <<<"$sql" 2>/dev/null | awk -F'|' '{printf "%-22s %8s %s\n", $1, $2, $3}'
-  # catalog_instance's row (primary/copy + oid) matters on its own
-  psql_on "$side" "$db" <<<'SELECT '"'"'instance'"'"' AS t, row_to_json(catalog_instance)::text FROM catalog_instance;' 2>/dev/null \
-    | awk -F'|' '{printf "%-22s %s\n", $1, $2}'
-}
-
-# --------------------------------------------------------------------- owner
-# The blob root's .owner names <db>:<pg_database oid> + port; a drop+create
-# changes the oid, so the receiver's marker must be rewritten for the new
-# database or uploads and `blob audit` refuse the root (S3). Written
-# directly, never via `blob audit --fix`: --fix also deletes day-old
-# orphans, and a delete on a shared store propagates to the other machine.
-write_owner_local() {
-  local oid
-  oid="$(lpsql postgres <<EOF
-select oid from pg_database where datname='$POSTGRES_DB';
-EOF
-)" || die "could not read pg_database oid for $POSTGRES_DB"
-  [ -n "$oid" ] || die "empty pg_database oid for $POSTGRES_DB"
-  mkdir -p "$BLOBS_DIR"
-  printf '{\n  "database": "%s:%s",\n  "port": "%s",\n  "claimed": "%s"\n}\n' \
-    "$POSTGRES_DB" "$oid" "$PG_PORT" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
-    > "$BLOBS_DIR/.owner"
-  ok "blob .owner rewritten for $POSTGRES_DB:$oid"
-}
-
-write_owner_mac() {
-  local oid
-  oid="$(mpsql postgres <<EOF
-select oid from pg_database where datname='$MAC_DB';
-EOF
-)" || die "could not read pg_database oid on the Mac"
-  [ -n "$oid" ] || die "empty pg_database oid on the Mac"
-  $SSH "$MAC_SSH" "cat > '$MAC_HOME/blobs/.owner'" <<EOF
-{
-  "database": "$MAC_DB:$oid",
-  "port": "$MAC_PGPORT",
-  "claimed": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-}
-EOF
-  ok "Mac blob .owner rewritten for $MAC_DB:$oid"
+    info "no sqlite3 on the Mac — copying the stopped database files"
+    $SSH "$MAC_SSH" "umask 077; rm -rf '$MAC_STAGE' && mkdir -p '$MAC_STAGE' && cp -p '$MAC_DB_FILE' '$MAC_STAGE/catalog.db' && { [ ! -f '$MAC_DB_FILE-wal' ] || cp -p '$MAC_DB_FILE-wal' '$MAC_STAGE/catalog.db-wal'; } && { [ ! -f '$MAC_DB_FILE-shm' ] || cp -p '$MAC_DB_FILE-shm' '$MAC_STAGE/catalog.db-shm'; }" \
+      || die "copying $MAC_DB_FILE on the Mac failed"
+  fi
 }
 
 # -------------------------------------------------------------- blob audit
 # Informational: reports rows whose object Seafile has not delivered yet.
+# Run with CATALOG_DB + GNOSIA_HOME (never DATABASE_URL, whose postgres-era
+# value would now be refused) so the incoming database validates the store
+# it just inherited. Never --fix: it deletes day-old orphans, and a delete
+# on a shared store propagates to the other machine.
 audit_local() {
   [ -d "$REPO_DIR" ] || { warn "no checkout at $REPO_DIR — skipping audit"; return 0; }
   info "blob audit on this server (informational)"
-  if ( cd "$REPO_DIR" && PATH="$NODE_BIN:$PATH" npm run catalog -- blob audit ); then
+  if ( cd "$REPO_DIR" && PATH="$NODE_BIN:$PATH" CATALOG_DB="$CATALOG_DB" GNOSIA_HOME="$GNOSIA_HOME" \
+         npm run catalog -- blob audit ); then
     ok "blob audit clean"
   else
     warn "audit reported gaps — Seafile may still be delivering; re-run: cd $REPO_DIR && npm run catalog -- blob audit"
@@ -358,7 +397,7 @@ audit_local() {
 
 audit_mac() {
   info "blob audit on the Mac (informational)"
-  if $SSH "$MAC_SSH" "export PATH='$MAC_PATH_PREFIX':\$PATH; cd '$MAC_REPO' && DATABASE_URL='$MAC_DB_URL' SELF_LEARN_HOME='$MAC_HOME' npm run catalog -- blob audit"; then
+  if $SSH "$MAC_SSH" "export PATH='$MAC_PATH_PREFIX':\$PATH; cd '$MAC_REPO' && CATALOG_DB='$MAC_DB_FILE' GNOSIA_HOME='$MAC_GNOSIA_HOME' npm run catalog -- blob audit"; then
     ok "Mac blob audit clean"
   else
     warn "Mac audit reported gaps — Seafile may still be delivering"
@@ -400,8 +439,9 @@ cmd_install() {
   SEAFILE_URL="${SEAFILE_URL:-http://127.0.0.1:$sea_port}"
   INIT_SEAFILE_ADMIN_EMAIL="$(seafile_env INIT_SEAFILE_ADMIN_EMAIL)"
   INIT_SEAFILE_ADMIN_PASSWORD="$(seafile_env INIT_SEAFILE_ADMIN_PASSWORD)"
-  [ -n "$INIT_SEAFILE_ADMIN_EMAIL" ] && [ -n "$INIT_SEAFILE_ADMIN_PASSWORD" ] \
-    || die "admin credentials missing from $SEAFILE_ENV"
+  if [ -z "$INIT_SEAFILE_ADMIN_EMAIL" ] || [ -z "$INIT_SEAFILE_ADMIN_PASSWORD" ]; then
+    die "admin credentials missing from $SEAFILE_ENV"
+  fi
 
   admin_token="$(printf 'data-urlencode "username=%s"\ndata-urlencode "password=%s"\n' \
       "$INIT_SEAFILE_ADMIN_EMAIL" "$INIT_SEAFILE_ADMIN_PASSWORD" \
@@ -540,12 +580,13 @@ cmd_mac_setup() {
 
   info "Checking ssh to $MAC_SSH"
   require_ssh
+  resolve_mac_paths
   ok "ssh reachable"
 
   # Written before any pairing — a synced .owner/.tmp on either side would
   # poison the other machine's blob root.
-  info "Writing $MAC_HOME/blobs/local/seafile-ignore.txt"
-  $SSH "$MAC_SSH" "mkdir -p '$MAC_HOME/blobs/local' && cat > '$MAC_HOME/blobs/local/seafile-ignore.txt'" <<'EOF'
+  info "Writing $MAC_GNOSIA_HOME/blobs/local/seafile-ignore.txt"
+  $SSH "$MAC_SSH" "mkdir -p '$MAC_GNOSIA_HOME/blobs/local' && cat > '$MAC_GNOSIA_HOME/blobs/local/seafile-ignore.txt'" <<'EOF'
 # Written by services/self-learn/sync.sh — machine-local entries that must not sync.
 # .owner names this machine's database for this blob root; a foreign marker
 # makes uploads and `blob audit` refuse it (docs/HOMESERVER.md S3).
@@ -558,7 +599,7 @@ EOF
   SEAF_MAC="$($SSH "$MAC_SSH" 'export PATH="'"$MAC_PATH_PREFIX"':$PATH"; command -v seaf-cli' 2>/dev/null || true)"
   if [ -n "$SEAF_MAC" ]; then
     info "seaf-cli found on the Mac ($SEAF_MAC) — pairing headless"
-    $SSH "$MAC_SSH" "mkdir -p '$MAC_HOME/.seafile' && { [ -d '$MAC_HOME/.seafile/ccnet' ] || '$SEAF_MAC' init -c '$MAC_HOME/.seafile/ccnet' -d '$MAC_HOME/.seafile'; }" \
+    $SSH "$MAC_SSH" "mkdir -p '$MAC_GNOSIA_HOME/.seafile' && { [ -d '$MAC_GNOSIA_HOME/.seafile/ccnet' ] || '$SEAF_MAC' init -c '$MAC_GNOSIA_HOME/.seafile/ccnet' -d '$MAC_GNOSIA_HOME/.seafile'; }" \
       || die "seaf-cli init on the Mac failed"
     # The agent runs seaf-daemon itself (next to seaf-cli) in the foreground
     # with KeepAlive — a oneshot `seaf-cli start` wrapper would leave a dead
@@ -572,7 +613,7 @@ EOF
 <dict>
   <key>Label</key><string>com.self-learn.seafile</string>
   <key>ProgramArguments</key>
-  <array><string>$SEAF_DAEMON_MAC</string><string>-c</string><string>$MAC_HOME/.seafile/ccnet</string><string>-d</string><string>$MAC_HOME/.seafile/seafile-data</string><string>-w</string><string>$MAC_HOME/.seafile/seafile</string></array>
+  <array><string>$SEAF_DAEMON_MAC</string><string>-c</string><string>$MAC_GNOSIA_HOME/.seafile/ccnet</string><string>-d</string><string>$MAC_GNOSIA_HOME/.seafile/seafile-data</string><string>-w</string><string>$MAC_GNOSIA_HOME/.seafile/seafile</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/tmp/self-learn-seafile.log</string>
@@ -581,15 +622,15 @@ EOF
 </plist>
 EOF
     $SSH "$MAC_SSH" "launchctl bootout gui/\$(id -u)/com.self-learn.seafile 2>/dev/null; launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.self-learn.seafile.plist" \
-      || warn "LaunchAgent load failed — start the daemon by hand: $SEAF_DAEMON_MAC -c $MAC_HOME/.seafile/ccnet -d $MAC_HOME/.seafile/seafile-data -w $MAC_HOME/.seafile/seafile"
+      || warn "LaunchAgent load failed — start the daemon by hand: $SEAF_DAEMON_MAC -c $MAC_GNOSIA_HOME/.seafile/ccnet -d $MAC_GNOSIA_HOME/.seafile/seafile-data -w $MAC_GNOSIA_HOME/.seafile/seafile"
     # The agent owns the daemon — no `seaf-cli start` here, or two daemons
     # fight over the same ccnet dir and KeepAlive retries forever. Pairing
     # waits for the agent's daemon to answer rpc first.
-    printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | $SSH "$MAC_SSH" "for _ in \$(seq 1 20); do '$SEAF_MAC' list -c '$MAC_HOME/.seafile/ccnet' >/dev/null 2>&1 && break; sleep 0.5; done
-      '$SEAF_MAC' list -c '$MAC_HOME/.seafile/ccnet' 2>/dev/null | grep -q '$SEAFILE_SYNC_REPO' || \
+    printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | $SSH "$MAC_SSH" "for _ in \$(seq 1 20); do '$SEAF_MAC' list -c '$MAC_GNOSIA_HOME/.seafile/ccnet' >/dev/null 2>&1 && break; sleep 0.5; done
+      '$SEAF_MAC' list -c '$MAC_GNOSIA_HOME/.seafile/ccnet' 2>/dev/null | grep -q '$SEAFILE_SYNC_REPO' || \
         '$SEAF_MAC' sync -l '$SEAFILE_SYNC_REPO' -s '$MAC_SEAFILE_URL' \
-          -d '$MAC_HOME/blobs/local' -u '$SEAFILE_SYNC_USER' \
-          -c '$MAC_HOME/.seafile/ccnet'" || die "seaf-cli pairing on the Mac failed"
+          -d '$MAC_GNOSIA_HOME/blobs/local' -u '$SEAFILE_SYNC_USER' \
+          -c '$MAC_GNOSIA_HOME/.seafile/ccnet'" || die "seaf-cli pairing on the Mac failed"
     ok "seaf-cli paired on the Mac; daemon returns at login"
   else
     cat <<EOF
@@ -603,7 +644,7 @@ there is no seaf-cli for macOS). On the MacBook, once:
        user     $SEAFILE_SYNC_USER
        password $SEAFILE_SYNC_PASSWORD   (also in .env)
   3. Right-click the "self-learn-blobs" library -> "Sync this library" ->
-     "sync with an existing folder" -> pick ~/.self-learn/blobs/local.
+     "sync with an existing folder" -> pick ~/.gnosia/blobs/local.
   4. Enable auto-start on login in the client's settings if it is off.
 
 seafile-ignore.txt is already in place, so the Mac's own .owner never
@@ -616,9 +657,34 @@ EOF
 }
 
 # ------------------------------------------------------------------ status
+# Modification time, GNU stat then BSD.
+db_mtime() {
+  stat -c %y "$1" 2>/dev/null | cut -d. -f1 \
+    || stat -f '%Sm' -t '%F %R' "$1" 2>/dev/null
+}
+
+# Table counts via sqlite3 — informative only; a missing table prints '?'.
+db_counts() {  # $1 = sqlite3 binary, $2 = db file
+  local t
+  for t in catalog_instance learner asset event review progress blob_object provider_key; do
+    printf '  %-15s %s\n' "$t" "$("$1" "$2" "select count(*) from \"$t\"" 2>/dev/null || echo '?')"
+  done
+  "$1" "$2" "select '  instance type : '||type from catalog_instance" 2>/dev/null || true
+}
+
 cmd_status() {
   echo "=== SERVER ($(hostname -s 2>/dev/null || hostname)) ==="
-  db_snapshot local "$POSTGRES_DB" || echo "  (database query failed — is $DB_CONTAINER up?)"
+  if [ -f "$CATALOG_DB" ]; then
+    printf 'db    : %s (%s, modified %s)\n' "$CATALOG_DB" \
+      "$(du -h "$CATALOG_DB" | cut -f1)" "$(db_mtime "$CATALOG_DB")"
+    if [ -n "$SQLITE3" ]; then
+      db_counts "$SQLITE3" "$CATALOG_DB"
+    else
+      echo "  (no sqlite3 — install it for table counts)"
+    fi
+  else
+    echo "db    : $CATALOG_DB missing"
+  fi
   echo "owner : $(tr -d '\n ' < "$BLOBS_DIR/.owner" 2>/dev/null || echo missing)"
   echo "blobs : $(find "$BLOBS_DIR/local" -type f 2>/dev/null | wc -l | tr -d ' ') files, $(du -sh "$BLOBS_DIR" 2>/dev/null | cut -f1)"
   if [ -d "$SEAF_DIR/ccnet" ] && command -v seaf-cli >/dev/null 2>&1; then
@@ -634,112 +700,105 @@ cmd_status() {
     echo "unreachable over ssh — tailscale up on both ends?"
     return 0
   fi
-  db_snapshot mac "$MAC_DB" || echo "  (database query failed)"
-  $SSH "$MAC_SSH" "printf 'owner : %s\n' \"\$(tr -d '\n ' < '$MAC_HOME/blobs/.owner' 2>/dev/null || echo missing)\"
-printf 'blobs : %s files, %s\n' \"\$(find '$MAC_HOME/blobs/local' -type f 2>/dev/null | wc -l | tr -d ' ')\" \"\$(du -sh '$MAC_HOME/blobs' 2>/dev/null | cut -f1)\"
+  resolve_mac_paths
+  $SSH "$MAC_SSH" "db='$MAC_DB_FILE'
+if [ -f \"\$db\" ]; then
+  s=\$(stat -f%z \"\$db\" 2>/dev/null)
+  m=\$(stat -f '%Sm' -t '%F %R' \"\$db\" 2>/dev/null)
+  printf 'db    : %s (%s bytes, modified %s)\n' \"\$db\" \"\$s\" \"\$m\"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    for t in catalog_instance learner asset event review progress blob_object provider_key; do
+      printf '  %-15s %s\n' \"\$t\" \"\$(sqlite3 \"\$db\" \"select count(*) from \$t\" 2>/dev/null || echo '?')\"
+    done
+    sqlite3 \"\$db\" \"select '  instance type : '||type from catalog_instance\" 2>/dev/null || true
+  fi
+else
+  printf 'db    : %s missing\n' \"\$db\"
+fi
+printf 'owner : %s\n' \"\$(tr -d '\n ' < '$MAC_GNOSIA_HOME/blobs/.owner' 2>/dev/null || echo missing)\"
+printf 'blobs : %s files, %s\n' \"\$(find '$MAC_GNOSIA_HOME/blobs/local' -type f 2>/dev/null | wc -l | tr -d ' ')\" \"\$(du -sh '$MAC_GNOSIA_HOME/blobs' 2>/dev/null | cut -f1)\"
 if pgrep -fl 'Seafile Client|seafile-applet|seaf-daemon' >/dev/null 2>&1; then echo 'seaf  : client running'; else echo 'seaf  : NO client running'; fi"
 }
 
 # ----------------------------------------------------------------- push/pull
 cmd_push() {
-  info "push: this server's database -> the MacBook (replaces the Mac's)"
+  info "push: this server's catalog.db -> the MacBook (replaces the Mac's)"
   acquire_lock
   require_ssh
+  resolve_mac_paths
   mkdir -p "$BUILD_STATE"
-  local dump="$BUILD_STATE/self_learn-push.dump"
+  [ -f "$CATALOG_DB" ] || die "no catalog at $CATALOG_DB — nothing to push"
 
-  info "pg_dump $POSTGRES_DB (docker exec $DB_CONTAINER)"
-  # Full-catalog dump = secrets-bearing file: 0600 on both ends, staged
-  # under the Mac's private ~ (scp -p carries the mode), never /tmp.
-  ( umask 077; docker exec -i "$DB_CONTAINER" pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB" \
-      > "$dump" ) || die "pg_dump failed"
-  ok "Dumped $(du -h "$dump" | cut -f1)"
+  # The receiving side's app goes down first: a running `next` would keep
+  # writing the old inode, and its next fresh connection would read the new
+  # file beside the old one's -wal as a hot WAL — a corruption vector.
+  MAC_APP_WAS_RUNNING=0
+  mac_app_stop || true
 
-  if $SSH "$MAC_SSH" "pgrep -fl 'next.*dev|next-server' 2>/dev/null | grep -q ."; then
-    warn "a Next dev/server process is running on the Mac — its connections will be force-dropped"
-  fi
+  snapshot_local "$STAGE_LOCAL"
+  ok "Snapshotted $(du -h "$STAGE_LOCAL/catalog.db" | cut -f1)"
 
-  info "copying dump to the Mac"
-  $SCP -p "$dump" "$MAC_SSH:$MAC_DUMP" >/dev/null || die "scp failed"
+  info "copying to the Mac"
+  $SSH "$MAC_SSH" "mkdir -p '$MAC_GNOSIA_HOME' && rm -rf '$MAC_STAGE'" || die "could not prep the Mac's staging dir"
+  $SCP -pr "$STAGE_LOCAL" "$MAC_SSH:$MAC_GNOSIA_HOME/" >/dev/null || die "scp failed"
+  rm -rf "$STAGE_LOCAL"
 
-  info "restoring on the Mac: drop + create + pg_restore"
-  mpsql postgres <<EOF || die "drop failed on the Mac"
-DROP DATABASE IF EXISTS "$MAC_DB" WITH (FORCE);
-EOF
-  $SSH "$MAC_SSH" "$MAC_PGBIN/createdb \"$MAC_DB\"" || die "createdb failed on the Mac"
-  $SSH "$MAC_SSH" "$MAC_PGBIN/pg_restore --no-owner -d \"$MAC_DB\" '$MAC_DUMP'" \
-    || die "pg_restore failed on the Mac — its database may be empty/partial; fix and re-run"
-  $SSH "$MAC_SSH" "rm -f '$MAC_DUMP'" || true
-  rm -f "$dump"
+  info "placing catalog.db on the Mac"
+  # Old -wal/-shm first — a WAL that is not the new file's own must never
+  # sit beside it — then the staged files rename in next to it.
+  $SSH "$MAC_SSH" "[ -f '$MAC_STAGE/catalog.db' ] && rm -f '$MAC_DB_FILE-wal' '$MAC_DB_FILE-shm' && mv '$MAC_STAGE/catalog.db' '$MAC_DB_FILE' && { [ ! -f '$MAC_STAGE/catalog.db-wal' ] || mv '$MAC_STAGE/catalog.db-wal' '$MAC_DB_FILE-wal'; } && { [ ! -f '$MAC_STAGE/catalog.db-shm' ] || mv '$MAC_STAGE/catalog.db-shm' '$MAC_DB_FILE-shm'; } && rm -rf '$MAC_STAGE'" \
+    || die "placing the new catalog.db on the Mac failed — its app was stopped; check $MAC_DB_FILE there and re-run"
 
-  write_owner_mac
   audit_mac
   echo
   ok "Push complete — the Mac's catalog is now this server's copy."
+  if [ "$MAC_APP_WAS_RUNNING" = "1" ]; then
+    warn "the Mac's app was stopped for the replace — start it again there (cd $MAC_REPO && npm run dev)"
+  fi
   warn "Mac vault is stale (a per-database projection): rebuild with \`learn vault pull\` on the Mac."
 }
 
 cmd_pull() {
-  info "pull: the MacBook's database -> this server (replaces this server's)"
+  info "pull: the MacBook's catalog.db -> this server (replaces this server's)"
   acquire_lock
   require_ssh
+  resolve_mac_paths
   mkdir -p "$BUILD_STATE"
-  local dump="$BUILD_STATE/self_learn-pull.dump"
+  $SSH "$MAC_SSH" "[ -f '$MAC_DB_FILE' ]" || die "no $MAC_DB_FILE on the Mac — nothing to pull"
 
-  info "pg_dump on the Mac"
-  $SSH "$MAC_SSH" "umask 077; $MAC_PGBIN/pg_dump -Fc \"$MAC_DB\" > '$MAC_DUMP'" \
-    || die "pg_dump failed on the Mac"
-  $SCP -p "$MAC_SSH:$MAC_DUMP" "$dump" >/dev/null || die "scp failed"
-  $SSH "$MAC_SSH" "rm -f '$MAC_DUMP'" || true
-  ok "Pulled $(du -h "$dump" | cut -f1)"
+  snapshot_mac
 
-  # The runner first: it depends on the app's node_modules and on this
-  # database, and must not run catalog-backed jobs while it is dropped.
-  STUDIO_WAS_ACTIVE=0
-  if studio_is_active; then
-    STUDIO_WAS_ACTIVE=1
-    info "stopping $STUDIO_UNIT during the restore"
-    studio_stop
+  info "copying back"
+  rm -rf "$STAGE_LOCAL"   # scp -r recreates it from the remote dir's basename
+  $SCP -pr "$MAC_SSH:$MAC_STAGE" "$BUILD_STATE/" >/dev/null || die "scp failed"
+  $SSH "$MAC_SSH" "rm -rf '$MAC_STAGE'" || true
+  [ -f "$STAGE_LOCAL/catalog.db" ] || die "the pull staged no catalog.db — scp failed?"
+  ok "Pulled $(du -h "$STAGE_LOCAL/catalog.db" | cut -f1)"
+
+  # The receiving side's writers go down while the file is swapped; what
+  # was running comes back at the end (a stopped app stays stopped).
+  stop_local_writers
+
+  info "placing catalog.db"
+  # Same rule as the Mac side: the old -wal/-shm are not the new file's
+  # own, so they go first; then the staged files rename in.
+  rm -f "$CATALOG_DB-wal" "$CATALOG_DB-shm"
+  mv "$STAGE_LOCAL/catalog.db" "$CATALOG_DB" \
+    || { start_local_writers; die "could not place $CATALOG_DB — $(left_stopped) left stopped"; }
+  # The db is already replaced from here on, so a failed companion move
+  # reports with the writers back up rather than leaving them stopped.
+  if [ -f "$STAGE_LOCAL/catalog.db-wal" ]; then
+    mv "$STAGE_LOCAL/catalog.db-wal" "$CATALOG_DB-wal" \
+      || { start_local_writers; die "could not place $CATALOG_DB-wal (the db itself was replaced; $(left_stopped) restarted)"; }
   fi
-  WAS_ACTIVE=0
-  if web_is_active; then
-    WAS_ACTIVE=1
-    info "stopping $WEB_UNIT during the restore"
-    web_stop
+  if [ -f "$STAGE_LOCAL/catalog.db-shm" ]; then
+    mv "$STAGE_LOCAL/catalog.db-shm" "$CATALOG_DB-shm" \
+      || { start_local_writers; die "could not place $CATALOG_DB-shm (the db itself was replaced; $(left_stopped) restarted)"; }
   fi
-  # Same contract as deploy.sh: Postgres is needed for the restore, but if
-  # the operator deliberately stopped it (launcher stop covers both), put
-  # it back down afterwards — a pull must not undo their stop.
-  DB_WAS_UP=0
-  if docker compose --project-directory "$SERVICE_DIR" ps --status running -q db 2>/dev/null | grep -q .; then
-    DB_WAS_UP=1
-  fi
-  docker compose --project-directory "$SERVICE_DIR" up -d >/dev/null
-  wait_pg
+  rm -rf "$STAGE_LOCAL"
 
-  info "restoring: drop + create + pg_restore"
-  lpsql postgres <<EOF || { warn "drop failed — $(left_stopped) left stopped"; exit 1; }
-DROP DATABASE IF EXISTS "$POSTGRES_DB" WITH (FORCE);
-EOF
-  lpsql postgres <<EOF || { warn "create failed — database is missing, $(left_stopped) left stopped"; exit 1; }
-CREATE DATABASE "$POSTGRES_DB";
-EOF
-  docker exec -i "$DB_CONTAINER" pg_restore --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-    < "$dump" || die "pg_restore failed — database may be empty/partial; fix and re-run ($(left_stopped) left stopped)"
-  rm -f "$dump"
-
-  write_owner_local
   audit_local
-  if [ "$DB_WAS_UP" = "0" ] && [ "$WAS_ACTIVE" = "0" ]; then
-    docker compose --project-directory "$SERVICE_DIR" stop >/dev/null 2>&1 || true
-    info "Postgres put back down (it was stopped before the pull)"
-  fi
-  if [ "$WAS_ACTIVE" = "1" ]; then
-    web_start && ok "$WEB_UNIT restarted"
-  fi
-  if [ "$STUDIO_WAS_ACTIVE" = "1" ]; then
-    studio_start && ok "$STUDIO_UNIT restarted"
-  fi
+  start_local_writers
   echo
   ok "Pull complete — this server's catalog is now the Mac's copy."
   warn "This server's vault is stale (a per-database projection): rebuild with \`learn vault pull\` in $REPO_DIR."

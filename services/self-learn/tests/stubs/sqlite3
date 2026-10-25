@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# sqlite3 stub. Usage here: `sqlite3 <db> ".backup '<dest>'"` writes canned
+# bytes to <dest>; a `select`-ish query prints a canned count.
+# State in $STATE_DIR:
+#   sqlite3_fails — exists => every call exits 1
+#   db_count      — file content: what a count query answers (default 42)
+echo "sqlite3 $*" >> "$CALLS_LOG"
+[ -f "$STATE_DIR/sqlite3_fails" ] && exit 1
+
+sql="${*: -1}"
+case "$sql" in
+  ".backup "*|".BACKUP "*|*[Vv][Aa][Cc][Uu][Uu][Mm]\ INTO\ *)
+    dest="${sql#*[Ii][Nn][Tt][Oo] }"   # VACUUM INTO <dest>
+    case "$sql" in ".backup "*) dest="${sql#.backup }" ;; esac
+    dest="${dest#\'}"; dest="${dest%\'}"; dest="${dest#\"}"; dest="${dest%\"}"
+    echo "STUB-SQLITE-BACKUP" > "$dest"
+    ;;
+  *)
+    cat "$STATE_DIR/db_count" 2>/dev/null || echo 42
+    ;;
+esac
+exit 0
