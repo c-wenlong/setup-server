@@ -243,6 +243,28 @@
 }
 .cat-btn { min-height: 34px; padding: 0 14px; font-size: 13px; text-decoration: none; }
 
+/* Narrow phones: the name keeps its floor — the status drops to a second
+   line under it and the action moves to a line of its own, rather than the
+   three of them squeezing the name to nothing. */
+@media (max-width: 480px) {
+  .cat-row { flex-wrap: wrap; }
+  .cat-row-main { flex-wrap: wrap; }
+  .cat-names { flex: 1 1 45%; }
+  .cat-state {
+    order: 5;
+    flex: 0 0 100%;
+    margin-left: 0;
+    padding-left: 62px;      /* icon + gap, so it sits under the name */
+    margin-top: 2px;
+  }
+  .cat-chev { order: 4; }
+  .cat-actions {
+    flex: 0 0 100%;
+    justify-content: flex-end;
+    padding: 6px 0 0 62px;
+  }
+}
+
 .cat-remove {
   -webkit-appearance: none;
   appearance: none;

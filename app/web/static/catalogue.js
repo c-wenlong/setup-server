@@ -159,17 +159,57 @@
     search.appendChild(elSearch);
     bar.appendChild(search);
 
+    /* app.js's ⌘K handler skips hidden views; this one is the catalogue's
+       own, live only while this route is up and no sheet is open. */
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'k' && e.key !== 'K') return;
+      if (!(e.metaKey || e.ctrlKey) || !shown) return;
+      var sheet = document.getElementById('sheet');
+      if (sheet && !sheet.hidden) return;
+      e.preventDefault();
+      elSearch.focus();
+      elSearch.select();
+    });
+
     elChips = make('div', 'cat-rail');
     elChips.setAttribute('role', 'group');
     elChips.setAttribute('aria-label', 'Categories');
-    var rail = FILTERS.slice();
+    bar.appendChild(elChips);
+    root.appendChild(bar);
+
+    elBody = make('div', 'cat-body');
+    elBody.setAttribute('aria-live', 'polite');
+    root.appendChild(elBody);
+  }
+
+  /* The rail is rebuilt when the group list changes — the first paint often
+     runs before the API lands, when a.groups() is still the defaults, and a
+     renamed or added category must appear without a reload. A removed
+     category drops the filter back to 'all'; a focused pill gets its focus
+     back by data-filter after the rebuild. */
+  var railSig = null;
+
+  function buildRail() {
     var a = app();
-    if (a && typeof a.groups === 'function') {
-      a.groups().forEach(function (g) {
-        rail.push({ id: g.id, label: g.label, glyph: GROUP_GLYPHS[g.id] || 'folder' });
-      });
+    var groups = (a && typeof a.groups === 'function') ? a.groups() : [];
+    var sig = groups.map(function (g) { return g.id + ':' + g.label; }).join('|');
+    if (sig === railSig) return;
+    railSig = sig;
+
+    var keepFocus = null;
+    var active = document.activeElement;
+    if (active && elChips.contains(active)) {
+      keepFocus = active.getAttribute('data-filter');
     }
+
+    elChips.textContent = '';
+    var rail = FILTERS.slice();
+    groups.forEach(function (g) {
+      rail.push({ id: g.id, label: g.label, glyph: GROUP_GLYPHS[g.id] || 'folder' });
+    });
+    var ids = {};
     rail.forEach(function (f) {
+      ids[f.id] = true;
       var b = make('button', 'cat-pill');
       b.type = 'button';
       b.setAttribute('data-filter', f.id);
@@ -179,12 +219,11 @@
       b.addEventListener('click', function () { filter = f.id; paint(); });
       elChips.appendChild(b);
     });
-    bar.appendChild(elChips);
-    root.appendChild(bar);
-
-    elBody = make('div', 'cat-body');
-    elBody.setAttribute('aria-live', 'polite');
-    root.appendChild(elBody);
+    if (!ids[filter]) filter = 'all';
+    if (keepFocus && ids[keepFocus]) {
+      var again = elChips.querySelector('[data-filter="' + keepFocus + '"]');
+      if (again) again.focus();
+    }
   }
 
   /* ---------- one row ---------- */
@@ -282,6 +321,7 @@
     if (!shown) return;
     build();
     var a = app();
+    buildRail();
 
     for (var c = 0; c < elChips.childNodes.length; c++) {
       var chip = elChips.childNodes[c];
