@@ -336,7 +336,12 @@
         ],
         "kuma": "kaichenpedia"
       },
-      "description": "Personal wiki: a Quartz static build of the private kaichenpedia GitHub repo, served by nginx. A systemd user timer polls GitHub daily and redeploys on new commits, so pushing from any device is the publish step; ~/services/kaichenpedia/bin/deploy.sh --force does it now. The poller only runs while the container is up, so an amber tile means the wiki is frozen at its last build."
+      "description": "Personal wiki: a Quartz static build of the private kaichenpedia GitHub repo, served by nginx. deployd polls GitHub every minute and redeploys on new commits, so pushing from any device is the publish step; ~/services/kaichenpedia/bin/deploy.sh --force does it now. An amber tile means the wiki is frozen at its last build.",
+      "deploy": {
+        "repo": "https://github.com/c-wenlong/kaichenpedia.git",
+        "ref": "main",
+        "cmd": "services/kaichenpedia/setup.sh"
+      }
     },
     {
       "key": "self-learn",
@@ -389,7 +394,12 @@
         ],
         "kuma": "sources"
       },
-      "description": "Passphrase-encrypted browser for the private sources archive (YouTube transcripts, blogs, newsletters, papers, personas): categories, sources, authors, personas and a reader. nginx serves the AES-256-GCM build on 127.0.0.1:8098 behind Serve; a daily poller rebuilds when the fetch clone at ~/dev/sources moves, so the weekly fetch commit goes live the same day. Unlock with the same SITE_PASSPHRASE as the GitHub Pages site. ~/services/sources/bin/deploy.sh --force rebuilds now."
+      "description": "Passphrase-encrypted browser for the private sources archive (YouTube transcripts, blogs, newsletters, papers, personas): categories, sources, authors, personas and a reader. nginx serves the AES-256-GCM build on 127.0.0.1:8098 behind Serve; deployd polls the remote every minute and rebuilds when the fetch clone at ~/dev/sources moves, so the weekly fetch commit goes live on the next tick. Unlock with the same SITE_PASSPHRASE as the GitHub Pages site. ~/services/sources/bin/deploy.sh --force rebuilds now.",
+      "deploy": {
+        "repo": "https://github.com/c-wenlong/sources",
+        "ref": "main",
+        "cmd": "services/sources/setup.sh"
+      }
     },
     {
       "key": "design-systems",
@@ -411,7 +421,12 @@
         ],
         "kuma": "design-systems"
       },
-      "description": "The private designs repo as a browsable library: the gallery of every captured design system (tokens, screenshots, components) plus the docs site and scorecard. nginx serves the Zensical build on 127.0.0.1:8108 behind Serve, and answers /systems/, /tools/, /example/, /catalog.json and /README.md straight from a read-only mount of the working clone at ~/dev/design-systems (same allowlist as the repo's make serve — the ~300 MB of LFS screenshots are never copied into a release). No passphrase: the repo's own Pages deploy strips and encrypts the gallery, but the tailnet is the boundary here. A daily poller rebuilds when the clone's HEAD moves; ~/services/design-systems/bin/deploy.sh --force rebuilds now."
+      "deploy": {
+        "repo": "https://github.com/c-wenlong/designs.git",
+        "ref": "main",
+        "cmd": "services/design-systems/setup.sh"
+      },
+      "description": "The private designs repo as a browsable library: the gallery of every captured design system (tokens, screenshots, components) plus the docs site and scorecard. nginx serves the Zensical build on 127.0.0.1:8108 behind Serve, and answers /systems/, /tools/, /example/, /catalog.json and /README.md straight from a read-only mount of the working clone at ~/dev/design-systems (same allowlist as the repo's make serve — the ~300 MB of LFS screenshots are never copied into a release). No passphrase: the repo's own Pages deploy strips and encrypts the gallery, but the tailnet is the boundary here. deployd rebuilds when the clone's HEAD moves; ~/services/design-systems/bin/deploy.sh --force rebuilds now."
     },
     {
       "key": "appflowy",

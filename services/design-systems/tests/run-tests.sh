@@ -67,6 +67,7 @@ out_lacks()  { ! grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
+env_lacks()  { ! grep -q "$1" "$SVC/.env"; }
 
 # ----------------------------------------------------------------- tests
 test_preflight_docker_perms() {
@@ -147,7 +148,7 @@ test_fresh_deploy() {
   run_deploy
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env has repo path"          env_has "SOURCE_REPO=$SOURCE_REPO"
-  check ".env has poll interval"      env_has "POLL_SECONDS=86400"
+  check ".env drops poll interval"                   env_lacks "POLL_SECONDS=86400"
   check ".env has public URL"         env_has "PUBLIC_URL=https://test-host.tailfake.ts.net:8108/"
   check ".env is owner-only"          sh -c '[ "$(stat -c %a "$0" 2>/dev/null || stat -f %Lp "$0")" = 600 ]' "$SVC/.env"
   check "deploy script installed"     [ -x "$HOME/services/design-systems/bin/deploy.sh" ]
@@ -172,16 +173,115 @@ test_fresh_deploy() {
   check "recorded built sha"          grep -qx aaa1111 "$HOME/services/design-systems/state/built-sha"
   check "compose up invoked"          [ -f "$STATE_DIR/compose_up" ]
   if [ "$OS" = "Linux" ]; then
-    check "timer unit written"        [ -f "$HOME/.config/systemd/user/design-systems-deploy.timer" ]
-    check "timer enabled"             calls_have "systemctl --user enable --now design-systems-deploy.timer"
-    check "lingering enabled"         calls_have "loginctl enable-linger"
+    check "no timer written"          [ ! -f "$HOME/.config/systemd/user/design-systems-deploy.timer" ]
+    check "no lingering touched"      no_call "loginctl enable-linger"
   else
-    check "launch agent written"      [ -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
-    check "label enabled (undoes teardown's disable)" calls_have "launchctl enable gui/.*/com.design-systems.deploy"
-    check "enabled before bootstrap"  [ "$(call_line "launchctl enable")" -lt "$(call_line "launchctl bootstrap")" ]
+    check "no launch agent written"   [ ! -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
   fi
   check "served on tailscale :8108"   calls_have "tailscale serve --bg --https=8108 http://127.0.0.1:8108"
   check "prints final URL"            out_has "https://test-host.tailfake.ts.net:8108/gallery/"
+  teardown
+}
+
+fake_deployd() {
+  mkdir -p "$HOME/services/deployd/bin" "$HOME/services/deployd/state"
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/services/deployd/bin/deployd"
+  chmod +x "$HOME/services/deployd/bin/deployd"
+}
+
+seed_legacy_poller() {
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    echo x > "$HOME/.config/systemd/user/design-systems-deploy.timer"
+    echo x > "$HOME/.config/systemd/user/design-systems-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist"
+  fi
+}
+
+test_legacy_poller_removed() {
+  echo "• migration: a leftover per-service deploy timer/plist is removed once deployd is installed"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  seed_legacy_poller
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "timer disabled"     calls_have "disable --now design-systems-deploy.timer"
+    check "timer unit gone"    [ ! -f "$HOME/.config/systemd/user/design-systems-deploy.timer" ]
+    check "service unit gone"  [ ! -f "$HOME/.config/systemd/user/design-systems-deploy.service" ]
+  else
+    check "agent booted out"   calls_have "launchctl bootout gui/.*/com.design-systems.deploy"
+    check "plist gone"         [ ! -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
+  fi
+  teardown
+}
+
+test_legacy_poller_kept_without_deployd() {
+  echo "• migration: without deployd the old poller is kept, with a warning"
+  setup
+  touch "$STATE_DIR/operator"
+  seed_legacy_poller
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  check "warns about deployd"  out_has "deployd is not installed"
+  if [ "$OS" = "Linux" ]; then
+    check "timer unit kept"    [ -f "$HOME/.config/systemd/user/design-systems-deploy.timer" ]
+    check "never disabled"     no_call "disable --now design-systems-deploy.timer"
+  else
+    check "plist kept"         [ -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
+    check "never booted out"   no_call "launchctl bootout gui/.*/com.design-systems.deploy"
+  fi
+  teardown
+}
+
+test_deployd_disabled_flag() {
+  echo "• teardown marks deployd disabled; a manual setup clears the flag"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  run_deploy
+  run_teardown
+  check "teardown exits zero"     [ "$CODE" -eq 0 ]
+  check "disabled flag written"   [ -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  run_deploy
+  check "re-setup exits zero"     [ "$CODE" -eq 0 ]
+  check "disabled flag cleared"   [ ! -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  teardown
+}
+
+test_deploy_sha_mismatch() {
+  echo "• deployd-requested sha: verified against the pulled clone"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  DEPLOY_SHA=aaa1111 run_poll
+  check "matching sha deploys"    [ "$CODE" -eq 0 ]
+  DEPLOY_SHA=zzz9999 run_poll
+  check "mismatch exits non-zero" [ "$CODE" -ne 0 ]
+  check "says why"                out_has "deployd asked for zzz9999"
+  teardown
+}
+
+test_path_restored_from_env() {
+  echo "• re-run under a minimal PATH finds uv via the dir saved in .env"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "first run ok"            [ "$CODE" -eq 0 ]
+  nouv="$STATE_DIR/no-uv-stubs"; mkdir -p "$nouv"
+  for s in "$STUBS"/*; do [ "${s##*/}" = uv ] || ln -s "$s" "$nouv/${s##*/}"; done
+  uvbin="$STATE_DIR/saved-uv-bin"; mkdir -p "$uvbin"
+  printf '#!/bin/sh\nexec "%s/uv" "$@"\n' "$STUBS" > "$uvbin/uv"; chmod +x "$uvbin/uv"
+  # deploy.sh prepends both recorded dirs to PATH, so GIT_LFS_BIN must also
+  # point somewhere git-free or the real git shadows the stub.
+  grep -v -E '^(UV_BIN|GIT_LFS_BIN)=' "$SVC/.env" > "$SVC/.env.tmp" && mv "$SVC/.env.tmp" "$SVC/.env"
+  printf "UV_BIN='%s'\nGIT_LFS_BIN='%s'\n" "$uvbin" "$uvbin" >> "$SVC/.env"
+  OUT="$(printf '\n' | PATH="$nouv:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  check "exits zero without stub uv" [ "$CODE" -eq 0 ]
+  check "found uv via .env"          out_has "Preflight checks"
   teardown
 }
 
@@ -296,7 +396,7 @@ test_poll_lock() {
   mkdir "$HOME/services/design-systems/.deploy.lock"
   : > "$CALLS_LOG"
   run_poll
-  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "exits non-zero"      [ "$CODE" -ne 0 ]
   check "reports the skip"    out_has "another deploy is running"
   check "touched no git"      no_call "git -C .* rev-parse"
   rmdir "$HOME/services/design-systems/.deploy.lock"
@@ -392,10 +492,14 @@ test_live() {
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches repo"   sh -c "[ \"\$(git -C '$repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   if [ "$OS" = "Linux" ]; then
-    live_check "deploy timer active"    sh -c "systemctl --user is-active design-systems-deploy.timer | grep -qx active"
-    live_check "lingering enabled"      sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
+    live_check "no legacy timer"        sh -c "! systemctl --user is-active design-systems-deploy.timer 2>/dev/null | grep -qx active"
+    live_check "deployd timer active"   sh -c "systemctl --user is-active deployd.timer 2>/dev/null | grep -qx active"
+    live_check "lingering enabled"      sh -c "loginctl show-user \"\$USER\" -p Linger 2>/dev/null | grep -qx 'Linger=yes'"
+    live_check "deployd watches it"     sh -c "$HOME/services/deployd/bin/deployd --status | grep -q design-systems"
   else
-    live_check "launch agent loaded"    sh -c "launchctl print gui/$(id -u)/com.design-systems.deploy"
+    live_check "no legacy agent"        sh -c "! launchctl print gui/$(id -u)/com.design-systems.deploy >/dev/null 2>&1"
+    live_check "deployd agent loaded"   sh -c "launchctl print gui/$(id -u)/com.setup-server.deployd >/dev/null 2>&1"
+    live_check "deployd watches it"     sh -c "$HOME/services/deployd/bin/deployd --status | grep -q design-systems"
   fi
   live_check "serve maps :$port"        sh -c "'$ts' serve status | grep -A2 ':$port' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS responds"   curl -fsS -o /dev/null --max-time 30 "$url/gallery/"
@@ -428,6 +532,15 @@ deployed() {
   UNITS="$HOME/.config/systemd/user"
   echo shot > "$SH/media/refero/a.jpg"
   mkdir -p "$UNITS"
+  if [ "$OS" = "Linux" ]; then
+    # Pre-migration installs ran the per-service poller; setup.sh removes it
+    # on its next run, but a box that has not re-run setup yet still has it.
+    printf '[Timer]\n' > "$UNITS/design-systems-deploy.timer"
+    printf '[Service]\n' > "$UNITS/design-systems-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist"
+  fi
   printf '[Service]\nExecStart=/usr/bin/python3 %s/scripts/deploy_trigger.py\n' "$REPO" \
     > "$UNITS/designs-trigger.service"
   printf '[Service]\nExecStart=/bin/true\n' > "$UNITS/unrelated.service"
@@ -648,7 +761,11 @@ test_teardown_purge() {
   run_teardown --purge "design"
   check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
   check "wrong name: nothing changed" nothing_changed
-  check "wrong name: units kept"      [ -f "$UNITS/design-systems-deploy.timer" ]
+  if [ "$OS" = "Linux" ]; then
+    check "wrong name: units kept"    [ -f "$UNITS/design-systems-deploy.timer" ]
+  else
+    check "wrong name: plist kept"    [ -f "$HOME/Library/LaunchAgents/com.design-systems.deploy.plist" ]
+  fi
   check "wrong name: media kept"      [ -f "$SH/media/refero/a.jpg" ]
   run_teardown --purge ""
   check "empty answer: exits non-zero" [ "$CODE" -ne 0 ]
@@ -1096,6 +1213,11 @@ test_preflight_wrong_repo
 test_lfs_pointers_fixed
 test_lfs_pointers_unfixable
 test_fresh_deploy
+test_legacy_poller_removed
+test_legacy_poller_kept_without_deployd
+test_deployd_disabled_flag
+test_deploy_sha_mismatch
+test_path_restored_from_env
 test_idempotent_rerun
 test_nginx_conf_stale_warns
 test_push_triggers_redeploy

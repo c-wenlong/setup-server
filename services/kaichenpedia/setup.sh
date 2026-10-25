@@ -8,11 +8,9 @@
 #     (machine-managed, hard-reset on every deploy — not a working copy)
 #   - static site built with Quartz, served by an nginx container binding
 #     127.0.0.1:LOCAL_PORT only
-#   - auto-deploy: a poller (systemd user timer / launchd) runs
-#     bin/deploy.sh every POLL_SECONDS (default daily); new commits on BRANCH
-#     go live on the next poll, or immediately via deploy.sh --force.
-#     (GitHub webhooks can't reach a tailnet-only box — polling is the
-#     outbound-only equivalent.)
+#   - auto-deploy: deployd (services/deployd) polls the repo's remote and
+#     re-runs this script when BRANCH moves; new commits go live on its
+#     next tick, or immediately via deploy.sh --force.
 #   - published tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
 #
 # Usage:
@@ -24,8 +22,9 @@
 # non-interactive access to the private repo (gh auth setup-git, or a deploy
 # key), Node.js >= 22, python3.
 #
-# Idempotent: re-running refreshes the deploy script + poller and repairs any
-# missing piece; an existing .env and nginx.conf are never overwritten.
+# Idempotent: re-running refreshes the deploy script and repairs any
+# missing piece (and removes the old per-service deploy timer if a host
+# still has one); an existing .env and nginx.conf are never overwritten.
 
 set -euo pipefail
 
@@ -33,7 +32,6 @@ LOCAL_PORT="${LOCAL_PORT:-8091}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 REPO_URL="${REPO_URL:-https://github.com/c-wenlong/kaichenpedia.git}"
 BRANCH="${BRANCH:-main}"
-POLL_SECONDS="${POLL_SECONDS:-86400}"   # daily; deploy.sh --force deploys now
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
@@ -41,6 +39,18 @@ info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+
+# A manual ./setup.sh re-installs the service: clear deployd's disabled
+# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
+# never invokes this while the flag is set, so clearing is always manual.
+rm -f "$HOME/services/deployd/state/kaichenpedia.disabled"
+
+# A re-run (e.g. under deployd, whose PATH is minimal) finds node where
+# the first install recorded it in .env — put that dir on PATH first.
+if [ -f "$ENV_FILE" ]; then
+  d="$(sed -n "s/^NODE_BIN=\(.*\)\$/\1/p" "$ENV_FILE" | sed "s/^'//; s/'\$//")"
+  [ -n "$d" ] && [ -d "$d" ] && PATH="$PATH:$d"
+fi
 
 # ---------------------------------------------------------------- preflight
 OS="$(uname -s)"
@@ -99,7 +109,6 @@ REPO_URL=$REPO_URL
 BRANCH=$BRANCH
 LOCAL_PORT=$LOCAL_PORT
 HTTPS_PORT=$HTTPS_PORT
-POLL_SECONDS=$POLL_SECONDS
 SERVICE_HOME=$HOME/services/kaichenpedia
 NODE_BIN=$(dirname "$(command -v node)")
 PUBLIC_URL=https://$host:$HTTPS_PORT/
@@ -163,66 +172,29 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
-# ------------------------------------------------------------------ poller
-if [ "$OS" = "Linux" ]; then
-  info "Installing systemd user timer (poll every ${POLL_SECONDS}s)"
-  UNIT_DIR="$HOME/.config/systemd/user"
-  mkdir -p "$UNIT_DIR"
-  cat > "$UNIT_DIR/kaichenpedia-deploy.service" <<EOF
-[Unit]
-Description=kaichenpedia deploy (pull from GitHub, rebuild if changed)
-
-[Service]
-Type=oneshot
-ExecStart=$SERVICE_HOME/bin/deploy.sh
-EOF
-  cat > "$UNIT_DIR/kaichenpedia-deploy.timer" <<EOF
-[Unit]
-Description=kaichenpedia deploy poller (push-to-deploy for a tailnet-only box)
-
-[Timer]
-OnBootSec=90
-OnUnitActiveSec=${POLL_SECONDS}
-AccuracySec=15
-
-[Install]
-WantedBy=timers.target
-EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now kaichenpedia-deploy.timer >/dev/null 2>&1
-  ok "Timer active: kaichenpedia-deploy.timer"
-
-  if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = "yes" ]; then
-    ok "Lingering already enabled"
-  else
-    info "Enabling lingering (needs sudo, one time) so the poller runs at boot"
-    sudo loginctl enable-linger "$USER"
-    ok "Lingering enabled"
+# ------------------------------------------------- legacy poller removal
+# deployd (services/deployd) polls the remote and re-runs this script now;
+# a host installed before the migration still has the per-service timer or
+# LaunchAgent — stop and remove it, but only once deployd itself is
+# installed to take over scheduling. teardown.sh deletes the same files.
+UNIT_DIR="$HOME/.config/systemd/user"
+PLIST_LABEL="com.kaichenpedia.deploy"
+PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+if [ ! -x "$HOME/services/deployd/bin/deployd" ]; then
+  warn "deployd is not installed — keeping any old poller; auto-deploy is off until services/deployd/setup.sh runs"
+elif [ "$OS" = "Linux" ]; then
+  if [ -f "$UNIT_DIR/kaichenpedia-deploy.timer" ]; then
+    systemctl --user disable --now kaichenpedia-deploy.timer >/dev/null 2>&1 || true
+    rm -f "$UNIT_DIR/kaichenpedia-deploy.timer" "$UNIT_DIR/kaichenpedia-deploy.service"
+    systemctl --user daemon-reload
+    ok "Removed kaichenpedia-deploy.timer (deployd polls now)"
   fi
 else
-  PLIST="$HOME/Library/LaunchAgents/com.kaichenpedia.deploy.plist"
-  info "Installing launchd poller (every ${POLL_SECONDS}s)"
-  mkdir -p "$(dirname "$PLIST")" "$HOME/Library/Logs"
-  cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.kaichenpedia.deploy</string>
-  <key>ProgramArguments</key>
-  <array><string>$SERVICE_HOME/bin/deploy.sh</string></array>
-  <key>StartInterval</key><integer>$POLL_SECONDS</integer>
-  <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/kaichenpedia-deploy.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/kaichenpedia-deploy.log</string>
-</dict>
-</plist>
-EOF
-  launchctl bootout "gui/$(id -u)/com.kaichenpedia.deploy" 2>/dev/null || true
-  # teardown.sh disables the label so login does not reload it; undo that.
-  launchctl enable "gui/$(id -u)/com.kaichenpedia.deploy" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  ok "LaunchAgent loaded (logs: ~/Library/Logs/kaichenpedia-deploy.log)"
+  launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+  if [ -f "$PLIST" ]; then
+    rm -f "$PLIST"
+    ok "Removed the $PLIST_LABEL LaunchAgent (deployd polls now)"
+  fi
 fi
 
 # ------------------------------------------------------- tailscale serve
@@ -252,13 +224,10 @@ fi
 echo
 printf '\033[1;32mDone.\033[0m Kaichenpedia is at \033[1m%s\033[0m (tailnet only).\n' "$url"
 echo
-echo "Auto-deploy: pushes to $BRANCH are picked up by the poller (every ${POLL_SECONDS}s)."
+echo "Auto-deploy: deployd re-runs this when $REPO_URL ($BRANCH) moves"
+echo "(services/deployd polls every minute; ~/services/deployd/bin/deployd --status)."
 echo "Manage:"
 echo "  $SERVICE_HOME/bin/deploy.sh --force        # rebuild now"
-if [ "$OS" = "Linux" ]; then
-  echo "  systemctl --user list-timers kaichenpedia-deploy.timer"
-  echo "  journalctl --user -u kaichenpedia-deploy -n 50   # deploy logs"
-else
-  echo "  tail -f ~/Library/Logs/kaichenpedia-deploy.log"
-fi
+echo "  journalctl --user -u deployd -n 50         # poll + deploy logs (Linux)"
+echo "  tail -f ~/Library/Logs/deployd.log         # macOS"
 echo "  docker compose --project-directory $SERVICE_DIR ps|logs|restart"

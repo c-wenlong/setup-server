@@ -200,6 +200,13 @@ def state_paths(state_dir, key):
             os.path.join(state_dir, safe + ".log"))
 
 
+def disabled_path(state_dir, key):
+    """teardown.sh drops state/<key>.disabled so a removed service stays
+    removed; a manual services/<name>/setup.sh clears it to opt back in."""
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in key)
+    return os.path.join(state_dir, safe + ".disabled")
+
+
 def read_sha(path):
     try:
         return open(path).read().strip() or None
@@ -364,6 +371,10 @@ def tick(env):
             log("no deploy entries in %s/services/*/app.json" % setup_repo)
         failures = 0
         for entry in entries:
+            if os.path.exists(disabled_path(state_dir, entry["key"])):
+                log("%s: disabled (state/%s.disabled) — skipping"
+                    % (entry["key"], entry["key"]))
+                continue
             sha = resolve_ref(entry["repo"], entry["ref"])
             if not sha:
                 failures += 1
@@ -414,6 +425,11 @@ def force(key, env):
     try:
         for entry in scan_entries(setup_repo):
             if entry["key"] == key:
+                if os.path.exists(disabled_path(state_dir, key)):
+                    warn("%s: disabled (state/%s.disabled) — run its "
+                         "setup.sh to re-enable, or remove the flag"
+                         % (key, key))
+                    return 1
                 sha = resolve_ref(entry["repo"], entry["ref"]) or "forced"
                 ok, rc = deploy(entry, sha, setup_repo, state_dir,
                                 int(env.get("DEPLOY_TIMEOUT") or DEPLOY_TIMEOUT))
@@ -443,13 +459,16 @@ def status(env):
     for e in entries:
         sha_file, fail_file, _ = state_paths(state_dir, e["key"])
         seen = read_sha(sha_file)
-        note = ""
+        notes = []
+        if os.path.exists(disabled_path(state_dir, e["key"])):
+            notes.append("disabled")
         try:
             rec = json.load(open(fail_file))
-            note = "last attempt failed (rc=%s) %ss ago" % (
-                rec.get("rc"), int(time.time() - rec.get("at", 0)))
+            notes.append("last attempt failed (rc=%s) %ss ago" % (
+                rec.get("rc"), int(time.time() - rec.get("at", 0))))
         except (OSError, ValueError):
             pass
+        note = "; ".join(notes)
         print("%-18s %-8s %-12s %s"
               % (e["key"], e["ref"], (seen or "never")[:12], note))
     return 0

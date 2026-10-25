@@ -16,20 +16,20 @@ weekly fetch timer ──┐                     push from any device
  (commits + pushes   │                            │
   on this clone)     ▼                            ▼
               ~/dev/sources  ◄────────────  GitHub (private repo)
-              (the fetch clone,        outbound git pull --ff-only,
-               already machine-         daily (POLL_SECONDS)
-               managed on main)              │
+              (the fetch clone,         ▲
+               already machine-         │ deployd polls ls-remote every
+               managed on main)         │ minute (services/deployd)
                      ▲                       │
-                     │      sources-deploy.timer ──► bin/deploy.sh
-                     │        (systemd user timer;    │ 1. flock .git/sources-fetch.lock
-                     │         launchd on macOS)      │    (shared with fetch_all.sh —
-                     │                                │     no build over a half-fetched tree)
-                     │                                │ 2. git pull --ff-only (best effort)
-                     │                                │ 3. uv sync --quiet
-                     │                                │ 4. uv run apps/web/build/build_site.py --out www/next
-                     │                                │    (gzip + AES-256-GCM per file;
-                     │                                │     SITE_PASSPHRASE from .env)
-                     │                                │ 5. atomic repoint  current -> releases/<sha>
+                     │      deployd ──► setup.sh ──► bin/deploy.sh
+                     │     (one poller for        │ 1. flock .git/sources-fetch.lock
+                     │      all deploy blocks)   │    (shared with fetch_all.sh —
+                     │                            │     no build over a half-fetched tree)
+                     │                            │ 2. git pull --ff-only (best effort)
+                     │                            │ 3. uv sync --quiet
+                     │                            │ 4. uv run apps/web/build/build_site.py --out www/next
+                     │                            │    (gzip + AES-256-GCM per file;
+                     │                            │     SITE_PASSPHRASE from .env)
+                     │                            │ 5. atomic repoint  current -> releases/<sha>
                      │                                ▼
                      │                     ~/services/sources/www/current
                      │                                │  bind mount (ro)
@@ -56,10 +56,12 @@ ever built — a fetch run mid-flight still shows the last commit's tree.
 ## Why polling, not a webhook
 
 Same reasoning as kaichenpedia: the box is tailnet-only, so GitHub can't
-reach it. Polling is outbound-only and free; worst-case latency is
-`POLL_SECONDS` (daily by default), and `deploy.sh --force` skips the wait.
-The weekly fetch commits locally anyway, so its output goes live on the
-next poll without GitHub being involved at all.
+reach it. deployd (`services/deployd`) resolves `main` with
+`git ls-remote` every minute and re-runs this service's `setup.sh` when it
+moves — `deploy.sh --force` skips the wait entirely. Anything pushed to
+origin (the weekly fetch included) lands on the next tick; a commit that
+only ever exists in the local clone never reaches the remote, so it does
+not trigger a deploy.
 
 ## Security model
 
@@ -101,8 +103,11 @@ next poll without GitHub being involved at all.
 5. Runs the initial deploy: pull, `uv sync`, `build_site.py`, swap.
 6. `docker compose up -d` (nginx, `restart: unless-stopped`) + local health
    check.
-7. Installs the poller: systemd user timer (`OnUnitActiveSec=POLL_SECONDS`)
-   + lingering on Linux; a launchd `StartInterval` agent on macOS.
+7. Removes the old per-service `sources-deploy` timer / LaunchAgent if a
+   host still has one — deployd (`services/deployd`) owns scheduling now.
+   Removal only happens once deployd itself is installed
+   (`~/services/deployd/bin/deployd`); without it the old poller stays and
+   setup warns, so install `services/deployd` first for auto-deploy.
 8. Publishes via `tailscale serve --bg --https=8098` and verifies
    end-to-end.
 
@@ -113,17 +118,21 @@ cd services/sources && SITE_PASSPHRASE='the site passphrase' ./setup.sh
 ```
 
 Overrides: `LOCAL_PORT` / `HTTPS_PORT` (default 8098), `SOURCE_REPO`
-(default `~/dev/sources`), `BRANCH` (main), `POLL_SECONDS` (86400 = daily).
+(default `~/dev/sources`), `BRANCH` (main). Overriding `BRANCH` or pointing
+`SOURCE_REPO` at a different remote desyncs auto-deploy: deployd polls the
+repo/ref declared in `services/sources/app.json`'s `deploy` block
+(`main` on `https://github.com/c-wenlong/sources`), so edit the manifest to
+match or pushes to the override never trigger a deploy.
 
 ## Ops
 
 ```sh
 ~/services/sources/bin/deploy.sh --force             # rebuild right now
-journalctl --user -u sources-deploy -n 50            # deploy history
-systemctl --user list-timers sources-deploy.timer
+~/services/deployd/bin/deployd --status              # what deployd last saw/deployed
+journalctl --user -u deployd -n 50                   # poll + deploy history (macOS: ~/Library/Logs/deployd.log)
 docker compose --project-directory ~/dev/setup-server/services/sources ps|logs|restart
 tailscale serve status
-./teardown.sh                                        # Remove: unpublish, stop poller + container; files and .env kept
+./teardown.sh                                        # Remove: unpublish + stop container; files and .env kept
 ./teardown.sh --purge                                # also delete site files, .env (SITE_PASSPHRASE!) and unit files
 ```
 
@@ -131,7 +140,7 @@ A failed build leaves `www/current` pointing at the last release — a
 broken commit never takes the site down, and the repoint itself is one
 rename (no gap where nginx has no root). The previous release stays in
 `www/releases/` for rollback. If `git pull` fails (dirty tree, offline,
-diverged) the poller builds the local HEAD instead and notes it in the
+diverged) the deploy builds the local HEAD instead and notes it in the
 log; if a fetch is mid-run the deploy waits for its lock up to 15 min,
 then skips to the next tick.
 

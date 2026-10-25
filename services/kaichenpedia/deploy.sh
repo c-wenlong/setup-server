@@ -2,9 +2,10 @@
 #
 # deploy.sh — pull kaichenpedia from GitHub and rebuild the wiki if it changed.
 #
-# The server is tailnet-only, so GitHub webhooks can't reach it; instead this
-# script runs every POLL_SECONDS (systemd user timer on Linux, launchd on
-# macOS) and exits fast when origin/BRANCH hasn't moved. Also runnable by hand:
+# The server is tailnet-only, so GitHub webhooks can't reach it; instead
+# deployd (services/deployd) polls the remote and re-runs setup.sh when
+# BRANCH moves — this script is the rebuild half of that run, and exits
+# fast when origin/BRANCH hasn't moved. Also runnable by hand:
 #
 #   deploy.sh            # build only if origin/BRANCH has new commits
 #   deploy.sh --force    # rebuild even without new commits
@@ -42,8 +43,8 @@ if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ];
   rmdir "$LOCK" 2>/dev/null || true
 fi
 if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "another deploy is running — skipping"
-  exit 0
+  echo "another deploy is running — skipping" >&2
+  exit 1
 fi
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
@@ -58,6 +59,15 @@ fi
 
 git -C "$REPO_DIR" fetch --quiet origin "$BRANCH"
 remote_sha="$(git -C "$REPO_DIR" rev-parse "origin/$BRANCH")"
+# deployd asked for a specific remote sha (DEPLOY_SHA). If the fetch could
+# not bring it down, building origin/$BRANCH would deploy something else
+# and deployd would still record the requested sha as done — fail instead
+# so it retries.
+if [ -n "${DEPLOY_SHA:-}" ] \
+    && ! git -C "$REPO_DIR" merge-base --is-ancestor "$DEPLOY_SHA" "$remote_sha" 2>/dev/null; then
+  echo "deployd asked for $DEPLOY_SHA but origin/$BRANCH is at $remote_sha (fetch failed or diverged) — failing so it retries" >&2
+  exit 1
+fi
 built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
 
 if [ "$remote_sha" = "$built_sha" ] && [ -d "$WWW_DIR/current" ] && [ "$FORCE" -eq 0 ]; then

@@ -17,5 +17,10 @@
     ],
     "kuma": "sources"
   },
-  "description": "Passphrase-encrypted browser for the private sources archive (YouTube transcripts, blogs, newsletters, papers, personas): categories, sources, authors, personas and a reader. nginx serves the AES-256-GCM build on 127.0.0.1:8098 behind Serve; a daily poller rebuilds when the fetch clone at ~/dev/sources moves, so the weekly fetch commit goes live the same day. Unlock with the same SITE_PASSPHRASE as the GitHub Pages site. ~/services/sources/bin/deploy.sh --force rebuilds now."
+  "description": "Passphrase-encrypted browser for the private sources archive (YouTube transcripts, blogs, newsletters, papers, personas): categories, sources, authors, personas and a reader. nginx serves the AES-256-GCM build on 127.0.0.1:8098 behind Serve; deployd polls the remote every minute and rebuilds when the fetch clone at ~/dev/sources moves, so the weekly fetch commit goes live on the next tick. Unlock with the same SITE_PASSPHRASE as the GitHub Pages site. ~/services/sources/bin/deploy.sh --force rebuilds now.",
+  "deploy": {
+    "repo": "https://github.com/c-wenlong/sources",
+    "ref": "main",
+    "cmd": "services/sources/setup.sh"
+  }
 }

@@ -2,10 +2,10 @@
 #
 # deploy.sh — rebuild the encrypted sources site if the fetch clone moved.
 #
-# The server is tailnet-only, so GitHub webhooks can't reach it; instead this
-# script runs every POLL_SECONDS (systemd user timer on Linux, launchd on
-# macOS) and exits fast when the repo's HEAD hasn't moved. Also runnable by
-# hand:
+# The server is tailnet-only, so GitHub webhooks can't reach it; instead
+# deployd (services/deployd) polls the remote and re-runs setup.sh when
+# main moves — this script is the rebuild half of that run, and exits fast
+# when the repo's HEAD hasn't moved. Also runnable by hand:
 #
 #   deploy.sh            # build only if HEAD is new
 #   deploy.sh --force    # rebuild even without new commits
@@ -49,8 +49,8 @@ if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ];
   rmdir "$LOCK" 2>/dev/null || true
 fi
 if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "another deploy is running — skipping"
-  exit 0
+  echo "another deploy is running — skipping" >&2
+  exit 1
 fi
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
@@ -74,8 +74,8 @@ if [ "$(uname -s)" = "Linux" ] && command -v flock >/dev/null 2>&1; then
   FETCH_LOCK="$REPO_DIR/$(git -C "$REPO_DIR" rev-parse --git-dir)/sources-fetch.lock"
   exec 8>"$FETCH_LOCK"
   if ! flock -w "${SOURCES_DEPLOY_LOCK_WAIT:-900}" 8; then
-    echo "fetch_all.sh still holds $FETCH_LOCK — skipping this deploy"
-    exit 0
+    echo "fetch_all.sh still holds $FETCH_LOCK — skipping this deploy" >&2
+    exit 1
   fi
 fi
 
@@ -87,6 +87,14 @@ if ! git -C "$REPO_DIR" pull --ff-only --quiet 2>/dev/null; then
 fi
 
 local_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
+# deployd asked for a specific remote sha (DEPLOY_SHA). If the pull could
+# not bring it down, building HEAD would deploy something else and deployd
+# would still record the requested sha as done — fail instead so it retries.
+if [ -n "${DEPLOY_SHA:-}" ] \
+    && ! git -C "$REPO_DIR" merge-base --is-ancestor "$DEPLOY_SHA" "$local_sha" 2>/dev/null; then
+  echo "deployd asked for $DEPLOY_SHA but the clone is at $local_sha (pull failed or diverged) — failing so it retries" >&2
+  exit 1
+fi
 built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
 
 if [ "$local_sha" = "$built_sha" ] && [ -d "$WWW_DIR/current" ] && [ "$FORCE" -eq 0 ]; then

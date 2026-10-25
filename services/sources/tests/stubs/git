@@ -21,6 +21,10 @@ case "${1:-}" in
       exit 1
     fi
     ;;
+  merge-base)
+    # --is-ancestor <sha> <head>: true only when <sha> is the known HEAD
+    [ "$3" = "$(cat "$STATE_DIR/local_sha" 2>/dev/null || echo aaa1111)" ] && exit 0 || exit 1
+    ;;
   fetch|status) ;;
 esac
 exit 0
