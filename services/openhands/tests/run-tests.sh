@@ -31,7 +31,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
 
 teardown() {
@@ -377,6 +377,559 @@ test_live() {
     sh -c "test -d \"\$(sed -n 's/^AGENT_WORKSPACES=//p' '$SERVICE_DIR/.env')/openhands-test\""
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+data_dir() { sed -n 's/^OPENHANDS_DATA=//p' "$SVC/.env"; }
+
+# uid 10001 can still write $1: an ACL entry, or the a+rwx fallback.
+grant_kept() {
+  getfacl -p "$1" 2>/dev/null | grep -q 'user:10001:rwx' \
+    || [ -n "$(find "$1" -maxdepth 0 -perm -0002 2>/dev/null)" ]
+}
+
+# A deployed sandbox: setup.sh has run (with ~/.claude, so the creds overlay
+# exists), Serve maps this port to this service, neighbours sit on other
+# ports (one a lookalike suffix), and Docker lists this project's container
+# plus unrelated ones.
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$HOME/.claude"
+  printf 'host-cred\n' > "$HOME/.claude/.credentials.json"
+  run_deploy
+  mkdir -p "$(data_dir)/conversations"
+  echo keep > "$(data_dir)/settings.json"
+  echo mine > "$HOME/agent-workspaces/openhands-test/work.txt"
+  mkdir -p "$HOME/agent-workspaces/paperclip-test"
+  echo pc > "$HOME/agent-workspaces/paperclip-test/keep"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:3100 (tailnet only)
+|-- / proxy http://127.0.0.1:3100
+
+https://test-host.tailfake.ts.net:8000 (tailnet only)
+|-- / proxy http://127.0.0.1:8000
+
+https://test-host.tailfake.ts.net:18000 (tailnet only)
+|-- / proxy http://127.0.0.1:18000
+EOF
+  printf '%s\n' 'openhands-agent-canvas|openhands' 'paperclip-db|paperclip' 'stirling-pdf|stirling-pdf' \
+    > "$STATE_DIR/containers"
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps data, .env, workspaces and ACLs; unpublishes only its port"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8000"         calls_have "tailscale serve --https=8000 off"
+  check "neighbour :3100 untouched"   no_call "https=3100"
+  check "lookalike :18000 untouched"  no_call "https=18000"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "  on the openhands dir + base file" calls_have "compose --project-directory $SVC -f $SVC/docker-compose.yml"
+  check "  with the creds overlay setup.sh uses" calls_have "-f $SVC/docker-compose.creds.yml down"
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "no other container touched"  no_call "docker rm\|docker stop\|docker kill"
+  check "no unit touched"             no_call "systemctl\|launchctl"
+  check "data kept"                   [ -f "$(data_dir)/settings.json" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "creds overlay kept"          [ -f "$SVC/docker-compose.creds.yml" ]
+  check "host Claude creds untouched" grep -qx 'host-cred' "$HOME/.claude/.credentials.json"
+  check "workspaces kept"             [ -f "$HOME/agent-workspaces/openhands-test/work.txt" ]
+  check "  Paperclip's workspace kept" [ -f "$HOME/agent-workspaces/paperclip-test/keep" ]
+  check "data dir grant left alone"   grant_kept "$(data_dir)"
+  check "workspace grant left alone"  grant_kept "$HOME/agent-workspaces"
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_no_overlay() {
+  echo "• teardown: no creds overlay means compose down on the base file only"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  printf 'https://test-host.tailfake.ts.net:8000 (tailnet only)\n|-- / proxy http://127.0.0.1:8000\n' \
+    > "$STATE_DIR/serve_status"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no overlay on disk"          [ ! -f "$SVC/docker-compose.creds.yml" ]
+  check "down without an overlay -f"  calls_have "-f $SVC/docker-compose.yml down"
+  teardown
+}
+
+test_teardown_https_port_override() {
+  echo "• teardown: a separate HTTPS port is found from serve status"
+  setup
+  touch "$STATE_DIR/operator"
+  export OPENHANDS_HTTPS_PORT=8444
+  run_deploy
+  unset OPENHANDS_HTTPS_PORT
+  printf 'https://test-host.tailfake.ts.net:8444 (tailnet only)\n|-- / proxy http://127.0.0.1:8000\n' \
+    > "$STATE_DIR/serve_status"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8444"         calls_have "tailscale serve --https=8444 off"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8000 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "root: no compose down"       [ ! -f "$STATE_DIR/compose_down" ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "no docker: nothing unpublished" no_call " off"
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then data, .env and marker go"
+  deployed
+  local dir; dir="$(data_dir)"
+  run_teardown --purge "open-hands"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: data kept"       [ -f "$dir/settings.json" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge "openhands"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "data dir gone"               [ ! -e "$dir" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "marker ~/services/openhands gone" [ ! -e "$HOME/services/openhands" ]
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "serve off for :8000"         calls_have "tailscale serve --https=8000 off"
+  check "down only, never down -v"    no_call "down -v"
+  check "no cleanup container needed" no_call "entrypoint sh"
+  check "creds overlay kept"          [ -f "$SVC/docker-compose.creds.yml" ]
+  check "host Claude creds untouched" grep -qx 'host-cred' "$HOME/.claude/.credentials.json"
+  check "workspaces kept"             [ -f "$HOME/agent-workspaces/openhands-test/work.txt" ]
+  check "  openhands-test README kept" [ -f "$HOME/agent-workspaces/openhands-test/README.md" ]
+  check "  Paperclip's workspace kept" [ -f "$HOME/agent-workspaces/paperclip-test/keep" ]
+  check "workspace grant NOT removed" grant_kept "$HOME/agent-workspaces"
+  check "  openhands-test grant NOT removed" grant_kept "$HOME/agent-workspaces/openhands-test"
+  if getfacl -p "$HOME/agent-workspaces" 2>/dev/null | grep -q 'user:10001:'; then
+    check "prints the exact setfacl -x" out_has "setfacl -x u:10001 $HOME/agent-workspaces$"
+    check "  and the default-ACL one"   out_has "setfacl -d -x u:10001 $HOME/agent-workspaces/openhands-test$"
+  else
+    check "prints the chmod o-w"        out_has "chmod o-w $HOME/agent-workspaces "
+  fi
+  check "no unit touched"             no_call "systemctl\|launchctl"
+  teardown
+}
+
+test_teardown_purge_container_owned() {
+  echo "• teardown --purge: container-owned files are cleared by the image on the box, not sudo"
+  deployed
+  local dir; dir="$(data_dir)"
+  # Stand-in for uid-10001 files: a read-only dir the host user cannot empty.
+  mkdir -p "$dir/conversations/locked"; echo x > "$dir/conversations/locked/f"
+  chmod 500 "$dir/conversations/locked"
+  run_teardown --purge "openhands"
+  chmod -R u+rwX "$dir" 2>/dev/null
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "used the image from .env"    calls_have "ghcr.io/openhands/agent-canvas:latest"
+  check "never pulled for it"         calls_have "pull never"
+  check "mounted only the data dir"   calls_have "-v $dir:/x"
+  check "no sudo"                     no_call "^sudo"
+  check "data dir gone"               [ ! -e "$dir" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  dir="$(data_dir)"
+  mkdir -p "$dir/conversations/locked"; echo x > "$dir/conversations/locked/f"
+  chmod 500 "$dir/conversations/locked"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "openhands"
+  chmod -R u+rwX "$dir" 2>/dev/null
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $dir"
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  sed -i.bak 's/^OPENHANDS_VERSION=.*/OPENHANDS_VERSION=latest@evil/' "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "odd image tag: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  data kept"                 [ -f "$(data_dir)/settings.json" ]
+  teardown
+}
+
+test_teardown_ambiguous_containers() {
+  echo "• teardown: openhands-looking containers outside the project are listed and left"
+  deployed
+  printf '%s\n' 'openhands-agent-canvas|openhands' 'openhands-runtime-abc123|' \
+    'paperclip-db|paperclip' >> "$STATE_DIR/containers"
+  run_teardown
+  check "default: exits zero"         [ "$CODE" -eq 0 ]
+  check "  names the runtime container" out_has "openhands-runtime-abc123 (compose project: none)"
+  check "  does not stop or remove it" no_call "docker rm\|docker stop\|docker kill"
+  check "  does not name Paperclip's"  out_lacks "paperclip-db"
+  check "  own project still down"    [ -f "$STATE_DIR/compose_down" ]
+  rm -f "$STATE_DIR/compose_down"; : > "$CALLS_LOG"
+  run_teardown --purge "openhands"
+  check "purge: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "  says why"                  out_has "will not run while the containers above exist"
+  check "  data kept"                 [ -f "$(data_dir)/settings.json" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  nothing unpublished"       no_call " off"
+  teardown
+  deployed
+  printf '%s\n' 'openhands-agent-canvas|paperclip-openhands' > "$STATE_DIR/containers"
+  run_teardown
+  check "legacy-project container: exits zero" [ "$CODE" -eq 0 ]
+  check "  named, not removed"        out_has "openhands-agent-canvas (compose project: paperclip-openhands)"
+  check "  no docker rm"              no_call "docker rm"
+  teardown
+  deployed
+  touch "$STATE_DIR/ps_list_fails"
+  run_teardown
+  check "unlistable containers: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing unpublished"       no_call " off"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_foreign_units() {
+  echo "• teardown: units that mention openhands but setup.sh did not create are named, not touched"
+  deployed
+  mkdir -p "$HOME/.config/systemd/user"
+  printf '[Service]\nExecStart=/usr/bin/paperclipai run --openhands-url http://127.0.0.1:8000\n' \
+    > "$HOME/.config/systemd/user/paperclip.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$HOME/.config/systemd/user/other.service"
+  run_teardown --purge "openhands"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "warns naming the unit"       out_has "paperclip.service mentions openhands"
+  check "  does not name the unrelated one" out_lacks "other.service"
+  check "  unit file kept"            [ -f "$HOME/.config/systemd/user/paperclip.service" ]
+  check "  no systemctl call"         no_call "systemctl"
+  teardown
+}
+
+test_teardown_purge_protects_creds() {
+  echo "• teardown --purge: host credentials reached through the data dir are refused"
+  deployed
+  local dir; dir="$(data_dir)"
+  mkdir -p "$dir/claude-real"; echo secret > "$dir/claude-real/.credentials.json"
+  rm -rf "$HOME/.claude"; ln -s "$dir/claude-real" "$HOME/.claude"
+  run_teardown --purge "openhands"
+  check ".claude inside data: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  creds kept"                [ -f "$dir/claude-real/.credentials.json" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  rm -f "$HOME/.claude"; mkdir -p "$HOME/.claude"
+  mkdir -p "$dir/codex-copy"; echo tok > "$dir/codex-copy/auth.json"
+  printf 'services:\n  openhands:\n    volumes:\n      - %s:/home/openhands/.codex\n' "$dir/codex-copy" \
+    > "$SVC/docker-compose.creds.yml"
+  run_teardown --purge "openhands"
+  check "overlay mount inside data: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it is mounted as credentials" out_has "mounted into the container as credentials"
+  check "  mounted file kept"         [ -f "$dir/codex-copy/auth.json" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a data dir outside ~/services"
+  deployed
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/agent-workspaces#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "workspaces refused"          [ "$CODE" -ne 0 ]
+  check "  workspaces kept"           [ -f "$HOME/agent-workspaces/openhands-test/work.txt" ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./openhands" "$HOME/services/openhands/.."; do
+    sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$dotted#" "$SVC/.env"
+    run_teardown --purge "openhands"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
+  check "own data never touched"      [ -f "$HOME/services/openhands/data/settings.json" ]
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8010 (tailnet only)
+|-- / proxy http://127.0.0.1:8000
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8000
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /oh proxy http://127.0.0.1:8000
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8010 off"                   calls_have "serve --https=8010 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^OPENHANDS_PORT=.*/export OPENHANDS_PORT='8000'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8000 off"                   calls_have "serve --https=8000 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^OPENHANDS_PORT=.*/OPENHANDS_PORT="8000"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  check ":8000 off"                   calls_have "serve --https=8000 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^OPENHANDS_PORT=.*/OPENHANDS_PORT=8000 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  check ":8000 off"                   calls_have "serve --https=8000 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^OPENHANDS_PORT=.*/OPENHANDS_PORT=80o0/' "$SVC/.env"
+  run_teardown
+  check "non-numeric port refused"    [ "$CODE" -ne 0 ]
+  check "  nothing unpublished"       no_call " off"
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/services//#" "$SVC/.env"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "openhands"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/services/alias#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services/neighbour" "$HOME/services/openhands/link"
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/services/openhands/link/#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "symlinked leaf with trailing slash refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+  deployed
+  local dir; dir="$(data_dir)"
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$dir///#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "own dir with trailing slashes: exits zero" [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: a data dir already gone is fine, marker still goes"
+  deployed
+  rm -rf "$(data_dir)"
+  run_teardown --purge "openhands"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "empty marker removed"        [ ! -e "$HOME/services/openhands" ]
+  teardown
+  deployed
+  rm -rf "$(data_dir)"
+  echo note > "$HOME/services/openhands/README"
+  run_teardown --purge "openhands"
+  check "non-empty marker: exits zero" [ "$CODE" -eq 0 ]
+  check "  marker kept (rmdir only)"  [ -f "$HOME/services/openhands/README" ]
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  local dir; dir="$(data_dir)"
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=\"\${HOME}${dir#"$HOME"}\"#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(data_dir)"
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=\$HOME${dir#"$HOME"}#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "\$HOME form: exits zero"     [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(data_dir)"
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA='\$HOME${dir#"$HOME"}'#" "$SVC/.env"
+  run_teardown --purge "openhands"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  dir kept"                  [ -e "$dir" ]
+  teardown
+}
+
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/openhands itself or inside it"
+  deployed
+  local d
+  for d in neighbour paperclip paperclip-openhands; do
+    mkdir -p "$HOME/services/$d"; echo x > "$HOME/services/$d/keep"
+    sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/services/$d#" "$SVC/.env"
+    run_teardown --purge "openhands"
+    check "$d dir refused"            [ "$CODE" -ne 0 ]
+    check "  its data kept"           [ -f "$HOME/services/$d/keep" ]
+    check "  nothing stopped"         [ ! -f "$STATE_DIR/compose_down" ]
+  done
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/services/openhands/a:b#" "$SVC/.env"
+  mkdir -p "$HOME/services/openhands/a:b"
+  run_teardown --purge "openhands"
+  check "a colon in the path refused" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/openhands/data"; echo x > "$HOME/openhands/data/keep"
+  run_teardown --purge "openhands"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"    [ -f "$HOME/openhands/data/keep" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'OPENHANDS_DATA=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "OPENHANDS_DATA is set more than once"
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nOPENHANDS_DATA=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_* in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "openhands"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  nothing unpublished"       no_call " off"
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  no compose call"           no_call "compose --project-directory"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/openhands survives"
+  deployed
+  local repo="$HOME/services/openhands/setup-server/services/openhands"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/openhands/setup-server/other.env"
+  sed -i.bak "s#^OPENHANDS_DATA=.*#OPENHANDS_DATA=$HOME/services/openhands#" "$repo/.env"
+  OUT="$(printf '%s\n' "openhands" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "checkout intact"             [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"  [ -f "$HOME/services/openhands/setup-server/other.env" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/openhands/setup.sh or docker-compose.yml is missing — nothing to test."
@@ -397,6 +950,29 @@ test_operator_escalation
 test_serve_approval_prompt
 test_creds_overlay_not_overwritten
 test_migrates_legacy_env
+test_teardown_safe
+test_teardown_no_overlay
+test_teardown_https_port_override
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_container_owned
+test_teardown_ambiguous_containers
+test_teardown_foreign_units
+test_teardown_purge_protects_creds
+test_teardown_purge_refuses_odd_paths
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_quoted_env
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_data_dir
+test_teardown_home_variable_in_env
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
+test_teardown_purge_keeps_a_checkout_inside
 
 if [ "${1:-}" = "--live" ]; then
   echo

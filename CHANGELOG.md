@@ -10,6 +10,14 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for openhands**, so it gets the launcher's Remove button.
+  It stops only containers in the `openhands` compose project (with the
+  creds overlay file when present); any other container named like
+  OpenHands is listed and left running, and `--purge` refuses while one
+  exists. It never touches `~/.claude`, `~/.codex`, the creds overlay
+  sources or `~/agent-workspaces`, and prints the `setfacl -x` lines for
+  the uid 10001 ACLs instead of running them.
+
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
   gets the launcher's Remove button. The vaultwarden, immich and
