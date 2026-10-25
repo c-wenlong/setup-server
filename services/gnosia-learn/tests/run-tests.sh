@@ -247,14 +247,14 @@ test_fresh_deploy() {
     check "app unit has no postgres"    sh -c "! grep -q 'postgres\|DATABASE_URL' '$HOME/.config/systemd/user/gnosia-learn.service'"
     check "export unit gets GNOSIA_HOME" grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/gnosia-learn-export.service"
     check "export unit gets CATALOG_DB" grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/gnosia-learn-export.service"
-    check "deploy timer written"        [ -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
+    check "no deploy timer (deployd)"   [ ! -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
     check "export timer written"        [ -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
     check "studio unit written"         [ -f "$HOME/.config/systemd/user/gnosia-learn-studio.service" ]
     check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
     check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
     check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/gnosia-learn/studio" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
     check "app restarted"               calls_have "systemctl --user restart gnosia-learn"
-    check "deploy timer enabled"        calls_have "systemctl --user enable --now gnosia-learn-deploy.timer"
+    check "deploy timer not enabled"    no_call "enable --now gnosia-learn-deploy.timer"
     check "export timer enabled"        calls_have "systemctl --user enable --now gnosia-learn-export.timer"
     check "studio off by default"       calls_have "systemctl --user disable --now gnosia-learn-studio"
     check "export unit mode is 600"     sh -c "[ \"$(stat -c %a "$HOME/.config/systemd/user/gnosia-learn-export.service" 2>/dev/null || stat -f %Lp "$HOME/.config/systemd/user/gnosia-learn-export.service")\" = 600 ]"
@@ -262,17 +262,17 @@ test_fresh_deploy() {
   else
     check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist" ]
     check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist" ]
-    check "deploy agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
+    check "no deploy agent (deployd)"   [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
     check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist" ]
     check "web agent gets GNOSIA_HOME"  grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
     check "web agent gets CATALOG_DB"   grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
     check "export agent gets GNOSIA_HOME" grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
     check "export agent gets CATALOG_DB" grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
-    check "deploy agent sets PATH"      grep -q "/opt/homebrew/bin" "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist"
+    check "deploy agent not loaded"     no_call "launchctl bootstrap .*com.gnosia-learn.deploy"
     check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.gnosia-learn.web"
     check "studio agent not loaded"     no_call "launchctl bootstrap .*com.gnosia-learn.studio"
     local a
-    for a in web deploy export; do
+    for a in web export; do
       check "$a label enabled before bootstrap (undoes teardown's disable)" \
         before "launchctl enable gui/.*/com.gnosia-learn.$a" "launchctl bootstrap .*com.gnosia-learn.$a"
     done
@@ -301,6 +301,124 @@ test_idempotent_rerun() {
   check "no git clone"            no_call "git clone"
   check "never invoked sudo"      no_call "^sudo "
   check "no docker anywhere"      no_call "^docker "
+  teardown
+}
+
+# The pre-migration poller under either name (the service was self-learn
+# before the rename): setup.sh removes it once deployd is installed.
+mk_deployd() {
+  mkdir -p "$HOME/services/deployd/bin" "$HOME/services/deployd/state"
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/services/deployd/bin/deployd"
+  chmod +x "$HOME/services/deployd/bin/deployd"
+}
+seed_legacy_poller() {
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    for n in self-learn gnosia-learn; do
+      echo x > "$HOME/.config/systemd/user/$n-deploy.timer"
+      echo x > "$HOME/.config/systemd/user/$n-deploy.service"
+    done
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist"
+  fi
+}
+
+test_migrate_removes_legacy_poller() {
+  echo "• migration: leftover per-service deploy timers/plists are removed once deployd is installed"
+  setup
+  touch "$STATE_DIR/operator"
+  mk_deployd
+  seed_legacy_poller
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "self-learn timer gone"   [ ! -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
+    check "gnosia timer gone"       [ ! -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
+    check "timer disabled first"    calls_have "systemctl --user disable --now self-learn-deploy.timer"
+    check "export timer kept"       [ -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
+  else
+    check "self-learn plist gone" [ ! -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
+    check "gnosia plist gone"     [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
+    check "agents booted out"     calls_have "launchctl bootout gui/.*/com.self-learn.deploy"
+    check "export plist kept"     [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist" ]
+  fi
+  teardown
+}
+
+test_migrate_keeps_poller_without_deployd() {
+  echo "• migration: without deployd the old poller is kept, with a warning"
+  setup
+  touch "$STATE_DIR/operator"
+  seed_legacy_poller
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "warns about deployd"     out_has "deployd is not installed"
+  if [ "$OS" = "Linux" ]; then
+    check "timers kept"           [ -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ] \
+                               && [ -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
+    check "never disabled"        no_call "disable --now self-learn-deploy.timer"
+  else
+    check "plists kept"           [ -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ] \
+                               && [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
+    check "never booted out"      no_call "launchctl bootout gui/.*/com.self-learn.deploy"
+  fi
+  teardown
+}
+
+test_teardown_marks_disabled() {
+  echo "• teardown marks deployd disabled; a manual setup clears the flag"
+  deployed
+  run_teardown
+  check "teardown exits zero"     [ "$CODE" -eq 0 ]
+  check "disabled flag written"   [ -f "$HOME/services/deployd/state/gnosia-learn.disabled" ]
+  run_deploy
+  check "re-setup exits zero"     [ "$CODE" -eq 0 ]
+  check "disabled flag cleared"   [ ! -f "$HOME/services/deployd/state/gnosia-learn.disabled" ]
+  teardown
+}
+
+test_deploy_sha_pin() {
+  echo "• deployd-requested sha: DEPLOY_SHA pins the built commit like --sha"
+  setup
+  touch "$STATE_DIR/operator"
+  DEPLOY_SHA=ddd4444 run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "resets to the pin"       calls_have "reset --hard --quiet ddd4444"
+  check "built sha is the pin"    grep -qx ddd4444 "$HOME/services/gnosia-learn/state/built-sha"
+  : > "$CALLS_LOG"
+  DEPLOY_SHA=eee5555 run_poll
+  check "poll: exits zero"        [ "$CODE" -eq 0 ]
+  check "poll: deploys the pin"   out_has "deploying eee5555"
+  check "poll: resets to the pin" calls_have "reset --hard --quiet eee5555"
+  # A pin that is not on the fetched branch fails instead of building it —
+  # deployd would otherwise record a sha that was never deployed.
+  echo fff6666 > "$STATE_DIR/git_diverged_sha"
+  : > "$CALLS_LOG"
+  DEPLOY_SHA=fff6666 run_poll
+  check "diverged pin: exits non-zero" [ "$CODE" -ne 0 ]
+  check "diverged pin: says why"       out_has "not an ancestor of origin/"
+  check "diverged pin: nothing built"  no_call "reset --hard"
+  teardown
+}
+
+test_path_restored_from_env() {
+  echo "• re-run under a minimal PATH finds node via the dir saved in .env"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "first run ok"            [ "$CODE" -eq 0 ]
+  nonode="$STATE_DIR/no-node-stubs"; mkdir -p "$nonode"
+  for s in "$STUBS"/*; do [ "${s##*/}" = node ] || ln -s "$s" "$nonode/${s##*/}"; done
+  nodebin="$STATE_DIR/saved-node-bin"; mkdir -p "$nodebin"
+  printf '#!/bin/sh\nexec "%s/node" "$@"\n' "$STUBS" > "$nodebin/node"; chmod +x "$nodebin/node"
+  ln -s "$STUBS/npm" "$nodebin/npm"
+  grep -v '^NODE_BIN=' "$SVC/.env" > "$SVC/.env.tmp" && mv "$SVC/.env.tmp" "$SVC/.env"
+  printf "NODE_BIN='%s'\n" "$nodebin" >> "$SVC/.env"
+  OUT="$(printf '\n' | PATH="$nonode:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  check "exits zero without stub node" [ "$CODE" -eq 0 ]
+  check "found node via .env"          out_has "Preflight checks"
   teardown
 }
 
@@ -402,7 +520,7 @@ test_poll_lock() {
   echo $$ > "$HOME/services/gnosia-learn/.deploy.lock/pid"
   : > "$CALLS_LOG"
   run_poll
-  check "exits zero"             [ "$CODE" -eq 0 ]
+  check "exits non-zero"         [ "$CODE" -ne 0 ]
   check "reports the skip"       out_has "another deploy is running"
   check "touched no git"         no_call "fetch --quiet"
   rm -rf "$HOME/services/gnosia-learn/.deploy.lock"
@@ -925,8 +1043,13 @@ test_sync_push_no_sqlite3() {
   run_sync push
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "no .backup attempted"    no_call "sqlite3 .*\.backup"
-  check "sender stopped for copy" calls_have "systemctl --user stop gnosia-learn.service"
-  check "sender restarted"        calls_have "systemctl --user start gnosia-learn.service"
+  if [ "$OS" = "Linux" ]; then
+    check "sender stopped for copy" calls_have "systemctl --user stop gnosia-learn.service"
+    check "sender restarted"        calls_have "systemctl --user start gnosia-learn.service"
+  else
+    check "sender stopped for copy" calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+    check "sender restarted"        calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+  fi
   check "staged set shipped"      calls_have "scp .*-pr"
   check "wal moves in too"        calls_have "catalog.db-wal"
   teardown
@@ -953,15 +1076,24 @@ test_sync_pull() {
   check "remote db checked"       calls_have "ssh .*-f '/Users/tester/.gnosia/catalog.db'"
   check "remote .backup"          calls_have "sqlite3 .*\.backup"
   check "staged dir scp'd back"   calls_have "scp .*-pr"
-  check "app stopped"             calls_have "systemctl --user stop gnosia-learn.service"
+  if [ "$OS" = "Linux" ]; then
+    check "app stopped"           calls_have "systemctl --user stop gnosia-learn.service"
+  else
+    check "app stopped"           calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+  fi
   check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
   check "stale wal dropped"       test ! -e "$HOME/.self-learn/catalog.db-wal"
   check "audit ran"               calls_have "npm run catalog -- blob audit"
   check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.self-learn/catalog.db" "$STATE_DIR/catalog_env.log"
   check "audit got GNOSIA_HOME"   grep -qx "GNOSIA_HOME=$HOME/.self-learn" "$STATE_DIR/catalog_env.log"
   check "no DATABASE_URL passed"  grep -qx "DATABASE_URL=" "$STATE_DIR/catalog_env.log"
-  check "app restarted"           calls_have "systemctl --user start gnosia-learn.service"
-  check "stop before start"       before "stop gnosia-learn.service" "start gnosia-learn.service"
+  if [ "$OS" = "Linux" ]; then
+    check "app restarted"         calls_have "systemctl --user start gnosia-learn.service"
+    check "stop before start"     before "stop gnosia-learn.service" "start gnosia-learn.service"
+  else
+    check "app restarted"         calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "stop before start"     before "bootout gui/.*/com.gnosia-learn.web" "\(bootstrap\|kickstart\).*com.gnosia-learn.web"
+  fi
   check "staging cleaned"         test ! -e "$HOME/.self-learn/.sync-stage"
   check "vault warned"            out_has "vault"
   teardown
@@ -1124,7 +1256,11 @@ test_sync_pull_audit_fails() {
   check "exits zero (informational)" [ "$CODE" -eq 0 ]
   check "warns about gaps"           out_has "audit reported gaps"
   check "db still replaced"          grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
-  check "app still restarted"        calls_have "systemctl --user start gnosia-learn.service"
+  if [ "$OS" = "Linux" ]; then
+    check "app still restarted"      calls_have "systemctl --user start gnosia-learn.service"
+  else
+    check "app still restarted"      calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+  fi
   teardown
 }
 
@@ -1226,12 +1362,13 @@ test_live() {
   if [ "$OS" = "Linux" ]; then
     live_check "app unit active"           sh -c "systemctl --user is-active gnosia-learn.service | grep -qx active"
     live_check "app unit enabled"          sh -c "systemctl --user is-enabled gnosia-learn.service | grep -qx enabled"
-    live_check "deploy timer active"       sh -c "systemctl --user is-active gnosia-learn-deploy.timer | grep -qx active"
+    live_check "deployd timer active"      sh -c "systemctl --user is-active deployd.timer | grep -qx active"
+    live_check "deployd tracks this repo"  sh -c "$HOME/services/deployd/bin/deployd --status 2>/dev/null | grep -q gnosia-learn"
     live_check "export timer active"       sh -c "systemctl --user is-active gnosia-learn-export.timer | grep -qx active"
     live_check "lingering enabled"         sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
   else
     live_check "web agent loaded"          sh -c "launchctl print gui/$(id -u)/com.gnosia-learn.web"
-    live_check "deploy agent loaded"       sh -c "launchctl print gui/$(id -u)/com.gnosia-learn.deploy"
+    live_check "deployd agent loaded"      sh -c "launchctl print gui/$(id -u)/com.setup-server.deployd"
   fi
   live_check "serve maps :$port"           sh -c "'$ts' serve status | grep -A2 ':$port' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS responds"      curl -fsS -o /dev/null --max-time 30 "$url/"
@@ -1271,6 +1408,24 @@ deployed() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
+  # teardown.sh still removes the pre-migration deploy timer/plist, so the
+  # deployed sandbox seeds it the way a pre-migration install left it —
+  # and deployd itself, the way the box has it now.
+  mkdir -p "$HOME/services/deployd/bin" "$HOME/services/deployd/state"
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/services/deployd/bin/deployd"
+  chmod +x "$HOME/services/deployd/bin/deployd"
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    echo x > "$HOME/.config/systemd/user/gnosia-learn-deploy.timer"
+    echo x > "$HOME/.config/systemd/user/gnosia-learn-deploy.service"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents" "$STATE_DIR/launchd"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist"
+    # Per-label loaded markers, as a real deployed box has them (the studio
+    # runner stays unmarked — it is disabled by default).
+    local a
+    for a in deploy export web; do touch "$STATE_DIR/launchd/com.gnosia-learn.$a"; done
+  fi
   mkdir -p "$(SVC_HOME)/studio/jobs" "$HOME/.gnosia/archive/latest" "$HOME/.gnosia/vault"
   echo wal > "$(SVC_HOME)/studio/jobs/wal"
   echo export > "$HOME/.gnosia/archive/latest/catalog.json"
@@ -1341,14 +1496,16 @@ test_teardown_then_setup_restores() {
   check "setup exits zero"              [ "$CODE" -eq 0 ]
   check "not left stopped"              out_lacks "leaving it stopped"
   check "marker consumed"               [ ! -f "$(SVC_HOME)/state/torn-down" ]
-  check "app marked active again"       [ -f "$STATE_DIR/web_active" ]
   if [ "$OS" = "Linux" ]; then
+    check "app marked active again"     [ -f "$STATE_DIR/web_active" ]
     check "app restarted"               calls_have "systemctl --user restart gnosia-learn"
-    check "timers re-enabled"           calls_have "systemctl --user enable --now gnosia-learn-deploy.timer"
+    check "deploy timer stays gone"     no_call "enable --now gnosia-learn-deploy.timer"
+  else
+    check "app marked active again"     [ -f "$STATE_DIR/launchd/com.gnosia-learn.web" ]
   fi
   check "serve republished"             calls_have "tailscale serve --bg --https=8107"
   # A later plain stop is the owner's again.
-  rm -f "$STATE_DIR/web_active"
+  rm -f "$STATE_DIR/web_active" "$STATE_DIR/launchd/com.gnosia-learn.web"
   : > "$CALLS_LOG"
   run_deploy
   check "next stop respected again"     out_has "leaving it stopped"
@@ -2025,7 +2182,7 @@ test_teardown_macos_agents() {
   touch "$STATE_DIR/launchd_bootout_fails"
   run_teardown --purge "gnosia-learn"
   check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  says so"                     out_has "Could not unload LaunchAgent com.gnosia-learn.web"
+  check "  says so"                     out_has "Could not unload LaunchAgent com.gnosia-learn.deploy"
   check "  deletion not reached"        [ -d "$(REPO_DIR)/.git" ]
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
   check "  .env kept"                   [ -f "$SVC/.env" ]
@@ -2065,6 +2222,11 @@ test_preflight_git_auth
 test_preflight_root
 test_fresh_deploy
 test_idempotent_rerun
+test_migrate_removes_legacy_poller
+test_migrate_keeps_poller_without_deployd
+test_teardown_marks_disabled
+test_deploy_sha_pin
+test_path_restored_from_env
 test_push_triggers_redeploy
 test_lockfile_change_triggers_ci
 test_stopped_app_stays_stopped
