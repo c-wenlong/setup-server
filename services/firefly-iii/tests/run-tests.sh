@@ -126,6 +126,7 @@ out_lacks()  { ! grep -qi -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 call_count() { grep -c -- "$1" "$CALLS_LOG"; }
+teardown_lacks() { ! grep -qE -- "$1" "$SERVICE_DIR/teardown.sh"; }
 
 # .env values may be double-quoted so a value containing a space survives
 # `. "$ENV_FILE"`. Strip the quotes here rather than in every assertion.
@@ -1516,6 +1517,16 @@ SERVE_END
   teardown
 }
 
+test_teardown_no_empty_array_length() {
+  echo "• teardown.sh: no \${#arr[@]} on a maybe-empty array — Bash 3.2 + set -u errors there"
+  # macOS ships Bash 3.2, where ${#arr[@]} of an empty array is an
+  # unbound-variable error, not 0. A normal purge queues zero hidden dirs,
+  # so reading the length died after the data was gone but before .env —
+  # a half-purge every retry repeated. The queue count is tracked instead.
+  check "no array-length expansion"      teardown_lacks '\${#[A-Za-z_]+\[@\]}'
+  check "hidden queue counted at append" grep -q 'HIDDEN_N=$((HIDDEN_N + 1))' "$SERVICE_DIR/teardown.sh"
+}
+
 # ------------------------------------------------------------------ main
 for f in setup.sh teardown.sh docker-compose.yml; do
   [ -f "$SERVICE_DIR/$f" ] || { red "services/firefly-iii/$f is missing — nothing to test."; exit 1; }
@@ -1568,6 +1579,7 @@ test_teardown_purge_missing_state_dirs
 test_teardown_quoted_env
 test_teardown_purge_unsearchable_parent
 test_teardown_only_shared_ports
+test_teardown_no_empty_array_length
 
 echo "• sandbox isolation: the mocked suite changed nothing on this host"
 AFTER_FP="$(host_fingerprint)"

@@ -248,6 +248,9 @@ PURGE_LABELS="" # what the user is told is being deleted
 HIDDEN_BASES=()
 HIDDEN_RESTS=()
 HIDDEN_PATHS=()
+# Counted at append: on Bash 3.2 (macOS's bundled shell) taking the length
+# of an empty array is an unbound-variable error under set -u.
+HIDDEN_N=0
 # The cleanup image: the postgres image the stack already pulled. Settled
 # before the confirmation, so the purge never has to work it out halfway.
 PG_IMAGE="postgres:${POSTGRES_VERSION:-16-alpine}"
@@ -280,6 +283,7 @@ check_purge_dir() {
     HIDDEN_BASES+=("$real")
     HIDDEN_RESTS+=("$HIDDEN_REST")
     HIDDEN_PATHS+=("$dir")
+    HIDDEN_N=$((HIDDEN_N + 1))
     PURGE_LABELS="${PURGE_LABELS:+$PURGE_LABELS, }$real/$HIDDEN_REST"
   elif [ "$DIR_STATE" = "present" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."
@@ -387,7 +391,7 @@ EOF
   # is already gone means its target went with it. Never mount a missing
   # folder: dockerd would create it, as root.
   i=0
-  while [ "$i" -lt "${#HIDDEN_BASES[@]}" ]; do
+  while [ "$i" -lt "$HIDDEN_N" ]; do
     base="${HIDDEN_BASES[$i]}"; rest="${HIDDEN_RESTS[$i]}"
     if [ ! -e "$base" ] && [ ! -L "$base" ]; then
       ok "$base/$rest is already gone (its folder went with an earlier delete)"

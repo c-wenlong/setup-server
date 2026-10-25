@@ -27,7 +27,10 @@ first, dated by merge.
   does: they check their own containers are gone, warn, and carry on, and
   trigger-dev no longer reports such networks as removed. Every
   teardown now says how many shared Serve ports still route to the service,
-  instead of "already off", when it leaves them on.
+  instead of "already off", when it leaves them on. firefly-iii's hidden-path
+  queue is also counted at append now, so a purge with no hidden dirs no
+  longer dies on the empty-array length read under macOS's Bash 3.2 —
+  halfway through, after the data but before `.env`.
 
 - **Stopping AdGuard from the launcher or the phone now checks tailnet DNS
   first.** Stop used to run a plain `docker stop`, skipping the check that
