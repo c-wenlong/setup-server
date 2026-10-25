@@ -527,6 +527,22 @@ EOF
   ok "Deleted the unit files, $ENV_FILE and the state under ${PURGE_DIR:-(no SERVICE_HOME on disk)}"
 fi
 
+# Tell deployd not to resurrect this on the next push: the flag lives in
+# deployd's own state dir so it survives --purge too. deployd's runtime
+# home can be overridden by SERVICE_HOME in services/deployd/.env.
+# Re-run ./setup.sh to clear it and re-enable auto-deploy.
+DEPLOYD_HOME="$HOME/services/deployd"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  d="$(sed -n "s/^SERVICE_HOME=\(.*\)\$/\1/p" "$SERVICE_DIR/../deployd/.env" \
+       | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
+  case "$d" in \~/*) d="$HOME/${d#\~/}" ;; \$HOME/*) d="$HOME/${d#\$HOME/}" ;; esac
+  [ -n "$d" ] && DEPLOYD_HOME="$d"
+fi
+if [ -d "$DEPLOYD_HOME/state" ]; then
+  touch "$DEPLOYD_HOME/state/$NAME.disabled"
+  ok "deployd will skip $NAME until its setup.sh runs again"
+fi
+
 echo
 if [ "$PURGE" -eq 1 ]; then
   printf '\033[1;32mDone.\033[0m %s is removed and its deploy state is gone. ./setup.sh starts fresh.\n' "$NAME"

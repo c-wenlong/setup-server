@@ -16,8 +16,9 @@
 #     LaunchAgent (macOS)
 #   - catalog bootstrapped once: migrate, `import seed`, six `flip`s,
 #     `blob audit --fix` to claim the blob store at $GNOSIA_HOME
-#   - two schedulers: a deploy poller (pull -> ci -> migrate -> build ->
-#     restart, every POLL_SECONDS) and a nightly catalog export (03:00)
+#   - two schedulers: deployd (services/deployd) polls the repo's remote
+#     and re-runs this script when main moves (pull -> ci -> migrate ->
+#     build -> restart), and a nightly catalog export timer (03:00)
 #   - published tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
 #
 # Usage:
@@ -34,8 +35,9 @@
 # non-interactive access to the private repo (gh auth setup-git, or a deploy
 # key), Node.js >= 22.22.2 (engines field in upstream's package.json).
 #
-# Idempotent: safe to re-run. Re-running pulls new commits through the poller
-# script, repairs any missing piece, and never overwrites the .env. The
+# Idempotent: safe to re-run. Re-running pulls new commits through the
+# deploy script, repairs any missing piece (and removes the old per-service
+# deploy timer if a host still has one), and never overwrites the .env. The
 # seeded marker in ~/services/gnosia-learn/state means the catalog bootstrap
 # runs once, ever.
 
@@ -46,7 +48,6 @@ HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 REPO_URL="${REPO_URL:-https://github.com/c-wenlong/self-learn.git}"
 BRANCH="${BRANCH:-main}"
-POLL_SECONDS="${POLL_SECONDS:-86400}"   # daily; deploy.sh --force deploys now
 SKIP_SEED="${SKIP_SEED:-0}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
@@ -55,6 +56,29 @@ info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+
+# deployd's runtime home is SERVICE_HOME in services/deployd/.env —
+# overridable there; the conventional path is the fallback.
+DEPLOYD_HOME="$HOME/services/deployd"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  d="$(sed -n "s/^SERVICE_HOME=\(.*\)\$/\1/p" "$SERVICE_DIR/../deployd/.env" \
+       | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
+  case "$d" in \~/*) d="$HOME/${d#\~/}" ;; \$HOME/*) d="$HOME/${d#\$HOME/}" ;; esac
+  [ -n "$d" ] && DEPLOYD_HOME="$d"
+fi
+
+# A manual ./setup.sh re-installs the service: clear deployd's disabled
+# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
+# never invokes this while the flag is set, so clearing is always manual.
+rm -f "$DEPLOYD_HOME/state/gnosia-learn.disabled"
+
+# A re-run (e.g. under deployd, whose PATH is minimal) finds node where the
+# first install recorded it in .env — put that dir on PATH ahead of any
+# older system node so the version check sees the saved one.
+if [ -f "$ENV_FILE" ]; then
+  d="$(sed -n "s/^NODE_BIN=\(.*\)\$/\1/p" "$ENV_FILE" | sed "s/^'//; s/'\$//")"
+  [ -n "$d" ] && [ -d "$d" ] && PATH="$d:$PATH"
+fi
 
 # Hex is URL-safe and survives .env without quoting.
 randhex() {
@@ -106,7 +130,7 @@ fi
 state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
 [ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
 
-# The poller must fetch the (private) repo unattended — verify that works now.
+# deployd polls and the deploy fetches the (private) repo unattended — verify that works now.
 if ! GIT_TERMINAL_PROMPT=0 git ls-remote --heads "$REPO_URL" >/dev/null 2>&1; then
   die "Cannot read $REPO_URL non-interactively. Fix auth first: gh auth login && gh auth setup-git (or use an SSH deploy key and set REPO_URL accordingly)."
 fi
@@ -133,7 +157,6 @@ BRANCH=$BRANCH
 
 LOCAL_PORT=$LOCAL_PORT
 HTTPS_PORT=$HTTPS_PORT
-POLL_SECONDS=$POLL_SECONDS
 
 SERVICE_HOME=$HOME/services/gnosia-learn
 # Upstream's own layout (docs/HOMESERVER.md): blobs/, vault/ and archive/
@@ -225,7 +248,7 @@ mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$GNOSIA_HOME/blobs" \
 # ------------------------------------------- existing deployment state
 # Captured before anything is touched: a previously deployed app that is
 # stopped stays stopped across a re-run — the launcher's stop must survive
-# setup the same way it survives the poller. state/built-sha proves an
+# setup the same way it survives a deploy. state/built-sha proves an
 # earlier run finished a first deploy; without it the install was
 # interrupted and the start below repairs rather than overrides. A *failed*
 # unit is restarted too (that's the repair), so only clean-inactive counts.
@@ -235,6 +258,7 @@ mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$GNOSIA_HOME/blobs" \
 # LaunchAgent delete it before the app comes up), so a later stop reads as the
 # owner's again.
 APP_SHOULD_RUN=1
+STUDIO_SHOULD_RUN=1
 TORN_DOWN="$SERVICE_HOME/state/torn-down"
 if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
   if [ "$OS" = "Linux" ]; then
@@ -243,10 +267,27 @@ if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
        && ! systemctl --user is-failed --quiet gnosia-learn; then
       APP_SHOULD_RUN=0
     fi
+    # A studio that is enabled but cleanly stopped was stopped deliberately
+    # (STUDIO_ENABLED=0 disables it instead) — deployd's re-runs must not
+    # bring it back while the flag stays on.
+    if [ -f "$UNIT_DIR/gnosia-learn-studio.service" ] \
+       && systemctl --user is-enabled --quiet gnosia-learn-studio \
+       && ! systemctl --user is-active --quiet gnosia-learn-studio \
+       && ! systemctl --user is-failed --quiet gnosia-learn-studio; then
+      STUDIO_SHOULD_RUN=0
+    fi
   else
     if [ -f "$WEB_PLIST" ] \
        && ! launchctl print "gui/$(id -u)/com.gnosia-learn.web" >/dev/null 2>&1; then
       APP_SHOULD_RUN=0
+    fi
+    # launchd has no disabled-but-plist-installed state to read, so a flag
+    # off run leaves state/studio-flag-off instead: unloaded without the
+    # marker means the owner booted the runner out themselves.
+    if [ -f "$STUDIO_PLIST" ] \
+       && ! launchctl print "gui/$(id -u)/com.gnosia-learn.studio" >/dev/null 2>&1 \
+       && [ ! -f "$SERVICE_HOME/state/studio-flag-off" ]; then
+      STUDIO_SHOULD_RUN=0
     fi
   fi
 fi
@@ -260,7 +301,7 @@ ok "Deploy script installed"
 
 # ------------------------------------------------------------- unit files
 if [ "$OS" = "Linux" ]; then
-  info "Writing systemd user units (app, deploy poller, nightly export)"
+  info "Writing systemd user units (app, nightly export)"
   mkdir -p "$UNIT_DIR"
   cat > "$UNIT_DIR/gnosia-learn.service" <<EOF
 # Generated by services/gnosia-learn/setup.sh — regenerated on every re-run, so edit
@@ -286,28 +327,6 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-EOF
-  cat > "$UNIT_DIR/gnosia-learn-deploy.service" <<EOF
-# Generated by services/gnosia-learn/setup.sh — regenerated on every re-run.
-[Unit]
-Description=gnosia-learn deploy (pull from GitHub, rebuild + migrate if changed)
-
-[Service]
-Type=oneshot
-ExecStart=$SERVICE_HOME/bin/deploy.sh
-EOF
-  cat > "$UNIT_DIR/gnosia-learn-deploy.timer" <<EOF
-# Generated by services/gnosia-learn/setup.sh — regenerated on every re-run.
-[Unit]
-Description=gnosia-learn deploy poller (push-to-deploy for a tailnet-only box)
-
-[Timer]
-OnBootSec=90
-OnUnitActiveSec=${POLL_SECONDS}
-AccuracySec=15
-
-[Install]
-WantedBy=timers.target
 EOF
   cat > "$UNIT_DIR/gnosia-learn-export.service" <<EOF
 # Generated by services/gnosia-learn/setup.sh — regenerated on every re-run.
@@ -357,7 +376,7 @@ WantedBy=default.target
 EOF
   systemctl --user daemon-reload
 else
-  info "Writing launchd LaunchAgents (app, deploy poller, nightly export)"
+  info "Writing launchd LaunchAgents (app, nightly export)"
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
   cat > "$WEB_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -418,26 +437,6 @@ EOF
 </dict>
 </plist>
 EOF
-  cat > "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated by services/gnosia-learn/setup.sh — regenerated on every re-run. -->
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.gnosia-learn.deploy</string>
-  <key>ProgramArguments</key>
-  <array><string>$SERVICE_HOME/bin/deploy.sh</string></array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>$NODE_BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
-  <key>StartInterval</key><integer>$POLL_SECONDS</integer>
-  <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/gnosia-learn-deploy.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/gnosia-learn-deploy.log</string>
-</dict>
-</plist>
-EOF
   cat > "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Generated by services/gnosia-learn/setup.sh — regenerated on every re-run. -->
@@ -467,9 +466,47 @@ EOF
   chmod 600 "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"  # names .env-derived paths
 fi
 
+# ------------------------------------------------- legacy poller removal
+# deployd (services/deployd) polls the remote and re-runs this script now;
+# a host installed before the migration still has the per-service deploy
+# timer or LaunchAgent — under either name (the service was self-learn
+# before the rename) — so stop and remove it, but only once deployd itself
+# is installed to take over scheduling. teardown.sh deletes the same
+# files. The nightly export timer/LaunchAgent is unrelated and stays.
+if [ ! -x "$DEPLOYD_HOME/bin/deployd" ]; then
+  warn "deployd is not installed — keeping any old deploy poller; auto-deploy is off until services/deployd/setup.sh runs"
+elif [ "$OS" = "Linux" ]; then
+  removed=0
+  for n in self-learn gnosia-learn; do
+    if [ -f "$UNIT_DIR/$n-deploy.timer" ]; then
+      systemctl --user disable --now "$n-deploy.timer" >/dev/null 2>&1 || true
+      rm -f "$UNIT_DIR/$n-deploy.timer" "$UNIT_DIR/$n-deploy.service"
+      removed=1
+    fi
+  done
+  if [ "$removed" = "1" ]; then
+    systemctl --user daemon-reload
+    ok "Removed the per-service deploy timer (deployd polls now)"
+  fi
+else
+  for label in com.self-learn.deploy com.gnosia-learn.deploy; do
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    if [ -f "$HOME/Library/LaunchAgents/$label.plist" ]; then
+      rm -f "$HOME/Library/LaunchAgents/$label.plist"
+      ok "Removed the $label LaunchAgent (deployd polls now)"
+    fi
+  done
+fi
+
 # ------------------------------------------------------------ initial deploy
 info "Deploy (clone + npm ci + catalog migrate + next build — several minutes on first run)"
-"$SERVICE_HOME/bin/deploy.sh" || die "Initial deploy failed — see output above."
+# deployd passes the remote sha it polled; build exactly that so its record
+# of "what is deployed" matches what is built.
+if [ -n "${DEPLOY_SHA:-}" ]; then
+  "$SERVICE_HOME/bin/deploy.sh" --sha "$DEPLOY_SHA" || die "Initial deploy failed — see output above."
+else
+  "$SERVICE_HOME/bin/deploy.sh" || die "Initial deploy failed — see output above."
+fi
 ok "Built: $REPO_DIR"
 
 # ---------------------------------------------------------- catalog bootstrap
@@ -511,9 +548,10 @@ if [ "$OS" = "Linux" ]; then
   fi
   if [ "$STUDIO_ENABLED" = "1" ]; then
     # The runner follows the app's run state: it lives off the same checkout
-    # and node_modules, and an owner who stopped the app meant the stack.
+    # and node_modules, and an owner who stopped the app meant the stack. A
+    # studio-only stop is the owner's too — deployd re-runs leave it down.
     systemctl --user enable gnosia-learn-studio >/dev/null 2>&1
-    if [ "$APP_SHOULD_RUN" = "1" ]; then
+    if [ "$APP_SHOULD_RUN" = "1" ] && [ "$STUDIO_SHOULD_RUN" = "1" ]; then
       systemctl --user restart gnosia-learn-studio
     else
       warn "gnosia-learn-studio.service is stopped — leaving it stopped (start: systemctl --user start gnosia-learn-studio)"
@@ -524,9 +562,8 @@ if [ "$OS" = "Linux" ]; then
     # install or a manual start.
     systemctl --user disable --now gnosia-learn-studio >/dev/null 2>&1 || true
   fi
-  systemctl --user enable --now gnosia-learn-deploy.timer >/dev/null 2>&1
   systemctl --user enable --now gnosia-learn-export.timer >/dev/null 2>&1
-  ok "Deploy/export timers active"
+  ok "Export timer active"
 else
   info "Loading LaunchAgents"
   if [ "$APP_SHOULD_RUN" = "1" ]; then
@@ -535,25 +572,32 @@ else
     launchctl enable "gui/$(id -u)/com.gnosia-learn.web" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$WEB_PLIST"
     if [ "$STUDIO_ENABLED" = "1" ]; then
-      launchctl bootout "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
       launchctl enable "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$STUDIO_PLIST"
+      if [ "$STUDIO_SHOULD_RUN" = "1" ]; then
+        launchctl bootout "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$STUDIO_PLIST"
+      else
+        warn "com.gnosia-learn.studio is unloaded — leaving it stopped (start: launchctl bootstrap gui/$(id -u) $STUDIO_PLIST)"
+      fi
     fi
   else
     # Left stopped, but not disabled: the start command below must work.
     launchctl enable "gui/$(id -u)/com.gnosia-learn.web" 2>/dev/null || true
     warn "com.gnosia-learn.web is unloaded — leaving it stopped (start: launchctl bootstrap gui/$(id -u) $WEB_PLIST)"
   fi
-  if [ "$STUDIO_ENABLED" != "1" ]; then
+  if [ "$STUDIO_ENABLED" = "1" ]; then
+    rm -f "$SERVICE_HOME/state/studio-flag-off"
+  else
     # Same as the Linux disable --now: a studio left loaded by an older run
-    # goes away when the flag is off, regardless of the app's run state.
+    # goes away when the flag is off, regardless of the app's run state. The
+    # marker distinguishes "off because the flag says so" from an owner's
+    # bootout the next time the flag is on.
     launchctl bootout "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
+    touch "$SERVICE_HOME/state/studio-flag-off"
   fi
-  for agent in com.gnosia-learn.deploy com.gnosia-learn.export; do
-    launchctl bootout "gui/$(id -u)/$agent" 2>/dev/null || true
-    launchctl enable "gui/$(id -u)/$agent" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$agent.plist"
-  done
+  launchctl bootout "gui/$(id -u)/com.gnosia-learn.export" 2>/dev/null || true
+  launchctl enable "gui/$(id -u)/com.gnosia-learn.export" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
   ok "LaunchAgents loaded (logs: ~/Library/Logs/gnosia-learn*.log)"
 fi
 rm -f "$TORN_DOWN"   # the stack is enabled again; a later stop is the owner's
@@ -638,7 +682,9 @@ else
 fi
 echo
 echo "  Sign in at $PUBLIC_URL/sign-in with OWNER_PASSWORD from $ENV_FILE"
-echo "  Auto-deploy: pushes to $BRANCH are picked up every ${POLL_SECONDS}s; $SERVICE_HOME/bin/deploy.sh --force does it now."
+echo "  Auto-deploy: deployd re-runs setup.sh when $REPO_URL ($BRANCH) moves"
+echo "    (services/deployd polls every minute; ~/services/deployd/bin/deployd --status)."
+echo "  $SERVICE_HOME/bin/deploy.sh --force redeploys now."
 echo "  Catalog: one SQLite file at $CATALOG_DB — 'cd $REPO_DIR && npm run catalog -- status'"
 echo "  Bringing the laptop's catalog.db over instead of the seed: SETUP.md, 'Bringing the laptop's data over'."
 echo
@@ -646,8 +692,8 @@ echo "Manage:"
 if [ "$OS" = "Linux" ]; then
   echo "  systemctl --user status|restart gnosia-learn"
   echo "  journalctl --user -u gnosia-learn -f                       # app logs"
-  echo "  systemctl --user list-timers gnosia-learn-*                # poller + export"
-  echo "  journalctl --user -u gnosia-learn-deploy -n 50             # deploy logs"
+  echo "  systemctl --user list-timers gnosia-learn-export.timer     # nightly export"
+  echo "  journalctl --user -u deployd -n 50                       # deploy logs"
 else
   echo "  launchctl kickstart -k gui/\$(id -u)/com.gnosia-learn.web  # restart"
   echo "  tail -f ~/Library/Logs/gnosia-learn.log"

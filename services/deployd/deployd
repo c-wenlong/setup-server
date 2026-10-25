@@ -387,6 +387,12 @@ def tick(env):
                 log("%s: deploy of %s failed recently — retrying in %ss"
                     % (entry["key"], sha[:12], left))
                 continue
+            # Re-check just before running: a teardown during the ref lookup
+            # would otherwise see the flag cleared by the cmd's own setup.sh.
+            if os.path.exists(disabled_path(state_dir, entry["key"])):
+                log("%s: disabled mid-tick (state/%s.disabled) — skipping"
+                    % (entry["key"], entry["key"]))
+                continue
             ok, _ = deploy(entry, sha, setup_repo, state_dir, timeout)
             if not ok:
                 failures += 1
