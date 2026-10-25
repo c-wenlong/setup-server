@@ -650,6 +650,25 @@ test_teardown_env_lint() {
   teardown
 }
 
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_FILE / COMPOSE_PROJECT_NAME in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "stirling-pdf"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  nothing unpublished"       no_call " off"
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/stirling-pdf/setup.sh or docker-compose.yml is missing — nothing to test."
@@ -671,6 +690,7 @@ test_frontend_url_drift
 test_operator_escalation
 test_serve_approval_prompt
 test_teardown_safe
+test_teardown_refuses_compose_overrides
 test_teardown_https_port_from_frontend_url
 test_teardown_not_published
 test_teardown_port_owned_by_someone_else

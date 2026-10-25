@@ -10,6 +10,29 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for the six services whose data hurts most to lose**:
+  vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
+  gets the launcher's Remove button. Every `--purge` warns that nothing
+  backs the box up and says what to export first. Service-specific:
+  immich stops the server and ML before the database and always includes
+  the `ml` profile; paperless keeps a non-empty `export/` (your backup) and
+  `consume/` (unfiled originals); seafile purges both data and MySQL dirs
+  and names the services that read its `.env`; appflowy and plane drop
+  their fixed-name named volumes with `down -v` on purge only; vaultwarden,
+  immich, paperless and seafile clear container-owned files with a
+  throwaway container of an image already on the box.
+
+### Fixed
+
+- **Every teardown.sh refuses `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME` or
+  `COMPOSE_ENV_FILES`** in `.env` or the shell (and `COMPOSE_PROFILES`,
+  except immich, whose setup.sh writes it). Compose honours them even with
+  `--project-directory`, so a stray `COMPOSE_FILE` pointing at another
+  stack would have let `down -v` on purge delete that stack's volumes
+  (metabase and umami were already merged with this gap).
+
+### Added
+
 - **teardown.sh for eight more services**: firefly-iii, home-assistant,
   homepage, jellyfin, metabase, n8n, open-webui and umami, so each gets the
   launcher's Remove button. Same contract as stirling-pdf's (only the Serve

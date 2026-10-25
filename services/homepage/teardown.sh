@@ -140,6 +140,15 @@ case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or no
 TARGET="http://127.0.0.1:$LOCAL_PORT"
 ok "$NAME: local :$LOCAL_PORT, config ${DATA_DIR:-(not set)}"
 
+# Compose reads COMPOSE_FILE / COMPOSE_PROJECT_NAME / COMPOSE_ENV_FILES from
+# .env and the shell, and any of them would change which stack `down` (and,
+# on --purge, `down -v`) acts on. setup.sh never sets them, so refuse rather
+# than tear down something it did not start.
+for v in COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+  [ -z "$(env_get "$v")" ] && [ -z "$(printenv "$v" 2>/dev/null || true)" ] \
+    || die "$v is set (in $ENV_FILE or the shell); setup.sh never sets it, so teardown will not guess which stack or volumes it means. Unset it and re-run."
+done
+
 # Read Serve before changing anything: if it cannot be read, an empty answer
 # would look like "already off" and the mapping would come back with the
 # daemon. Stop instead.

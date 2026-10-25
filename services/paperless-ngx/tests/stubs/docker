@@ -41,6 +41,8 @@
 #   superuser             — "user:password" of the account manage_superuser made
 #   superuser_created_runs— one line per `up` that actually created the account.
 #                           More than one line means something wiped the DB.
+#   docker_run_fails      — `docker run --entrypoint sh` (teardown --purge's
+#                           cleanup of files the host user cannot delete) fails
 #   no_secret_key         — force the ImproperlyConfigured start failure the real
 #                           image raises when PAPERLESS_SECRET_KEY is unset or
 #                           left at "change-me"
@@ -241,6 +243,26 @@ case "$1" in
       *Memory*) echo 1073741824 ;;
       *) echo running ;;
     esac
+    ;;
+
+  run)
+    # teardown --purge's cleanup of files the host user cannot delete:
+    #   docker run --rm --pull never -v DIR:/x --entrypoint sh <image> -c 'find /x -mindepth 1 -delete'
+    # The real container is root, so it can delete what the host user cannot.
+    # Model that by making the tree writable first, then running the real find.
+    mount_host=""; entry=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
+        --entrypoint) entry="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ "$entry" = "sh" ] && [ -n "$mount_host" ] || exit 0
+    [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+    chmod -R u+rwX "$mount_host" 2>/dev/null
+    find "$mount_host" -mindepth 1 -delete
+    exit $?
     ;;
 
   exec)

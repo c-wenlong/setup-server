@@ -457,6 +457,8 @@ docker compose --project-directory . ps
 docker compose --project-directory . logs -f --tail=50
 docker compose --project-directory . restart
 docker compose --project-directory . up -d          # after editing compose
+./teardown.sh                                       # Remove: unpublish + down, archive and .env kept
+./teardown.sh --purge                               # ALSO delete data/ media/ .env (export first!)
 
 ./tests/run-tests.sh                                # mocked, no side effects
 sg docker -c './tests/run-tests.sh --live'          # against the real deploy

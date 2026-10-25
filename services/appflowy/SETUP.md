@@ -135,6 +135,12 @@ docker compose --project-directory ~/dev/setup-server/services/appflowy logs -f
 docker compose --project-directory ~/dev/setup-server/services/appflowy restart
 ```
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
+port pointing at `127.0.0.1:LOCAL_PORT` and runs `compose down`; the
+volumes, `APPFLOWY_DATA` and `.env` stay, so `./setup.sh` brings it back.
+`./teardown.sh --purge` also drops the three volumes (`down -v`),
+`APPFLOWY_DATA` and `.env` after you type `appflowy`.
+
 Upgrade: bump `APPFLOWY_CLOUD_VERSION` (and `GOTRUE_VERSION` /
 `APPFLOWY_WORKER_VERSION` / `APPFLOWY_WEB_VERSION` /
 `APPFLOWY_ADMIN_FRONTEND_VERSION`) in `.env`, then `./setup.sh`.

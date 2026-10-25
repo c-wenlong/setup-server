@@ -117,14 +117,25 @@ points at `http://minio:9000`. Fix
 
 ## Nuke and pave
 
-Stops the stack, deletes data, keeps `.env` unless you remove it too.
-There is no undo.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down` on the same nine-container
+project `setup.sh` starts, and refuses to delete a marker dir that is not
+really inside `~/services/appflowy`.
 
 ```bash
 cd ~/dev/setup-server/services/appflowy
-docker compose --project-directory . down
-docker volume rm appflowy-postgres appflowy-redis appflowy-minio
-rm -rf ~/services/appflowy
-# optional: rm .env          # new passwords, new JWT
-./setup.sh
+./teardown.sh            # remove, keep the volumes + .env (the launcher's Remove)
+./teardown.sh --purge    # also drop the three volumes, APPFLOWY_DATA and .env; type the name
+./setup.sh               # back, fresh if you purged
 ```
+
+The live data is in the named volumes `appflowy-postgres` (accounts,
+workspaces, documents), `appflowy-minio` (uploads) and `appflowy-redis`,
+not `APPFLOWY_DATA` (only a marker dir, plus any dumps you put there).
+Plain `teardown.sh` keeps the volumes; `--purge` runs `down -v`, which can
+only hit those three because the compose file pins the project name and
+every volume name. `.env` holds the generated DB, JWT and admin passwords,
+so a purge removes it and the next `./setup.sh` seeds a new admin. The
+repo's `nginx.conf` and `docker-compose.yml` are never touched. There is no
+undo. From a terminal, pause the `appflowy` monitor in Uptime Kuma first,
+or it pages; the launcher's Remove does that.

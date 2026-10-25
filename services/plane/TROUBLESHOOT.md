@@ -65,13 +65,24 @@ The proxy is HTTP-only on purpose. Serve must send
 
 ## Nuke and pave
 
-Stops the stack, deletes named volumes, keeps `.env` unless you remove
-it too. There is no undo.
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at this service, runs `compose down`, and refuses to delete a
+marker dir that is not really inside `~/services/plane`.
 
 ```bash
 cd ~/dev/setup-server/services/plane
-docker compose --project-directory . down -v
-rm -rf ~/services/plane
-# optional: rm .env
-./setup.sh
+./teardown.sh            # remove, keep the volumes + .env (the launcher's Remove)
+./teardown.sh --purge    # also drop every plane_* volume, PLANE_DATA and .env; type the name
+./setup.sh               # back, fresh if you purged
 ```
+
+The live data is in the named volumes of compose project `plane` (fixed by
+`name: plane` in the compose file): `plane_pgdata` (every workspace, issue
+and user), `plane_uploads` (MinIO attachments), plus Valkey, RabbitMQ, proxy
+and log volumes. `PLANE_DATA` (`~/services/plane`) is only a marker dir.
+Plain `teardown.sh` keeps the volumes; `--purge` runs `down -v`. The `.env`
+holds the generated DB, MinIO and admin secrets, so a purge removes it and
+the next `./setup.sh` seeds a new admin. Teardown refuses to run if
+`COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` or `COMPOSE_PROFILES` is set. There
+is no undo: dump Postgres first. From a terminal, pause the `plane` monitor
+in Uptime Kuma first, or it pages; the launcher's Remove does that.

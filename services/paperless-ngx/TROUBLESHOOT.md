@@ -514,64 +514,29 @@ du -sh ~/services/paperless-ngx/export/
 #    ...and now actually move it somewhere else. A copy on the same disk is
 #    not a backup of a disk failure.
 
-# 2. Confirm the paths before deleting them. A `rm -rf` of a path that never
-#    existed is a silent no-op that leaves you convinced you started clean.
-#    The .env values are the authority — if setup.sh was ever run with
-#    different paths, ~/services/paperless-ngx is NOT where the data is.
-grep -E '^(PAPERLESS_DATA|PAPERLESS_MEDIA|PAPERLESS_CONSUME|PAPERLESS_EXPORT|PAPERLESS_ROOT)' .env
-ls -ld ~/services/paperless-ngx \
-       ~/services/paperless-ngx/data \
-       ~/services/paperless-ngx/media \
-       ~/services/paperless-ngx/consume \
-       ~/services/paperless-ngx/export
-docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' paperless-ngx
-#    The Source paths above are the ground truth for what to delete. If a path
-#    printed by `ls -ld` errors with "No such file or directory", do not
-#    include it in step 4 — find where the data really is first.
+# 2. Tear it down. teardown.sh unpublishes only the Serve ports that point at
+#    this service (never `serve reset`), runs `compose down -v`, and deletes
+#    data/, media/ and .env after you type "paperless-ngx". It reads the paths
+#    from .env, refuses any path outside ~/services/paperless-ngx, and keeps
+#    export/ and consume/ unless they are empty (your export, and any scan
+#    you dropped in that was never filed).
+./teardown.sh --purge
 
-# 3. Tear down the containers and their anonymous volumes.
-docker compose --project-directory . down -v
-
-# 4. Delete the state. Only the paths you confirmed exist in step 2.
-rm -rf ~/services/paperless-ngx/data \
-       ~/services/paperless-ngx/media \
-       ~/services/paperless-ngx/consume
-#    NOTE: export/ is deliberately not in that list — it is your escape hatch.
-
-# 5. New credentials and a new secret key on the next deploy.
-rm -f .env
-
-# 6. Unpublish this ONE port. Not `serve reset`.
-tailscale serve --https=8095 off
-
-# 7. Redeploy.
+# 3. Redeploy: new credentials and a new secret key.
 ./setup.sh
 ```
 
-Two things make this recipe safe rather than superstitious:
+Without `--purge`, `./teardown.sh` is the safe remove the launcher's Remove
+button runs: containers down and the publish gone, archive and `.env` kept, so
+`./setup.sh` brings it back exactly as it was.
 
-- **Step 2 prints the mounts from the container itself.** `docker inspect`'s
-  `.Mounts` is what the running container is genuinely using, which beats both
-  `.env` and this document if they ever disagree. Delete what it names.
-- **`rm -rf` here does not need `sudo`** *if* the container ran as your uid
-  (`PAPERLESS_UID`, which is what `setup.sh` sets). If it did not, the
-  files are owned by the image's user and a plain `rm -rf` fails partway
-  through, leaving a half-deleted data directory — which is worse than either
-  extreme, because Paperless will start on it and behave strangely. Check
-  first:
-
-  ```bash
-  stat -c '%U' ~/services/paperless-ngx/media 2>/dev/null \
-    || stat -f '%Su' ~/services/paperless-ngx/media
-  ```
-
-  If that is not you, delete from inside a root container instead of reaching
-  for `sudo`:
-
-  ```bash
-  docker run --rm -v ~/services/paperless-ngx:/x --entrypoint rm alpine \
-    -rf /x/data /x/media /x/consume
-  ```
+The script does not need `sudo` when the container ran as your uid
+(`PAPERLESS_UID`, which `setup.sh` sets). If some files under `data/` or
+`media/` are owned by another uid, it empties them with a throwaway container
+of the pinned image already on this box (`--pull never`). If even that fails
+it stops, names the `sudo rm -rf` to run, and keeps `.env` so you can re-run
+it. It never leaves a half-deleted `data/` silently: Paperless would start on
+one and behave strangely.
 
 ### The much smaller hammer you probably want
 

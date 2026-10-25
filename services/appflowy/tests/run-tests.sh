@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/appflowy/setup.sh.
+# Tests for services/appflowy/setup.sh and teardown.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -29,8 +29,8 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" \
-    "$SERVICE_DIR/nginx.conf" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" \
+    "$SERVICE_DIR/docker-compose.yml" "$SERVICE_DIR/nginx.conf" "$SVC/"
 }
 
 teardown() {
@@ -392,6 +392,409 @@ test_live() {
   live_check "AI container is not running"   sh -c "! docker inspect appflowy-ai >/dev/null 2>&1"
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps this port to this service,
+# and neighbours sit on other ports (one a lookalike suffix).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  mkdir -p "$(data_dir)"
+  echo keep > "$(data_dir)/dump.sql"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8102 (tailnet only)
+|-- / proxy http://127.0.0.1:8102
+
+https://test-host.tailfake.ts.net:18102 (tailnet only)
+|-- / proxy http://127.0.0.1:18102
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps volumes, data and .env, unpublishes only its port"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8102"         calls_have "tailscale serve --https=8102 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18102 untouched"  no_call "https=18102"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "same project as setup.sh"    calls_have "docker compose --project-directory $SVC down"
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "data kept"                   [ -f "$(data_dir)/dump.sql" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "nginx.conf kept"             [ -f "$SVC/nginx.conf" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_https_port_differs() {
+  echo "• teardown: an HTTPS port other than LOCAL_PORT is found from Serve"
+  setup
+  touch "$STATE_DIR/operator"
+  export HTTPS_PORT=9443
+  run_deploy
+  unset HTTPS_PORT
+  printf 'https://test-host.tailfake.ts.net:9443 (tailnet only)\n|-- / proxy http://127.0.0.1:8102\n' \
+    > "$STATE_DIR/serve_status"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :9443"         calls_have "tailscale serve --https=9443 off"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8102 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then volumes, data and .env go"
+  deployed
+  local dir; dir="$(data_dir)"
+  run_teardown --purge "appflow"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: data kept"       [ -f "$dir/dump.sql" ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: no down -v"      no_call "down -v"
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge "appflowy"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "down -v removes the volumes" calls_have "docker compose --project-directory $SVC down -v"
+  check "marker dir gone"             [ ! -e "$dir" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "nginx.conf kept"             [ -f "$SVC/nginx.conf" ]
+  check "compose file kept"           [ -f "$SVC/docker-compose.yml" ]
+  check "serve off for :8102"         calls_have "tailscale serve --https=8102 off"
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a data dir outside ~/services"
+  deployed
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "home untouched"              [ -d "$HOME" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "no down -v"                  no_call "down -v"
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/../x#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "'..' refused"                [ "$CODE" -ne 0 ]
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "services dir itself refused" [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  for dotted in "$HOME/services/." "$HOME/services/./appflowy" "$HOME/services/appflowy/.."; do
+    sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$dotted#" "$SVC/.env"
+    run_teardown --purge "appflowy"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
+  check "own data never touched"      [ -f "$HOME/services/appflowy/dump.sql" ]
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:8102
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8102
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /notes proxy http://127.0.0.1:8102
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8110 off"                   calls_have "serve --https=8110 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8102'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8102 off"                   calls_have "serve --https=8102 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8102"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8102 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services//#" "$SVC/.env"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "appflowy"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "neighbour data kept"         [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/alias#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "symlink to services refused" [ "$CODE" -ne 0 ]
+  check "neighbour still kept"        [ -f "$HOME/services/neighbour/keep" ]
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/appflowy///#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "own dir with trailing slashes: exits zero" [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$HOME/services/appflowy" ]
+  check "  neighbour kept"            [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: a data dir already gone is fine; the marker still goes"
+  deployed
+  rm -rf "$(data_dir)"
+  run_teardown --purge "appflowy"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "down -v still run"           calls_have "down -v"
+  teardown
+  deployed
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/appflowy/dumps#" "$SVC/.env"
+  rm -f "$HOME/services/appflowy/dump.sql"
+  run_teardown --purge "appflowy"
+  check "sub-dir gone, empty marker: exits zero" [ "$CODE" -eq 0 ]
+  check "  empty ~/services/appflowy removed"    [ ! -e "$HOME/services/appflowy" ]
+  teardown
+  deployed
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/appflowy/dumps#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "non-empty marker: exits zero"           [ "$CODE" -eq 0 ]
+  check "  marker kept (rmdir only empties)"     [ -f "$HOME/services/appflowy/dump.sql" ]
+  teardown
+}
+
+test_teardown_purge_marker_symlink() {
+  echo "• teardown --purge: ~/services/appflowy as a symlink is never followed"
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo x > "$HOME/elsewhere/keep"
+  rm -rf "$HOME/services/appflowy"
+  ln -s "$HOME/elsewhere" "$HOME/services/appflowy"
+  run_teardown --purge "appflowy"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "link target kept"            [ -f "$HOME/elsewhere/keep" ]
+  check "link kept"                   [ -L "$HOME/services/appflowy" ]
+  check "no down -v"                  no_call "down -v"
+  rm -rf "$HOME/elsewhere"
+  : > "$CALLS_LOG"
+  run_teardown --purge "appflowy"
+  check "dangling link: exits zero"   [ "$CODE" -eq 0 ]
+  check "  dangling link left alone"  [ -L "$HOME/services/appflowy" ]
+  teardown
+}
+
+test_teardown_purge_refuses_repo_dir() {
+  echo "• teardown --purge: never deletes the checkout holding nginx.conf"
+  deployed
+  local repo="$HOME/services/appflowy/repo"
+  mkdir -p "$repo"
+  cp "$SVC/setup.sh" "$SVC/teardown.sh" "$SVC/docker-compose.yml" "$SVC/nginx.conf" "$SVC/.env" "$repo/"
+  SVC="$repo"
+  run_teardown --purge "appflowy"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "contains this checkout"
+  check "nginx.conf kept"             [ -f "$repo/nginx.conf" ]
+  check "no down -v"                  no_call "down -v"
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  local dir; dir="$(data_dir)"
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=\"\${HOME}${dir#"$HOME"}\"#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(data_dir)"
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=\$HOME${dir#"$HOME"}#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "unquoted \$HOME form: exits zero" [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(data_dir)"
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA='\$HOME${dir#"$HOME"}'#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  dir kept"                  [ -e "$dir" ]
+  check "  no down -v"                no_call "down -v"
+  teardown
+}
+
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/appflowy itself or inside it"
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/neighbour#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"             [ -f "$HOME/services/neighbour/keep" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  mkdir -p "$HOME/services/appflowy-old"; echo x > "$HOME/services/appflowy-old/keep"
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/appflowy-old#" "$SVC/.env"
+  run_teardown --purge "appflowy"
+  check "lookalike name refused"      [ "$CODE" -ne 0 ]
+  check "  its data kept"             [ -f "$HOME/services/appflowy-old/keep" ]
+  sed -i.bak "s#^APPFLOWY_DATA=.*#APPFLOWY_DATA=$HOME/services/appflowy/a:b#" "$SVC/.env"
+  mkdir -p "$HOME/services/appflowy/a:b"
+  run_teardown --purge "appflowy"
+  check "a colon in the path refused" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/appflowy"; echo x > "$HOME/appflowy/keep"
+  run_teardown --purge "appflowy"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"    [ -f "$HOME/appflowy/keep" ]
+  check "no down -v"                  no_call "down -v"
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'APPFLOWY_DATA=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "APPFLOWY_DATA is set more than once"
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nAPPFLOWY_DATA=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+  deployed
+  printf 'not a key value line\n' >> "$SVC/.env"
+  run_teardown
+  check "bad line: exits non-zero"    [ "$CODE" -ne 0 ]
+  check "  says not KEY=value"        out_has "is not KEY=value"
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_FILE / COMPOSE_PROJECT_NAME in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "appflowy"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  nothing unpublished"       no_call " off"
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ] \
    || [ ! -f "$SERVICE_DIR/nginx.conf" ]; then
@@ -414,6 +817,25 @@ test_idempotent_rerun
 test_base_url_drift
 test_operator_escalation
 test_serve_approval_prompt
+test_teardown_safe
+test_teardown_refuses_compose_overrides
+test_teardown_https_port_differs
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_preflight
+test_teardown_purge
+test_teardown_purge_refuses_odd_paths
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_quoted_env
+test_teardown_purge_trailing_slashes
+test_teardown_purge_missing_data_dir
+test_teardown_purge_marker_symlink
+test_teardown_purge_refuses_repo_dir
+test_teardown_home_variable_in_env
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_env_lint
 
 if [ "${1:-}" = "--live" ]; then
   echo

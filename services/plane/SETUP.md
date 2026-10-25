@@ -82,5 +82,10 @@ docker compose --project-directory ~/dev/setup-server/services/plane restart
 Upgrade: bump `APP_RELEASE` in `.env`, then `./setup.sh`. Dump Postgres
 first.
 
+Remove: `./teardown.sh` (or Remove in the launcher) unpublishes `:HTTPS_PORT`
+and runs `compose down`; the `plane_*` named volumes and `.env` stay, so
+`./setup.sh` brings it back. `./teardown.sh --purge` also drops the volumes
+(`down -v`), the `PLANE_DATA` marker dir and `.env`, after you type `plane`.
+
 Backup target: `docker compose exec -T plane-db pg_dump -U plane plane`
 plus the MinIO named volume. Nothing on this box backs itself up.
