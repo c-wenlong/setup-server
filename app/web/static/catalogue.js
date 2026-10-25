@@ -14,11 +14,14 @@
   'use strict';
 
   var ROUTE = '#/catalogue';
+  /* The Umbrel store rail: state filters first, one pill per category after.
+     Group pills are appended from a.groups() at build time. */
   var FILTERS = [
-    { id: 'all', label: 'All' },
-    { id: 'installed', label: 'Installed' },
-    { id: 'available', label: 'Not installed' }
+    { id: 'all', label: 'All apps', glyph: 'activity' },
+    { id: 'installed', label: 'Installed', glyph: 'heartbeat' },
+    { id: 'available', label: 'Not installed', glyph: 'archive' }
   ];
+  var GROUP_GLYPHS = { ai: 'chat', daily: 'home', knowledge: 'book', infra: 'cpu' };
 
   var root = document.getElementById('view-catalogue');
   if (!root) return;
@@ -81,13 +84,12 @@
     return 'planned';
   }
 
-  function shortDate(iso) {
-    return typeof iso === 'string' && iso.length >= 10 ? iso.slice(0, 10) : null;
-  }
-
   function matches(svc) {
     if (filter === 'installed' && bucket(svc) !== 'installed') return false;
     if (filter === 'available' && bucket(svc) === 'installed') return false;
+    /* A group pill filters by category id; the state pills behave as above. */
+    if (['all', 'installed', 'available'].indexOf(filter) === -1 &&
+        svc.group !== filter) return false;
     if (!query) return true;
     var hay = [svc.key, svc.name, svc.tagline, svc.description, svc.author]
       .filter(function (v) { return typeof v === 'string'; })
@@ -97,14 +99,16 @@
 
   /* ---------- chrome, built once ---------- */
 
+  function pillGlyph(name) {
+    if (typeof window.ICONS !== 'object' || typeof window.ICONS.svg !== 'function') return null;
+    try { return window.ICONS.svg(name); } catch (e) { return null; }
+  }
+
   function build() {
     if (built) return;
     built = true;
 
     var top = make('div', 'cat-top');
-    var back = make('a', 'iconbtn cat-back', 'All apps');
-    back.href = '#/';
-    top.appendChild(back);
     var titles = make('div', 'cat-titles');
     var h = make('h2', null, 'Catalogue');
     h.id = 'cat-title';
@@ -112,34 +116,64 @@
     elSummary = make('p', 'cat-summary', '');
     titles.appendChild(elSummary);
     top.appendChild(titles);
+    var back = make('a', 'iconbtn cat-back', 'Home');
+    back.href = '#/';
+    back.setAttribute('aria-label', 'Back to the launcher home');
+    top.appendChild(back);
     root.appendChild(top);
 
     var bar = make('div', 'cat-bar');
+    var search = make('div', 'cat-searchwrap');
+    var sic = make('span', 'cat-search-ic');
+    /* The glyph set has no magnifier, so the search icon is drawn inline. */
+    var svg = (function () {
+      var s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      s.setAttribute('viewBox', '0 0 24 24');
+      s.setAttribute('fill', 'none');
+      s.setAttribute('stroke', 'currentColor');
+      s.setAttribute('stroke-width', '1.5');
+      s.setAttribute('stroke-linecap', 'round');
+      var c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      c.setAttribute('cx', '11'); c.setAttribute('cy', '11'); c.setAttribute('r', '6.4');
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', 'm15.7 15.7 4.3 4.3');
+      s.appendChild(c); s.appendChild(p);
+      return s;
+    }());
+    sic.appendChild(svg);
+    sic.setAttribute('aria-hidden', 'true');
+    search.appendChild(sic);
     var label = make('label', 'sr-only', 'Search the catalogue');
     label.setAttribute('for', 'cat-search');
-    bar.appendChild(label);
+    search.appendChild(label);
     elSearch = make('input', 'cat-search');
     elSearch.id = 'cat-search';
     elSearch.type = 'search';
-    elSearch.placeholder = 'Search apps';
+    elSearch.placeholder = 'Search';
     elSearch.autocomplete = 'off';
     elSearch.spellcheck = false;
     elSearch.addEventListener('input', function () {
       query = String(elSearch.value || '').trim().toLowerCase();
       paint();
     });
-    bar.appendChild(elSearch);
+    search.appendChild(elSearch);
+    bar.appendChild(search);
 
-    elChips = make('div', 'cat-chips');
-    elChips.setAttribute('role', 'group');
-    elChips.setAttribute('aria-label', 'Show');
-    FILTERS.forEach(function (f) {
-      var b = make('button', 'cat-chip', f.label);
-      b.type = 'button';
-      b.setAttribute('data-filter', f.id);
-      b.addEventListener('click', function () { filter = f.id; paint(); });
-      elChips.appendChild(b);
+    /* app.js's ⌘K handler skips hidden views; this one is the catalogue's
+       own, live only while this route is up and no sheet is open. */
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'k' && e.key !== 'K') return;
+      if (!(e.metaKey || e.ctrlKey) || !shown) return;
+      var sheet = document.getElementById('sheet');
+      if (sheet && !sheet.hidden) return;
+      e.preventDefault();
+      elSearch.focus();
+      elSearch.select();
     });
+
+    elChips = make('div', 'cat-rail');
+    elChips.setAttribute('role', 'group');
+    elChips.setAttribute('aria-label', 'Categories');
     bar.appendChild(elChips);
     root.appendChild(bar);
 
@@ -148,7 +182,69 @@
     root.appendChild(elBody);
   }
 
-  /* ---------- one card ---------- */
+  /* The rail is rebuilt when the group list changes — the first paint often
+     runs before the API lands, when a.groups() is still the defaults, and a
+     renamed or added category must appear without a reload. A removed
+     category drops the filter back to 'all'; a focused pill gets its focus
+     back by data-filter after the rebuild. */
+  var railSig = null;
+
+  function buildRail() {
+    var a = app();
+    var groups = (a && typeof a.groups === 'function') ? a.groups() : [];
+    var sig = groups.map(function (g) { return g.id + ':' + g.label; }).join('|');
+    if (sig === railSig) return;
+    railSig = sig;
+
+    var keepFocus = null;
+    var active = document.activeElement;
+    if (active && elChips.contains(active)) {
+      keepFocus = active.getAttribute('data-filter');
+    }
+
+    elChips.textContent = '';
+    var rail = FILTERS.slice();
+    groups.forEach(function (g) {
+      rail.push({ id: g.id, label: g.label, glyph: GROUP_GLYPHS[g.id] || 'folder' });
+    });
+    var ids = {};
+    rail.forEach(function (f) {
+      ids[f.id] = true;
+      var b = make('button', 'cat-pill');
+      b.type = 'button';
+      b.setAttribute('data-filter', f.id);
+      var g = pillGlyph(f.glyph);
+      if (g) { var gs = make('span', 'cat-pill-ic'); gs.appendChild(g); b.appendChild(gs); }
+      b.appendChild(make('span', 'cat-pill-tx', f.label));
+      b.addEventListener('click', function () { filter = f.id; paint(); });
+      elChips.appendChild(b);
+    });
+    if (!ids[filter]) filter = 'all';
+    if (keepFocus && ids[keepFocus]) {
+      var again = elChips.querySelector('[data-filter="' + keepFocus + '"]');
+      if (again) again.focus();
+    }
+  }
+
+  /* ---------- one row ---------- */
+
+  /* Compact status for the row's right edge; the detail page carries the
+     long form (receipt dates, "removed, data kept", …). */
+  function rowStatus(svc) {
+    var b = bucket(svc);
+    if (isRunningJob(svc)) return { cls: 'run', text: running(svc).line };
+    if (b === 'installed') {
+      return svc.state === 'active'
+        ? { cls: 'ok', text: 'Running' }
+        : { cls: 'warn', text: 'Stopped' };
+    }
+    if (b === 'available') {
+      return svc.receipt && svc.receipt.removed_at
+        ? { cls: 'muted', text: 'Removed · data kept' }
+        : { cls: 'muted', text: 'Not installed' };
+    }
+    return { cls: 'muted', text: 'Coming soon' };
+  }
 
   function action(svc) {
     var b = bucket(svc);
@@ -173,66 +269,50 @@
       wrap.appendChild(open);
     }
 
-    if (b === 'installed' && svc.removable === true && !isRunningJob(svc)) {
-      var rm = tag(make('button', 'cat-remove', 'Remove'), svc, 'remove');
-      rm.type = 'button';
-      rm.setAttribute('aria-label', 'Remove ' + (svc.name || svc.key));
-      rm.addEventListener('click', function () { if (app()) app().remove(svc.key, rm); });
-      wrap.appendChild(rm);
-    }
-
-    var more = tag(make('a', 'cat-more', 'Details'), svc, 'details');
-    more.href = '#/service/' + encodeURIComponent(svc.key);
-    wrap.appendChild(more);
+    /* Remove stays on the detail page: it is a deliberate, destructive
+       action, not a list-row affordance. */
     return wrap;
   }
 
-  function status(svc) {
-    var b = bucket(svc);
-    var line = make('p', 'cat-status cat-status-' + b);
-    if (isRunningJob(svc)) {
-      line.className = 'cat-status cat-status-run';
-      line.textContent = running(svc).line;
-      return line;
-    }
-    if (b === 'installed') {
-      var r = svc.receipt;
-      var when = r && shortDate(r.installed_at);
-      line.textContent = (svc.state === 'active' ? 'Installed, running' : 'Installed, stopped') +
-        (when ? ' · since ' + when : '');
-    } else if (b === 'available') {
-      line.textContent = svc.receipt && svc.receipt.removed_at
-        ? 'Removed ' + (shortDate(svc.receipt.removed_at) || '') + ' · data kept'
-        : 'Not installed';
-    } else {
-      line.textContent = 'Coming soon';
-    }
-    return line;
-  }
-
+  /* Umbrel store row: squircle icon, name + tagline, status at the right
+     edge, then the action. The row body itself is the detail link, so the
+     action buttons sit beside it as siblings — the same layering the home
+     tiles use. */
   function card(svc) {
-    var art = make('article', 'cat-card cat-card-' + bucket(svc));
-    art.setAttribute('data-key', svc.key);
+    var row = make('div', 'cat-row cat-row-' + bucket(svc));
+    row.setAttribute('data-key', svc.key);
 
-    var head = make('div', 'cat-head');
+    var main = tag(make('a', 'cat-row-main'), svc, 'details');
+    main.href = '#/service/' + encodeURIComponent(svc.key);
+    main.setAttribute('aria-label',
+      (svc.name || svc.key) + ', ' + rowStatus(svc).text + ', opens details');
+
     var ic = make('span', 'cat-icon');
     ic.appendChild(iconNode(svc));
-    head.appendChild(ic);
+    main.appendChild(ic);
     var names = make('div', 'cat-names');
-    names.appendChild(make('h4', 'cat-name', svc.name || svc.key));
+    names.appendChild(make('span', 'cat-name', svc.name || svc.key));
     if (svc.tagline) names.appendChild(make('span', 'cat-tag', svc.tagline));
-    head.appendChild(names);
-    art.appendChild(head);
-
-    if (typeof svc.description === 'string' && svc.description) {
-      art.appendChild(make('p', 'cat-desc', svc.description));
-    }
-    if (typeof svc.author === 'string' && svc.author) {
-      art.appendChild(make('p', 'cat-author', 'by ' + svc.author));
-    }
-    art.appendChild(status(svc));
-    art.appendChild(action(svc));
-    return art;
+    main.appendChild(names);
+    var st = rowStatus(svc);
+    main.appendChild(make('span', 'cat-state cat-state-' + st.cls, st.text));
+    var chev = make('span', 'cat-chev');
+    chev.setAttribute('aria-hidden', 'true');
+    var cs = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    cs.setAttribute('viewBox', '0 0 24 24');
+    cs.setAttribute('fill', 'none');
+    cs.setAttribute('stroke', 'currentColor');
+    cs.setAttribute('stroke-width', '1.6');
+    cs.setAttribute('stroke-linecap', 'round');
+    cs.setAttribute('stroke-linejoin', 'round');
+    var cp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    cp.setAttribute('d', 'm9.5 6 6 6-6 6');
+    cs.appendChild(cp);
+    chev.appendChild(cs);
+    main.appendChild(chev);
+    row.appendChild(main);
+    row.appendChild(action(svc));
+    return row;
   }
 
   /* ---------- paint ---------- */
@@ -241,11 +321,12 @@
     if (!shown) return;
     build();
     var a = app();
+    buildRail();
 
     for (var c = 0; c < elChips.childNodes.length; c++) {
       var chip = elChips.childNodes[c];
       var on = chip.getAttribute('data-filter') === filter;
-      chip.className = on ? 'cat-chip is-on' : 'cat-chip';
+      chip.className = on ? 'cat-pill is-on' : 'cat-pill';
       chip.setAttribute('aria-pressed', on ? 'true' : 'false');
     }
 
@@ -286,8 +367,6 @@
       (counts.planned ? ' · ' + counts.planned + ' coming soon' : '');
 
     var groups = a.groups();
-    var known = {};
-    groups.forEach(function (g) { known[g.id] = true; });
     var sections = groups.map(function (g) { return { id: g.id, label: g.label, items: [] }; });
     var other = { id: null, label: 'Other', items: [] };
     list.forEach(function (s) {
@@ -305,11 +384,14 @@
     sections.forEach(function (sec) {
       if (!sec.items.length) return;
       any = true;
-      var box = make('section', 'cat-group');
-      box.appendChild(make('h3', 'cat-group-title', sec.label + ' · ' + sec.items.length));
-      var grid = make('div', 'cat-grid');
-      sec.items.forEach(function (s) { grid.appendChild(card(s)); });
-      box.appendChild(grid);
+      var box = make('section', 'cat-panel');
+      var head = make('div', 'cat-panel-h');
+      head.appendChild(make('h3', 'cat-panel-title', sec.label));
+      head.appendChild(make('span', 'cat-panel-n', String(sec.items.length)));
+      box.appendChild(head);
+      var rows = make('div', 'cat-rows');
+      sec.items.forEach(function (s) { rows.appendChild(card(s)); });
+      box.appendChild(rows);
       elBody.appendChild(box);
     });
     if (!any) elBody.appendChild(make('p', 'cat-empty', 'No app matches that.'));
