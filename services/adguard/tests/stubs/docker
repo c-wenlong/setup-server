@@ -13,12 +13,31 @@
 #                         other   -> an unrecognised failure
 #   container_status  — what `docker inspect .State.Status` reports (default
 #                       running)
+#   cleanup_fails     — exists => the purge's `docker run ... find -delete`
+#                       cleanup container fails
+#   cleanup_ran       — touched by a cleanup `docker run`
 #   restart_count     — what `docker inspect .RestartCount` reports (default 0).
 #                       Non-zero is EXPECTED right after a reboot and must not
 #                       be reported as a fault.
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
+  run)
+    # teardown --purge's root-file cleanup:
+    #   docker run --rm --pull never -v DIR:/x --entrypoint sh IMAGE -c 'find /x -mindepth 1 -delete'
+    # Emulated by emptying DIR as its owner would (root in real life; the
+    # sandbox's "root-owned" files are read-only dirs, so restore write first).
+    touch "$STATE_DIR/cleanup_ran"
+    [ -f "$STATE_DIR/cleanup_fails" ] && { echo "cleanup failed" >&2; exit 1; }
+    src=""
+    while [ $# -gt 0 ]; do
+      case "$1" in -v) src="${2%%:*}"; shift 2 ;; *) shift ;; esac
+    done
+    [ -n "$src" ] && [ -d "$src" ] || exit 1
+    chmod -R u+w "$src"
+    find "$src" -mindepth 1 -delete
+    ;;
+
   ps)
     if [ -f "$STATE_DIR/docker_no_perm" ]; then
       echo "permission denied while trying to connect to the Docker daemon socket" >&2

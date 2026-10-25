@@ -20,6 +20,15 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for adguard**, so it gets the launcher's Remove button,
+  behind a DNS safety gate. Before changing anything it reads
+  `tailscale dns status --json` and dies if this node's tailnet address
+  is still a tailnet DNS resolver (stopping AdGuard then would cut DNS
+  for every device). If the answer cannot be read it dies unless you
+  pass `--dns-removed`. Default keeps `conf/`, `work/` and `.env`;
+  `--purge` deletes them, using a throwaway container of the pinned image
+  for root-owned files.
+
 - **teardown.sh for openhands**, so it gets the launcher's Remove button.
   It stops only containers in the `openhands` compose project (with the
   creds overlay file when present); any other container named like
