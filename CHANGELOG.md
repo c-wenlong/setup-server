@@ -8,6 +8,14 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Fixed
+
+- **coolify setup.sh no longer breaks the last line of
+  `~/.ssh/authorized_keys`.** When that file did not end in a newline,
+  the Coolify key was glued onto the user's last key, breaking both. It now
+  adds the newline first, and only counts the key as present on an exact
+  whole-line match (a commented-out copy no longer counts).
+
 ### Added
 
 - **teardown.sh for the six services whose data hurts most to lose**:

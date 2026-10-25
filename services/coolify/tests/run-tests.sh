@@ -165,6 +165,27 @@ test_fresh_deploy() {
   teardown
 }
 
+test_authorized_keys_append() {
+  echo "• authorized_keys: key goes on its own line, exact match only"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$HOME/.ssh"
+  printf 'ssh-ed25519 AAAAuserkey me@laptop' > "$HOME/.ssh/authorized_keys"
+  run_deploy
+  pub="$(cat "$(data_dir)/ssh/keys/id.${USER}@host.docker.internal.pub")"
+  check "exits zero"                      [ "$CODE" -eq 0 ]
+  check "user's key line kept intact"     grep -qx 'ssh-ed25519 AAAAuserkey me@laptop' "$HOME/.ssh/authorized_keys"
+  check "coolify key on its own line"     grep -qxF "$pub" "$HOME/.ssh/authorized_keys"
+  check "file is exactly two lines"       [ "$(wc -l < "$HOME/.ssh/authorized_keys" | tr -d ' ')" = 2 ]
+  # A commented-out copy of the key must not count as present.
+  printf '# %s\n' "$pub" > "$HOME/.ssh/authorized_keys"
+  run_deploy
+  check "commented copy not treated as present" grep -qxF "$pub" "$HOME/.ssh/authorized_keys"
+  run_deploy
+  check "re-run adds no duplicate"        [ "$(grep -cxF "$pub" "$HOME/.ssh/authorized_keys")" = 1 ]
+  teardown
+}
+
 test_open_register_fails() {
   echo "• first-run registration still open: setup dies, does not publish"
   setup
@@ -379,6 +400,7 @@ test_preflight_docker_perms
 test_preflight_tailscale_down
 test_preflight_bad_port
 test_fresh_deploy
+test_authorized_keys_append
 test_open_register_fails
 test_port_override
 test_https_port_follows_local_port

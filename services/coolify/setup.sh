@@ -351,9 +351,15 @@ if [ -f "$KEY_BASE" ]; then
   chmod 600 "$auth"
   pub_line="$(cat "${KEY_BASE}.pub" 2>/dev/null || true)"
   if [ -n "$pub_line" ]; then
-    if grep -qF "$pub_line" "$auth" 2>/dev/null; then
+    if grep -qxF "$pub_line" "$auth" 2>/dev/null; then
       ok "Coolify pubkey already in $auth"
     else
+      # A last line without a newline would get the key glued onto it,
+      # breaking both keys. $(...) strips a trailing newline, so a
+      # non-empty last byte means the file does not end in one.
+      if [ -s "$auth" ] && [ -n "$(tail -c 1 "$auth")" ]; then
+        printf '\n' >> "$auth"
+      fi
       printf '%s\n' "$pub_line" >> "$auth"
       ok "Added Coolify pubkey to $auth (SSH as $USER, not root)"
     fi
