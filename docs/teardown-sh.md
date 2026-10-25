@@ -9,7 +9,8 @@ Paperclip / OpenHands split-and-redeploy on `kai-home-server`.
 the reference and the launcher's Remove action running it without
 `--purge`. Since then: firefly-iii, home-assistant, homepage, jellyfin,
 metabase, n8n, open-webui, umami; then vaultwarden, immich, paperless-ngx,
-seafile, appflowy, plane. Services without one keep their **Nuke
+seafile, appflowy, plane; then beszel, quiver-hub, syncthing,
+trigger-dev, coolify. Services without one keep their **Nuke
 and pave** recipe as the authority.
 
 ## Recommendation

@@ -152,18 +152,39 @@ Same recipe as every other service:
 
 ## Nuke and pave
 
-This deletes the database, the registry, and every deployed task
-image. The `.env` secrets stay, so a new stack can decrypt nothing
-that was in the old volumes — that is fine, they will be empty.
+This deletes the database, ClickHouse, Redis, MinIO (task payloads), the
+registry with every deployed task image, and the worker token. Nothing on
+this box backs them up, so take a cold copy first if you might want them:
 
 ```bash
 cd ~/dev/setup-server/services/trigger-dev
-docker compose --project-directory . down
-rm -rf ~/services/trigger-dev
-# keep .env (origins + secrets) unless you also want new passwords:
-# rm -f .env
-./setup.sh
+docker compose --project-directory . stop
+tar czf ~/trigger-dev-$(date +%F).tgz -C ~/services/trigger-dev .
+cp .env ~/trigger-dev-$(date +%F).env
 ```
+
+Then use `teardown.sh`, not a hand recipe. It unpublishes only the Serve
+ports that point at the dashboard's `LOCAL_PORT` and runs `compose down`.
+If a task-runner container the supervisor started is still attached to a
+`trigger-*` network, it names it and stops before changing anything (it never
+kills containers outside the compose project); let the run finish or
+`docker rm -f` it, then re-run. `--purge` deletes only the paths `.env` names
+plus `.magic-link-requested`, refuses any that is not inside
+`~/services/trigger-dev`, and empties container-owned files with a throwaway
+container of the Postgres image already on the box (no pull, no `sudo`); if
+that fails it keeps `.env` and prints the `sudo rm -rf` to run. The tracked
+`docker-compose.yml`, `machine-presets.json` and `clickhouse/*.xml` stay.
+
+```bash
+./teardown.sh            # remove, keep all data + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete the state under ~/services/trigger-dev
+                         # and .env; type "trigger-dev" to confirm
+./setup.sh               # back, fresh (new secrets) if you purged
+```
+
+Task images already pulled into the host Docker and the host's
+`docker login localhost:5000` survive a purge: `docker image rm` /
+`docker logout localhost:5000` by hand if you want them gone.
 
 To rotate only the registry password: delete
 `~/services/trigger-dev/registry/auth.htpasswd`, change

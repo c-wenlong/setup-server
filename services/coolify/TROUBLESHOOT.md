@@ -126,16 +126,33 @@ own "forgot password" only if SMTP is configured (it is not).
 
 ## Nuke and pave
 
+Use `teardown.sh`, not a hand recipe: it unpublishes only the Serve ports
+that point at the dashboard or Soketi, runs `compose down` on Coolify's own
+four containers, and leaves every app Coolify deployed alone (it names
+them). `--purge` refuses while Coolify still holds apps, databases or
+services you deployed through it; delete those in the dashboard first.
+While those apps (or coolify-proxy) run, Docker cannot remove the `coolify`
+network: teardown says "Docker kept the 'coolify' network" and carries on.
+`docker network rm coolify` once they are gone.
+
+Back up before a purge. It deletes the `coolify-db` volume and `.env`
+(`APP_KEY`), and one without the other is useless:
+
 ```bash
 cd ~/dev/setup-server/services/coolify
-docker compose --project-directory . down
-docker volume rm coolify-db coolify-redis
-# optional: drop the SSH line setup.sh added
-# grep -v ' coolify$' ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.t && mv ...
-rm -rf ~/services/coolify
-# keeps .env (ports + APP_KEY). To start over completely:
-#   mv .env .env.bak
-./setup.sh
+docker compose --project-directory . exec -T postgres \
+  pg_dump -U coolify coolify > ~/coolify-$(date +%F).sql
+cp .env ~/coolify-$(date +%F).env
+```
+
+Then:
+
+```bash
+./teardown.sh            # remove, keep volumes, ~/services/coolify, .env and the SSH key
+./teardown.sh --purge    # also delete coolify-db, coolify-redis, Coolify's dirs under
+                         # ~/services/coolify, .env, and exactly the key line setup.sh
+                         # added to ~/.ssh/authorized_keys; type "coolify"
+./setup.sh               # back, fresh if you purged
 ```
 
 Deleting `.env` rotates `APP_KEY`. A restored `coolify-db` volume then

@@ -113,15 +113,27 @@ journalctl --user -u quiver-hub.service -e --no-pager
 
 ## Nuke and pave
 
+Back up first if you might want the paired devices back (`~/.quiver/data/remote/`
+is Quiver's, and neither command below touches it):
+
 ```sh
-systemctl --user disable --now quiver-hub.service
-tailscale serve --https=8477 off                     # this port only
-rm -rf ~/.local/share/quiver-hub ~/.config/systemd/user/quiver-hub.service
-systemctl --user daemon-reload
+tar czf ~/quiver-remote-backup.tgz -C ~/.quiver/data remote   # optional
+./teardown.sh --purge     # type quiver-hub: unpublishes :8477 (this port only),
+                          # disables + stops the unit, deletes .env and the unit file
+rm -rf ~/.local/share/quiver-hub                               # the hub build (teardown keeps it)
 ./setup.sh
 ```
 
-This keeps `~/.quiver/data/remote/`, so paired phones and satellites keep
-working. To forget every device as well, also
-`rm -rf ~/.quiver/data/remote` before `./setup.sh`, then re-pair each one.
-`.env` survives too; delete it to start from the default ports.
+`./teardown.sh` without `--purge` (what the launcher's Remove runs) only
+unpublishes and stops the hub; `.env`, the unit file and the build stay, so
+`./setup.sh` brings it back as it was. Neither mode touches the `swe` on your
+PATH, `~/.quiver`, lingering or the Tailscale operator, and units it did not
+write are named but left alone. On macOS both modes unload the LaunchAgent
+and delete its plist (it would start again at login; `setup.sh` rewrites it).
+
+Because `~/.quiver/data/remote/` survives, paired phones and satellites keep
+working once the hub is back on the same port. `--purge` deletes `.env`, so a
+hub that ran on a non-default port comes back on 8477: re-pair every MacBook
+satellite (`./pair.sh`, then `swe remote agent --hub=... --token=...`) and the
+phones. To forget every device as well, also `rm -rf ~/.quiver/data/remote`
+before `./setup.sh`, then re-pair each one.

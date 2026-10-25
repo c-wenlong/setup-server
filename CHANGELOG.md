@@ -28,6 +28,28 @@ first, dated by merge.
   An SSH TCP forward is only turned off if the compose SSH port line is
   actually enabled.
 
+- **teardown.sh for code-server**, so it gets the launcher's Remove
+  button. On `:443` it turns off only code-server's own path (`/`), so
+  the launcher's `/home` stays up; a port that is all code-server goes
+  off whole. It disables the unit (Linux) or boots out the agent (macOS),
+  and keeps `config.yaml`, user data, extensions, the binary and every
+  workspace folder. `--purge` deletes only the unit file and the empty
+  `~/services/code-server` marker, and prints the `rm` for everything
+  else.
+
+- **teardown.sh for beszel, quiver-hub, syncthing, trigger-dev and
+  coolify**, so each gets the launcher's Remove button. Service-specific:
+  syncthing's purge deletes only its identity and index and keeps your
+  synced files unless you also pass `--delete-synced-files`; quiver-hub
+  keeps `~/.local/share/quiver-hub` and `~/.quiver`; trigger-dev refuses
+  while task-runner containers exist rather than killing them; coolify
+  never stops the apps it deployed, refuses `--purge` while any exist, and
+  removes only its own key line from `authorized_keys`. Coolify's Remove
+  also carries on when Compose cannot delete the `coolify` network because
+  deployed apps still use it, as long as its own containers are gone.
+  beszel and syncthing setup.sh now `launchctl enable` before
+  bootstrap on macOS.
+
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
   gets the launcher's Remove button. The vaultwarden, immich and

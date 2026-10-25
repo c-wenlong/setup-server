@@ -319,14 +319,21 @@ generate one instead: a fresh config pinned to an address this host does not
 hold could never bind, and every later check in the script would agree with
 itself and miss it.
 
-**Turn it off.** `systemctl --user disable --now syncthing` and
-`tailscale serve --https=8384 off`. The files stay where they are.
+**Remove.** `./teardown.sh` (or Remove in the launcher) unpublishes the
+GUI's Serve port and runs `systemctl --user disable --now syncthing.service`
+(macOS: disables and boots out the LaunchAgent); config, index, files, `.env`
+and the unit file stay, so `./setup.sh` brings it back as the same device.
+`./teardown.sh --purge` also deletes `config/` (the Device ID), `db/`, `.env`
+and the unit file, after you type `syncthing`; the synced files in `data/`
+stay unless you add `--delete-synced-files`. See TROUBLESHOOT.md "Nuke and
+pave".
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `setup.sh` | the deploy, idempotent |
+| `teardown.sh` | remove (keep everything) or `--purge` (identity + index; files only with `--delete-synced-files`) |
 | `.env` | generated, gitignored: version, ports, tailnet IP, directories |
 | `tests/run-tests.sh` | mocked suite (real tar/sha256/XML patch in a sandbox) + `--live` |
 | `tests/stubs/syncthing.tmpl` | the fake binary the curl stub packages into the mocked release tarball |
