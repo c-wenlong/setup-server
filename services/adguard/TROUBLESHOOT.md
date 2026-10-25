@@ -465,7 +465,8 @@ do not fall back to something sensible; they just stop resolving. Depending on
    ```
 
    If it says it **could not tell** (tailscaled down, logged out, a CLI
-   without `dns status --json`), and you did steps 1 and 2 yourself, re-run
+   without `dns status --json`, or JSON whose resolver fields are not the
+   types it expects), and you did steps 1 and 2 yourself, re-run
    with `./teardown.sh --dns-removed`. That flag never overrides a
    nameserver the tailnet still lists. The launcher's Remove button runs the
    plain form, so it only works once the check comes back clear.

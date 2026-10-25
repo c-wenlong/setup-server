@@ -13,7 +13,8 @@
 #   serve_status_fails  — exists => `serve status` fails like a stopped daemon
 #   dns_status          — JSON `tailscale dns status --json` prints (teardown's
 #                         DNS gate). Absent => a logged-in node whose tailnet
-#                         lists no resolvers at all.
+#                         lists no resolvers at all (all four keys null, as
+#                         the real CLI prints them).
 #   dns_status_fails    — exists => `dns status` fails ("no netmap", i.e. 503
 #                         from the local API, or a CLI without the subcommand)
 #
@@ -48,7 +49,11 @@ if [ "$1" = "dns" ] && [ "${2:-}" = "status" ]; then
     "MagicDNSEnabled": true,
     "MagicDNSSuffix": "tailfake.ts.net",
     "SelfDNSName": "test-host.tailfake.ts.net."
-  }
+  },
+  "Resolvers": null,
+  "SplitDNSRoutes": null,
+  "FallbackResolvers": null,
+  "Nameservers": null
 }
 JSON
   fi

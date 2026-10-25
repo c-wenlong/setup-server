@@ -1167,8 +1167,19 @@ work_dir() { env_val ADGUARD_WORK; }
 
 # `tailscale dns status --json` for a logged-in node, with the given extra
 # top-level keys (already indented two spaces, comma-separated) after
-# CurrentTailnet. Same two-space MarshalIndent shape as the real CLI.
+# CurrentTailnet. Same two-space MarshalIndent shape as the real CLI, which
+# always prints all four resolver keys: any the extra keys leave out are
+# added as null. dns_json "" leaves them all out (a truncated or renamed
+# shape).
 dns_json() {
+  local extra="${1:-}" k
+  if [ -n "$extra" ]; then
+    for k in Resolvers SplitDNSRoutes FallbackResolvers Nameservers; do
+      case "$extra" in *"
+  \"$k\":"*|"  \"$k\":"*) ;; *) extra="$extra,
+  \"$k\": null" ;; esac
+    done
+  fi
   {
     echo '{'
     echo '  "TailscaleDNS": true,'
@@ -1176,9 +1187,9 @@ dns_json() {
     echo '    "MagicDNSEnabled": true,'
     echo '    "MagicDNSSuffix": "tailfake.ts.net",'
     echo '    "SelfDNSName": "test-host.tailfake.ts.net."'
-    if [ -n "${1:-}" ]; then
+    if [ -n "$extra" ]; then
       echo '  },'
-      printf '%s\n' "$1"
+      printf '%s\n' "$extra"
     else
       echo '  }'
     fi
@@ -1500,12 +1511,35 @@ test_teardown_dns_gate_clear() {
   run_teardown
   check "no resolvers configured: exits zero" [ "$CODE" -eq 0 ]
   teardown
+  # The shape a real node printed (on one line here: a parser, not an
+  # indent match), with other addresses in every slot.
+  deployed
+  printf '{"TailscaleDNS":true,"CurrentTailnet":{"MagicDNSEnabled":true,"MagicDNSSuffix":"tailfake.ts.net","SelfDNSName":"test-host.tailfake.ts.net."},"Resolvers":[{"Addr":"1.1.1.1"},{"Addr":"9.9.9.9"}],"FallbackResolvers":null,"SplitDNSRoutes":{"ts.net.":[{"Addr":"199.247.155.53"}],"empty.example.":null},"Nameservers":["8.8.8.8"],"CertDomains":null,"SearchDomains":["tailfake.ts.net"]}\n' > "$STATE_DIR/dns_status"
+  run_teardown
+  check "real-box shape, compact: exits zero" [ "$CODE" -eq 0 ]
+  check "  compose down"              [ -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf '{"TailscaleDNS":true,"CurrentTailnet":{"MagicDNSSuffix":"tailfake.ts.net"},"Resolvers":[{"Addr":"1.1.1.1"},{"Addr":"%s"}],"FallbackResolvers":null,"SplitDNSRoutes":null,"Nameservers":null}\n' "$FAKE_TS_IP" > "$STATE_DIR/dns_status"
+  run_teardown
+  nothing_changed "real-box shape, compact, listed"
+  check "  says the tailnet still uses it" out_has "still uses $FAKE_TS_IP for DNS"
+  teardown
 }
 
 test_teardown_dns_gate_unknown() {
   echo "• teardown: an unreadable DNS config stops, unless --dns-removed"
   local shape
-  for shape in fails logged-out text truncated no-ip; do
+  # Every shape below has the right key names but not the right types, or
+  # is not quite JSON: none of them may read as "not listed".
+  local all_null='"Resolvers": null, "SplitDNSRoutes": null, "FallbackResolvers": null, "Nameservers": null'
+  local tailnet='"TailscaleDNS": true, "CurrentTailnet": {"MagicDNSSuffix": "tailfake.ts.net"}'
+  for shape in fails logged-out text truncated no-ip \
+      tailnet-null tailnet-string no-tailscaledns keys-missing \
+      resolvers-string resolvers-of-strings resolver-no-addr resolver-addr-number \
+      fallback-object split-array split-route-string split-route-of-strings \
+      nameservers-objects nameservers-string duplicate-key escaped-addr \
+      trailing-garbage two-objects bad-literal; do
     deployed
     case "$shape" in
       fails)      touch "$STATE_DIR/dns_status_fails" ;;
@@ -1513,6 +1547,32 @@ test_teardown_dns_gate_unknown() {
       text)       printf '\n=== MagicDNS configuration ===\n\nResolvers (in preference order):\n  - 9.9.9.9\n' > "$STATE_DIR/dns_status" ;;
       truncated)  dns_json ""; sed -i.bak '$d' "$STATE_DIR/dns_status" ;;
       no-ip)      sed -i.bak '/^ADGUARD_DNS_IP=/d' "$SVC/.env" ;;
+      tailnet-null)
+        printf '{"TailscaleDNS": true, "CurrentTailnet": null, "Resolvers": "unavailable", "SplitDNSRoutes": null, "FallbackResolvers": "unavailable", "Nameservers": null}\n' > "$STATE_DIR/dns_status" ;;
+      tailnet-string)
+        printf '{"TailscaleDNS": true, "CurrentTailnet": "tailfake.ts.net", %s}\n' "$all_null" > "$STATE_DIR/dns_status" ;;
+      no-tailscaledns)
+        printf '{"CurrentTailnet": {"MagicDNSSuffix": "tailfake.ts.net"}, %s}\n' "$all_null" > "$STATE_DIR/dns_status" ;;
+      keys-missing)
+        printf '{%s, "Resolvers": null, "FallbackResolvers": null, "Nameservers": null}\n' "$tailnet" > "$STATE_DIR/dns_status" ;;
+      resolvers-string)     dns_json '  "Resolvers": "unavailable"' ;;
+      resolvers-of-strings) dns_json '  "Resolvers": ["9.9.9.9"]' ;;
+      resolver-no-addr)     dns_json '  "Resolvers": [{"Address": "9.9.9.9"}]' ;;
+      resolver-addr-number) dns_json '  "Resolvers": [{"Addr": 9}]' ;;
+      fallback-object)      dns_json '  "FallbackResolvers": {"Addr": "9.9.9.9"}' ;;
+      split-array)          dns_json '  "SplitDNSRoutes": [{"Addr": "9.9.9.9"}]' ;;
+      split-route-string)   dns_json '  "SplitDNSRoutes": {"lan.example.": "9.9.9.9"}' ;;
+      split-route-of-strings) dns_json '  "SplitDNSRoutes": {"lan.example.": ["9.9.9.9"]}' ;;
+      nameservers-objects)  dns_json '  "Nameservers": [{"Addr": "9.9.9.9"}]' ;;
+      nameservers-string)   dns_json '  "Nameservers": "9.9.9.9"' ;;
+      duplicate-key)
+        printf '{%s, %s, "Resolvers": [{"Addr": "%s"}]}\n' "$tailnet" "$all_null" "$FAKE_TS_IP" > "$STATE_DIR/dns_status" ;;
+      escaped-addr)
+        # \u0031 is "1": decoded, this is the node's own address.
+        dns_json '  "Resolvers": [{"Addr": "\u0031'"${FAKE_TS_IP#1}"'"}]' ;;
+      trailing-garbage)     dns_json '  "Resolvers": null'; echo 'x' >> "$STATE_DIR/dns_status" ;;
+      two-objects)          dns_json '  "Resolvers": null'; echo '{}' >> "$STATE_DIR/dns_status" ;;
+      bad-literal)          dns_json '  "Resolvers": nul' ;;
     esac
     run_teardown
     nothing_changed "$shape"

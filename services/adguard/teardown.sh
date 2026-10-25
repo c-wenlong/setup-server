@@ -204,14 +204,23 @@ SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
 # value setup.sh told you to type into the console) plus every address
 # `tailscale ip` reports now, in case the node's address moved since.
 #
-# `tailscale dns status --json` is json.MarshalIndent with a two-space
-# indent, so a top-level key is exactly `  "Key":` and everything nested is
-# indented further. The awk below reads only the four keys that carry
-# resolvers. A match is a whole address (100.1.2.3 does not match inside
-# 100.1.2.33), so 100.x, 100.x:53, [v6]:53 and a DoH URL on the IP all count.
-# "Readable" means the output is one JSON object that has TailscaleDNS and a
-# CurrentTailnet (missing when logged out or the shape changed): anything
-# less is "unknown", never "not listed".
+# `tailscale dns status --json` is parsed as JSON, not matched as text:
+# setup.sh guarantees no JSON tool (python3 is optional there, jq is never
+# required), so the awk below is a small strict parser. Anything it does not
+# fully understand is "unknown", never "clear":
+#   - the whole output must be one valid JSON object, nothing after it, no
+#     key twice in any object, no escaped key;
+#   - TailscaleDNS a boolean and CurrentTailnet a non-null object (null or
+#     missing when logged out);
+#   - all four resolver keys present (the CLI never omits them), each with
+#     the type it has in the CLI: Resolvers and FallbackResolvers null or an
+#     array of objects with a string Addr, SplitDNSRoutes null or an object
+#     whose values are null or such arrays, Nameservers null or an array of
+#     strings; no escape sequence in any string under them.
+# Then every string under those four keys is checked for this node's
+# addresses. A match is a whole address (100.1.2.3 does not match inside
+# 100.1.2.33), so 100.x, 100.x:53, [v6]:53, a DoH URL on the IP and a
+# BootstrapResolution entry all count.
 dns_verdict() {  # dns_verdict -> "listed <Key>"..., "clear", or "unknown"
   local addrs json
   case "$DNS_IP" in
@@ -221,9 +230,9 @@ dns_verdict() {  # dns_verdict -> "listed <Key>"..., "clear", or "unknown"
   addrs="$DNS_IP $("$TAILSCALE" ip 2>/dev/null | tr '\n\r' '  ' || true)"
   json="$("$TAILSCALE" dns status --json 2>/dev/null)" || { echo unknown; return 0; }
   printf '%s\n' "$json" | awk -v addrs="$addrs" '
-    function has_addr(line, a,   s, p, before, after, cls) {
+    function has_addr(str, a,   s, p, before, after, cls) {
       cls = index(a, ":") ? "[0-9a-f:]" : "[0-9.]"
-      s = tolower(line)
+      s = tolower(str)
       while ((p = index(s, a)) > 0) {
         before = (p > 1) ? substr(s, p - 1, 1) : ""
         after = substr(s, p + length(a), 1)
@@ -232,24 +241,136 @@ dns_verdict() {  # dns_verdict -> "listed <Key>"..., "clear", or "unknown"
       }
       return 0
     }
+    function bad() { err = 1; return "" }
+    function skipws(   c) {
+      while (pos <= len) {
+        c = substr(src, pos, 1)
+        if (c != " " && c != "\t" && c != "\n" && c != "\r") return
+        pos++
+      }
+    }
+    # A JSON string starting at pos. Returns its raw text; esc says whether
+    # it held an escape sequence.
+    function pstr(   c, out) {
+      esc = 0
+      if (substr(src, pos, 1) != "\"") return bad()
+      pos++; out = ""
+      while (pos <= len) {
+        c = substr(src, pos, 1)
+        if (c == "\"") { pos++; return out }
+        if (c == "\n" || c == "\r" || c == "\t") return bad()
+        if (c == "\\") {
+          esc = 1; c = substr(src, pos + 1, 1)
+          if (c == "u") {
+            if (substr(src, pos + 2, 4) !~ /^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/) return bad()
+            out = out substr(src, pos, 6); pos += 6; continue
+          }
+          if (index("\"\\/bfnrt", c) == 0 || c == "") return bad()
+          out = out "\\" c; pos += 2; continue
+        }
+        out = out c; pos++
+      }
+      return bad()
+    }
+    # The JSON value at pos, recorded under path: T[path] its type, V and E
+    # its text and escape flag (strings), N[path] its length (arrays,
+    # objects), K[path, i] the i-th key (objects). Returns the type, or ""
+    # with err set.
+    function pval(path, depth,   c, k, n, child) {
+      if (err) return ""
+      if (depth > 32) return bad()
+      skipws()
+      c = substr(src, pos, 1)
+      if (c == "{") {
+        pos++; n = 0; skipws()
+        if (substr(src, pos, 1) == "}") pos++
+        else while (1) {
+          skipws(); k = pstr()
+          if (err || esc || index(k, SEP)) return bad()
+          child = path SEP k
+          if (child in T) return bad()
+          T[child] = "pending"; K[path, ++n] = k
+          skipws()
+          if (substr(src, pos, 1) != ":") return bad()
+          pos++
+          if (pval(child, depth + 1) == "") return bad()
+          skipws(); c = substr(src, pos, 1); pos++
+          if (c == "}") break
+          if (c != ",") return bad()
+        }
+        N[path] = n; T[path] = "object"; return "object"
+      }
+      if (c == "[") {
+        pos++; n = 0; skipws()
+        if (substr(src, pos, 1) == "]") pos++
+        else while (1) {
+          n++
+          if (pval(path SEP n, depth + 1) == "") return bad()
+          skipws(); c = substr(src, pos, 1); pos++
+          if (c == "]") break
+          if (c != ",") return bad()
+        }
+        N[path] = n; T[path] = "array"; return "array"
+      }
+      if (c == "\"") {
+        V[path] = pstr(); E[path] = esc
+        if (err) return ""
+        T[path] = "string"; return "string"
+      }
+      if (substr(src, pos, 4) == "true" || substr(src, pos, 4) == "null") {
+        T[path] = (substr(src, pos, 4) == "null") ? "null" : "bool"
+        pos += 4; return T[path]
+      }
+      if (substr(src, pos, 5) == "false") { pos += 5; T[path] = "bool"; return "bool" }
+      if (match(substr(src, pos), /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?/)) {
+        pos += RLENGTH; T[path] = "number"; return "number"
+      }
+      return bad()
+    }
+    # null, or an array of objects that each have a string Addr.
+    function resolver_list(p,   i) {
+      if (T[p] == "null") return 1
+      if (T[p] != "array") return 0
+      for (i = 1; i <= N[p]; i++) {
+        if (T[p SEP i] != "object" || T[p SEP i SEP "Addr"] != "string") return 0
+      }
+      return 1
+    }
+    function shape_ok(   p, i) {
+      p = R SEP "Resolvers";         if (!(p in T) || !resolver_list(p)) return 0
+      p = R SEP "FallbackResolvers"; if (!(p in T) || !resolver_list(p)) return 0
+      p = R SEP "SplitDNSRoutes";    if (!(p in T)) return 0
+      if (T[p] == "object") {
+        for (i = 1; i <= N[p]; i++) if (!resolver_list(p SEP K[p, i])) return 0
+      } else if (T[p] != "null") return 0
+      p = R SEP "Nameservers";       if (!(p in T)) return 0
+      if (T[p] == "array") {
+        for (i = 1; i <= N[p]; i++) if (T[p SEP i] != "string") return 0
+      } else if (T[p] != "null") return 0
+      return 1
+    }
     BEGIN {
-      n = 0
+      SEP = "\034"; R = "$"; n = 0
       split(addrs, raw, " ")
       for (i in raw) if (raw[i] ~ /^[0-9a-fA-F:.]+$/ && raw[i] ~ /[.:]/) want[++n] = tolower(raw[i])
     }
-    { sub(/\r$/, "") }
-    NF == 0 { next }
-    first == "" { first = $0 }
-    { last = $0 }
-    /^  "[^"]+":/ {
-      key = $0; sub(/^  "/, "", key); sub(/".*/, "", key)
-      seen[key] = 1
-    }
-    key == "Resolvers" || key == "FallbackResolvers" || key == "SplitDNSRoutes" || key == "Nameservers" {
-      for (i = 1; i <= n; i++) if (has_addr($0, want[i]) && !(key in hit)) { hit[key] = 1; order[++h] = key }
-    }
+    { src = (NR == 1) ? $0 : src "\n" $0 }
     END {
-      if (first != "{" || last != "}" || !("TailscaleDNS" in seen) || !("CurrentTailnet" in seen) || n == 0) { print "unknown"; exit }
+      len = length(src); pos = 1; err = 0
+      if (pval(R, 0) != "object") { print "unknown"; exit }
+      skipws()
+      if (pos <= len || n == 0 || T[R SEP "TailscaleDNS"] != "bool" || T[R SEP "CurrentTailnet"] != "object" || !shape_ok()) { print "unknown"; exit }
+      split("Resolvers FallbackResolvers SplitDNSRoutes Nameservers", keys, " ")
+      h = 0
+      for (j = 1; j <= 4; j++) {
+        prefix = R SEP keys[j] SEP; found = 0
+        for (p in T) {
+          if (T[p] != "string" || index(p, prefix) != 1) continue
+          if (E[p]) { print "unknown"; exit }
+          for (i = 1; i <= n; i++) if (has_addr(V[p], want[i])) found = 1
+        }
+        if (found) order[++h] = keys[j]
+      }
       if (h == 0) { print "clear"; exit }
       for (i = 1; i <= h; i++) print "listed " order[i]
     }'
