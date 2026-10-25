@@ -10,6 +10,16 @@ first, dated by merge.
 
 ### Fixed
 
+- **Stopping AdGuard from the launcher or the phone now checks tailnet DNS
+  first.** Stop used to run a plain `docker stop`, skipping the check that
+  `teardown.sh` makes, so one tap could cut DNS for every device. A service's
+  `control` block may now name a `stop_guard` (AdGuard's is the new
+  read-only `teardown.sh --check-dns`), and both front ends run it before
+  Stop, refusing with its message when it fails. The launcher also runs it
+  before Remove unless it is the same teardown.sh. Restart is not guarded:
+  it costs a few seconds of DNS, and it is the usual fix for a stuck
+  resolver.
+
 - **adguard teardown refused every Remove on a real box.** Its DNS safety
   gate required all four resolver keys in `tailscale dns status --json`,
   but the CLI omits empty ones (kai-home-server prints only `Resolvers`

@@ -471,6 +471,12 @@ do not fall back to something sensible; they just stop resolving. Depending on
    nameserver the tailnet still lists. The launcher's Remove button runs the
    plain form, so it only works once the check comes back clear.
 
+   The Stop button (launcher and the ntfy phone panel) runs the same check
+   first, as `./teardown.sh --check-dns` (read-only: it changes nothing and
+   exits non-zero while the tailnet is listed or it cannot tell), and refuses
+   with that message. Restart is not checked: it costs a few seconds of DNS,
+   and it is the usual fix for a stuck resolver.
+
 ### If you already stopped it and the tailnet is broken
 
 Do not panic-debug DNS. Get resolution back first, in whichever way is

@@ -24,6 +24,7 @@ Python 3.9 like the launcher.
 
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -50,6 +51,42 @@ def _load(path):
         raise RegistryError("%s is not valid JSON: %s" % (path, exc))
 
 
+# A stop_guard's flags become argv words in the launcher and ntfy-control,
+# which both refuse anything outside this pattern. The same pattern and the
+# same check live in app/web/server.py and ntfy-control's
+# control_listener.py; app/web/tests asserts all three agree on a table.
+GUARD_ARG_RE = re.compile(r"^[A-Za-z0-9._=:/@+-]{1,128}$")
+
+
+def guard_shape_ok(raw):
+    """True when a stop_guard is a non-empty list of non-empty strings whose
+    flags (every item after the script) match GUARD_ARG_RE."""
+    return (isinstance(raw, list) and bool(raw)
+            and all(isinstance(a, str) and a for a in raw)
+            and all(GUARD_ARG_RE.fullmatch(a) for a in raw[1:]))
+
+
+def _stop_guard(folder, key, guard):
+    """control.stop_guard: argv relative to the service folder -> repo-relative.
+
+    A non-empty list of strings whose first item names a file inside
+    services/<folder>/ (no absolute path, no way out of the folder). The
+    generator rewrites that item to services/<folder>/<file>, the same way
+    `env` is rewritten, so both front ends resolve it from the repo root.
+    """
+    where = "services/%s/%s (%s): control.stop_guard" % (folder, MANIFEST, key)
+    if not guard_shape_ok(guard):
+        raise RegistryError("%s must be a non-empty list of non-empty strings, "
+                            "each flag matching %s" % (where, GUARD_ARG_RE.pattern))
+    script = guard[0]
+    base = os.path.realpath(os.path.join(ROOT, "services", folder))
+    path = os.path.realpath(os.path.join(base, script))
+    if (os.path.isabs(script) or script.startswith("~")
+            or not path.startswith(base + os.sep) or not os.path.isfile(path)):
+        raise RegistryError("%s: %r is not a file in services/%s/" % (where, script, folder))
+    return ["services/%s/%s" % (folder, os.path.relpath(path, base))] + guard[1:]
+
+
 def _from_manifest(folder, entry):
     """One manifest entry -> one services.json entry, with setup/env filled in."""
     if not isinstance(entry, dict) or not entry.get("key"):
@@ -60,6 +97,9 @@ def _from_manifest(folder, entry):
             % (folder, MANIFEST, entry["key"], folder))
     out = {}
     for name, value in entry.items():
+        if name == "control" and isinstance(value, dict) and "stop_guard" in value:
+            value = dict(value)
+            value["stop_guard"] = _stop_guard(folder, entry["key"], value["stop_guard"])
         if name == "env" and isinstance(value, str) and not value.startswith(("/", "~")):
             value = "services/%s/%s" % (folder, value)
         if name == "env":

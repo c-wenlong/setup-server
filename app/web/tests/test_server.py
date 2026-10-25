@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -484,7 +485,7 @@ class DeployTest(SandboxTest):
         jid = server.start_deploy("alpha")
         payload = server.job_payload(jid)
         self.assertEqual(sorted(payload),
-                         ["action", "exit_code", "key", "log", "status"])
+                         ["action", "exit_code", "key", "log", "refused", "status"])
         self.assertEqual(payload["action"], "deploy")
         self.assertEqual(payload["key"], "alpha")
         self.assertEqual(payload["status"], "running")
@@ -2949,9 +2950,26 @@ class RecordedProc:
 
     def __init__(self, code):
         self.code = code
+        self.pid = 4242
 
-    def wait(self):
+    def wait(self, timeout=None):
         return self.code
+
+
+class HungProc:
+    """A stop guard that never answers: wait(timeout) always times out, and
+    only a plain wait() (after the group kill) returns."""
+
+    def __init__(self, argv):
+        self.argv = argv
+        self.pid = 31337
+        self.timeouts = []
+
+    def wait(self, timeout=None):
+        if timeout is not None:
+            self.timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        return -9
 
 
 class ControlTestBase(SandboxTest):
@@ -3700,6 +3718,177 @@ class ControlHttpTest(SandboxTest):
 
 # ------------------------------------------- the shipped, shared registry
 
+class ControlStopGuardTest(ControlTestBase):
+    """control.stop_guard: a read-only check that must pass before a stop."""
+
+    def control_registry(self):
+        self.marker = os.path.join(self.tmp, "data", "adguard")
+        os.makedirs(self.marker, exist_ok=True)
+        for key in ("adguard", "other"):
+            self.make_script("%s/setup.sh" % key)
+            self.make_script("%s/teardown.sh" % key)
+        self.make_script("other/guard.sh")
+        self.make_script("outside/guard.sh")
+
+        def svc(key, guard, **extra):
+            control = {"parts": [{"container": key}], "kuma": [key, key + "-dns"]}
+            control.update(extra)
+            if guard is not None:
+                control["stop_guard"] = guard
+            return {"key": key, "name": key, "tagline": "t", "icon": "code",
+                    "url": None, "health": None, "marker": self.marker,
+                    "setup": "%s/setup.sh" % key, "env": None,
+                    "control": control}
+        return {"services": [
+            svc("adguard", ["adguard/teardown.sh", "--check-dns"]),
+            svc("other", ["other/guard.sh"]),
+            svc("plain", None),
+        ]}
+
+    def path(self, rel):
+        return os.path.realpath(os.path.join(self.repo, rel))
+
+    def set_guard(self, key, guard):
+        registry = self.control_registry()
+        for svc in registry["services"]:
+            if svc["key"] == key:
+                svc["control"]["stop_guard"] = guard
+        self.write_registry(registry)
+
+    def test_stop_runs_the_guard_first_then_pauses_then_stops(self):
+        self.enable_kuma()
+        argvs = self.plan("adguard", "stop")
+        self.assertEqual(argvs[0], [self.path("adguard/teardown.sh"), "--check-dns"])
+        self.assertEqual([a[-1] for a in argvs[1:3]], ["adguard", "adguard-dns"])
+        self.assertIn("pause", argvs[1])
+        self.assertEqual(argvs[3], ["docker", "stop", "adguard"])
+        steps = server.plan_action(server.find_service("adguard"), "stop")
+        self.assertTrue(steps[0]["guard"])
+        self.assertFalse(steps[0]["optional"])
+        self.assertEqual([s for s in steps[1:] if s.get("guard")], [])
+
+    def test_restart_and_start_are_not_guarded(self):
+        for action in ("restart", "start"):
+            steps = server.plan_action(server.find_service("adguard"), action)
+            self.assertEqual([s for s in steps if s.get("guard")], [], action)
+            self.assertNotIn("--check-dns", sum((s["argv"] for s in steps), []))
+
+    def test_a_service_without_a_guard_plans_as_before(self):
+        self.assertEqual(self.plan("plain", "stop"), [["docker", "stop", "plain"]])
+
+    def test_the_guard_goes_through_the_docker_group_wrapper(self):
+        server._have_docker_group = lambda: False
+        server._which = lambda name: "/usr/bin/sg" if name == "sg" else None
+        argv = self.plan("adguard", "stop")[0]
+        self.assertEqual(argv[:3], ["/usr/bin/sg", "docker", "-c"])
+        self.assertEqual(argv[3], "%s --check-dns" % self.path("adguard/teardown.sh"))
+
+    def test_remove_does_not_run_teardown_twice(self):
+        argvs = self.plan("adguard", "remove")
+        self.assertEqual(argvs, [[self.path("adguard/teardown.sh")]])
+
+    def test_remove_runs_a_separate_guard_first(self):
+        self.enable_kuma()
+        argvs = self.plan("other", "remove")
+        self.assertEqual(argvs[0], [self.path("other/guard.sh")])
+        self.assertIn("pause", argvs[1])
+        self.assertEqual(argvs[3], [self.path("other/teardown.sh")])
+
+    def test_a_refusing_guard_fails_the_stop_before_anything_changes(self):
+        self.enable_kuma()
+        payload = self.run_action("adguard", "stop",
+                                  failures={"--check-dns": 1})
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["exit_code"], 1)
+        self.assertTrue(payload["refused"])
+        self.assertEqual(self.argvs(),
+                         [[self.path("adguard/teardown.sh"), "--check-dns"]])
+        self.assertIn("refused by the stop guard", payload["log"])
+        self.assertIn("nothing was changed", payload["log"])
+
+    def test_a_passing_guard_lets_the_stop_through(self):
+        payload = self.run_action("adguard", "stop")
+        self.assertEqual(payload["status"], "done")
+        self.assertFalse(payload["refused"])
+        self.assertEqual(self.argvs()[-1], ["docker", "stop", "adguard"])
+
+    def test_a_refused_remove_never_pauses_or_resumes_kuma(self):
+        self.enable_kuma()
+        payload = self.run_action("other", "remove", failures={"guard.sh": 2})
+        self.assertTrue(payload["refused"])
+        self.assertEqual(self.argvs(), [[self.path("other/guard.sh")]])
+
+    def test_an_ordinary_failure_is_not_a_refusal(self):
+        payload = self.run_action("adguard", "stop",
+                                  failures={"docker stop": 1})
+        self.assertEqual(payload["status"], "failed")
+        self.assertFalse(payload["refused"])
+
+    def test_an_unusable_guard_refuses_the_stop_with_no_job(self):
+        outside = os.path.join(self.tmp, "elsewhere.sh")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        for guard in (["adguard/missing.sh"], [outside], "adguard/teardown.sh",
+                      [], [""], ["adguard/teardown.sh", 3],
+                      ["adguard/teardown.sh", "--x; rm -rf ~"],
+                      ["../%s" % os.path.basename(self.tmp) + "/elsewhere.sh"]):
+            self.set_guard("adguard", guard)
+            self.record_popen()
+            with self.assertRaises(server.DeployError) as ctx:
+                server.start_action("adguard", "stop")
+            self.assertEqual(ctx.exception.status, 403, guard)
+            self.assertIn("stop_guard", ctx.exception.message, guard)
+            self.assertEqual(self.spawned, [], guard)
+            self.assertEqual(server._jobs, {}, guard)
+
+    def test_a_hung_guard_is_killed_and_the_stop_refused(self):
+        self.enable_kuma()
+        hung = []
+        killed = []
+
+        def fake(argv, **kwargs):
+            self.spawned.append((list(argv), kwargs))
+            if "--check-dns" in argv:
+                hung.append(HungProc(argv))
+                return hung[-1]
+            return RecordedProc(0)
+
+        real_killpg = os.killpg
+        subprocess.Popen = fake
+        os.killpg = lambda pid, sig: killed.append((pid, sig))
+        try:
+            job_id = server.start_action("adguard", "stop")
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                with server._jobs_lock:
+                    if server._jobs[job_id]["status"] != "running":
+                        break
+                time.sleep(0.01)
+            payload = server.job_payload(job_id)
+        finally:
+            os.killpg = real_killpg
+        self.assertEqual(payload["status"], "failed")
+        self.assertTrue(payload["refused"])
+        self.assertEqual(payload["exit_code"], 124)
+        self.assertEqual(hung[0].timeouts, [server.GUARD_TIMEOUT])
+        self.assertEqual(killed, [(31337, signal.SIGKILL)])
+        self.assertTrue(self.spawned[0][1].get("start_new_session"))
+        # Nothing after the guard ran: no Kuma pause, no docker stop.
+        self.assertEqual(self.argvs(),
+                         [[self.path("adguard/teardown.sh"), "--check-dns"]])
+        self.assertIn("killed", payload["log"])
+
+    def test_only_the_guard_gets_its_own_session(self):
+        self.run_action("adguard", "stop")
+        sessions = [bool(kw.get("start_new_session")) for _, kw in self.spawned]
+        self.assertEqual(sessions, [True] + [False] * (len(sessions) - 1))
+
+    def test_an_unusable_guard_does_not_block_restart_or_start(self):
+        self.set_guard("adguard", ["adguard/missing.sh"])
+        self.run_action("adguard", "restart")
+        self.assertIn(["docker", "start", "adguard"], self.argvs())
+
+
 class SharedControlRegistryTest(unittest.TestCase):
     """The real services.json — the file BOTH front ends read.
 
@@ -3905,6 +4094,75 @@ class SharedControlRegistryTest(unittest.TestCase):
             self.assertEqual(control["kuma"],
                              server.control_monitors(
                                  server.control_block(svc)), key)
+
+    def test_adguard_stop_is_guarded_by_its_own_dns_check(self):
+        guard = self.control("adguard")["stop_guard"]
+        self.assertEqual(guard, ["services/adguard/teardown.sh", "--check-dns"])
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, guard[0])))
+        with open(os.path.join(self.repo, guard[0]), encoding="utf-8") as fh:
+            self.assertIn("--check-dns)", fh.read())
+
+    def test_both_front_ends_resolve_the_same_stop_guard(self):
+        listener = self._ntfy_control()
+        try:
+            phone = listener.load_registry()
+        finally:
+            os.environ.pop("CONTROL_REGISTRY", None)
+        saved = (server.REPO_ROOT, server.ALLOWED_ROOTS)
+        server.REPO_ROOT = os.path.realpath(self.repo)
+        server.ALLOWED_ROOTS = [server.REPO_ROOT]
+        try:
+            for key, control in phone.items():
+                web = server.stop_guard(self.services[key])
+                guard, guard_error = listener.resolve_guard(control)
+                self.assertIsNone(guard_error, key)
+                if web is None:
+                    self.assertIsNone(guard, key)
+                else:
+                    # The phone may prefix /bin/bash; the rest must match.
+                    want = [web[0]] + list(web[1])
+                    self.assertEqual(guard[-len(want):], want, key)
+        finally:
+            server.REPO_ROOT, server.ALLOWED_ROOTS = saved
+        self.assertTrue(listener.resolve_guard(phone["adguard"])[0])
+
+    def test_all_three_agree_on_which_stop_guards_are_well_formed(self):
+        """The generator, the launcher and ntfy-control each carry their own
+        copy of the guard shape rule; this table keeps the copies identical."""
+        import importlib.util
+        listener = self._ntfy_control()
+        os.environ.pop("CONTROL_REGISTRY", None)
+        spec = importlib.util.spec_from_file_location(
+            "build_registry", os.path.join(self.repo, "scripts", "build-registry.py"))
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        self.assertEqual(server._GUARD_ARG_RE.pattern, listener.GUARD_ARG_RE.pattern)
+        self.assertEqual(server._GUARD_ARG_RE.pattern, generator.GUARD_ARG_RE.pattern)
+        table = [
+            (["teardown.sh"], True),
+            (["teardown.sh", "--check-dns"], True),
+            (["teardown.sh", "--reason=DNS_maintenance", "-v", "a/b:c@d+e"], True),
+            (["teardown.sh", "x" * 128], True),
+            (["teardown.sh", "x" * 129], False),
+            (["teardown.sh", "--reason=DNS maintenance"], False),
+            (["teardown.sh", "--x;rm"], False),
+            (["teardown.sh", "$(id)"], False),
+            (["teardown.sh", "a\nb"], False),
+            (["teardown.sh", "--x\n"], False),
+            (["teardown.sh", "caf\u00e9"], False),
+            (["teardown.sh", "'q'"], False),
+            (["teardown.sh", ""], False),
+            (["teardown.sh", 3], False),
+            ([""], False),
+            ([], False),
+            ("teardown.sh", False),
+            (None, False),
+            ({"0": "teardown.sh"}, False),
+        ]
+        for raw, want in table:
+            got = (server.guard_shape_ok(raw), listener.guard_shape_ok(raw),
+                   generator.guard_shape_ok(raw))
+            self.assertEqual(got, (want, want, want), raw)
 
     def test_neither_front_end_will_touch_the_locked_three(self):
         listener = self._ntfy_control()
@@ -4807,9 +5065,26 @@ class ExitedProc:
 
     def __init__(self, code):
         self.code = code
+        self.pid = 4242
 
-    def wait(self):
+    def wait(self, timeout=None):
         return self.code
+
+
+class HungProc:
+    """A stop guard that never answers: wait(timeout) always times out, and
+    only a plain wait() (after the group kill) returns."""
+
+    def __init__(self, argv):
+        self.argv = argv
+        self.pid = 31337
+        self.timeouts = []
+
+    def wait(self, timeout=None):
+        if timeout is not None:
+            self.timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        return -9
 
 
 SHA_A = "a" * 40

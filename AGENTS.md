@@ -117,6 +117,13 @@ the reference. When a service ships one:
   neighbours do not, data kept without `--purge`, a wrong confirmation
   changes nothing, odd data paths refused.
 - The service's TROUBLESHOOT.md "Nuke and pave" points at the script.
+- When a plain stop can hurt more than the service itself (AdGuard is DNS
+  for the tailnet), teardown.sh may add a read-only check mode
+  (`--check-dns`: preflight plus the gate, changes nothing, non-zero with
+  the reason as its last stderr line) and `app.json` names it as
+  `control.stop_guard` (argv relative to the service folder). The launcher
+  and ntfy-control run it before Stop and refuse on non-zero; Restart is not
+  guarded.
 
 ## Testing requirements
 

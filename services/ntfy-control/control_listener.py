@@ -31,7 +31,9 @@ that would start it) and ollama (a *system* unit, so it would need sudo).
 Those are marked `locked` in the shared file and hard-locked here as well.
 Stopping a service also pauses its Uptime Kuma monitor (via kuma_toggle.py)
 so intentional downtime doesn't page; that step is best-effort and never
-fails the action itself.
+fails the action itself. A service with a `stop_guard` (AdGuard: its
+`teardown.sh --check-dns`) has that run before `stop`, and a non-zero exit
+refuses the stop before anything changes; the reply carries its reason.
 
 Modes:
     control_listener.py                  subscribe loop (systemd/launchd)
@@ -45,6 +47,7 @@ Config via env (systemd EnvironmentFile= / launchd EnvironmentVariables):
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -68,6 +71,24 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 # marks these `locked`, and this is here so an edit to that file cannot
 # hand the phone a button that stops the thing you would start things with.
 HARD_LOCKED = ("ntfy", "launcher", "ollama")
+
+# A stop_guard's flags become argv words: the same kind of shape gate. The
+# same pattern and check live in app/web/server.py and
+# scripts/build-registry.py; app/web/tests asserts all three agree.
+GUARD_ARG_RE = re.compile(r"^[A-Za-z0-9._=:/@+-]{1,128}$")
+
+# Seconds a stop guard may run before its process group is killed and the
+# stop refused. It is a read-only check, so anything slower is hung.
+GUARD_TIMEOUT = 30
+
+
+def guard_shape_ok(raw):
+    """True when a stop_guard is a non-empty list of non-empty strings whose
+    flags (every item after the script) match GUARD_ARG_RE."""
+    return (isinstance(raw, list) and bool(raw)
+            and all(isinstance(a, str) and a for a in raw)
+            and all(GUARD_ARG_RE.fullmatch(a) for a in raw[1:]))
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def run(argv, env=None, timeout=300):
@@ -123,8 +144,84 @@ def _parts(block):
     return out
 
 
+def _guard(block, registry_path):
+    """control.stop_guard -> (argv, None), (None, reason), or (None, None).
+
+    The script path is repo-relative (the generator writes it so) and the
+    repo is the one services.json sits in: <repo>/app/web/services.json. It
+    must resolve to a file inside that repo. A guard that is present but
+    unusable is kept as a reason, so stop refuses rather than skipping the
+    check it exists for.
+    """
+    if "stop_guard" not in block:
+        return None, None
+    raw = block.get("stop_guard")
+    bad = "its stop_guard in services.json is malformed"
+    if not guard_shape_ok(raw):
+        return None, bad
+    repo = os.path.realpath(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(registry_path)))))
+    script = os.path.realpath(os.path.join(repo, raw[0]))
+    if (os.path.isabs(raw[0]) or not script.startswith(repo + os.sep)
+            or not os.path.isfile(script)):
+        return None, "its stop_guard (%s) is not a file in %s" % (raw[0], repo)
+    head = [script] if os.access(script, os.X_OK) else ["/bin/bash", script]
+    return head + raw[1:], None
+
+
+def resolve_guard(control):
+    """(argv, None), (None, reason) or (None, None) for one registry entry.
+
+    Resolved on every call rather than at load time: the registry is cached
+    on services.json's mtime, and a cached "file missing" would keep Stop
+    refused after the guard file came back.
+    """
+    if "stop_guard" not in control:
+        return None, None
+    return _guard({"stop_guard": control["stop_guard"]}, control["registry"])
+
+
+def run_guard(argv):
+    """Run a stop guard. (0, "") when it passes, else (code, its reason).
+
+    The reason is the guard's last stderr line (a teardown.sh `die`), colour
+    codes and the cross mark stripped, falling back to its last stdout line.
+    """
+    try:
+        # Its own session, so a timeout kills everything it started
+        # (bash, tailscale), not just the first process.
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                text=True, start_new_session=True)
+    except OSError as e:
+        return 1, f"the safety check could not run: {e}"
+    try:
+        out, err = proc.communicate(timeout=GUARD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass  # a child that left the group still holds a pipe; give up on it
+        return 124, f"the safety check ran past {GUARD_TIMEOUT}s and was stopped"
+    if proc.returncode == 0:
+        return 0, ""
+    for stream in (err, out):
+        lines = [ANSI_RE.sub("", ln).strip(" \t\u2717") for ln in stream.splitlines()]
+        lines = [ln for ln in lines if ln]
+        if lines:
+            return proc.returncode, lines[-1]
+    return proc.returncode, f"the safety check exited {proc.returncode}"
+
+
 def load_registry():
-    """key -> {parts, primary, kuma} for every controllable service.
+    """key -> {parts, primary, kuma, stop_guard?, registry} per controllable service.
+
+    A stop_guard is carried raw and resolved by resolve_guard at stop time,
+    so a guard file restored after a failed lookup counts straight away.
 
     Re-read only when the file changes, so editing services.json takes
     effect without restarting the listener — the same live-reload the
@@ -157,7 +254,9 @@ def load_registry():
             if not parts:
                 continue
             services[key] = {"parts": parts, "kuma": _monitors(block),
-                             "primary": block.get("primary")}
+                             "primary": block.get("primary"), "registry": path}
+            if "stop_guard" in block:
+                services[key]["stop_guard"] = block["stop_guard"]
         _registry.update(path=path, mtime=mtime, services=services)
         print(f"control registry: {len(services)} services from {path}",
               flush=True)
@@ -402,6 +501,21 @@ def handle(text):
     if control is None:
         notify(f"unknown service '{target}'\n{usage()}")
         return
+
+    # The stop guard runs first, before even the Kuma pause, and only for
+    # stop. Restart is not guarded: it is the usual fix for a stuck service,
+    # and for AdGuard it costs a few seconds of DNS rather than an outage.
+    guard, guard_error = resolve_guard(control) if cmd == "stop" else (None, None)
+    if guard or guard_error:
+        if guard_error:
+            code, why = 1, guard_error
+        else:
+            code, why = run_guard(guard)
+        if code != 0:
+            _, acts = context_buttons(target)
+            notify(f"{target}: stop refused, nothing was changed. {why[:600]}",
+                   actions=acts)
+            return
 
     # Pause before stopping, resume after starting: a paused monitor cannot
     # page about downtime you asked for. Both are best-effort — `note` is the
