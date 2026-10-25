@@ -108,6 +108,8 @@ class SandboxTest(unittest.TestCase):
             "NOTES_PATH": server.NOTES_PATH,
             "USAGE_PATH": server.USAGE_PATH,
             "INSTANCES_DIR": server.INSTANCES_DIR,
+            "DEPLOYD_HOME": server.DEPLOYD_HOME,
+            "deployd_timer": server.deployd_timer,
             "CGROUP_ROOT": server.CGROUP_ROOT,
             "RESOURCE_TTL": server.RESOURCE_TTL,
             "DOCKER_MAP_TTL": server.DOCKER_MAP_TTL,
@@ -132,6 +134,11 @@ class SandboxTest(unittest.TestCase):
         server.NOTES_PATH = os.path.join(self.tmp, "state", "notes.json")
         server.USAGE_PATH = os.path.join(self.tmp, "state", "usage.json")
         server.INSTANCES_DIR = os.path.join(self.tmp, "state", "instances")
+        # deployd's service home under the sandbox too; and its timer probe
+        # defaults to "unknowable" so no test can reach a real systemctl
+        # (which subprocess.run would route into the unstubbed-Popen guard).
+        server.DEPLOYD_HOME = os.path.join(self.tmp, "deployd-home")
+        server.deployd_timer = lambda: None
         # Never the real /sys/fs/cgroup either: a tree under the sandbox that
         # a test builds if it cares, and that otherwise simply does not
         # exist, so resources measure nothing rather than this box.
@@ -5527,6 +5534,194 @@ class RemoveTest(ControlTestBase):
         job = server.register_job("n8n", "deploy")
         server._reap(job, ExitedProc(0), open(os.devnull, "wb"))
         self.assertEqual(self.argvs(), [])
+
+
+# ------------------------------------------------------------------ deployd
+
+class DeploydTest(SandboxTest):
+    """GET /api/deployd: watched rows scanned from the configured checkout's
+    services/*/app.json deploy blocks — the same files deployd itself
+    scans — plus the <key>.sha/.fail/.log triplets under the state dir."""
+
+    def manifest(self, folder, doc):
+        path = os.path.join(server.REPO_ROOT, "services", folder)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "app.json"), "w") as fh:
+            json.dump(doc, fh)
+
+    def setUp(self):
+        super().setUp()
+        self.manifest("alpha", {
+            "key": "alpha",
+            "deploy": {"repo": "https://example/alpha.git", "ref": "main",
+                       "cmd": "run alpha"}})
+        self.manifest("beta", {
+            "key": "beta",
+            "deploy": {"repo": "https://example/beta.git", "cmd": "run beta"}})
+        self.manifest("gamma", {
+            "key": "gamma",
+            "deploy": {"repo": "https://example/g.git", "ref": "v2",
+                       "cmd": "run g"}})
+        self.manifest("unwatched", {"key": "unwatched", "name": "Nope"})
+        self.manifest("off", {
+            "key": "off",
+            "deploy": {"repo": "https://example/o.git", "cmd": "x",
+                       "enabled": False}})
+        self.manifest("broken", {
+            "key": "broken",
+            "deploy": {"repo": "", "cmd": "x"}})
+
+    def state_dir(self):
+        path = os.path.join(server.DEPLOYD_HOME, "state")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def test_empty_state_everything_pending(self):
+        payload = server.deployd_payload()
+        self.assertFalse(payload["installed"])
+        self.assertIsNone(payload["timer"])
+        self.assertFalse(payload["self_update_pending"])
+        rows = {w["key"]: w for w in payload["watched"]}
+        self.assertEqual(sorted(rows), ["alpha", "beta", "gamma"])
+        for row in rows.values():
+            self.assertEqual(row["state"], "pending")
+            self.assertIsNone(row["sha"])
+            self.assertIsNone(row["fail"])
+            self.assertIsNone(row["log"])
+        self.assertEqual(rows["beta"]["ref"], "main")   # default
+        self.assertEqual(rows["gamma"]["ref"], "v2")
+        self.assertEqual(payload["orphans"], [])
+
+    def test_deployed_failed_disabled(self):
+        state = self.state_dir()
+        with open(os.path.join(state, "alpha.sha"), "w") as fh:
+            fh.write("abc123def456\n")
+        with open(os.path.join(state, "beta.fail"), "w") as fh:
+            json.dump({"sha": "deadbeef", "at": 1700000000, "rc": 17}, fh)
+        with open(os.path.join(state, "beta.sha"), "w") as fh:
+            fh.write("older123\n")
+        with open(os.path.join(state, "gamma.disabled"), "w") as fh:
+            fh.write("")
+        rows = {w["key"]: w for w in server.deployd_payload()["watched"]}
+        self.assertEqual(rows["alpha"]["state"], "deployed")
+        self.assertEqual(rows["alpha"]["sha"], "abc123def456")
+        # A recorded failure wins over the older sha: backoff, not success.
+        self.assertEqual(rows["beta"]["state"], "failed")
+        self.assertEqual(rows["beta"]["fail"]["rc"], 17)
+        self.assertEqual(rows["beta"]["fail"]["sha"], "deadbeef")
+        self.assertEqual(rows["gamma"]["state"], "disabled")
+        self.assertTrue(rows["gamma"]["disabled"])
+
+    def test_unreadable_fail_still_fails(self):
+        with open(os.path.join(self.state_dir(), "alpha.fail"), "w") as fh:
+            fh.write("not json")
+        row = server.deployd_payload()["watched"][0]
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(row["fail"], {})
+
+    def test_log_tail_stripped_and_truncated(self):
+        state = self.state_dir()
+        lines = ["\x1b[1;32m ok \x1b[0m line %d" % i for i in range(60)]
+        with open(os.path.join(state, "alpha.log"), "w") as fh:
+            fh.write("\n".join(lines))
+        row = server.deployd_payload()["watched"][0]
+        tail = row["log"].splitlines()
+        self.assertEqual(len(tail), server.DEPLOYD_LOG_TAIL)
+        self.assertNotIn("\x1b", row["log"])
+        self.assertEqual(tail[0], " ok  line 20")
+        self.assertIsNotNone(row["log_mtime"])
+
+    def test_orphans_and_self_update_pending(self):
+        state = self.state_dir()
+        with open(os.path.join(state, "ghost.sha"), "w") as fh:
+            fh.write("x\n")
+        with open(os.path.join(state, "self-update.pending"), "w") as fh:
+            fh.write("")
+        payload = server.deployd_payload()
+        self.assertTrue(payload["installed"])
+        self.assertTrue(payload["self_update_pending"])
+        self.assertEqual(payload["orphans"], ["ghost"])
+
+    def test_service_home_env_override(self):
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            fh.write("SERVICE_HOME=%s\n" % elsewhere)
+        os.makedirs(os.path.join(elsewhere, "state"))
+        with open(os.path.join(elsewhere, "state", "alpha.sha"), "w") as fh:
+            fh.write("e5e5\n")
+        payload = server.deployd_payload()
+        self.assertTrue(payload["installed"])
+        self.assertEqual(payload["state_dir"],
+                         os.path.join(elsewhere, "state"))
+        self.assertEqual(payload["watched"][0]["sha"], "e5e5")
+
+    def test_service_home_escaped_path(self):
+        # setup.sh writes .env values %q-escaped; a space in the path must
+        # come back decoded, the same way deployd's own load_env reads it.
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        elsewhere = os.path.join(self.tmp, "deploy home")
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            # printf %q: the space is backslash-escaped, not quoted.
+            fh.write("SERVICE_HOME=%s\n" % elsewhere.replace(" ", "\\ "))
+        os.makedirs(os.path.join(elsewhere, "state"))
+        with open(os.path.join(elsewhere, "state", "alpha.sha"), "w") as fh:
+            fh.write("e5e5\n")
+        self.assertEqual(server.deployd_payload()["state_dir"],
+                         os.path.join(elsewhere, "state"))
+
+    def test_setup_repo_env_picks_another_checkout(self):
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        other = os.path.join(self.tmp, "other-checkout")
+        os.makedirs(os.path.join(other, "services", "zeta"))
+        with open(os.path.join(other, "services", "zeta", "app.json"),
+                  "w") as fh:
+            json.dump({"key": "zeta", "deploy": {
+                "repo": "https://example/z.git", "cmd": "x"}}, fh)
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            fh.write("SETUP_REPO=%s\n" % other)
+        keys = [w["key"] for w in server.deployd_payload()["watched"]]
+        # The configured checkout's manifests, not this one's.
+        self.assertEqual(keys, ["zeta"])
+
+    def test_enabled_false_and_malformed_skipped(self):
+        keys = [w["key"] for w in server.deployd_payload()["watched"]]
+        self.assertNotIn("off", keys)       # enabled: false, like deployd
+        self.assertNotIn("broken", keys)    # deploy block missing strings
+        self.assertNotIn("unwatched", keys) # no deploy block at all
+
+    def test_timer_passthrough(self):
+        server.deployd_timer = lambda: "active"
+        self.assertEqual(server.deployd_payload()["timer"], "active")
+
+
+class DeploydHttpTest(HttpTest):
+
+    def setUp(self):
+        super().setUp()
+        # The watched list comes from the checkout's manifests, not the
+        # registry — alpha needs an app.json with a deploy block.
+        path = os.path.join(server.REPO_ROOT, "services", "alpha")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "app.json"), "w") as fh:
+            json.dump({"key": "alpha", "deploy": {
+                "repo": "https://example/a.git", "cmd": "x"}}, fh)
+
+    def test_deployd_route(self):
+        status, body = self.get("/api/deployd")
+        self.assertEqual(status, 200)
+        doc = json.loads(body)
+        self.assertEqual([w["key"] for w in doc["watched"]], ["alpha"])
+        self.assertEqual(doc["watched"][0]["state"], "pending")
+        # And the /home path mount serves it too.
+        status2, _ = self.get("/home/api/deployd")
+        self.assertEqual(status2, 200)
 
 
 if __name__ == "__main__":

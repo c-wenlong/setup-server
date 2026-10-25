@@ -1,0 +1,20 @@
+{
+  "key": "deployd",
+  "name": "Deployd",
+  "tagline": "Push-to-deploy",
+  "group": "infra",
+  "icon": "workflow",
+  "author": "c-wenlong",
+  "url": null,
+  "health": null,
+  "marker": "~/services/deployd",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "unit": "deployd.timer"
+      }
+    ]
+  },
+  "description": "The tailnet-only answer to webhooks: a systemd user timer (or LaunchAgent on macOS) that polls every services/*/app.json deploy block, ff-pulls this checkout, resolves each watched git ref, and runs that service's deploy command when the remote moved. State lives under ~/services/deployd/state — one <key>.sha/.fail/.log triplet per service — which is what the launcher's /api/deployd surface reads. Stop pauses the timer (no more polls); start resumes it. The launcher's control plane is Linux-only: on a macOS install Start/Stop will fail, so pause the agent with launchctl instead."
+}

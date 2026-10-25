@@ -125,7 +125,8 @@
     "home-assistant",
     "jellyfin",
     "karakeep",
-    "forgejo"
+    "forgejo",
+    "deployd"
   ],
   "external": [
     {

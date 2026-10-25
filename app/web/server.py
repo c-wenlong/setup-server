@@ -97,6 +97,12 @@ USAGE_PATH = os.path.expanduser("~/services/launcher/usage.json")
 # never make a removed service look installed.
 INSTANCES_DIR = os.path.expanduser("~/services/launcher/instances")
 
+# deployd's service home: one state/<key>.sha/.fail/.log triplet per watched
+# service, which is what GET /api/deployd renders. $SERVICE_HOME in
+# services/deployd/.env can move it, so the payload resolves the env file
+# first and only falls back here.
+DEPLOYD_HOME = os.path.expanduser("~/services/deployd")
+
 # Deploy scripts may only live under one of these roots. The repo is the
 # normal case; ~/dev is needed because some services keep their code in
 # their own repo (manimkc lives at ~/dev/manimkc/server/setup.sh) while
@@ -1139,6 +1145,191 @@ def service_detail(key):
         "env": env_payload(svc),
         "receipt": receipt,
         "removable": removable(svc),
+    }
+
+
+# ---- deployd
+
+# deployd writes ANSI-coloured setup.sh output into <key>.log; the detail
+# page shows the tail as plain text.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+DEPLOYD_LOG_TAIL = 40      # lines shown per watched service
+DEPLOYD_LOG_BYTES = 65536  # never read a whole deploy log into the payload
+
+
+def _deployd_env():
+    """deployd's .env, decoded the way its own load_env() decodes it:
+    KEY=value lines, values shlex-split so setup.sh's %q-escaped paths
+    (SERVICE_HOME=/home/u/deploy\\ state) come back real."""
+    env = {}
+    try:
+        with open(os.path.join(REPO_ROOT, "services", "deployd", ".env"),
+                  encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, raw = line.partition("=")
+                try:
+                    parts = shlex.split(raw)
+                    env[key.strip()] = parts[0] if parts else ""
+                except ValueError:
+                    env[key.strip()] = raw
+    except OSError:
+        pass
+    return env
+
+
+def _deployd_state_dir(env):
+    """deployd's state dir: $SERVICE_HOME/state when its .env sets one."""
+    return os.path.join(env.get("SERVICE_HOME") or DEPLOYD_HOME, "state")
+
+
+def _deployd_watched(setup_repo):
+    """The same entries deployd's own scan_entries() picks: a `deploy`
+    block in every services/<dir>/app.json under the *configured* checkout
+    (which need not be the one the launcher serves), skipping anything
+    malformed or marked enabled:false."""
+    watched = []
+    svc_root = os.path.join(setup_repo, "services")
+    try:
+        names = sorted(os.listdir(svc_root))
+    except OSError:
+        return watched
+    for name in names:
+        path = os.path.join(svc_root, name, "app.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        deploy = data.get("deploy") if isinstance(data, dict) else None
+        if not isinstance(deploy, dict) or deploy.get("enabled") is False:
+            continue
+        repo, cmd = deploy.get("repo"), deploy.get("cmd")
+        if not isinstance(repo, str) or not isinstance(cmd, str) \
+                or not repo or not cmd:
+            continue
+        ref = deploy.get("ref") or "main"
+        key = data.get("key")
+        watched.append({
+            "key": key if isinstance(key, str) and key else name,
+            "repo": repo,
+            "ref": ref if isinstance(ref, str) else "main",
+        })
+    return watched
+
+
+def deployd_timer():
+    """`systemctl --user is-active deployd.timer` verbatim, or None.
+
+    None means unknowable from here — no systemd (macOS), no unit, dbus
+    down — and the UI shows a muted "unknown" rather than pretending the
+    poller is off. Never raises: this runs on every detail-page poll.
+    """
+    if sys.platform == "darwin":
+        return None
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "is-active", "deployd.timer"],
+            capture_output=True, text=True, timeout=5, check=False)
+        state = out.stdout.strip()
+        return state or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _deployd_log_tail(path):
+    """Last DEPLOYD_LOG_TAIL lines of a <key>.log, ANSI stripped."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > DEPLOYD_LOG_BYTES:
+                fh.seek(-DEPLOYD_LOG_BYTES, os.SEEK_END)
+            raw = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    lines = _ANSI_RE.sub("", raw).splitlines()
+    return "\n".join(lines[-DEPLOYD_LOG_TAIL:])
+
+
+def _deployd_entry(state_dir, watched):
+    """One watched service's row for the payload, from its state triplet.
+
+    `sha` None means never deployed, `fail` is the backoff record
+    verbatim."""
+    key = watched["key"]
+    base = os.path.join(state_dir, re.sub(r"[^A-Za-z0-9._-]", "_", key))
+    sha = fail = None
+    try:
+        with open(base + ".sha", encoding="utf-8") as fh:
+            sha = fh.read().strip() or None
+    except OSError:
+        pass
+    try:
+        with open(base + ".fail", encoding="utf-8") as fh:
+            data = json.load(fh)
+        fail = ({"sha": data.get("sha"), "at": data.get("at"),
+                 "rc": data.get("rc")} if isinstance(data, dict) else {})
+    except ValueError:
+        fail = {}  # present but unreadable: still a failure state
+    except OSError:
+        pass  # absent: no recorded failure
+    disabled = os.path.exists(base + ".disabled")
+    log_tail = _deployd_log_tail(base + ".log")
+    try:
+        log_mtime = os.path.getmtime(base + ".log")
+    except OSError:
+        log_mtime = None
+    if disabled:
+        state = "disabled"
+    elif fail is not None:
+        state = "failed"
+    elif sha:
+        state = "deployed"
+    else:
+        state = "pending"  # watched, never deployed
+    return {
+        "key": key,
+        "repo": watched["repo"],
+        "ref": watched["ref"],
+        "sha": sha,
+        "fail": fail,
+        "disabled": disabled,
+        "state": state,
+        "log": log_tail,
+        "log_mtime": log_mtime,
+    }
+
+
+def deployd_payload():
+    """Everything the deployd detail page shows.
+
+    `watched` comes from the same manifests deployd scans — the checkout
+    its .env names, not necessarily the one this launcher serves — so the
+    table is what the poller actually polls. A state file for a key that
+    left the manifests is reported under `orphans` so it can be cleaned
+    up."""
+    env = _deployd_env()
+    state_dir = _deployd_state_dir(env)
+    watched = _deployd_watched(env.get("SETUP_REPO") or REPO_ROOT)
+    known = {w["key"] for w in watched}
+    orphans = []
+    try:
+        for name in sorted(os.listdir(state_dir)):
+            key, dot, ext = name.rpartition(".")
+            if dot and ext == "sha" and key not in known:
+                orphans.append(key)
+    except OSError:
+        pass
+    return {
+        "installed": os.path.isdir(state_dir),
+        "timer": deployd_timer(),
+        "self_update_pending": os.path.exists(
+            os.path.join(state_dir, "self-update.pending")),
+        "state_dir": state_dir,
+        "watched": [_deployd_entry(state_dir, w) for w in watched],
+        "orphans": orphans,
     }
 
 
@@ -2694,6 +2885,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path == "api/services":
             self._json(200, services_payload())
+            return
+        if path == "api/deployd":
+            self._json(200, deployd_payload())
             return
         if path.startswith("api/services/"):
             rest = path[len("api/services/"):].strip("/")
