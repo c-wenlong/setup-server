@@ -841,6 +841,22 @@ EOF
   teardown
 }
 
+test_sync_mac_setup_daemon_down() {
+  echo "• sync mac-setup: a dead local daemon falls back to the fresh library name"
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  touch "$STATE_DIR/seaf_down"
+  run_sync mac-setup
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "falls back to fresh name"  out_has '"gnosia-learn-blobs"'
+  check "steps still printed"       out_has "Seafile Client"
+  teardown
+}
+
 test_sync_mac_setup_headless() {
   echo "• sync mac-setup: seaf-cli on the Mac pairs headless + LaunchAgent"
   setup; mk_env; mk_seafile_env
@@ -2075,6 +2091,7 @@ test_sync_install_old_layout
 test_sync_install_already_linked
 test_sync_mac_setup_gui
 test_sync_mac_setup_legacy_lib_name
+test_sync_mac_setup_daemon_down
 test_sync_mac_setup_headless
 test_sync_push
 test_sync_push_quiet_mac

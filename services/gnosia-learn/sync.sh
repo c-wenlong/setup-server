@@ -615,7 +615,7 @@ cmd_mac_setup() {
   SYNC_LIB_NAME="gnosia-learn-blobs"
   if seaf_bin="$(command -v seaf-cli 2>/dev/null)"; then
     listed="$("$seaf_bin" list -c "$SEAF_DIR/ccnet" 2>/dev/null \
-      | awk -v r="$SEAFILE_SYNC_REPO" '$2 == r {print $1}')"
+      | awk -v r="$SEAFILE_SYNC_REPO" '$2 == r {print $1}' || true)"
     [ -n "$listed" ] && SYNC_LIB_NAME="$listed"
   fi
 

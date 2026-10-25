@@ -39,6 +39,8 @@ case "${1:-}" in
     done
     ;;
   list)
+    # seaf_down — exists => the daemon socket is dead; list exits 1
+    [ -f "$STATE_DIR/seaf_down" ] && exit 1
     for f in "$STATE_DIR"/seaf_synced_*; do
       [ -e "$f" ] || continue
       repo="${f##*seaf_synced_}"
