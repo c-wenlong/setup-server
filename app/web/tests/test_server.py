@@ -5539,20 +5539,37 @@ class RemoveTest(ControlTestBase):
 # ------------------------------------------------------------------ deployd
 
 class DeploydTest(SandboxTest):
-    """GET /api/deployd: watched rows from registry deploy blocks plus the
-    <key>.sha/.fail/.log triplets under the state dir."""
+    """GET /api/deployd: watched rows scanned from the configured checkout's
+    services/*/app.json deploy blocks — the same files deployd itself
+    scans — plus the <key>.sha/.fail/.log triplets under the state dir."""
 
-    REGISTRY = {"services": [
-        {"key": "alpha", "name": "Alpha", "tagline": "t",
-         "deploy": {"repo": "https://example/alpha.git", "ref": "main",
-                    "cmd": "run alpha"}},
-        {"key": "beta", "name": "Beta", "tagline": "t",
-         "deploy": {"repo": "https://example/beta.git", "cmd": "run beta"}},
-        {"key": "gamma", "name": "Gamma", "tagline": "t",
-         "deploy": {"repo": "https://example/g.git", "ref": "v2",
-                    "cmd": "run g"}},
-        {"key": "unwatched", "name": "Nope", "tagline": "t"},
-    ]}
+    def manifest(self, folder, doc):
+        path = os.path.join(server.REPO_ROOT, "services", folder)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "app.json"), "w") as fh:
+            json.dump(doc, fh)
+
+    def setUp(self):
+        super().setUp()
+        self.manifest("alpha", {
+            "key": "alpha",
+            "deploy": {"repo": "https://example/alpha.git", "ref": "main",
+                       "cmd": "run alpha"}})
+        self.manifest("beta", {
+            "key": "beta",
+            "deploy": {"repo": "https://example/beta.git", "cmd": "run beta"}})
+        self.manifest("gamma", {
+            "key": "gamma",
+            "deploy": {"repo": "https://example/g.git", "ref": "v2",
+                       "cmd": "run g"}})
+        self.manifest("unwatched", {"key": "unwatched", "name": "Nope"})
+        self.manifest("off", {
+            "key": "off",
+            "deploy": {"repo": "https://example/o.git", "cmd": "x",
+                       "enabled": False}})
+        self.manifest("broken", {
+            "key": "broken",
+            "deploy": {"repo": "", "cmd": "x"}})
 
     def state_dir(self):
         path = os.path.join(server.DEPLOYD_HOME, "state")
@@ -5641,6 +5658,44 @@ class DeploydTest(SandboxTest):
                          os.path.join(elsewhere, "state"))
         self.assertEqual(payload["watched"][0]["sha"], "e5e5")
 
+    def test_service_home_escaped_path(self):
+        # setup.sh writes .env values %q-escaped; a space in the path must
+        # come back decoded, the same way deployd's own load_env reads it.
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        elsewhere = os.path.join(self.tmp, "deploy home")
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            # printf %q: the space is backslash-escaped, not quoted.
+            fh.write("SERVICE_HOME=%s\n" % elsewhere.replace(" ", "\\ "))
+        os.makedirs(os.path.join(elsewhere, "state"))
+        with open(os.path.join(elsewhere, "state", "alpha.sha"), "w") as fh:
+            fh.write("e5e5\n")
+        self.assertEqual(server.deployd_payload()["state_dir"],
+                         os.path.join(elsewhere, "state"))
+
+    def test_setup_repo_env_picks_another_checkout(self):
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        other = os.path.join(self.tmp, "other-checkout")
+        os.makedirs(os.path.join(other, "services", "zeta"))
+        with open(os.path.join(other, "services", "zeta", "app.json"),
+                  "w") as fh:
+            json.dump({"key": "zeta", "deploy": {
+                "repo": "https://example/z.git", "cmd": "x"}}, fh)
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            fh.write("SETUP_REPO=%s\n" % other)
+        keys = [w["key"] for w in server.deployd_payload()["watched"]]
+        # The configured checkout's manifests, not this one's.
+        self.assertEqual(keys, ["zeta"])
+
+    def test_enabled_false_and_malformed_skipped(self):
+        keys = [w["key"] for w in server.deployd_payload()["watched"]]
+        self.assertNotIn("off", keys)       # enabled: false, like deployd
+        self.assertNotIn("broken", keys)    # deploy block missing strings
+        self.assertNotIn("unwatched", keys) # no deploy block at all
+
     def test_timer_passthrough(self):
         server.deployd_timer = lambda: "active"
         self.assertEqual(server.deployd_payload()["timer"], "active")
@@ -5650,15 +5705,13 @@ class DeploydHttpTest(HttpTest):
 
     def setUp(self):
         super().setUp()
-        # Same "alpha" tile the parent's tests assert on, plus a deploy
-        # block so it also shows up as a watched service.
-        self.write_registry({"services": [
-            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
-             "author": "c-wenlong",
-             "url": "https://HOST:1/", "health": None, "marker": None,
-             "setup": "alpha/setup.sh",
-             "deploy": {"repo": "https://example/a.git", "cmd": "x"}},
-        ]})
+        # The watched list comes from the checkout's manifests, not the
+        # registry — alpha needs an app.json with a deploy block.
+        path = os.path.join(server.REPO_ROOT, "services", "alpha")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "app.json"), "w") as fh:
+            json.dump({"key": "alpha", "deploy": {
+                "repo": "https://example/a.git", "cmd": "x"}}, fh)
 
     def test_deployd_route(self):
         status, body = self.get("/api/deployd")

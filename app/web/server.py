@@ -1157,19 +1157,67 @@ DEPLOYD_LOG_TAIL = 40      # lines shown per watched service
 DEPLOYD_LOG_BYTES = 65536  # never read a whole deploy log into the payload
 
 
-def _deployd_state_dir():
-    """deployd's state dir: $SERVICE_HOME/state when its .env sets one."""
-    home = None
-    env_path = os.path.join(REPO_ROOT, "services", "deployd", ".env")
+def _deployd_env():
+    """deployd's .env, decoded the way its own load_env() decodes it:
+    KEY=value lines, values shlex-split so setup.sh's %q-escaped paths
+    (SERVICE_HOME=/home/u/deploy\\ state) come back real."""
+    env = {}
     try:
-        with open(env_path, encoding="utf-8") as fh:
+        with open(os.path.join(REPO_ROOT, "services", "deployd", ".env"),
+                  encoding="utf-8") as fh:
             for line in fh:
-                key, _, value = line.strip().partition("=")
-                if key.strip() == "SERVICE_HOME" and value.strip():
-                    home = value.strip().strip("'\"")
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, raw = line.partition("=")
+                try:
+                    parts = shlex.split(raw)
+                    env[key.strip()] = parts[0] if parts else ""
+                except ValueError:
+                    env[key.strip()] = raw
     except OSError:
         pass
-    return os.path.join(home or DEPLOYD_HOME, "state")
+    return env
+
+
+def _deployd_state_dir(env):
+    """deployd's state dir: $SERVICE_HOME/state when its .env sets one."""
+    return os.path.join(env.get("SERVICE_HOME") or DEPLOYD_HOME, "state")
+
+
+def _deployd_watched(setup_repo):
+    """The same entries deployd's own scan_entries() picks: a `deploy`
+    block in every services/<dir>/app.json under the *configured* checkout
+    (which need not be the one the launcher serves), skipping anything
+    malformed or marked enabled:false."""
+    watched = []
+    svc_root = os.path.join(setup_repo, "services")
+    try:
+        names = sorted(os.listdir(svc_root))
+    except OSError:
+        return watched
+    for name in names:
+        path = os.path.join(svc_root, name, "app.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        deploy = data.get("deploy") if isinstance(data, dict) else None
+        if not isinstance(deploy, dict) or deploy.get("enabled") is False:
+            continue
+        repo, cmd = deploy.get("repo"), deploy.get("cmd")
+        if not isinstance(repo, str) or not isinstance(cmd, str) \
+                or not repo or not cmd:
+            continue
+        ref = deploy.get("ref") or "main"
+        key = data.get("key")
+        watched.append({
+            "key": key if isinstance(key, str) and key else name,
+            "repo": repo,
+            "ref": ref if isinstance(ref, str) else "main",
+        })
+    return watched
 
 
 def deployd_timer():
@@ -1205,14 +1253,12 @@ def _deployd_log_tail(path):
     return "\n".join(lines[-DEPLOYD_LOG_TAIL:])
 
 
-def _deployd_entry(state_dir, svc):
+def _deployd_entry(state_dir, watched):
     """One watched service's row for the payload, from its state triplet.
 
-    `deploy` may be absent (deployd watches it anyway only via a manifest
-    block — a service without one is not in `watched`), `sha` None means
-    never deployed, `fail` is the backoff record verbatim."""
-    key = svc["key"]
-    deploy = svc.get("deploy") or {}
+    `sha` None means never deployed, `fail` is the backoff record
+    verbatim."""
+    key = watched["key"]
     base = os.path.join(state_dir, re.sub(r"[^A-Za-z0-9._-]", "_", key))
     sha = fail = None
     try:
@@ -1245,8 +1291,8 @@ def _deployd_entry(state_dir, svc):
         state = "pending"  # watched, never deployed
     return {
         "key": key,
-        "repo": deploy.get("repo"),
-        "ref": deploy.get("ref") or "main",
+        "repo": watched["repo"],
+        "ref": watched["ref"],
         "sha": sha,
         "fail": fail,
         "disabled": disabled,
@@ -1259,16 +1305,15 @@ def _deployd_entry(state_dir, svc):
 def deployd_payload():
     """Everything the deployd detail page shows.
 
-    `watched` is keyed off the registry (the same manifests deployd scans),
-    not the state dir, so a service deployd has never reached still shows as
-    pending instead of being invisible. A state file for a key that left
-    the registry is reported under `orphans` so it can be cleaned up.
-    """
-    state_dir = _deployd_state_dir()
-    registry = load_registry()
-    watched = [svc for svc in registry
-               if isinstance(svc.get("deploy"), dict)]
-    known = {svc["key"] for svc in watched}
+    `watched` comes from the same manifests deployd scans — the checkout
+    its .env names, not necessarily the one this launcher serves — so the
+    table is what the poller actually polls. A state file for a key that
+    left the manifests is reported under `orphans` so it can be cleaned
+    up."""
+    env = _deployd_env()
+    state_dir = _deployd_state_dir(env)
+    watched = _deployd_watched(env.get("SETUP_REPO") or REPO_ROOT)
+    known = {w["key"] for w in watched}
     orphans = []
     try:
         for name in sorted(os.listdir(state_dir)):
@@ -1283,7 +1328,7 @@ def deployd_payload():
         "self_update_pending": os.path.exists(
             os.path.join(state_dir, "self-update.pending")),
         "state_dir": state_dir,
-        "watched": [_deployd_entry(state_dir, svc) for svc in watched],
+        "watched": [_deployd_entry(state_dir, w) for w in watched],
         "orphans": orphans,
     }
 
