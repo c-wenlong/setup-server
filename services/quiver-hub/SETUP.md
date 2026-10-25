@@ -107,7 +107,10 @@ QUIVER_REF=680d9d010aec... ./setup.sh    # install this commit (or a tag/branch)
 `QUIVER_REF`. After the first run it is the source of truth: a different
 `LOCAL_PORT` on the command line is ignored with a warning. Edit `.env` and
 re-run to move a port or change the tracked ref; an explicit `QUIVER_REF=`
-on the command line wins for that run only.
+on the command line wins for that run only. Tooling that pins the run's
+commit (deployd runs `QUIVER_REF=$DEPLOY_SHA`) can pass
+`QUIVER_TRACK=<branch>` so the write-once `.env` records the ref being
+followed, not that one SHA.
 
 Sudo is needed at most twice on Linux, one time each:
 

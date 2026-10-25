@@ -20,7 +20,7 @@
   "deploy": {
     "repo": "https://github.com/c-wenlong/quiver.git",
     "ref": "main",
-    "cmd": "QUIVER_REF=$DEPLOY_SHA services/quiver-hub/setup.sh"
+    "cmd": "QUIVER_REF=$DEPLOY_SHA QUIVER_TRACK=$DEPLOY_REF services/quiver-hub/setup.sh"
   },
   "description": "Quiver's remote-control hub (swe remote serve): the phone PWA for watching and steering coding-agent sessions, with an inbox and a Usage tab, and the hub MacBook satellites dial. Pinned uv install under ~/.local/share/quiver-hub, systemd user unit, loopback-only behind Serve on :8477. Runs with --public-url, so 'Pair with Tailscale' works behind Serve; approve the code on the box with swe remote devices --approve. services/quiver-hub/pair.sh mints a token for satellites."
 }
