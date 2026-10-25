@@ -1051,6 +1051,7 @@ EOF_SERVE
   check ":8443 off"                     calls_have "serve --https=8443 off"
   check "shared :443 left on"           no_call "https=443 off"
   check "warns about the shared port"   out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished"   out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8384 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -1578,6 +1579,131 @@ test_teardown_refuses_compose_overrides() {
   teardown
 }
 
+# A state dir behind a folder this user cannot search (a root-owned 0700
+# parent, faked with chmod 000): `[ -e ]` cannot see it, which must not read
+# as "already gone" while .env is deleted. No cleanup container here, so it
+# stops before anything changes and names the sudo command.
+hidden_untouched() {  # hidden_untouched — nothing stopped, unpublished or deleted
+  [ -f "$SVC/.env" ] && [ -f "$(unit_file)" ] && not_stopped && no_call " off" \
+    && no_call "daemon-reload" && out_lacks "Deleted" && out_lacks "Type syncthing"
+}
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: state behind an unsearchable folder stops before anything changes"
+  local st
+  # The index behind it.
+  deployed
+  st="$HOME/services/syncthing/storage"
+  mkdir -p "$st"; mv "$DB" "$st/db"
+  set_env SYNCTHING_DB "$st/db"
+  chmod 000 "$st"
+  purge "syncthing"
+  chmod 755 "$st"
+  check "index hidden: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the folder"          out_has "$st cannot be searched"
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting it" out_lacks "sudo rm -rf $st/db"
+  check "  nothing changed"           hidden_untouched
+  check "  index kept"                [ -f "$st/db/index.db" ]
+  check "  identity kept"             [ -f "$CFG/cert.pem" ]
+  check "  synced files kept"         [ -f "$DATA/default/notes.md" ]
+  teardown
+  # The identity behind it: config.xml (the folder list) cannot be read.
+  deployed
+  st="$HOME/services/syncthing/storage"
+  mkdir -p "$st"; mv "$CFG" "$st/config"
+  set_env SYNCTHING_CONFIG "$st/config"
+  chmod 000 "$st"
+  purge "syncthing"
+  chmod 755 "$st"
+  check "identity hidden: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting it" out_lacks "sudo rm -rf $st/config"
+  check "  nothing changed"           hidden_untouched
+  check "  identity kept"             [ -f "$st/config/cert.pem" ]
+  check "  index kept"                [ -f "$DB/index.db" ]
+  teardown
+  # The synced files behind it, with --delete-synced-files.
+  deployed
+  st="$HOME/services/syncthing/storage"
+  mkdir -p "$st"; mv "$DATA" "$st/data"
+  set_env SYNCTHING_DATA "$st/data"
+  chmod 000 "$st"
+  purge "syncthing" --delete-synced-files
+  chmod 755 "$st"
+  check "files hidden (--delete-synced-files): exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting it" out_lacks "sudo rm -rf $st/data"
+  check "  nothing changed"           hidden_untouched
+  check "  synced files kept"         [ -f "$st/data/default/notes.md" ]
+  check "  identity kept"             [ -f "$CFG/cert.pem" ]
+  teardown
+  # Without the flag the synced files are kept anyway, so a hidden sync
+  # root does not block the purge.
+  deployed
+  st="$HOME/services/syncthing/storage"
+  mkdir -p "$st"; mv "$DATA" "$st/data"
+  set_env SYNCTHING_DATA "$st/data"
+  chmod 000 "$st"
+  purge "syncthing"
+  chmod 755 "$st"
+  check "files hidden, kept anyway: exits zero" [ "$CODE" -eq 0 ]
+  check "  synced files kept"         [ -f "$st/data/default/notes.md" ]
+  check "  identity gone"             [ ! -e "$CFG" ]
+  teardown
+  # The identity dir itself cannot be searched: config.xml is unreadable.
+  deployed
+  chmod 000 "$CFG"
+  purge "syncthing"
+  chmod 700 "$CFG"
+  check "identity dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says config.xml cannot be read" out_has "config.xml"
+  check "  nothing changed"           hidden_untouched
+  check "  identity kept"             [ -f "$CFG/cert.pem" ]
+  check "  index kept"                [ -f "$DB/index.db" ]
+  teardown
+  # ~/services/syncthing itself unsearchable.
+  deployed
+  st="$HOME/services/syncthing"
+  chmod 000 "$st"
+  purge "syncthing"
+  chmod 755 "$st"
+  check "state root unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says to restore access"    out_has "sudo chown -R .* $st"
+  check "  never suggests deleting"   out_lacks "sudo rm -rf"
+  check "  nothing changed"           hidden_untouched
+  check "  identity kept"             [ -f "$CFG/cert.pem" ]
+  check "  index kept"                [ -f "$DB/index.db" ]
+  check "  synced files kept"         [ -f "$DATA/default/notes.md" ]
+  teardown
+  # ~/services itself unsearchable: not provably this service's folder.
+  deployed
+  chmod 000 "$HOME/services"
+  purge "syncthing"
+  chmod 755 "$HOME/services"
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says to check it first"    out_has "Check what it is"
+  check "  nothing changed"           hidden_untouched
+  check "  identity kept"             [ -f "$CFG/cert.pem" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF_SERVE
+https://test-host.tailfake.ts.net (tailnet only)
+|-- /     proxy http://127.0.0.1:8080
+|-- /sync proxy http://127.0.0.1:8384
+EOF_SERVE
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no serve off"                  no_call " off"
+  check "does not say already off"      out_lacks "already off"
+  check "counts the kept port"          out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8384 (left on, see above); 0 port(s) unpublished"
+  check "still stops the unit"          stopped
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ]; then
   red "services/syncthing/setup.sh is missing — nothing to test."
@@ -1638,6 +1764,8 @@ test_teardown_quoted_env
 test_teardown_home_variable_in_env
 test_teardown_env_lint
 test_teardown_refuses_compose_overrides
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 if [ "${1:-}" = "--live" ]; then
   echo

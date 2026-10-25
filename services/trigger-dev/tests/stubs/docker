@@ -10,6 +10,13 @@
 #   compose_down       — touched by `compose ... down`
 #   compose_down_fails — exists => `compose ... down` fails (network in use)
 #   docker_run_fails   — exists => `docker run --entrypoint sh` (purge cleanup) fails
+#   project_left       — exists => `docker ps -aq --filter label=com.docker.compose.project=…`
+#                        prints it (this project's containers a failed down left)
+#   ps_label_fails     — exists => that labelled `docker ps` fails
+#   network_users_<net> — exists => `docker network inspect … <net>` succeeds
+#                        and prints it (else: no such network)
+#   mounted_missing    — touched when a cleanup `docker run -v SRC:…` names a
+#                        SRC that does not exist (real dockerd would create it as root)
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -26,6 +33,20 @@ case "$1" in
       [ -f "$STATE_DIR/ps_filter_fails" ] && { echo "Error response from daemon" >&2; exit 1; }
       [ -f "$STATE_DIR/attached_$net" ] && cat "$STATE_DIR/attached_$net"
     fi
+    case " $* " in
+      *" label=com.docker.compose.project="*)
+        [ -f "$STATE_DIR/ps_label_fails" ] && { echo "Error response from daemon" >&2; exit 1; }
+        [ -f "$STATE_DIR/project_left" ] && cat "$STATE_DIR/project_left"
+        ;;
+    esac
+    ;;
+
+  network)
+    # docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' <net>
+    [ "${2:-}" = "inspect" ] || exit 0
+    for net in "$@"; do :; done
+    [ -f "$STATE_DIR/network_users_$net" ] || { echo "Error response from daemon: network $net not found" >&2; exit 1; }
+    cat "$STATE_DIR/network_users_$net"
     ;;
 
   inspect)
@@ -45,8 +66,9 @@ case "$1" in
 
   run)
     # setup.sh: docker run --rm httpd:2 htpasswd -Bbn USER PASS
-    case "$*" in
-      *htpasswd*)
+    # (not a cleanup that merely names auth.htpasswd)
+    case " $* " in
+      *" htpasswd -Bbn "*)
         n=0
         [ -f "$STATE_DIR/htpasswd_count" ] && n="$(cat "$STATE_DIR/htpasswd_count")"
         echo $((n + 1)) > "$STATE_DIR/htpasswd_count"
@@ -54,22 +76,28 @@ case "$1" in
         exit 0
         ;;
     esac
-    # teardown --purge's cleanup of container-owned files:
+    # teardown --purge's cleanups of container-owned files:
     #   docker run --rm --pull never --user 0 -v DIR:/x --entrypoint sh <image> -c 'find ...'
+    #   docker run --rm --pull never --user 0 -v BASE:/x --entrypoint sh <image> -c SCRIPT sh REST
+    #                                       (a target behind an unsearchable folder)
     # The real container is root, so it can delete what the host user cannot.
-    # Model that by making the tree writable first, then running the real find.
-    mount_host=""; entry=""
+    # Model that by making the mounted tree accessible first, then running the
+    # real SCRIPT on the host with the mount point replaced by the host path.
+    mount_host=""; mount_ctr=""; entry=""; script=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
+        -v|--volume) mount_host="${2%%:*}"; mount_ctr="${2#*:}"; shift 2 ;;
         --entrypoint) entry="$2"; shift 2 ;;
+        -c) script="$2"; shift 2; break ;;
         *) shift ;;
       esac
     done
     [ "$entry" = "sh" ] && [ -n "$mount_host" ] || exit 0
     [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+    [ -n "$mount_ctr" ] && [ -n "$script" ] || exit 1
+    [ -d "$mount_host" ] || { touch "$STATE_DIR/mounted_missing"; exit 1; }
     chmod -R u+rwX "$mount_host" 2>/dev/null
-    find "$mount_host" -mindepth 1 -delete
+    sh -c "${script//"$mount_ctr"/$mount_host}" "$@"
     exit $?
     ;;
 

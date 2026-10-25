@@ -1014,6 +1014,7 @@ EOT
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8222 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -1204,6 +1205,94 @@ if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" 
 fi
 
 echo "Mocked suite (sandboxed, no system changes):"
+
+# VAULTWARDEN_DATA under a folder this user cannot search (a root-owned 0700
+# storage/, faked with chmod 000): `[ -e ]` cannot see the vault, which must
+# not read as "already gone" while .env is deleted. The pinned image mounts
+# that folder and deletes only the path below it.
+hide_vault_under_storage() {
+  local st="$HOME/services/vaultwarden/storage"
+  mkdir -p "$st"
+  mv "$(data_dir)" "$st/data"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+}
+unhide_storage() { chmod -R u+rwX "$HOME/services/vaultwarden" 2>/dev/null; }
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: a vault behind an unsearchable folder is deleted, not taken as gone"
+  local st
+  deployed
+  st="$HOME/services/vaultwarden/storage"
+  hide_vault_under_storage
+  run_teardown --purge "vaultwarden"
+  unhide_storage
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "mounted the unsearchable folder" grep -q -- "-v $st:/x" "$STATE_DIR/cleanup_run"
+  check "used the pinned image"       grep -q "vaultwarden/server:1.37.2" "$STATE_DIR/cleanup_run"
+  check "no sudo"                     no_call "^sudo"
+  check "vault gone"                  [ ! -e "$st/data" ]
+  check "emptied folder gone"         [ ! -e "$st" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "state dir removed"           [ ! -e "$HOME/services/vaultwarden" ]
+  teardown
+  deployed
+  st="$HOME/services/vaultwarden/storage"
+  hide_vault_under_storage
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "vaultwarden"
+  unhide_storage
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/data"
+  check "  never says deleted"        out_lacks "Deleted"
+  check "  vault kept"                [ -f "$st/data/db.sqlite3" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  st="$HOME/services/vaultwarden/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/data"
+  sed -i.bak "s#^VAULTWARDEN_DATA=.*#VAULTWARDEN_DATA=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "vaultwarden"
+  unhide_storage
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/vaultwarden itself unsearchable: not strictly inside it, so
+  # no mount; stop before anything changes and name the sudo command.
+  deployed
+  chmod 000 "$HOME/services/vaultwarden"
+  run_teardown --purge "vaultwarden"
+  unhide_storage
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  no cleanup container"      [ ! -f "$STATE_DIR/cleanup_run" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  vault kept"                [ -f "$(data_dir)/db.sqlite3" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOT
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /vault proxy http://127.0.0.1:8222
+EOT
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8222 (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
 test_preflight_root
 test_preflight_docker_perms
 test_preflight_tailscale_down
@@ -1242,6 +1331,8 @@ test_teardown_home_variable_in_env
 test_teardown_purge_own_dir_only
 test_teardown_purge_services_root_is_a_link
 test_teardown_env_lint
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 if [ "${1:-}" = "--live" ]; then
   echo

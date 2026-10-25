@@ -618,6 +618,7 @@ EOF
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:2283 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -811,6 +812,147 @@ test_teardown_env_lint() {
   teardown
 }
 
+# The library and database behind a folder this user cannot search (a
+# root-owned 0700 storage/, faked with chmod 000): `[ -e ]` cannot see them,
+# which must not read as "already gone" while .env is deleted. The pinned
+# Postgres image mounts that folder and deletes only the path below it.
+out_lacks() { ! grep -q -- "$1" <<<"$OUT"; }
+call_count() { grep -c -- "$1" "$CALLS_LOG"; }
+unhide_state() { chmod -R u+rwX "$HOME/services/immich" 2>/dev/null; }
+img_of_compose() {
+  sed -n 's/^[[:space:]]*image:[[:space:]]*\(ghcr\.io\/immich-app\/postgres:[^[:space:]]*\).*/\1/p' "$SVC/docker-compose.yml"
+}
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: photos and database behind an unsearchable folder are deleted, not taken as gone"
+  local st im img
+  # Both share one hidden folder.
+  deployed
+  im="$HOME/services/immich"; st="$im/storage"; img="$(img_of_compose)"
+  mkdir -p "$st"
+  mv "$(lib_dir)" "$st/library"; mv "$(db_dir)" "$st/postgres"
+  set_env UPLOAD_LOCATION "$st/library"; set_env DB_DATA_LOCATION "$st/postgres"
+  chmod 000 "$st"
+  run_teardown --purge "immich"
+  unhide_state
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "confirmation names the library" out_has "photo library: $st/library"
+  check "confirmation names the database" out_has "the database $st/postgres"
+  check "mounted the unsearchable folder as root" calls_have "docker run --rm --pull never --user 0 -v $st:/x --entrypoint sh $img"
+  check "no sudo"                     no_call "^sudo"
+  check "library gone"                [ ! -e "$st/library" ]
+  check "database gone"               [ ! -e "$st/postgres" ]
+  check "emptied folder gone"         [ ! -e "$st" ]
+  check "no mount source created"     [ ! -e "$STATE_DIR/docker_created_mount" ]
+  check "says what it deleted"        out_has "Deleted $st/postgres, $st/library and"
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "state dir removed"           [ ! -e "$im" ]
+  teardown
+  # Deleting the database empties the shared folder, so hidden_rm removes
+  # it; the library (never there) must then not mount a folder that is gone,
+  # which a real dockerd would create as root.
+  deployed
+  im="$HOME/services/immich"; st="$im/storage"
+  mkdir -p "$st"
+  rm -rf "$(lib_dir)"; mv "$(db_dir)" "$st/postgres"
+  set_env UPLOAD_LOCATION "$st/library"; set_env DB_DATA_LOCATION "$st/postgres"
+  chmod 000 "$st"
+  run_teardown --purge "immich"
+  unhide_state
+  check "shared folder emptied first: exits zero" [ "$CODE" -eq 0 ]
+  check "  one cleanup container"     [ "$(call_count "-v $st:/x")" -eq 1 ]
+  check "  no mount source created"   [ ! -e "$STATE_DIR/docker_created_mount" ]
+  check "  says the library was already gone" out_has "$st/library is already gone"
+  check "  folder gone"               [ ! -e "$st" ]
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  im="$HOME/services/immich"; st="$im/storage"
+  mkdir -p "$st"; mv "$(lib_dir)" "$st/library"
+  set_env UPLOAD_LOCATION "$st/library"
+  chmod 000 "$st"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "immich"
+  unhide_state
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/library"
+  check "  never says deleted"        out_lacks "Deleted"
+  check "  photos kept"               [ -f "$st/library/upload/u1/IMG_0001.jpg" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  im="$HOME/services/immich"; st="$im/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/library"
+  set_env UPLOAD_LOCATION "$st/library"
+  chmod 000 "$st"
+  run_teardown --purge "immich"
+  unhide_state
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # ~/services/immich itself unsearchable (the ML marker sits right in it):
+  # not strictly inside it, so no mount; stop before anything changes.
+  deployed
+  im="$HOME/services/immich"
+  chmod 000 "$im"
+  run_teardown --purge "immich"
+  unhide_state
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $im/library"
+  check "  no cleanup container"      no_call "docker run"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_stop" ]
+  check "  serve untouched"           no_call " off"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  photos kept"               [ -f "$(lib_dir)/upload/u1/IMG_0001.jpg" ]
+  check "  ML marker kept"            [ -f "$im/.ml-mode" ]
+  teardown
+  # A library outside ~/services/immich behind an unsearchable folder may be
+  # a photo folder teardown never deletes: refused, and no sudo rm offered.
+  deployed
+  mkdir -p "$HOME/services/photos/lib"; echo jpeg > "$HOME/services/photos/lib/IMG.jpg"
+  set_env UPLOAD_LOCATION "$HOME/services/photos/lib"
+  chmod 000 "$HOME/services/photos"
+  run_teardown --purge "immich"
+  chmod -R u+rwX "$HOME/services/photos"
+  check "outside library behind it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  no sudo rm offered"        out_lacks "sudo rm"
+  check "  photos kept"               [ -f "$HOME/services/photos/lib/IMG.jpg" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_stop" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  # And ~/services itself.
+  deployed
+  chmod 000 "$HOME/services"
+  run_teardown --purge "immich"
+  chmod 755 "$HOME/services"
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_stop" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  database kept"             [ -f "$(db_dir)/base/1" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /photos proxy http://127.0.0.1:2283
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    out_lacks "already off"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:2283 (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -936,6 +1078,8 @@ test_teardown_home_variable_in_env
 test_teardown_purge_own_dir_only
 test_teardown_purge_services_root_is_a_link
 test_teardown_env_lint
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 if [ "${1:-}" = "--live" ]; then
   echo

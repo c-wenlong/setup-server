@@ -258,6 +258,38 @@ EOF
   teardown
 }
 
+test_teardown_unexpected_path_left_on() {
+  echo "• teardown: a route left alone (odd path) is counted, not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8445 (tailnet only)
+|-- code proxy http://127.0.0.1:8080
+|-- /home proxy http://127.0.0.1:8093
+EOF
+  run_teardown
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "warns about the odd path"       out_has "Unexpected Serve path 'code' on :8445"
+  check "no serve off"                   no_call " off"
+  check "does not say already off"       bash -c '! grep -q "already off" <<<"$1"' _ "$OUT"
+  check "counts the kept route"          out_has "1 Serve route(s) still point at http://127.0.0.1:8080 (left on, see above); 0 route(s) unpublished"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /home proxy http://127.0.0.1:8093
+
+https://test-host.tailfake.ts.net:8445 (tailnet only)
+|-- code proxy http://127.0.0.1:8080
+|-- /home proxy http://127.0.0.1:8093
+EOF
+  : > "$CALLS_LOG"
+  run_teardown
+  check "mixed: exits zero"              [ "$CODE" -eq 0 ]
+  check "mixed: :443 / off"              calls_have "serve --https=443 --set-path=/ off"
+  check "mixed: odd path not turned off" no_call "https=8445"
+  check "mixed: counts kept and unpublished" out_has "1 Serve route(s) still point at http://127.0.0.1:8080 (left on, see above); 1 route(s) unpublished"
+  teardown
+}
+
 test_teardown_not_published() {
   echo "• teardown: nothing published (or only lookalikes) is fine"
   deployed
@@ -615,6 +647,7 @@ test_port_override
 test_serve_approval_retry
 test_teardown_safe
 test_teardown_port_shapes
+test_teardown_unexpected_path_left_on
 test_teardown_not_published
 test_teardown_serve_status_fails
 test_teardown_port_from_config

@@ -518,6 +518,7 @@ EOF
   check ":8443 off"                   calls_have "serve --https=8443 off"
   check "shared :443 left on"         no_call "https=443 off"
   check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  check "counts kept and unpublished" out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8103 (left on, see above); 2 port(s) unpublished"
   teardown
 }
 
@@ -690,6 +691,57 @@ test_teardown_purge_keeps_a_checkout_inside() {
 }
 
 echo "Mocked suite (sandboxed, no system changes):"
+
+# A data dir behind a folder this user cannot search (a root-owned 0700
+# parent, faked with chmod 000): `[ -e ]` cannot see it, which must not read
+# as "already gone" while .env is deleted. No cleanup container here, so it
+# stops before anything changes and names the sudo command.
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: data behind an unsearchable folder stops before anything changes"
+  deployed
+  local st="$HOME/services/stirling-pdf/storage"
+  mkdir -p "$st/data/configs"
+  echo keep > "$st/data/configs/settings.yml"
+  sed -i.bak "s#^STIRLING_DATA=.*#STIRLING_DATA=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "stirling-pdf"
+  chmod 755 "$st"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "names the folder"            out_has "$st cannot be searched"
+  check "names the sudo command"      out_has "sudo rm -rf $st/data"
+  check "never says deleted"          bash -c '! grep -q "Deleted" <<<"$1"' _ "$OUT"
+  check "data kept"                   [ -f "$st/data/configs/settings.yml" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "nothing stopped"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "serve untouched"             no_call " off"
+  teardown
+  deployed
+  chmod 000 "$HOME/services"
+  run_teardown --purge "stirling-pdf"
+  chmod 755 "$HOME/services"
+  check "\$HOME/services unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  data kept"                 [ -f "$(data_dir)/configs/settings.yml" ]
+  teardown
+}
+
+test_teardown_only_shared_ports() {
+  echo "• teardown: a shared port left on is not reported as already off"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /pdf proxy http://127.0.0.1:8103
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "does not say already off"    bash -c '! grep -q "already off" <<<"$1"' _ "$OUT"
+  check "counts the kept port"        out_has "1 shared HTTPS port(s) still route to http://127.0.0.1:8103 (left on, see above); 0 port(s) unpublished"
+  teardown
+}
+
 test_preflight_root
 test_preflight_docker_perms
 test_preflight_tailscale_down
@@ -721,6 +773,8 @@ test_teardown_home_variable_in_env
 test_teardown_purge_own_dir_only
 test_teardown_purge_services_root_is_a_link
 test_teardown_env_lint
+test_teardown_purge_unsearchable_parent
+test_teardown_only_shared_ports
 
 if [ "${1:-}" = "--live" ]; then
   echo

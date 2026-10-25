@@ -4,7 +4,7 @@
 #   operator            — exists => serve allowed without sudo
 #   serve_fails_left    — countdown of forced serve failures (approval-link flow)
 #   serve_status_fails — exists => `serve status` fails (tailscaled down)
-#   served: one "PORT TARGET" line per live mapping. Seed it to
+#   served: one "PORT TARGET [PATH]" line per live mapping. Seed it to
 #                         model a box that was published before this run (the
 #                         legacy :10000 mapping the migration has to remove);
 #                         `serve status` reports it and `--https=N off` drops
@@ -33,11 +33,18 @@ EOF
         exit 1
       fi
       [ -s "$STATE_DIR/served" ] || { echo "No serve config"; exit 0; }
-      while read -r sport starget; do
+      # Consecutive lines with the same port share one header, so a port
+      # with two handlers (an optional third column is the path) models a
+      # port shared with another service.
+      prev_port=""
+      while read -r sport starget spath; do
         [ -n "$sport" ] || continue
-        echo "https://test-host.tailfake.ts.net:$sport (tailnet only)"
-        echo "|-- / proxy $starget"
-        echo
+        if [ "$sport" != "$prev_port" ]; then
+          [ -z "$prev_port" ] || echo
+          echo "https://test-host.tailfake.ts.net:$sport (tailnet only)"
+          prev_port="$sport"
+        fi
+        echo "|-- ${spath:-/} proxy $starget"
       done < "$STATE_DIR/served"
       exit 0
     fi

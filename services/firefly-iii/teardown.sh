@@ -142,6 +142,68 @@ env_lint() {
     }' "$ENV_FILE")"
   [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
 }
+
+# Is a purge target there? `[ -e ]` is false both when it is gone and when a
+# folder on the way (e.g. a root-owned 0700 dir) cannot be searched, and only
+# the first means "nothing to delete". So walk down from ~/services: a
+# component absent under a searchable parent means gone (DIR_STATE=missing);
+# one that exists but cannot be searched hides the target (DIR_STATE=hidden,
+# HIDDEN_DIR that folder, HIDDEN_REST the path below it). $2 must already be
+# checked to sit inside ~/services/ with no `..` and no trailing slash.
+DIR_STATE=""
+HIDDEN_DIR=""
+HIDDEN_REST=""
+dir_state() {
+  local var="$1" target="$2" p="$HOME/services" rest
+  rest="${target#"$HOME/services/"}"
+  DIR_STATE="present"; HIDDEN_DIR=""; HIDDEN_REST=""
+  while :; do
+    if [ ! -e "$p" ]; then
+      # A symlink that does not resolve may be dangling or point into a
+      # folder this user cannot search; the two look the same from here.
+      [ ! -L "$p" ] || die "$p is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+      DIR_STATE="missing"; return 0
+    fi
+    [ -d "$p" ] || die "$p (on the way to $var=$target) is not a directory, refusing. Nothing was changed."
+    if [ ! -x "$p" ]; then DIR_STATE="hidden"; HIDDEN_DIR="$p"; HIDDEN_REST="$rest"; return 0; fi
+    case "$rest" in */*) ;; *) break ;; esac
+    p="$p/${rest%%/*}"
+    rest="${rest#*/}"
+  done
+  if [ ! -e "$target" ]; then
+    [ ! -L "$target" ] || die "$target is a symlink this user cannot follow (dangling, or into a folder it cannot search), so teardown cannot tell whether $var=$target is there. Remove the link by hand if it is stale, then re-run. Nothing was changed."
+    DIR_STATE="missing"
+  fi
+}
+
+# A purge target behind a folder this user cannot search: the host cannot
+# even see it, so a throwaway container mounts that folder ($1, already
+# through real_dir and strictly inside ~/services/$NAME) and deletes only the
+# path below it ($2). $3 is the expected kind, dir or file, checked inside
+# the container before anything is deleted: the other kind is refused (exit
+# 4), the way the visible-path check refuses — rm -rf on a directory that
+# was meant to be a file could take far more than that file. A symlink
+# anywhere on that path is refused (exit 3; it would resolve inside the
+# container, not on this box); the path must be gone afterwards, and the
+# folders emptied on the way go too. $4 is the image, any further arguments
+# are extra `docker run` options. Returns the container's exit code.
+hidden_rm() {
+  local base="$1" rest="$2" kind="$3" image="$4" rc=0
+  shift 4
+  docker run --rm --pull never "$@" -v "$base:/x" --entrypoint sh "$image" \
+    -c 'set -f; r=$1; k=$2; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+        if [ -e "/x/$r" ]; then
+          { [ "$k" = dir ] && [ ! -d "/x/$r" ]; } && exit 4
+          { [ "$k" = file ] && [ -d "/x/$r" ]; } && exit 4
+        fi
+        rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
+        d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
+    sh "$rest" "$kind" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  # The emptied folder itself: removing it needs only its parent's
+  # permissions, and rmdir never removes anything that is not empty.
+  rmdir -- "$base" 2>/dev/null || true
+}
 env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 IMPORTER_PORT="$(env_get IMPORTER_PORT)"
@@ -181,6 +243,17 @@ SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
 # leaves the service exactly as it was.
 PURGE_DIRS=""   # newline-separated real paths that exist on disk
 PURGE_LABELS="" # what the user is told is being deleted
+# Targets behind a folder this user cannot search (see dir_state): the
+# folder to mount (real path), the path below it, and the path as in .env.
+HIDDEN_BASES=()
+HIDDEN_RESTS=()
+HIDDEN_PATHS=()
+# Counted at append: on Bash 3.2 (macOS's bundled shell) taking the length
+# of an empty array is an unbound-variable error under set -u.
+HIDDEN_N=0
+# The cleanup image: the postgres image the stack already pulled. Settled
+# before the confirmation, so the purge never has to work it out halfway.
+PG_IMAGE="postgres:${POSTGRES_VERSION:-16-alpine}"
 # check_purge_dir VAR VALUE — the guard every state dir goes through.
 check_purge_dir() {
   local var="$1" dir="$2" root real
@@ -193,7 +266,26 @@ check_purge_dir() {
   esac
   # And where it really is, symlinks and all: it must be a strict child of
   # the real ~/services, never ~/services itself or anything above it.
-  if [ -e "$dir" ]; then
+  dir_state "$var" "$dir"
+  if [ "$DIR_STATE" = "hidden" ]; then
+    # The cleanup container mounts the unsearchable folder itself (real_dir
+    # resolves it without entering it) and deletes only the path below it,
+    # so that folder must sit strictly inside ~/services/firefly-iii.
+    real="$(real_dir "$HIDDEN_DIR")" \
+      || die "$HIDDEN_DIR cannot be searched and is not a real directory inside $HOME/services/$NAME. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. Nothing was changed."
+    root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
+    case "$real" in
+      "$root/$NAME"/?*) ;;
+      *) die "$HIDDEN_DIR cannot be searched, so teardown cannot reach $var=$dir. Run: sudo rm -rf $dir   then ./teardown.sh --purge again. Nothing was changed." ;;
+    esac
+    case "$HIDDEN_REST" in *"
+"*) die "$var=$dir contains a newline — refusing." ;; esac
+    HIDDEN_BASES+=("$real")
+    HIDDEN_RESTS+=("$HIDDEN_REST")
+    HIDDEN_PATHS+=("$dir")
+    HIDDEN_N=$((HIDDEN_N + 1))
+    PURGE_LABELS="${PURGE_LABELS:+$PURGE_LABELS, }$real/$HIDDEN_REST"
+  elif [ "$DIR_STATE" = "present" ]; then
     [ -d "$dir" ] || die "$var=$dir is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
     real="$(real_dir "$dir")" || die "dir=$dir is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
@@ -244,6 +336,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t1="$TARGET_APP" -v t2="$TA
   port != "" && /\|-- / { n++; if (/ proxy / && ($NF == t1 || $NF == t2)) mine++ }
   END { flush() }')"
 unpublished=0
+kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -252,11 +345,17 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET_APP or $TARGET_IMP (already off)"
+# A shared port left on still routes here, so "already off" would be wrong.
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET_APP or $TARGET_IMP (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET_APP or $TARGET_IMP (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
 # Plain `down`, never -v: the compose file declares no named volumes (all state
@@ -272,7 +371,6 @@ ok "Containers removed; ledger in ${DB_DATA:-(not set)} kept"
 # postgres image the stack already pulled, never fetching anything).
 if [ "$PURGE" -eq 1 ]; then
   info "Purging ledger, uploads and importer config"
-  PG_IMAGE="postgres:${POSTGRES_VERSION:-16-alpine}"
   while IFS= read -r dir; do
     [ -n "$dir" ] || continue
     rm -rf -- "$dir" 2>/dev/null || true
@@ -287,6 +385,25 @@ if [ "$PURGE" -eq 1 ]; then
   done <<EOF
 $PURGE_DIRS
 EOF
+  # Targets the host cannot see: a throwaway container mounts the folder that
+  # hides each one and deletes only the path below it. Two targets can share
+  # that folder, and hidden_rm removes it once it is empty, so a folder that
+  # is already gone means its target went with it. Never mount a missing
+  # folder: dockerd would create it, as root.
+  i=0
+  while [ "$i" -lt "$HIDDEN_N" ]; do
+    base="${HIDDEN_BASES[$i]}"; rest="${HIDDEN_RESTS[$i]}"
+    if [ ! -e "$base" ] && [ ! -L "$base" ]; then
+      ok "$base/$rest is already gone (its folder went with an earlier delete)"
+    else
+      info "$base cannot be searched by this user; deleting $base/$rest with $PG_IMAGE"
+      hidden_rm "$base" "$rest" dir "$PG_IMAGE" \
+        || die "Could not delete $base/$rest through $base. Run: sudo rm -rf ${HIDDEN_PATHS[$i]}   then ./teardown.sh --purge again. .env was kept."
+      ok "Deleted $base/$rest"
+    fi
+    i=$((i + 1))
+  done
+  # Only now, with every data path gone, the APP_KEY.
   rm -f -- "$ENV_FILE"
   # ~/services/<name> is the launcher's install marker. Try it even when the
   # data dir was already gone, so a purged app never reads as installed;
