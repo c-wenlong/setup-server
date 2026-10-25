@@ -380,7 +380,11 @@ else
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>rm -f "$SERVICE_HOME/state/torn-down"; exec "$NODE_BIN/npm" run start -- -p "$LOCAL_PORT" -H 127.0.0.1</string>
+    <string>rm -f "\$1"; exec "\$2" run start -- -p "\$3" -H 127.0.0.1</string>
+    <string>self-learn-web</string>
+    <string>$SERVICE_HOME/state/torn-down</string>
+    <string>$NODE_BIN/npm</string>
+    <string>$LOCAL_PORT</string>
   </array>
   <key>WorkingDirectory</key><string>$REPO_DIR/apps/web</string>
   <key>EnvironmentVariables</key>

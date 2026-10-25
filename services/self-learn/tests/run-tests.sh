@@ -1115,7 +1115,8 @@ test_teardown_then_start_and_stop() {
     check "start consumed the marker"   [ ! -f "$(SVC_HOME)/state/torn-down" ]
     PATH="$STUBS:$PATH" systemctl --user stop self-learn.service >/dev/null
   else
-    check "agent clears marker on load" grep -q 'rm -f ".*state/torn-down"; exec' "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
+    check "agent clears marker on load" grep -qF 'rm -f "$1"; exec "$2" run start' "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
+    check "agent passes marker path"    grep -q '<string>.*/state/torn-down</string>' "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
     PATH="$STUBS:$PATH" launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.self-learn.web.plist" >/dev/null
     check "load consumed the marker"    [ ! -f "$(SVC_HOME)/state/torn-down" ]
     PATH="$STUBS:$PATH" launchctl bootout "gui/$(id -u)/com.self-learn.web" >/dev/null

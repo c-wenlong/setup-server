@@ -45,7 +45,7 @@ case "${1:-}" in
 $(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/s:.*<string>\(.*\)</string>.*:\1:p' "$plist")
 PROGARGS
       if [ "${args[0]:-}" = "/bin/sh" ] && [ "${args[1]:-}" = "-c" ]; then
-        sh -c "${args[2]:-true}" || exit 5
+        sh -c "${args[2]:-true}" "${args[@]:3}" || exit 5
       fi
     fi
     touch "$STATE_DIR/$marker"
