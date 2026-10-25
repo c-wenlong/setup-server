@@ -31,7 +31,13 @@ set -euo pipefail
 NAME="deployd"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
+# .env is the source of truth once written — an operator may have pointed
+# SERVICE_HOME elsewhere, and the lock must be checked there, not here.
 SERVICE_HOME="$HOME/services/$NAME"
+if [ -f "$ENV_FILE" ]; then
+  set -a; . "$ENV_FILE"; set +a
+  SERVICE_HOME="${SERVICE_HOME:-$HOME/services/$NAME}"
+fi
 UNIT_DIR="$HOME/.config/systemd/user"
 TIMER_UNIT="deployd.timer"
 SERVICE_UNIT="deployd.service"
@@ -65,9 +71,10 @@ else
 fi
 
 # ---------------------------------------------------------------- poller
-# The timer goes first so no new tick can start; then the lock — a held,
-# fresh lock means a poll is inside a deploy right now and teardown waits
-# for the operator rather than killing it.
+# First stop *future* ticks without touching a running one: disable the
+# systemd timer (a running oneshot survives) or launchd-disable the label
+# (the loaded job keeps running). Then the lock check; only after it clears
+# do we stop a possibly-running job.
 if [ "$OS" = "Linux" ]; then
   if [ -f "$UNIT_DIR/$TIMER_UNIT" ]; then
     systemctl --user disable --now "$TIMER_UNIT" >/dev/null 2>&1 \
@@ -78,31 +85,36 @@ if [ "$OS" = "Linux" ]; then
   fi
 else
   target="gui/$(id -u)/$PLIST_LABEL"
-  if launchctl print "$target" >/dev/null 2>&1 \
-     && ! launchctl bootout "$target" >/dev/null 2>&1; then
-    for i in 1 2 3; do
-      launchctl print "$target" >/dev/null 2>&1 || break
-      [ "$i" -lt 3 ] || die "Could not unload LaunchAgent $PLIST_LABEL (launchctl bootout $target failed and it is still loaded; check: launchctl print $target). Nothing was changed; fix that and re-run."
-      sleep 1
-    done
-  fi
   launchctl disable "$target" >/dev/null 2>&1 \
     || die "Could not disable LaunchAgent $PLIST_LABEL (launchctl disable $target), so it would load again at the next login. Nothing was changed; fix that and re-run."
-  ok "LaunchAgent $PLIST_LABEL unloaded and disabled"
+  ok "LaunchAgent $PLIST_LABEL disabled (stops future starts)"
 fi
 
 if [ -d "$LOCK" ]; then
   [ -L "$LOCK" ] && die "$LOCK is a symlink, not the lock deployd makes — refusing."
   if [ -z "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
-    die "A poll is mid-run (it holds $LOCK) and may be inside another service's deploy — re-run once it finishes. The timer is already off, so nothing new will start."
+    die "A poll is mid-run (it holds $LOCK) and may be inside another service's deploy — re-run once it finishes. New ticks are already disabled, so nothing new will start."
   fi
   rmdir "$LOCK" 2>/dev/null \
     || die "$LOCK is over 60 min old but not empty — look inside, remove it by hand, then re-run."
   ok "Cleared a stale poll lock (over 60 min old)"
 fi
 
-if [ "$OS" = "Linux" ] && [ -f "$UNIT_DIR/$SERVICE_UNIT" ]; then
-  systemctl --user stop "$SERVICE_UNIT" >/dev/null 2>&1 || true
+if [ "$OS" = "Linux" ]; then
+  if [ -f "$UNIT_DIR/$SERVICE_UNIT" ]; then
+    systemctl --user stop "$SERVICE_UNIT" >/dev/null 2>&1 || true
+  fi
+else
+  target="gui/$(id -u)/$PLIST_LABEL"
+  if launchctl print "$target" >/dev/null 2>&1 \
+     && ! launchctl bootout "$target" >/dev/null 2>&1; then
+    for i in 1 2 3; do
+      launchctl print "$target" >/dev/null 2>&1 || break
+      [ "$i" -lt 3 ] || die "Could not unload LaunchAgent $PLIST_LABEL (launchctl bootout $target failed and it is still loaded; check: launchctl print $target). Fix that and re-run."
+      sleep 1
+    done
+  fi
+  ok "LaunchAgent $PLIST_LABEL unloaded"
 fi
 
 # ------------------------------------------------------------------- purge

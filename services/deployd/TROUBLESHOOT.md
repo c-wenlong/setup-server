@@ -68,10 +68,13 @@ disabled, so nothing new starts; re-run teardown when the lock clears.
 
 ## "I edited a deploy block but the old one still runs"
 
-`app.json` is read from the checkout, not the working copy you edited.
-Commit + push, or run `git -C <SETUP_REPO> pull` — the next tick picks it
-up. Same for `POLL_SECONDS`: it is baked into the timer; edit `.env` and
-re-run `setup.sh`.
+Check which checkout `SETUP_REPO` in `.env` names — `app.json` is read from
+*that* working tree, committed or not, so uncommitted edits there already
+apply on the next tick. If you edited a *different* clone, commit + push
+and let the tick pull it in. One caveat: uncommitted local changes leave
+that tree dirty, so `git pull --ff-only` stops applying until they are
+committed or stashed. Same for `POLL_SECONDS`: it is baked into the timer;
+edit `.env` and re-run `setup.sh`.
 
 ## macOS: nothing runs at all
 

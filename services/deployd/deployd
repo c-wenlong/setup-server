@@ -35,6 +35,7 @@
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -82,20 +83,38 @@ def load_env(path):
     return out
 
 
-def run(argv, cwd=None, env=None, timeout=GIT_TIMEOUT):
-    """Run argv, return (rc, combined output). Never raises on nonzero."""
+def run(argv, cwd=None, env=None, timeout=GIT_TIMEOUT, group_kill=False):
+    """Run argv, return (rc, combined output). Never raises on nonzero.
+    group_kill puts the child in its own process group so a timeout can
+    killpg() the whole tree — a service setup.sh spawns uv/git/docker
+    grandchildren that a plain p.kill() would orphan mid-write."""
     merged = dict(os.environ)
     if env:
         merged.update(env)
     try:
-        p = subprocess.run(argv, cwd=cwd, env=merged, timeout=timeout,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           universal_newlines=True)
-        return p.returncode, p.stdout or ""
-    except subprocess.TimeoutExpired:
-        return 124, "timed out after %ss" % timeout
+        p = subprocess.Popen(argv, cwd=cwd, env=merged,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             universal_newlines=True,
+                             start_new_session=group_kill)
     except OSError as e:
         return 127, str(e)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return p.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        if group_kill:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        else:
+            p.kill()
+        try:
+            out, _ = p.communicate()
+        except Exception:
+            out = ""
+        suffix = "timed out after %ss" % timeout
+        return 124, (out + "\n" + suffix) if out else suffix
 
 
 def git(repo_dir, *args):
@@ -156,13 +175,19 @@ def scan_entries(setup_repo):
         if deploy.get("enabled") is False:
             continue
         repo, cmd = deploy.get("repo"), deploy.get("cmd")
-        if not repo or not cmd:
-            warn("%s: deploy needs both \"repo\" and \"cmd\"" % manifest)
+        if not isinstance(repo, str) or not isinstance(cmd, str) \
+                or not repo or not cmd:
+            warn("%s: deploy needs string \"repo\" and \"cmd\"" % manifest)
+            continue
+        ref = deploy.get("ref") or "main"
+        key = data.get("key")
+        if not isinstance(ref, str):
+            warn("%s: deploy \"ref\" must be a string" % manifest)
             continue
         entries.append({
-            "key": data.get("key") or name,
+            "key": key if isinstance(key, str) and key else name,
             "repo": repo,
-            "ref": deploy.get("ref") or "main",
+            "ref": ref,
             "cmd": cmd,
         })
     return entries
@@ -213,7 +238,10 @@ def deploy(entry, sha, setup_repo, state_dir, timeout):
     }
     log("%s: %s -> %s" % (entry["key"], entry["ref"], sha[:12]))
     rc, out = run(["bash", "-c", entry["cmd"]], cwd=setup_repo, env=env,
-                  timeout=timeout)
+                  timeout=timeout, group_kill=True)
+    if out:
+        # the deploy cmd's own output is the useful part of the service log
+        sys.stdout.write(out if out.endswith("\n") else out + "\n")
     tail = "\n".join(out.splitlines()[-80:])
     try:
         with open(log_file, "w") as fh:
@@ -238,37 +266,72 @@ def deploy(entry, sha, setup_repo, state_dir, timeout):
     return False, rc
 
 
-def refresh_checkout(setup_repo):
+def refresh_checkout(setup_repo, state_dir):
     """ff-only pull of the setup-server checkout; config lives in it, so a
     stale checkout means stale config. Self-update: if the pull touched
     services/deployd/, re-run its setup.sh so the installed bin and units
     pick up the change (we keep running this copy for the rest of the tick).
-    Returns nothing; failures warn and the tick proceeds on the stale tree."""
+    A pending marker makes a failed self-update retry next tick — the
+    checkout has already moved by then, so sha comparison alone would never
+    run setup.sh again. Pull failures warn; pending retries still run."""
+    pending = os.path.join(state_dir, "self-update.pending")
     rc, old = git(setup_repo, "rev-parse", "HEAD")
     if rc != 0:
         warn("%s is not a git checkout — scanning it as-is" % setup_repo)
         return
     old = old.strip()
     rc, out = git(setup_repo, "pull", "--ff-only", "--quiet")
-    if rc != 0:
+    if rc == 0:
+        rc, new = git(setup_repo, "rev-parse", "HEAD")
+        new = new.strip() if rc == 0 else old
+        if new != old:
+            log("checkout moved %s -> %s" % (old[:8], new[:8]))
+            rc, diff = git(setup_repo, "diff", "--name-only", old, new)
+            if rc == 0 and any(p.startswith("services/deployd/")
+                               for p in diff.splitlines()):
+                try:
+                    with open(pending, "w") as fh:
+                        fh.write(new + "\n")
+                except OSError as e:
+                    warn("cannot write %s: %s" % (pending, e))
+    else:
         warn("setup-server pull did not apply (dirty tree, offline, or "
              "diverged): %s" % out.strip().splitlines()[-1]
              if out.strip() else "setup-server pull did not apply")
-        return
-    rc, new = git(setup_repo, "rev-parse", "HEAD")
-    new = new.strip() if rc == 0 else old
-    if new == old:
-        return
-    log("checkout moved %s -> %s" % (old[:8], new[:8]))
-    rc, diff = git(setup_repo, "diff", "--name-only", old, new)
-    if rc == 0 and any(p.startswith("services/deployd/")
-                       for p in diff.splitlines()):
+    if os.path.exists(pending):
         setup = os.path.join(setup_repo, "services", "deployd", "setup.sh")
-        log("services/deployd changed — re-running its setup.sh")
-        rc, out = run(["bash", setup], cwd=setup_repo, timeout=DEPLOY_TIMEOUT)
-        if rc != 0:
-            warn("deployd self-update failed (rc=%s):\n%s"
+        log("applying deployd self-update")
+        rc, out = run(["bash", setup], cwd=setup_repo, timeout=DEPLOY_TIMEOUT,
+                      group_kill=True, env={"DEPLOYD_SELF_UPDATE": "1"})
+        if rc == 0:
+            try:
+                os.remove(pending)
+            except OSError:
+                pass
+        else:
+            warn("deployd self-update failed (rc=%s); retrying next tick:\n%s"
                  % (rc, "\n".join(out.splitlines()[-40:])))
+
+
+def acquire_lock(service_home):
+    """mkdir the poll lock, reclaiming it when stale. Lock path or None."""
+    lock = os.path.join(service_home, ".poll.lock")
+    if os.path.isdir(lock):
+        try:
+            stale = time.time() - os.path.getmtime(lock) > LOCK_STALE_SECONDS
+        except OSError:
+            stale = False
+        if stale:
+            log("removing a stale poll lock (>60 min old)")
+            try:
+                os.rmdir(lock)
+            except OSError:
+                pass
+    try:
+        os.mkdir(lock)
+        return lock
+    except OSError:
+        return None
 
 
 def tick(env):
@@ -290,25 +353,12 @@ def tick(env):
         warn("cannot create %s: %s" % (state_dir, e))
         return 1
 
-    lock = os.path.join(service_home, ".poll.lock")
-    if os.path.isdir(lock):
-        try:
-            stale = time.time() - os.path.getmtime(lock) > LOCK_STALE_SECONDS
-        except OSError:
-            stale = False
-        if stale:
-            log("removing a stale poll lock (>60 min old)")
-            try:
-                os.rmdir(lock)
-            except OSError:
-                pass
-    try:
-        os.mkdir(lock)
-    except OSError:
+    lock = acquire_lock(service_home)
+    if not lock:
         log("another poll is running — skipping this tick")
         return 0
     try:
-        refresh_checkout(setup_repo)
+        refresh_checkout(setup_repo, state_dir)
         entries = scan_entries(setup_repo)
         if not entries:
             log("no deploy entries in %s/services/*/app.json" % setup_repo)
@@ -350,14 +400,31 @@ def force(key, env):
     state_dir = os.path.join(service_home, "state")
     if env.get("PATH_PREFIX"):
         os.environ["PATH"] = env["PATH_PREFIX"] + ":" + os.environ["PATH"]
-    for entry in scan_entries(setup_repo):
-        if entry["key"] == key:
-            sha = resolve_ref(entry["repo"], entry["ref"]) or "forced"
-            ok, rc = deploy(entry, sha, setup_repo, state_dir,
-                            int(env.get("DEPLOY_TIMEOUT") or DEPLOY_TIMEOUT))
-            return 0 if ok else rc or 1
-    warn("no deploy entry named %r" % key)
-    return 1
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+    except OSError as e:
+        warn("cannot create %s: %s" % (state_dir, e))
+        return 1
+    # same lock as a tick: --force may jump the sha/backoff, but never runs
+    # two deploys of the same service at once
+    lock = acquire_lock(service_home)
+    if not lock:
+        warn("a poll is running — retry --force when it finishes")
+        return 1
+    try:
+        for entry in scan_entries(setup_repo):
+            if entry["key"] == key:
+                sha = resolve_ref(entry["repo"], entry["ref"]) or "forced"
+                ok, rc = deploy(entry, sha, setup_repo, state_dir,
+                                int(env.get("DEPLOY_TIMEOUT") or DEPLOY_TIMEOUT))
+                return 0 if ok else rc or 1
+        warn("no deploy entry named %r" % key)
+        return 1
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
 
 
 def status(env):

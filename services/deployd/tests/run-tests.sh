@@ -51,14 +51,15 @@ setup() {
   # deploy block at all) and a stand-in services/deployd/ for self-update.
   mkdir -p "$REPO/services/svc-a" "$REPO/services/svc-b" \
            "$REPO/services/svc-off" "$REPO/services/svc-badcfg" \
-           "$REPO/services/svc-broken" "$REPO/services/svc-plain" \
-           "$REPO/services/deployd"
+           "$REPO/services/svc-badtype" "$REPO/services/svc-broken" \
+           "$REPO/services/svc-plain" "$REPO/services/deployd"
   for s in a b; do
     cat > "$REPO/services/svc-$s/app.json" <<EOF
 {"key":"svc-$s","deploy":{"repo":"https://$s.invalid/repo.git","ref":"main","cmd":"services/svc-$s/deploy.sh"}}
 EOF
     cat > "$REPO/services/svc-$s/deploy.sh" <<EOF
 #!/usr/bin/env bash
+echo "svc-$s deploying"
 echo "DEPLOY svc-$s sha=\$DEPLOY_SHA ref=\$DEPLOY_REF" >> "$CALLS_LOG"
 [ -f "$STATE_DIR/fail_svc_$s" ] && { echo "svc-$s exploded" >&2; exit 3; }
 exit 0
@@ -73,11 +74,15 @@ EOF
     > "$REPO/services/svc-off/app.json"
   echo '{"key":"svc-badcfg","deploy":{"repo":"https://bad.invalid/r.git"}}' \
     > "$REPO/services/svc-badcfg/app.json"
+  echo '{"key":"svc-badtype","deploy":{"repo":"https://t.invalid/r.git","ref":1,"cmd":"true"}}' \
+    > "$REPO/services/svc-badtype/app.json"
   echo '{ "key": broken json' > "$REPO/services/svc-broken/app.json"
   echo '{"key":"svc-plain"}' > "$REPO/services/svc-plain/app.json"
   cat > "$REPO/services/deployd/setup.sh" <<'EOF'
 #!/usr/bin/env bash
-echo "deployd-self-update" >> "$CALLS_LOG"
+echo "deployd-self-update su=${DEPLOYD_SELF_UPDATE:-none}" >> "$CALLS_LOG"
+[ -f "$STATE_DIR/self_update_fails" ] && exit 4
+exit 0
 EOF
   echo "aaa1111111111111111111111111111111111111" > "$STATE_DIR/head"
 }
@@ -161,6 +166,7 @@ test_fresh_setup_linux() {
   check ".env points at checkout"  env_has "SETUP_REPO=$REPO"
   check "poller installed"         [ -x "$BIN_DIR/deployd" ]
   check "env path baked"           grep -qF "ENV_BAKED = \"$ENVF\"" "$BIN_DIR/deployd"
+  check "python3 baked"            grep -qF "#!$(command -v python3)" "$BIN_DIR/deployd"
   check "timer written"            [ -f "$TIMER" ]
   check "timer cadence"            grep -qF "OnUnitActiveSec=60" "$TIMER"
   check "service oneshot"          grep -qF "Type=oneshot" "$SUNIT"
@@ -169,9 +175,11 @@ test_fresh_setup_linux() {
   check "first tick ran"           calls_have "ls-remote"
   check "first-sight deploy a"     [ "$(deploy_count svc-a)" -eq 1 ]
   check "first-sight deploy b"     [ "$(deploy_count svc-b)" -eq 1 ]
+  check "cmd output reaches log"   out_has "svc-a deploying"
   check "sha recorded"             sha_is svc-a "$SHA_A1"
   check "disabled entry skipped"   no_call "svc-off"
-  check "badcfg warned"            out_has 'deploy needs both "repo" and "cmd"'
+  check "badcfg warned"            out_has 'deploy needs string "repo" and "cmd"'
+  check "badtype warned"           out_has 'deploy "ref" must be a string'
   teardown
 }
 
@@ -223,7 +231,9 @@ test_poll_deploys_on_change_only() {
   check "clean tick"              [ "$CODE" -eq 0 ]
   check "svc-a deployed"          [ "$(deploy_count svc-a)" -eq 1 ]
   check "svc-b deployed"          [ "$(deploy_count svc-b)" -eq 1 ]
+  check "cmd output reaches log"  out_has "svc-a deploying"
   check "env passed to cmd"       calls_have "DEPLOY svc-a sha=$SHA_A1 ref=main"
+  check "bad-type entry skipped"  out_has 'deploy "ref" must be a string'
   : > "$CALLS_LOG"
   run_poll
   check "second tick clean"       [ "$CODE" -eq 0 ]
@@ -283,7 +293,28 @@ test_poll_checkout_pull_and_self_update() {
   run_poll
   check "checkout pulled"         calls_have "pull"
   check "self-update ran"         calls_have "deployd-self-update"
+  check "self-update env set"     calls_have "su=1"
   check "tick clean"              [ "$CODE" -eq 0 ]
+  check "no marker left"          [ ! -f "$DSTATE/self-update.pending" ]
+  teardown
+}
+
+test_poll_self_update_retry() {
+  echo "• poll: a failed self-update keeps a pending marker and retries"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  echo "ccc9999999999999999999999999999999999999" > "$STATE_DIR/head_next"
+  echo "services/deployd/deployd" > "$STATE_DIR/pull_diff"
+  touch "$STATE_DIR/self_update_fails"
+  run_poll
+  check "warns"                    out_has "self-update failed"
+  check "marker kept for retry"    [ -f "$DSTATE/self-update.pending" ]
+  rm "$STATE_DIR/self_update_fails"
+  : > "$CALLS_LOG"
+  run_poll   # checkout already moved: only the marker triggers the retry
+  check "retried next tick"        calls_have "deployd-self-update"
+  check "marker cleared"           [ ! -f "$DSTATE/self-update.pending" ]
   teardown
 }
 
@@ -299,13 +330,17 @@ test_poll_pull_failure_keeps_going() {
 }
 
 test_poll_lock() {
-  echo "• poll: a held lock skips the tick cleanly"
+  echo "• poll: a held lock skips the tick cleanly, and blocks --force too"
   setup
   mkdir -p "$HOME/services/deployd/.poll.lock"
   run_poll
   check "exits 0"          [ "$CODE" -eq 0 ]
   check "says why"         out_has "another poll is running"
   check "nothing ran"      no_call "ls-remote"
+  run_poll --force svc-a
+  check "force refuses"    [ "$CODE" -ne 0 ]
+  check "says busy"        out_has "poll is running"
+  check "no deploy ran"    no_call "DEPLOY svc-a"
   teardown
 }
 
@@ -384,6 +419,7 @@ for t in \
   test_poll_failure_backoff \
   test_poll_remote_down \
   test_poll_checkout_pull_and_self_update \
+  test_poll_self_update_retry \
   test_poll_pull_failure_keeps_going \
   test_poll_lock \
   test_poll_force_and_status \

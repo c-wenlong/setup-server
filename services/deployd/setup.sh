@@ -43,7 +43,9 @@ set -euo pipefail
 NAME="deployd"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
-SERVICE_HOME="$HOME/services/$NAME"
+# Defaults; after .env exists it is the source of truth — SERVICE_HOME and
+# BIN_DIR are re-derived from it below, so a custom SERVICE_HOME is honoured.
+SERVICE_HOME="${SERVICE_HOME:-$HOME/services/$NAME}"
 BIN_DIR="$SERVICE_HOME/bin"
 UNIT_DIR="$HOME/.config/systemd/user"
 SERVICE_UNIT="$UNIT_DIR/deployd.service"
@@ -70,6 +72,11 @@ case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only
 command -v git >/dev/null     || die "git is required (polling remote refs)."
 command -v python3 >/dev/null || die "python3 is required (the poller is stdlib-only python)."
 command -v bash >/dev/null    || die "bash is required (deploy commands run through it)."
+# The scheduled jobs start the poller directly, and a service-manager PATH
+# may not contain the python3 we just found (a uv/nix install). Bake the
+# resolved path into the installed shebang so PATH_PREFIX can handle the
+# tools inside the poller instead of python3 itself never starting.
+PYTHON3="$(command -v python3)"
 if [ "$OS" = "Linux" ]; then
   command -v systemctl >/dev/null || die "systemd is required on Linux (the poller is a systemd user timer)."
   command -v loginctl >/dev/null  || die "loginctl is required on Linux (lingering, for boot persistence)."
@@ -110,8 +117,11 @@ fi
 
 # The poller reads .env itself; setup.sh only needs SETUP_REPO/POLL_SECONDS
 # back for the units. Source it (values are %q-escaped shell, so they come
-# back unescaped — the same format every service's .env uses).
+# back unescaped — the same format every service's .env uses). SERVICE_HOME
+# may have been edited to a custom path; re-derive before installing.
 set -a; . "$ENV_FILE"; set +a
+SERVICE_HOME="${SERVICE_HOME:-$HOME/services/$NAME}"
+BIN_DIR="$SERVICE_HOME/bin"
 
 mkdir -p "$BIN_DIR" "$SERVICE_HOME/state"
 
@@ -122,7 +132,8 @@ mkdir -p "$BIN_DIR" "$SERVICE_HOME/state"
 # a poll is running).
 info "Installing poller to $BIN_DIR/deployd"
 TMP_BIN="$BIN_DIR/.deployd.tmp.$$"
-sed "s|^ENV_BAKED = \"__ENV_FILE__\"|ENV_BAKED = \"$ENV_FILE\"|" \
+sed -e "1s|^#!.*|#!$PYTHON3|" \
+    -e "s|^ENV_BAKED = \"__ENV_FILE__\"|ENV_BAKED = \"$ENV_FILE\"|" \
   "$SERVICE_DIR/deployd" > "$TMP_BIN"
 chmod 755 "$TMP_BIN"
 mv -f "$TMP_BIN" "$BIN_DIR/deployd"
@@ -181,19 +192,30 @@ else
 </dict>
 </plist>
 EOF
-  launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
-  # teardown.sh disables the label so login does not reload it; undo that.
-  launchctl enable "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  ok "LaunchAgent loaded (logs: ~/Library/Logs/deployd.log)"
+  if [ -n "${DEPLOYD_SELF_UPDATE:-}" ]; then
+    # Running as a child of the LaunchAgent we're replacing: bootout here
+    # would kill this script (and the tick) before bootstrap can re-load it.
+    # The loaded job keeps its old config until a later manual setup.sh run
+    # or login; the new poller binary still runs on the next StartInterval.
+    info "Self-update inside a running poll — leaving the loaded job alone"
+    info "Re-run setup.sh by hand to pick up plist changes (interval, logs)"
+  else
+    launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+    # teardown.sh disables the label so login does not reload it; undo that.
+    launchctl enable "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    ok "LaunchAgent loaded (logs: ~/Library/Logs/deployd.log)"
+  fi
 fi
 
 # ------------------------------------------------------------ first tick
 # A first poll now proves the wiring (checkout pull, manifest scan, state
 # writes) without waiting a cycle. A deploy that fails here warns, not dies:
-# setup itself succeeded.
-info "Running the first poll"
-if "$BIN_DIR/deployd"; then
+# setup itself succeeded. Skipped during a self-update: the invoking tick is
+# already running and still holds the poll lock.
+if [ -n "${DEPLOYD_SELF_UPDATE:-}" ]; then
+  info "Self-update — skipping the first poll (a poll is already running)"
+elif "$BIN_DIR/deployd"; then
   ok "First poll clean"
 else
   warn "First poll reported failures — see above and ~/services/deployd/state/*.log"

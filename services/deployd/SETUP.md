@@ -25,7 +25,11 @@ Each tick:
 1. `git pull --ff-only` the checkout — deploy config lives in the repo, so
    the config self-updates. If the pull touched `services/deployd/` the
    poller re-runs its own `setup.sh` (self-update; the running tick finishes
-   on the old build, the next tick uses the new one).
+   on the old build, the next tick uses the new one). A failed self-update
+   leaves `state/self-update.pending` behind and is retried every tick
+   until it succeeds — on macOS that child run skips re-loading the
+   LaunchAgent (bootout would kill the tick itself), so plist changes land
+   on the next manual `setup.sh` or login.
 2. Scan `services/*/app.json` for `deploy` blocks.
 3. Per entry: `git ls-remote <repo> <ref>` → sha. Same as
    `state/<key>.sha` → done. Different → run `cmd`. Success → record the
@@ -87,6 +91,8 @@ the wiring.
 ```sh
 ~/services/deployd/bin/deployd --status         # entries, deployed shas, failures
 ~/services/deployd/bin/deployd --force <key>    # deploy one service now
+                                                # (takes the same lock —
+                                                # refuses while a poll runs)
 journalctl --user -u deployd -n 100 --no-pager  # tick + deploy logs (Linux)
 tail -f ~/Library/Logs/deployd.log              # macOS
 systemctl --user list-timers deployd.timer      # next tick
