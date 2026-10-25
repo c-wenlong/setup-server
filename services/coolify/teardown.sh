@@ -233,7 +233,7 @@ note_if_busy() {
   local listing
   [ -n "$2" ] || return 0
   listing="$(ls -A -- "$2")" \
-    || die "Cannot list $2 ($1), so teardown cannot tell whether Coolify apps keep data there — refusing to purge. Nothing was changed."
+    || die "Cannot list $2 ($1), so teardown cannot tell whether Coolify apps keep data there — refusing to purge. $3"
   [ -z "$listing" ] || BUSY="$BUSY $1=$2"
 }
 
@@ -241,10 +241,15 @@ AUTH="$HOME/.ssh/authorized_keys"
 PUB_LINE=""
 PUB_NOTE=""
 
-# --purge confirmation comes before anything changes, so a mistyped name
-# leaves the service exactly as it was.
+# Every purge path, and every reason purge must refuse: user-deployed work
+# first, since purge deletes APP_KEY and the database, after which nothing
+# could manage (or decrypt the settings of) those apps. Run twice: before
+# the confirmation prompt (nothing changed yet), and again once Coolify's
+# own stack is stopped, so an app deployed while the prompt waited cannot
+# slip through to `down -v`. $1 is what the refusal says was left as it was.
 P_DATA=""; P_SSH=""; P_BACKUPS=""; P_IMAGES=""; P_APPS=""; P_DBS=""; P_SVCS=""
-if [ "$PURGE" -eq 1 ]; then
+purge_checks() {
+  local left="$1"
   resolve_purge_path COOLIFY_DATA "$DATA_DIR";                          P_DATA="$RESOLVED"
   resolve_purge_path COOLIFY_SSH "$(env_get COOLIFY_SSH)";              P_SSH="$RESOLVED"
   resolve_purge_path COOLIFY_BACKUPS "$(env_get COOLIFY_BACKUPS)";      P_BACKUPS="$RESOLVED"
@@ -253,14 +258,21 @@ if [ "$PURGE" -eq 1 ]; then
   resolve_purge_path COOLIFY_DATABASES "$(env_get COOLIFY_DATABASES)";  P_DBS="$RESOLVED"
   resolve_purge_path COOLIFY_SERVICES "$(env_get COOLIFY_SERVICES)";    P_SVCS="$RESOLVED"
 
-  # User-deployed work first: purge deletes APP_KEY and the database, after
-  # which nothing could manage (or decrypt the settings of) those apps.
-  [ "$MANAGED_OK" -eq 1 ] || die "Could not list Coolify-managed containers (docker ps --filter label=coolify.managed) — refusing to purge. Nothing was changed."
-  note_if_busy COOLIFY_APPLICATIONS "$P_APPS"
-  note_if_busy COOLIFY_DATABASES "$P_DBS"
-  note_if_busy COOLIFY_SERVICES "$P_SVCS"
-  [ -z "$BUSY" ] || die "Coolify still holds apps, databases or services you deployed through it:$BUSY. Delete them in the Coolify dashboard first (that also removes their containers and data), then re-run. Nothing was changed."
-  [ -z "$MANAGED" ] || die "Containers deployed by Coolify still exist: $MANAGED. Delete those apps in the Coolify dashboard first (coolify-proxy / coolify-sentinel: docker rm -f them), then re-run. Nothing was changed."
+  MANAGED_OK=1
+  MANAGED="$(managed_list)" || { MANAGED=""; MANAGED_OK=0; }
+  [ "$MANAGED_OK" -eq 1 ] || die "Could not list Coolify-managed containers (docker ps --filter label=coolify.managed) — refusing to purge. $left"
+  BUSY=""
+  note_if_busy COOLIFY_APPLICATIONS "$P_APPS" "$left"
+  note_if_busy COOLIFY_DATABASES "$P_DBS" "$left"
+  note_if_busy COOLIFY_SERVICES "$P_SVCS" "$left"
+  [ -z "$BUSY" ] || die "Coolify still holds apps, databases or services you deployed through it:$BUSY. Delete them in the Coolify dashboard first (that also removes their containers and data), then re-run. $left"
+  [ -z "$MANAGED" ] || die "Containers deployed by Coolify still exist: $MANAGED. Delete those apps in the Coolify dashboard first (coolify-proxy / coolify-sentinel: docker rm -f them), then re-run. $left"
+}
+
+# --purge confirmation comes before anything changes, so a mistyped name
+# leaves the service exactly as it was.
+if [ "$PURGE" -eq 1 ]; then
+  purge_checks "Nothing was changed."
 
   # The key line setup.sh appended to authorized_keys is the exact content
   # of its .pub file. Read it now, before the SSH dir is deleted.
@@ -369,6 +381,14 @@ stack_down() {
   warn "Docker kept the 'coolify' network: still used by ${users:-other containers}. It goes when they do (docker network rm coolify)."
 }
 if [ "$PURGE" -eq 1 ]; then
+  # The checks above ran while Coolify was still up and the prompt waited:
+  # an app deployed in that window would be missed, and `down -v` takes the
+  # database that is the only record of it. Stop Coolify's own stack first
+  # (no -v: volumes stay), so nothing new can be deployed, then check again.
+  info "Stopping Coolify's own containers (docker compose stop) before the final purge checks"
+  docker compose --project-directory "$SERVICE_DIR" stop \
+    || die "docker compose stop failed. Nothing was deleted (volumes, data and .env are intact); re-run ./teardown.sh --purge, or ./setup.sh to bring Coolify back."
+  purge_checks "Nothing was deleted: Coolify's stack is stopped, its volumes, data and .env are intact, and ./setup.sh brings it back."
   info "Stopping and removing Coolify's containers and volumes (docker compose down -v)"
   stack_down -v
   ok "Containers and volumes coolify-db, coolify-redis removed"

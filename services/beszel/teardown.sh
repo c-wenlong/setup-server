@@ -210,6 +210,19 @@ plist_is_ours() {
     && grep -qF "<string>$BIN</string>" "$PLIST"
 }
 
+# systemd's own view of the agent unit, whether or not its file is still on
+# disk: a unit file deleted while the agent ran leaves it loaded and
+# running. Sets U_ACTIVE; fails when systemd cannot be asked.
+U_ACTIVE=""
+unit_probe() {
+  local out
+  U_ACTIVE=""
+  out="$(systemctl --user show -p LoadState -p ActiveState -- "$UNIT_NAME" 2>/dev/null)" || return 1
+  U_ACTIVE="$(printf '%s\n' "$out" | sed -n 's/^ActiveState=//p')"
+  [ -n "$U_ACTIVE" ]
+}
+unit_running() { case "$U_ACTIVE" in inactive|failed) return 1 ;; *) return 0 ;; esac; }
+
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was.
 PURGE_DIR=""
@@ -230,6 +243,11 @@ if [ "$PURGE" -eq 1 ]; then
       "$root"/?*) ;;
       *) die "BESZEL_VOLUME=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;
     esac
+  fi
+  # No unit file means the stop step has nothing to disable; the agent may
+  # still be running from it. Purge only once systemd can say.
+  if [ "$OS" = "Linux" ] && [ ! -e "$UNIT" ] && [ ! -L "$UNIT" ]; then
+    unit_probe || die "No $UNIT, and systemd could not say whether $UNIT_NAME is still running (systemctl --user show failed) — refusing to purge. Nothing was changed."
   fi
   agent_files="$BIN"
   if [ "$OS" = "Linux" ]; then agent_files="$agent_files, $UNIT"; else agent_files="$agent_files, $PLIST"; fi
@@ -283,12 +301,19 @@ EOF
 # Stopped before the hub, as the launcher does: the agent only waits for the
 # hub to dial it, so nothing is lost by stopping it first.
 if [ "$OS" = "Linux" ]; then
-  if [ -f "$UNIT" ]; then
+  if [ -e "$UNIT" ] || [ -L "$UNIT" ]; then
     info "Stopping and disabling the agent ($UNIT_NAME)"
     systemctl --user disable --now "$UNIT_NAME" >/dev/null
     ok "Agent stopped and disabled; unit file and binary kept"
+  elif ! unit_probe; then
+    warn "No $UNIT, and systemd could not say whether $UNIT_NAME is still running. If it is: systemctl --user stop $UNIT_NAME"
+  elif unit_running; then
+    # The name is setup.sh's own (no package ships a beszel-agent user unit).
+    info "$UNIT is gone but the agent is still running from it; stopping it (systemctl --user stop)"
+    systemctl --user stop "$UNIT_NAME"
+    ok "Agent stopped"
   else
-    ok "No $UNIT (agent already removed)"
+    ok "No $UNIT and no agent running (already removed)"
   fi
 else
   info "Unloading the agent LaunchAgent ($LABEL)"
@@ -306,6 +331,10 @@ ok "Hub removed; data in $DATA_DIR kept"
 
 # ---------------------------------------------------------------- purge
 if [ "$PURGE" -eq 1 ]; then
+  if [ "$OS" = "Linux" ]; then
+    unit_probe || die "Could not ask systemd whether $UNIT_NAME stopped. Nothing was deleted and $ENV_FILE is kept; re-run ./teardown.sh --purge."
+    ! unit_running || die "$UNIT_NAME is still running. Nothing was deleted and $ENV_FILE is kept: stop it (systemctl --user stop $UNIT_NAME) and re-run ./teardown.sh --purge."
+  fi
   info "Purging hub data"
   if [ -n "$PURGE_DIR" ]; then
     # The hub runs as root, so its database files are root-owned and a plain

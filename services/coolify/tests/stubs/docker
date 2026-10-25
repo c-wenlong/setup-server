@@ -15,6 +15,12 @@
 #   volumes_left        — what `docker volume ls -q` prints
 #   network_users       — exists => `docker network inspect coolify` succeeds
 #                         and prints it (else: no such network)
+#   compose_stop        — touched by `compose ... stop`
+#   managed_after_stop  — appended to managed_containers by `compose ... stop`
+#                         (an app Coolify deployed while teardown's prompt waited)
+#   busy_after_stop     — a path; `compose ... stop` creates it with a file in it
+#                         (a user-deployed dir that appeared during the prompt)
+#   stop_fails          — exists => `compose ... stop` exits 1
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -76,6 +82,17 @@ case "$1" in
             up)   touch "$STATE_DIR/compose_up" ;;
             pull) touch "$STATE_DIR/compose_pull" ;;
             down) touch "$STATE_DIR/compose_down" ;;
+            stop)
+              [ -f "$STATE_DIR/stop_fails" ] && { echo "stop failed" >&2; exit 1; }
+              touch "$STATE_DIR/compose_stop"
+              [ -f "$STATE_DIR/managed_after_stop" ] \
+                && cat "$STATE_DIR/managed_after_stop" >> "$STATE_DIR/managed_containers"
+              if [ -f "$STATE_DIR/busy_after_stop" ]; then
+                busy="$(cat "$STATE_DIR/busy_after_stop")"
+                case "$busy" in "$HOME"/?*) ;; *) echo "stub: path outside sandbox HOME: $busy" >&2; exit 97 ;; esac
+                mkdir -p "$busy" && echo deployed > "$busy/app.yml"
+              fi
+              ;;
             -v)   [ -f "$STATE_DIR/compose_down" ] && touch "$STATE_DIR/compose_down_v" ;;
           esac
         done

@@ -612,6 +612,44 @@ test_teardown_purge_refuses_user_apps() {
   teardown
 }
 
+test_teardown_purge_rechecks_after_stop() {
+  echo "• teardown --purge: stops Coolify, then re-checks for apps deployed during the prompt"
+  deployed
+  run_teardown --purge "coolify"
+  check "clean purge: stack stopped before down -v" \
+    [ "$(grep -n 'compose .* stop$' "$CALLS_LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n 'down -v' "$CALLS_LOG" | head -1 | cut -d: -f1)" ]
+  teardown
+  deployed
+  printf '%s\n' "late-app-z9 running" > "$STATE_DIR/managed_after_stop"
+  run_teardown --purge "coolify"
+  check "app deployed during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  passed the first check (stack was stopped)" [ -f "$STATE_DIR/compose_stop" ]
+  check "  names it"                  out_has "late-app-z9 (running)"
+  check "  says the stack is stopped and setup.sh restores it" out_has "./setup.sh brings it back"
+  check "  no down -v (volumes intact)" no_call "down -v"
+  check "  data kept"                 [ -f "$(data_dir)/backups/coolify/dump.sql" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  key line kept"             grep -qxF "$(key_line)" "$(auth_file)"
+  teardown
+  deployed
+  rm -rf "$(data_dir)/applications"
+  printf '%s' "$(data_dir)/applications/late" > "$STATE_DIR/busy_after_stop"
+  run_teardown --purge "coolify"
+  check "app dir created during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names COOLIFY_APPLICATIONS" out_has "COOLIFY_APPLICATIONS="
+  check "  no down -v (volumes intact)" no_call "down -v"
+  check "  the new app's files kept"  [ -f "$(data_dir)/applications/late/app.yml" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  touch "$STATE_DIR/stop_fails"
+  run_teardown --purge "coolify"
+  check "compose stop fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  no down -v"                no_call "down -v"
+  check "  data kept"                 [ -f "$(data_dir)/backups/coolify/dump.sql" ]
+  teardown
+}
+
 test_teardown_purge_key_line_edge_cases() {
   echo "• teardown --purge: authorized_keys is only edited for setup.sh's exact key line"
   deployed
@@ -1028,6 +1066,7 @@ test_teardown_port_owned_by_someone_else
 test_teardown_preflight
 test_teardown_purge
 test_teardown_purge_refuses_user_apps
+test_teardown_purge_rechecks_after_stop
 test_teardown_purge_key_line_edge_cases
 test_teardown_purge_container_owned_files
 test_teardown_purge_refuses_odd_paths

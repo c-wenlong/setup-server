@@ -148,7 +148,44 @@ exit 0
 EOF_STUB_T4m
   cat > "$bin/systemctl" <<'EOF_STUB_S8x'
 #!/usr/bin/env bash
+# systemctl stub: logs every call and succeeds. Unit state for teardown's
+# checks lives in $STATE_DIR (a unit is named without its .service suffix):
+#   active.<unit>   exists => running; `start`/`restart` create it, `stop` and
+#                   `disable --now` remove it
+#   fragment.<unit> the FragmentPath `show` prints (default: the user unit
+#                   file when it is on disk, else empty)
+#   show_fails      exists => `show` fails, like a session with no user bus
+#   stop_ignored    exists => `stop` / `disable --now` leave the unit running
 echo "systemctl $*" >> "$CALLS_LOG"
+[ -n "${STATE_DIR:-}" ] && [ -d "$STATE_DIR" ] || exit 0
+verb=""; now=0; units=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--quiet|-q|--no-pager|--) ;;
+    --now) now=1 ;;
+    -p|--property) shift ;;
+    -*) ;;
+    *) if [ -z "$verb" ]; then verb="$1"; else units+=("${1%.service}"); fi ;;
+  esac
+  shift
+done
+for u in ${units[@]+"${units[@]}"}; do
+  case "$verb" in
+    start|restart) touch "$STATE_DIR/active.$u" ;;
+    stop) [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
+    disable) [ "$now" -eq 0 ] || [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
+    show)
+      [ ! -f "$STATE_DIR/show_fails" ] || { echo "Failed to connect to bus" >&2; exit 1; }
+      file="$HOME/.config/systemd/user/$u.service"
+      if [ -f "$STATE_DIR/fragment.$u" ]; then frag="$(cat "$STATE_DIR/fragment.$u")"
+      elif [ -e "$file" ]; then frag="$file"
+      else frag=""; fi
+      if [ -n "$frag" ]; then echo "LoadState=loaded"; else echo "LoadState=not-found"; fi
+      if [ -f "$STATE_DIR/active.$u" ]; then echo "ActiveState=active"; else echo "ActiveState=inactive"; fi
+      echo "FragmentPath=$frag"
+      ;;
+  esac
+done
 exit 0
 EOF_STUB_S8x
   cat > "$bin/sudo" <<'EOF_STUB_Q9n'
@@ -229,6 +266,7 @@ deployed() {
     mkdir -p "$HOME/.config/systemd/user/default.target.wants"
     from_setup UNIT > "$HOME/.config/systemd/user/beszel-agent.service"
     ln -s ../beszel-agent.service "$HOME/.config/systemd/user/default.target.wants/beszel-agent.service"
+    touch "$STATE_DIR/active.beszel-agent"   # setup.sh left it running
   fi
   echo alpine:3 > "$STATE_DIR/images"
   cat > "$STATE_DIR/serve_status" <<EOF_SERVE_K1p
@@ -712,6 +750,51 @@ test_teardown_refuses_compose_overrides() {
   td_teardown
 }
 
+test_teardown_unit_file_missing() {
+  echo "  teardown: no unit file, so ask systemd whether the agent still runs"
+  deployed
+  rm -f "$(UNIT_F)"
+  run_teardown
+  check "still running: exits zero"   [ "$CODE" -eq 0 ]
+  check "  stopped by name"           calls_have "systemctl --user stop beszel-agent.service"
+  check "  really stopped"            [ ! -f "$STATE_DIR/active.beszel-agent" ]
+  check "  no disable (no file)"      no_call "disable --now"
+  run_teardown
+  check "not running: exits zero"     [ "$CODE" -eq 0 ]
+  check "  says already removed"      out_has "already removed"
+  td_teardown
+  deployed
+  rm -f "$(UNIT_F)"
+  touch "$STATE_DIR/show_fails"
+  run_teardown
+  check "systemd cannot be asked: plain remove exits zero" [ "$CODE" -eq 0 ]
+  check "  warns how to stop it"      out_has "systemctl --user stop beszel-agent.service"
+  : > "$CALLS_LOG"; rm -f "$STATE_DIR/compose_down"
+  run_teardown --purge "beszel"
+  check "  --purge: refused"          [ "$CODE" -ne 0 ]
+  check "  --purge: says why"         out_has "could not say whether"
+  check "  --purge: nothing unpublished" no_call " off"
+  check "  --purge: no compose down"  [ ! -f "$STATE_DIR/compose_down" ]
+  check "  --purge: hub data kept"    [ -f "$(hub_dir)/data.db" ]
+  td_teardown
+  deployed
+  rm -f "$(UNIT_F)"
+  run_teardown --purge "beszel"
+  check "--purge with the agent still running: exits zero" [ "$CODE" -eq 0 ]
+  check "  stopped before deleting"   calls_have "systemctl --user stop beszel-agent.service"
+  check "  hub data gone"             [ ! -e "$(hub_dir)" ]
+  td_teardown
+  deployed
+  touch "$STATE_DIR/stop_ignored"
+  run_teardown --purge "beszel"
+  check "agent will not stop: --purge refused" [ "$CODE" -ne 0 ]
+  check "  says it is still running"  out_has "still running"
+  check "  hub data kept"             [ -f "$(hub_dir)/data.db" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  agent binary kept"         [ -f "$(AGENT_BIN)" ]
+  td_teardown
+}
+
 test_teardown_macos() {
   echo "  teardown (macOS path): launchd bootout + disable, plist kept; --purge removes it"
   export FAKE_OS=Darwin
@@ -757,6 +840,7 @@ test_teardown_quoted_env
 test_teardown_home_variable_in_env
 test_teardown_env_lint
 test_teardown_refuses_compose_overrides
+test_teardown_unit_file_missing
 test_teardown_macos
 
 if [ "${1:-}" = "--live" ]; then

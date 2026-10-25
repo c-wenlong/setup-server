@@ -254,6 +254,25 @@ strip_slashes() {
 # The real path of an existing directory, or the text as given.
 real_or_text() { if [ -d "$1" ]; then (cd "$1" && pwd -P) || printf '%s' "$1"; else printf '%s' "$1"; fi; }
 
+# systemd's own view of $UNIT_NAME, whether or not the file is still on disk:
+# a unit file deleted while the service ran leaves it loaded and running.
+# Sets U_ACTIVE and U_FRAG (the file it was loaded from, "" once systemd has
+# forgotten it); fails when systemd cannot be asked.
+U_ACTIVE=""; U_FRAG=""
+unit_probe() {
+  local out
+  U_ACTIVE=""; U_FRAG=""
+  out="$(systemctl --user show -p LoadState -p ActiveState -p FragmentPath -- "$UNIT_NAME" 2>/dev/null)" || return 1
+  U_ACTIVE="$(printf '%s\n' "$out" | sed -n 's/^ActiveState=//p')"
+  U_FRAG="$(printf '%s\n' "$out" | sed -n 's/^FragmentPath=//p')"
+  [ -n "$U_ACTIVE" ]
+}
+unit_running() { case "$U_ACTIVE" in inactive|failed) return 1 ;; *) return 0 ;; esac; }
+# Running from setup.sh's unit (its path, or no file at all any more), as
+# opposed to a distro package's /usr/lib/systemd/user/syncthing.service.
+unit_is_ours() { [ -z "$U_FRAG" ] || [ "$U_FRAG" = "$UNIT" ]; }
+agent_loaded() { launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; }
+
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was.
 PURGE_DIRS=()
@@ -268,22 +287,97 @@ if [ "$PURGE" -eq 1 ]; then
 
   # Every folder the running config syncs, not just the 'default' one setup.sh
   # made: the user may have added folders at any path, including (by mistake)
-  # inside config/ or db/. Read from config.xml (<defaults> holds a template
-  # folder with an empty path; skipped). `path` may be any attribute, first
-  # included: a hand-edited config.xml need not keep Syncthing's order.
+  # inside config/ or db/. Read from config.xml as XML, not line by line: the
+  # file is split at every '<' (which XML never allows raw inside a value), so
+  # a <folder> start tag is found with its attributes spread over any number
+  # of lines, in any order, single- or double-quoted. <defaults> holds a
+  # template folder (skipped). Prints P<path> per folder, E for a folder tag
+  # this reader cannot be sure of, and T<count> of all folder tags seen; any
+  # E, or a '<folder' in the file with no tag counted, refuses the purge.
   FOLDERS=()
   cfg_xml="$(strip_slashes "${CONFIG_DIR:-}")/config.xml"
   if [ -n "$CONFIG_DIR" ] && [ -f "$cfg_xml" ]; then
     [ -r "$cfg_xml" ] || die "Cannot read $cfg_xml, so the synced folders cannot be located — refusing to purge."
-    while IFS= read -r p; do
-      [ -n "$p" ] || continue
-      case "$p" in \~) p="$HOME" ;; \~/*) p="$HOME/${p#\~/}" ;; esac
-      FOLDERS+=("$(strip_slashes "$p")")
+    folder_scan="$(awk '
+      # Entity references as Syncthing (Go encoding/xml) writes them, plus the
+      # named ones a hand edit might use. Anything else: not sure, so bad.
+      function decode(v,   out, i, j, ent) {
+        out = ""
+        while ((i = index(v, "&")) > 0) {
+          out = out substr(v, 1, i - 1); v = substr(v, i)
+          j = index(v, ";")
+          if (j == 0) { bad = 1; return "" }
+          ent = substr(v, 2, j - 2)
+          if (ent == "lt" || ent == "#60" || ent == "#x3C" || ent == "#x3c") out = out "<"
+          else if (ent == "gt" || ent == "#62" || ent == "#x3E" || ent == "#x3e") out = out ">"
+          else if (ent == "quot" || ent == "#34" || ent == "#x22") out = out "\""
+          else if (ent == "apos" || ent == "#39" || ent == "#x27") out = out "\047"
+          else if (ent == "amp" || ent == "#38" || ent == "#x26") out = out "&"
+          else { bad = 1; return "" }
+          v = substr(v, j + 1)
+        }
+        return out v
+      }
+      { buf = buf $0 "\n" }
+      END {
+        n = split(buf, rec, "<"); tags = 0; indef = 0
+        for (k = 2; k <= n; k++) {
+          r = rec[k]
+          if (r ~ /^\/defaults([ \t\r\n>]|$)/) { indef = 0; continue }
+          if (r ~ /^defaults([ \t\r\n\/>]|$)/) {
+            t = r; e = index(t, ">"); if (e > 0) t = substr(t, 1, e - 1)
+            if (t !~ /\/[ \t\r\n]*$/) indef = 1
+            continue
+          }
+          if (r !~ /^folder([ \t\r\n\/>]|$)/) continue
+          tags++
+          if (indef) continue
+          s = substr(r, 7); bad = 0; found = 0; path = ""
+          while (1) {
+            sub(/^[ \t\r\n]+/, "", s)
+            c = substr(s, 1, 1)
+            if (c == ">" || c == "/") break
+            if (c == "" || !match(s, /^[^ \t\r\n=\/>"\047]+/)) { bad = 1; break }
+            name = substr(s, 1, RLENGTH); s = substr(s, RLENGTH + 1)
+            sub(/^[ \t\r\n]+/, "", s)
+            if (substr(s, 1, 1) != "=") { bad = 1; break }
+            s = substr(s, 2); sub(/^[ \t\r\n]+/, "", s)
+            q = substr(s, 1, 1)
+            if (q != "\"" && q != "\047") { bad = 1; break }
+            s = substr(s, 2); e = index(s, q)
+            if (e == 0) { bad = 1; break }
+            v = substr(s, 1, e - 1); s = substr(s, e + 1)
+            if (name == "path") {
+              if (found) { bad = 1; break }
+              found = 1; path = decode(v)
+            }
+          }
+          # A raw tab or line break inside the value: Syncthing and this list
+          # could disagree on what it is.
+          if (bad || !found || path ~ /[\t\r\n]/) { print "E"; continue }
+          print "P" path
+        }
+        print "T" tags
+      }' "$cfg_xml")" || die "Could not parse $cfg_xml, so the synced folders cannot be located — refusing to purge. Nothing was changed."
+    folder_tags=""
+    while IFS= read -r line; do
+      case "$line" in
+        T*) folder_tags="${line#T}" ;;
+        E*) die "A <folder> entry in $cfg_xml could not be read for certain (no single, quoted path= attribute, or an unknown &...; reference), so teardown cannot tell whether purge would delete synced files — refusing to purge. Nothing was changed." ;;
+        P*)
+          p="${line#P}"
+          [ -n "$p" ] || continue
+          case "$p" in \~) p="$HOME" ;; \~/*) p="$HOME/${p#\~/}" ;; esac
+          case "$p" in /*) ;; *) die "Folder path \"$p\" in $cfg_xml is not absolute, so teardown cannot tell where those synced files are — refusing to purge. Nothing was changed." ;; esac
+          FOLDERS+=("$(strip_slashes "$p")")
+          ;;
+      esac
     done <<EOF_FOLDERS
-$(sed -n -e '/<defaults>/,/<\/defaults>/d' \
-         -e 's/^[[:space:]]*<folder\([[:space:]][^>]*\)\{0,1\}[[:space:]]path="\([^"]*\)".*/\2/p' "$cfg_xml" \
-  | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e "s/&apos;/'/g" -e 's/&amp;/\&/g')
+$folder_scan
 EOF_FOLDERS
+    if [ "${folder_tags:-0}" -eq 0 ] && grep -Eq '<folder([[:space:]/>]|$)' "$cfg_xml"; then
+      die "$cfg_xml mentions <folder but no folder entry could be read from it, so teardown cannot tell where the synced files are — refusing to purge. Nothing was changed."
+    fi
   fi
 
   # Identity and index: each guarded, and refused outright if it would take
@@ -322,6 +416,16 @@ EOF_FOLDERS
     if is_within "$p" "$data_text" || is_within "$p_real" "$data_real"; then continue; fi
     KEPT+=("$p")
   done
+
+  # With the unit file gone the stop step below has nothing to disable, but
+  # Syncthing may still be running from it. Purge only once systemd can say
+  # what runs under the name, and only when that is (or was) our unit.
+  if [ "$OS" = "Linux" ] && [ ! -e "$UNIT" ] && [ ! -L "$UNIT" ]; then
+    unit_probe || die "No $UNIT, and systemd could not say whether $UNIT_NAME is still running (systemctl --user show failed) — refusing to purge. Nothing was changed."
+    if unit_running && ! unit_is_ours; then
+      die "$UNIT_NAME is running from $U_FRAG, which setup.sh did not write, so teardown will not stop it or delete state it may be using — refusing to purge. Nothing was changed. If it is this deploy's Syncthing, stop it (systemctl --user stop $UNIT_NAME) and re-run."
+    fi
+  fi
 
   warn "--purge deletes ${PURGE_DIRS[*]:-nothing (no state dirs on disk)}, $ENV_FILE and the $NAME unit file. This cannot be undone."
   warn "  This is the Device ID: every peer will see a NEW device and must re-add this box. Back up ${CONFIG_DIR} first if you may want it back."
@@ -373,16 +477,26 @@ EOF
 [ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
 
 # ---------------------------------------------------------------- stop
-# Only the unit setup.sh writes, and only when its file is there: with it
-# gone, `syncthing.service` would resolve to a distro package's
+# Disable + stop through the unit file setup.sh wrote. With that file gone,
+# systemd (or launchd) is asked what is still loaded under the name: a unit
+# deleted while it ran keeps running until stopped. It is stopped only when
+# it is ours; `syncthing.service` may also resolve to a distro package's
 # /usr/lib/systemd/user unit, which is not this deploy's to stop.
 if [ "$OS" = "Linux" ]; then
   if [ -e "$UNIT" ] || [ -L "$UNIT" ]; then
     info "Stopping and disabling $UNIT_NAME (systemctl --user disable --now)"
     systemctl --user disable --now "$UNIT_NAME"
     ok "$UNIT_NAME stopped and disabled; the sync listener on :22000 is closed"
+  elif ! unit_probe; then
+    warn "No $UNIT, and systemd could not say whether $UNIT_NAME is still running. If it is: systemctl --user stop $UNIT_NAME"
+  elif ! unit_running; then
+    ok "No $UNIT and nothing running as $UNIT_NAME; nothing to stop"
+  elif unit_is_ours; then
+    info "$UNIT is gone but $UNIT_NAME is still running from it; stopping it (systemctl --user stop)"
+    systemctl --user stop "$UNIT_NAME"
+    ok "$UNIT_NAME stopped; the sync listener on :22000 is closed"
   else
-    ok "No $UNIT (already removed); nothing to stop"
+    warn "$UNIT_NAME is running from $U_FRAG, which setup.sh did not write, so it is left running."
   fi
 else
   if [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
@@ -393,8 +507,12 @@ else
     launchctl disable "gui/$(id -u)/$LABEL"
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
     ok "$LABEL stopped and disabled; the sync listener on :22000 is closed"
+  elif agent_loaded; then
+    info "$PLIST is gone but $LABEL is still loaded; unloading it (launchctl bootout)"
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+    ok "$LABEL unloaded; the sync listener on :22000 is closed"
   else
-    ok "No $PLIST (already removed); nothing to stop"
+    ok "No $PLIST and nothing loaded as $LABEL; nothing to stop"
   fi
 fi
 if [ -n "$OTHER_UNITS" ]; then
@@ -403,6 +521,13 @@ fi
 
 # ---------------------------------------------------------------- purge
 if [ "$PURGE" -eq 1 ]; then
+  # Never delete the identity or index under a Syncthing that is still up.
+  if [ "$OS" = "Linux" ]; then
+    unit_probe || die "Could not ask systemd whether $UNIT_NAME stopped. Nothing was deleted and $ENV_FILE is kept; re-run ./teardown.sh --purge."
+    ! unit_running || die "$UNIT_NAME is still running (${U_FRAG:-no unit file}). Nothing was deleted and $ENV_FILE is kept: stop it (systemctl --user stop $UNIT_NAME) and re-run ./teardown.sh --purge."
+  else
+    ! agent_loaded || die "$LABEL is still loaded. Nothing was deleted and $ENV_FILE is kept: launchctl bootout gui/$(id -u)/$LABEL, then re-run ./teardown.sh --purge."
+  fi
   info "Purging this device's identity and index${DATA_PURGE:+ and the synced files}"
   # Files first, index next, identity last, then .env straight after it: a
   # failure part-way keeps .env, so ./teardown.sh --purge can simply be re-run.

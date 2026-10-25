@@ -773,14 +773,48 @@ test_teardown_preflight() {
 }
 
 test_teardown_unit_already_gone() {
-  echo "• teardown: a unit file already removed by hand is fine"
+  echo "• teardown: a unit file already removed by hand: ask systemd whether the hub still runs"
   [ "$OS" = "Linux" ] || { echo "    (Linux only: skipped)"; return 0; }
   deployed
   rm -f "$UNIT"
+  check "file deleted while it ran (stub agrees)" [ -f "$STATE_DIR/active.quiver-hub" ]
   run_teardown
-  check "exits zero"                  [ "$CODE" -eq 0 ]
-  check "no disable call"             no_call "disable --now"
-  check "says already removed"        out_has "already removed"
+  check "still running: exits zero"   [ "$CODE" -eq 0 ]
+  check "  no disable call"           no_call "disable --now"
+  check "  stopped by name"           calls_have "systemctl --user stop quiver-hub.service"
+  check "  really stopped"            [ ! -f "$STATE_DIR/active.quiver-hub" ]
+  run_teardown
+  check "not running: exits zero"     [ "$CODE" -eq 0 ]
+  check "  says already removed"      out_has "already removed"
+  teardown
+  deployed
+  rm -f "$UNIT"
+  touch "$STATE_DIR/show_fails"
+  run_teardown
+  check "systemd cannot be asked: plain remove exits zero" [ "$CODE" -eq 0 ]
+  check "  warns how to stop it"      out_has "systemctl --user stop quiver-hub.service"
+  : > "$CALLS_LOG"
+  run_teardown --purge "quiver-hub"
+  check "  --purge: refused"          [ "$CODE" -ne 0 ]
+  check "  --purge: says why"         out_has "could not say whether"
+  check "  --purge: nothing unpublished" no_call " off"
+  check "  --purge: .env kept"        [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  rm -f "$UNIT"
+  run_teardown --purge "quiver-hub"
+  check "--purge with the hub still running: exits zero" [ "$CODE" -eq 0 ]
+  check "  stopped before deleting"   calls_have "systemctl --user stop quiver-hub.service"
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  touch "$STATE_DIR/stop_ignored"
+  run_teardown --purge "quiver-hub"
+  check "hub will not stop: --purge refused" [ "$CODE" -ne 0 ]
+  check "  says it is still running"  out_has "still running"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  unit file kept"            [ -f "$UNIT" ]
+  check "  ~/.quiver kept"            quiver_kept
   teardown
 }
 

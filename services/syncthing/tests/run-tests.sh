@@ -1098,15 +1098,75 @@ test_teardown_preflight() {
 }
 
 test_teardown_unit_file_missing() {
-  echo "• teardown: no unit file of ours means nothing to stop (never a distro unit)"
+  echo "• teardown: no unit file, so ask systemd/launchd what still runs under the name"
   deployed
   rm -f "$(unit_file)"
+  rm -f "$STATE_DIR"/active.* "$STATE_DIR"/loaded.*
   run_teardown
-  check "exits zero"                    [ "$CODE" -eq 0 ]
-  check "no disable/bootout call"       not_stopped
-  check "says already removed"          out_has "already removed"
-  check "still unpublishes"             calls_have "serve --https=8384 off"
+  check "nothing running: exits zero"   [ "$CODE" -eq 0 ]
+  check "  no disable/bootout/stop call" not_stopped
+  check "  no stop call"                no_call "systemctl --user stop"
+  check "  says nothing to stop"        out_has "nothing to stop"
+  check "  still unpublishes"           calls_have "serve --https=8384 off"
   teardown
+  if [ "$OS" = "Linux" ]; then
+    deployed
+    rm -f "$(unit_file)"
+    check "file deleted while it ran (stub agrees)" [ -f "$STATE_DIR/active.syncthing" ]
+    run_teardown
+    check "still running: exits zero"   [ "$CODE" -eq 0 ]
+    check "  stopped by name"           calls_have "systemctl --user stop syncthing.service"
+    check "  really stopped"            [ ! -f "$STATE_DIR/active.syncthing" ]
+    teardown
+    deployed
+    rm -f "$(unit_file)"
+    echo /usr/lib/systemd/user/syncthing.service > "$STATE_DIR/fragment.syncthing"
+    run_teardown
+    check "distro unit running: exits zero" [ "$CODE" -eq 0 ]
+    check "  never stopped"             no_call "systemctl --user stop"
+    check "  says it is left running"   out_has "which setup.sh did not write"
+    purge "syncthing"
+    check "  --purge: refused"          [ "$CODE" -ne 0 ]
+    check "  --purge: identity kept"    [ -f "$CFG/cert.pem" ]
+    check "  --purge: .env kept"        [ -f "$SVC/.env" ]
+    teardown
+    deployed
+    rm -f "$(unit_file)"
+    touch "$STATE_DIR/show_fails"
+    run_teardown
+    check "systemd cannot be asked: plain remove exits zero" [ "$CODE" -eq 0 ]
+    check "  warns how to stop it"      out_has "systemctl --user stop syncthing.service"
+    : > "$CALLS_LOG"
+    purge "syncthing"
+    check "  --purge: refused"          [ "$CODE" -ne 0 ]
+    check "  --purge: says why"         out_has "could not say whether"
+    check "  --purge: nothing unpublished" no_call " off"
+    check "  --purge: identity kept"    [ -f "$CFG/cert.pem" ]
+    teardown
+    deployed
+    rm -f "$(unit_file)"
+    purge "syncthing"
+    check "--purge with our unit still running: exits zero" [ "$CODE" -eq 0 ]
+    check "  stopped before deleting"   calls_have "systemctl --user stop syncthing.service"
+    check "  identity gone"             [ ! -e "$CFG" ]
+    teardown
+    deployed
+    touch "$STATE_DIR/stop_ignored"
+    purge "syncthing"
+    check "unit will not stop: --purge refused" [ "$CODE" -ne 0 ]
+    check "  says it is still running"  out_has "still running"
+    check "  identity kept"             [ -f "$CFG/cert.pem" ]
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  else
+    deployed
+    rm -f "$(unit_file)"
+    touch "$STATE_DIR/loaded.net.syncthing.syncthing"
+    run_teardown
+    check "plist gone, agent loaded: booted out" calls_have "launchctl bootout gui/"
+    check "  really unloaded"           [ ! -f "$STATE_DIR/loaded.net.syncthing.syncthing" ]
+    teardown
+  fi
 }
 
 test_teardown_other_units_named_not_touched() {
@@ -1260,6 +1320,81 @@ EOF_PYF
   set_env SYNCTHING_DATA ""
   purge "syncthing"
   check "SYNCTHING_DATA missing: refused" [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  teardown
+}
+
+add_folder_xml() {  # add_folder_xml RAW_XML — insert verbatim before <options>
+  python3 - "$CFG/config.xml" "$1" <<'EOF_PYX'
+import sys
+p, xml = sys.argv[1:3]
+s = open(p).read()
+s = s.replace("<options>", xml + "\n    <options>", 1)
+open(p, "w").write(s)
+EOF_PYX
+}
+
+test_teardown_purge_folder_tags_any_layout() {
+  echo "• teardown --purge: <folder> tags are read across lines, in any attribute order"
+  deployed
+  add_folder_xml "<folder id=\"wrapped\"
+            label=\"Wrapped\"
+            path=\"$DB/oops\" type=\"sendreceive\">
+    </folder>"
+  mkdir -p "$DB/oops"; echo x > "$DB/oops/precious"
+  purge "syncthing"
+  check "path= on its own line, folder inside db/: refused" [ "$CODE" -ne 0 ]
+  check "  says why"                    out_has "contains synced files"
+  check "  those files kept"            [ -f "$DB/oops/precious" ]
+  check "  nothing changed"             untouched
+  teardown
+  deployed
+  add_folder_xml "<folder
+      type=\"sendreceive\" label=\"Late\"
+      id=\"late\"
+      path=\"$CFG/late\"
+    ></folder>"
+  mkdir -p "$CFG/late"; echo x > "$CFG/late/precious"
+  purge "syncthing"
+  check "'<folder' alone on a line, path last: refused" [ "$CODE" -ne 0 ]
+  check "  those files kept"            [ -f "$CFG/late/precious" ]
+  check "  nothing changed"             untouched
+  teardown
+  deployed
+  add_folder_xml "<folder id='sq' path = '$DB/sq' />"
+  mkdir -p "$DB/sq"; echo x > "$DB/sq/precious"
+  purge "syncthing"
+  check "single quotes, spaces around =, self-closing: refused" [ "$CODE" -ne 0 ]
+  check "  those files kept"            [ -f "$DB/sq/precious" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/Kai's & Notes"; echo x > "$HOME/Kai's & Notes/todo.md"
+  add_folder_xml "<folder id=\"n\"
+      path=\"$HOME/Kai&#39;s &amp; Notes\" label=\"N\"></folder>"
+  purge "syncthing" --delete-synced-files
+  check "entity-escaped path elsewhere: exits zero" [ "$CODE" -eq 0 ]
+  check "  named as kept, decoded"      out_hasF "$HOME/Kai's & Notes"
+  check "  that folder survives"        [ -f "$HOME/Kai's & Notes/todo.md" ]
+  teardown
+  deployed
+  add_folder_xml "<folder id=\"nopath\"
+      label=\"No path\"></folder>"
+  purge "syncthing"
+  check "folder with no path=: refused" [ "$CODE" -ne 0 ]
+  check "  says it could not be read"   out_has "could not be read for certain"
+  check "  nothing changed"             untouched
+  teardown
+  deployed
+  add_folder_xml "<folder id=\"x\" path=\"$DB/x&#xA;y\"></folder>"
+  purge "syncthing"
+  check "unknown character reference: refused" [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  teardown
+  deployed
+  add_folder_xml "<folder id=\"rel\" path=\"relative/dir\"></folder>"
+  purge "syncthing"
+  check "relative folder path: refused" [ "$CODE" -ne 0 ]
+  check "  says it is not absolute"     out_has "is not absolute"
   check "  nothing changed"             untouched
   teardown
 }
@@ -1493,6 +1628,7 @@ test_teardown_purge_empty_data_removes_marker
 test_teardown_purge_delete_synced_files
 test_teardown_purge_folders_elsewhere
 test_teardown_purge_refuses_files_inside_state
+test_teardown_purge_folder_tags_any_layout
 test_teardown_purge_failure_keeps_env
 test_teardown_purge_missing_dirs
 test_teardown_purge_refuses_odd_paths

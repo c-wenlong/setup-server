@@ -189,6 +189,19 @@ for dir in "$UNIT_DIR" "$PLIST_DIR"; do
   done
 done
 
+# systemd's own view of the hub unit, whether or not its file is still on
+# disk: a unit file deleted while the hub ran leaves it loaded and running.
+# Sets U_ACTIVE; fails when systemd cannot be asked.
+U_ACTIVE=""
+unit_probe() {
+  local out
+  U_ACTIVE=""
+  out="$(systemctl --user show -p LoadState -p ActiveState -- "$UNIT_NAME" 2>/dev/null)" || return 1
+  U_ACTIVE="$(printf '%s\n' "$out" | sed -n 's/^ActiveState=//p')"
+  [ -n "$U_ACTIVE" ]
+}
+unit_running() { case "$U_ACTIVE" in inactive|failed) return 1 ;; *) return 0 ;; esac; }
+
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was. setup.sh keeps no state under
 # ~/services/quiver-hub, so all purge can find there is the empty marker.
@@ -199,6 +212,11 @@ if [ "$PURGE" -eq 1 ]; then
   elif [ -e "$MARKER" ]; then
     [ -d "$MARKER" ] || die "$MARKER is not a directory — refusing."
     PURGE_MARKER="$(real_dir "$MARKER")" || die "$MARKER is not a real directory inside $HOME/services, or it holds this checkout — refusing."
+  fi
+  # No unit file means the stop step has nothing to disable; the hub may
+  # still be running from it. Purge only once systemd can say.
+  if [ "$OS" = "Linux" ] && [ ! -e "$UNIT" ] && [ ! -L "$UNIT" ]; then
+    unit_probe || die "No $UNIT, and systemd could not say whether $UNIT_NAME is still running (systemctl --user show failed) — refusing to purge. Nothing was changed."
   fi
   if [ "$OS" = "Linux" ]; then unit_file="$UNIT"; else unit_file="$PLIST"; fi
   warn "--purge deletes $ENV_FILE and $unit_file${PURGE_MARKER:+, and removes $PURGE_MARKER if it is empty}. This cannot be undone."
@@ -253,12 +271,19 @@ if [ -n "$others" ]; then
   warn "Also on this box, mentioning the hub, NOT written by setup.sh and left alone:$others"
 fi
 if [ "$OS" = "Linux" ]; then
-  if [ -f "$UNIT" ]; then
+  if [ -e "$UNIT" ] || [ -L "$UNIT" ]; then
     info "Stopping the hub (systemctl --user disable --now $UNIT_NAME)"
     systemctl --user disable --now "$UNIT_NAME"
     ok "Hub stopped and disabled; unit file kept at $UNIT"
+  elif ! unit_probe; then
+    warn "No $UNIT, and systemd could not say whether $UNIT_NAME is still running. If it is: systemctl --user stop $UNIT_NAME"
+  elif unit_running; then
+    # The name is setup.sh's own; nothing else ships a quiver-hub user unit.
+    info "$UNIT is gone but the hub is still running from it; stopping it (systemctl --user stop)"
+    systemctl --user stop "$UNIT_NAME"
+    ok "Hub stopped"
   else
-    ok "No $UNIT (already removed)"
+    ok "No $UNIT and no hub running (already removed)"
   fi
 else
   if launchctl print "gui/$(id -u)/$PLIST_LABEL" >/dev/null 2>&1; then
@@ -273,6 +298,10 @@ fi
 
 # ---------------------------------------------------------------- purge
 if [ "$PURGE" -eq 1 ]; then
+  if [ "$OS" = "Linux" ]; then
+    unit_probe || die "Could not ask systemd whether $UNIT_NAME stopped. Nothing was deleted and $ENV_FILE is kept; re-run ./teardown.sh --purge."
+    ! unit_running || die "$UNIT_NAME is still running. Nothing was deleted and $ENV_FILE is kept: stop it (systemctl --user stop $UNIT_NAME) and re-run ./teardown.sh --purge."
+  fi
   info "Purging"
   if [ "$OS" = "Linux" ] && { [ -f "$UNIT" ] || [ -L "$UNIT" ]; }; then
     rm -f -- "$UNIT"
