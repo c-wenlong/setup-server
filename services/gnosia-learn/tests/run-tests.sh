@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/self-learn/setup.sh + deploy.sh.
+# Tests for services/gnosia-learn/setup.sh + deploy.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -33,8 +33,9 @@ setup() {
     "$SERVICE_DIR/sync.sh" "$SVC/"
 }
 
-# A self-learn .env as a finished setup.sh would have written it — enough for
-# sync.sh tests without a full mocked deploy.
+# A .env as a pre-rename setup.sh left it — SERVICE_HOME and the data root
+# still under their old names, both data-root vars present. That is the
+# shape every existing install has, so it is what most sync tests exercise.
 mk_env() {
   mkdir -p "$HOME/services/self-learn/bin" "$HOME/services/self-learn/state" \
     "$HOME/.self-learn/blobs/local"
@@ -43,6 +44,22 @@ SERVICE_HOME=$HOME/services/self-learn
 SELF_LEARN_HOME=$HOME/.self-learn
 GNOSIA_HOME=$HOME/.self-learn
 CATALOG_DB=$HOME/.self-learn/catalog.db
+MAC_SSH=tester@mac.invalid
+NODE_BIN=/usr/bin
+LOCAL_PORT=8107
+EOF
+  chmod 600 "$SVC/.env"
+}
+
+# The same .env as a fresh (post-rename) setup.sh writes it: GNOSIA_HOME
+# only at upstream's default root — no SELF_LEARN_HOME at all.
+mk_env_new() {
+  mkdir -p "$HOME/services/gnosia-learn/bin" "$HOME/services/gnosia-learn/state" \
+    "$HOME/.gnosia/blobs/local"
+  cat > "$SVC/.env" <<EOF
+SERVICE_HOME=$HOME/services/gnosia-learn
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
 MAC_SSH=tester@mac.invalid
 NODE_BIN=/usr/bin
 LOCAL_PORT=8107
@@ -108,7 +125,7 @@ run_deploy() {
 
 # Run the installed poller script directly (as the timer would).
 run_poll() {
-  OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/self-learn/bin/deploy.sh" "$@" 2>&1)"
+  OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/gnosia-learn/bin/deploy.sh" "$@" 2>&1)"
   CODE=$?
 }
 
@@ -132,7 +149,7 @@ out_lacks()  { ! grep -q -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q -- "$1" "$SVC/.env"; }
-REPO_DIR()   { printf '%s' "$HOME/services/self-learn/repo"; }
+REPO_DIR()   { printf '%s' "$HOME/services/gnosia-learn/repo"; }
 TL_DIR()     { printf '%s' "$(REPO_DIR)/tools/tldrawkc"; }
 # Line of the first logged call matching $1 (empty when none), to assert order.
 call_line()  { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1; }
@@ -140,10 +157,10 @@ call_line()  { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1; }
 mk_studio_unit() {
   if [ "$OS" = "Linux" ]; then
     mkdir -p "$HOME/.config/systemd/user"
-    touch "$HOME/.config/systemd/user/self-learn-studio.service"
+    touch "$HOME/.config/systemd/user/gnosia-learn-studio.service"
   else
     mkdir -p "$HOME/Library/LaunchAgents"
-    touch "$HOME/Library/LaunchAgents/com.self-learn.studio.plist"
+    touch "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
   fi
 }
 
@@ -196,14 +213,15 @@ test_fresh_deploy() {
   run_deploy
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check ".env has repo URL"             env_has "REPO_URL=https://github.com/c-wenlong/self-learn.git"
-  check ".env has data root"            env_has "GNOSIA_HOME=$HOME/.self-learn"
-  check ".env has catalog file"         env_has "CATALOG_DB=$HOME/.self-learn/catalog.db"
+  check ".env has data root"            env_has "GNOSIA_HOME=$HOME/.gnosia"
+  check ".env has catalog file"         env_has "CATALOG_DB=$HOME/.gnosia/catalog.db"
+  check ".env drops the old var"        sh -c "! grep -q '^SELF_LEARN_HOME=' '$SVC/.env'"
   check ".env has no postgres url"      sh -c "! grep -q '^DATABASE_URL=postgres://' '$SVC/.env'"
   check ".env has owner password"       grep -qE '^OWNER_PASSWORD=.+$' "$SVC/.env"
   check ".env has auth secret"          grep -qE '^AUTH_SECRET=.{32,}$' "$SVC/.env"
   check ".env mode is 600"              sh -c "[ \"$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")\" = 600 ]"
-  check "deploy script installed"       [ -x "$HOME/services/self-learn/bin/deploy.sh" ]
-  check "env path baked into script"    grep -q "$SVC/.env" "$HOME/services/self-learn/bin/deploy.sh"
+  check "deploy script installed"       [ -x "$HOME/services/gnosia-learn/bin/deploy.sh" ]
+  check "env path baked into script"    grep -q "$SVC/.env" "$HOME/services/gnosia-learn/bin/deploy.sh"
   check "cloned the repo"               calls_have "git clone --branch main"
   check "installed deps (npm ci)"       calls_have "npm ci"
   check "web env has no DATABASE_URL"   sh -c "! grep -q '^DATABASE_URL=' '$(REPO_DIR)/apps/web/.env.local'"
@@ -217,46 +235,46 @@ test_fresh_deploy() {
   check "seed imported"                 calls_have "npm run catalog -- import seed"
   check "six flips run"                 sh -c '[ "$(grep -c "npm run catalog -- flip" "$CALLS_LOG")" -eq 6 ]'
   check "blob root claimed"             calls_have "npm run catalog -- blob audit --fix"
-  check "bootstrap marker written"      [ -f "$HOME/services/self-learn/state/db-bootstrapped" ]
+  check "bootstrap marker written"      [ -f "$HOME/services/gnosia-learn/state/db-bootstrapped" ]
   check "built (next build)"            calls_have "npm run build"
-  check "built sha recorded"            grep -qx aaa1111 "$HOME/services/self-learn/state/built-sha"
+  check "built sha recorded"            grep -qx aaa1111 "$HOME/services/gnosia-learn/state/built-sha"
   check "tldrawkc not fetched"          no_call "submodule update"
   if [ "$OS" = "Linux" ]; then
-    check "app unit written"            [ -f "$HOME/.config/systemd/user/self-learn.service" ]
-    check "app binds loopback+port"     grep -q -- "-p 8107 -H 127.0.0.1" "$HOME/.config/systemd/user/self-learn.service"
-    check "app unit gets GNOSIA_HOME"   grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/self-learn.service"
-    check "app unit gets CATALOG_DB"    grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/self-learn.service"
-    check "app unit has no postgres"    sh -c "! grep -q 'postgres\|DATABASE_URL' '$HOME/.config/systemd/user/self-learn.service'"
-    check "export unit gets GNOSIA_HOME" grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/self-learn-export.service"
-    check "export unit gets CATALOG_DB" grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/self-learn-export.service"
-    check "deploy timer written"        [ -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
-    check "export timer written"        [ -f "$HOME/.config/systemd/user/self-learn-export.timer" ]
-    check "studio unit written"         [ -f "$HOME/.config/systemd/user/self-learn-studio.service" ]
-    check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/self-learn-studio.service"
-    check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/self-learn-studio.service"
-    check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/self-learn/studio" "$HOME/.config/systemd/user/self-learn-studio.service"
-    check "app restarted"               calls_have "systemctl --user restart self-learn"
-    check "deploy timer enabled"        calls_have "systemctl --user enable --now self-learn-deploy.timer"
-    check "export timer enabled"        calls_have "systemctl --user enable --now self-learn-export.timer"
-    check "studio off by default"       calls_have "systemctl --user disable --now self-learn-studio"
-    check "export unit mode is 600"     sh -c "[ \"$(stat -c %a "$HOME/.config/systemd/user/self-learn-export.service" 2>/dev/null || stat -f %Lp "$HOME/.config/systemd/user/self-learn-export.service")\" = 600 ]"
+    check "app unit written"            [ -f "$HOME/.config/systemd/user/gnosia-learn.service" ]
+    check "app binds loopback+port"     grep -q -- "-p 8107 -H 127.0.0.1" "$HOME/.config/systemd/user/gnosia-learn.service"
+    check "app unit gets GNOSIA_HOME"   grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/gnosia-learn.service"
+    check "app unit gets CATALOG_DB"    grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/gnosia-learn.service"
+    check "app unit has no postgres"    sh -c "! grep -q 'postgres\|DATABASE_URL' '$HOME/.config/systemd/user/gnosia-learn.service'"
+    check "export unit gets GNOSIA_HOME" grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/gnosia-learn-export.service"
+    check "export unit gets CATALOG_DB" grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/gnosia-learn-export.service"
+    check "deploy timer written"        [ -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
+    check "export timer written"        [ -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
+    check "studio unit written"         [ -f "$HOME/.config/systemd/user/gnosia-learn-studio.service" ]
+    check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
+    check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
+    check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/gnosia-learn/studio" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
+    check "app restarted"               calls_have "systemctl --user restart gnosia-learn"
+    check "deploy timer enabled"        calls_have "systemctl --user enable --now gnosia-learn-deploy.timer"
+    check "export timer enabled"        calls_have "systemctl --user enable --now gnosia-learn-export.timer"
+    check "studio off by default"       calls_have "systemctl --user disable --now gnosia-learn-studio"
+    check "export unit mode is 600"     sh -c "[ \"$(stat -c %a "$HOME/.config/systemd/user/gnosia-learn-export.service" 2>/dev/null || stat -f %Lp "$HOME/.config/systemd/user/gnosia-learn-export.service")\" = 600 ]"
     check "lingering enabled"           calls_have "loginctl enable-linger"
   else
-    check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.self-learn.web.plist" ]
-    check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.studio.plist" ]
-    check "deploy agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
-    check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
-    check "web agent gets GNOSIA_HOME"  grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
-    check "web agent gets CATALOG_DB"   grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
-    check "export agent gets GNOSIA_HOME" grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.self-learn.export.plist"
-    check "export agent gets CATALOG_DB" grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.self-learn.export.plist"
-    check "deploy agent sets PATH"      grep -q "/opt/homebrew/bin" "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
-    check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.self-learn.web"
-    check "studio agent not loaded"     no_call "launchctl bootstrap .*com.self-learn.studio"
+    check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist" ]
+    check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist" ]
+    check "deploy agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
+    check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist" ]
+    check "web agent gets GNOSIA_HOME"  grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    check "web agent gets CATALOG_DB"   grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    check "export agent gets GNOSIA_HOME" grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
+    check "export agent gets CATALOG_DB" grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
+    check "deploy agent sets PATH"      grep -q "/opt/homebrew/bin" "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist"
+    check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.gnosia-learn.web"
+    check "studio agent not loaded"     no_call "launchctl bootstrap .*com.gnosia-learn.studio"
     local a
     for a in web deploy export; do
       check "$a label enabled before bootstrap (undoes teardown's disable)" \
-        before "launchctl enable gui/.*/com.self-learn.$a" "launchctl bootstrap .*com.self-learn.$a"
+        before "launchctl enable gui/.*/com.gnosia-learn.$a" "launchctl bootstrap .*com.gnosia-learn.$a"
     done
   fi
   check "served on tailscale :8107"     calls_have "tailscale serve --bg --https=8107 http://127.0.0.1:8107"
@@ -297,16 +315,16 @@ test_push_triggers_redeploy() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the new sha"     out_has "deploying bbb2222"
   if [ "$OS" = "Linux" ]; then
-    check "app stopped first"     calls_have "systemctl --user stop self-learn.service"
-    check "app started again"     calls_have "systemctl --user start self-learn.service"
+    check "app stopped first"     calls_have "systemctl --user stop gnosia-learn.service"
+    check "app started again"     calls_have "systemctl --user start gnosia-learn.service"
   else
-    check "app stopped first"     calls_have "launchctl bootout gui/.*/com.self-learn.web"
-    check "app started again"     calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+    check "app stopped first"     calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+    check "app started again"     calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
   fi
   check "rebuilt"                 calls_have "npm run build"
   check "catalog migrated"        calls_have "npm run catalog -- migrate"
   check "npm ci skipped"          no_call "npm ci"
-  check "built sha updated"       grep -qx bbb2222 "$HOME/services/self-learn/state/built-sha"
+  check "built sha updated"       grep -qx bbb2222 "$HOME/services/gnosia-learn/state/built-sha"
   teardown
 }
 
@@ -341,11 +359,11 @@ test_stopped_app_stays_stopped() {
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "rebuilt"             calls_have "npm run build"
   if [ "$OS" = "Linux" ]; then
-    check "no stop attempted" no_call "systemctl --user stop self-learn"
-    check "not restarted"     no_call "systemctl --user start self-learn"
+    check "no stop attempted" no_call "systemctl --user stop gnosia-learn"
+    check "not restarted"     no_call "systemctl --user start gnosia-learn"
   else
     check "no stop attempted" no_call "launchctl bootout"
-    check "not restarted"     no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+    check "not restarted"     no_call "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
   fi
   check "no docker touched"   no_call "^docker "
   check "says it was left"    out_has "left stopped"
@@ -366,11 +384,11 @@ test_stopped_stack_stays_stopped() {
   check "rebuilt"                  calls_have "npm run build"
   check "catalog migrated"         calls_have "npm run catalog -- migrate"
   if [ "$OS" = "Linux" ]; then
-    check "app not restarted"      no_call "systemctl --user start self-learn.service"
-    check "studio not started"     no_call "systemctl --user start self-learn-studio"
+    check "app not restarted"      no_call "systemctl --user start gnosia-learn.service"
+    check "studio not started"     no_call "systemctl --user start gnosia-learn-studio"
   else
-    check "app not restarted"      no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
-    check "studio not started"     no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.studio"
+    check "app not restarted"      no_call "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "studio not started"     no_call "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.studio"
   fi
   teardown
 }
@@ -380,17 +398,17 @@ test_poll_lock() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  mkdir "$HOME/services/self-learn/.deploy.lock"
-  echo $$ > "$HOME/services/self-learn/.deploy.lock/pid"
+  mkdir "$HOME/services/gnosia-learn/.deploy.lock"
+  echo $$ > "$HOME/services/gnosia-learn/.deploy.lock/pid"
   : > "$CALLS_LOG"
   run_poll
   check "exits zero"             [ "$CODE" -eq 0 ]
   check "reports the skip"       out_has "another deploy is running"
   check "touched no git"         no_call "fetch --quiet"
-  rm -rf "$HOME/services/self-learn/.deploy.lock"
-  mkdir "$HOME/services/self-learn/.deploy.lock"
+  rm -rf "$HOME/services/gnosia-learn/.deploy.lock"
+  mkdir "$HOME/services/gnosia-learn/.deploy.lock"
   ( exit 0 ) & dead=$!; wait "$dead" 2>/dev/null || true
-  echo "$dead" > "$HOME/services/self-learn/.deploy.lock/pid"
+  echo "$dead" > "$HOME/services/gnosia-learn/.deploy.lock/pid"
   : > "$CALLS_LOG"
   run_poll
   check "reclaims a dead lock"   out_has "owner pid $dead is gone"
@@ -403,7 +421,7 @@ test_poll_lock_identity() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  lock="$HOME/services/self-learn/.deploy.lock"
+  lock="$HOME/services/gnosia-learn/.deploy.lock"
   # A recorded holder is pid + start identity: however old the lock, it is
   # not raced (the 60-min bound only guards locks whose owner cannot be
   # verified).
@@ -448,7 +466,7 @@ test_skip_seed() {
   check "no seed import"          no_call "npm run catalog -- import"
   check "no flips"                no_call "npm run catalog -- flip"
   check "still migrated"          calls_have "npm run catalog -- migrate"
-  check "marker says skipped"     grep -qx skipped "$HOME/services/self-learn/state/db-bootstrapped"
+  check "marker says skipped"     grep -qx skipped "$HOME/services/gnosia-learn/state/db-bootstrapped"
   check "warns about restore"     out_has "laptop"
   teardown
 }
@@ -462,7 +480,7 @@ test_port_override() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "served on :9999 -> 9999" calls_have "tailscale serve --bg --https=9999 http://127.0.0.1:9999"
   if [ "$OS" = "Linux" ]; then
-    check "unit uses :9999"       grep -q -- "-p 9999" "$HOME/.config/systemd/user/self-learn.service"
+    check "unit uses :9999"       grep -q -- "-p 9999" "$HOME/.config/systemd/user/gnosia-learn.service"
   fi
   teardown
 }
@@ -498,10 +516,10 @@ test_setup_leaves_stopped() {
   check "serve still configured"  calls_have "tailscale serve --bg --https=8107"
   check "no health checks"        no_call "^curl "
   if [ "$OS" = "Linux" ]; then
-    check "app not restarted"     no_call "systemctl --user restart self-learn"
-    check "app not enabled"       no_call "systemctl --user enable self-learn$"
+    check "app not restarted"     no_call "systemctl --user restart gnosia-learn"
+    check "app not enabled"       no_call "systemctl --user enable gnosia-learn$"
   else
-    check "agent not loaded"      no_call "launchctl bootstrap .*com.self-learn.web.plist"
+    check "agent not loaded"      no_call "launchctl bootstrap .*com.gnosia-learn.web.plist"
   fi
   teardown
 }
@@ -516,14 +534,14 @@ test_studio_enabled() {
   check ".env keeps the flag"     env_has "STUDIO_ENABLED=1"
   check "web env has the flag"    grep -qx "STUDIO_ENABLED=1" "$(REPO_DIR)/apps/web/.env.local"
   check "tldrawkc fetched"        calls_have "submodule update --init tools/tldrawkc"
-  check "tldrawkc built+stamped"  [ -f "$HOME/services/self-learn/state/tldrawkc-sha" ]
+  check "tldrawkc built+stamped"  [ -f "$HOME/services/gnosia-learn/state/tldrawkc-sha" ]
   if [ "$OS" = "Linux" ]; then
-    check "studio enabled"        calls_have "systemctl --user enable self-learn-studio"
-    check "studio restarted"      calls_have "systemctl --user restart self-learn-studio"
-    check "no disable call"       no_call "systemctl --user disable --now self-learn-studio"
+    check "studio enabled"        calls_have "systemctl --user enable gnosia-learn-studio"
+    check "studio restarted"      calls_have "systemctl --user restart gnosia-learn-studio"
+    check "no disable call"       no_call "systemctl --user disable --now gnosia-learn-studio"
   else
-    check "studio agent loaded"   calls_have "launchctl bootstrap gui/.*/com.self-learn.studio"
-    check "plist has claude bin"  grep -q "STUDIO_CLAUDE_BIN" "$HOME/Library/LaunchAgents/com.self-learn.studio.plist"
+    check "studio agent loaded"   calls_have "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
+    check "plist has claude bin"  grep -q "STUDIO_CLAUDE_BIN" "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
   fi
   check "studio health probed"  calls_have "curl .*127.0.0.1:7250/api/health"
 
@@ -532,9 +550,9 @@ test_studio_enabled() {
   run_deploy
   check "re-run exits zero"       [ "$CODE" -eq 0 ]
   if [ "$OS" = "Linux" ]; then
-    check "studio disabled+stopped" calls_have "systemctl --user disable --now self-learn-studio"
+    check "studio disabled+stopped" calls_have "systemctl --user disable --now gnosia-learn-studio"
   else
-    check "studio agent booted out" calls_have "launchctl bootout gui/.*/com.self-learn.studio"
+    check "studio agent booted out" calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
   fi
   teardown
 }
@@ -552,11 +570,11 @@ test_deploy_bounces_studio() {
   run_poll
   check "exits zero"              [ "$CODE" -eq 0 ]
   if [ "$OS" = "Linux" ]; then
-    check "studio stopped"        calls_have "systemctl --user stop self-learn-studio.service"
-    check "studio started again"  calls_have "systemctl --user start self-learn-studio.service"
+    check "studio stopped"        calls_have "systemctl --user stop gnosia-learn-studio.service"
+    check "studio started again"  calls_have "systemctl --user start gnosia-learn-studio.service"
   else
-    check "studio stopped"        calls_have "launchctl bootout gui/.*/com.self-learn.studio"
-    check "studio started again"  calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.studio"
+    check "studio stopped"        calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
+    check "studio started again"  calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.studio"
   fi
   teardown
 }
@@ -600,12 +618,12 @@ test_tldrawkc_failed_build_restores() {
   check "previous dist/ is back"      grep -qx old "$(TL_DIR)/dist/marker"
   check "no half-written dist/"       test ! -e "$(TL_DIR)/dist/partial"
   check "node_modules is back"        [ -d "$(TL_DIR)/node_modules" ]
-  check "stamp still the old build"   grep -qx aaa1111 "$HOME/services/self-learn/state/tldrawkc-sha"
-  check "snapshot cleaned up"         test ! -e "$HOME/services/self-learn/state/rollback-tldrawkc"
+  check "stamp still the old build"   grep -qx aaa1111 "$HOME/services/gnosia-learn/state/tldrawkc-sha"
+  check "snapshot cleaned up"         test ! -e "$HOME/services/gnosia-learn/state/rollback-tldrawkc"
   if [ "$OS" = "Linux" ]; then
-    check "studio restarted"          calls_have "systemctl --user start self-learn-studio.service"
+    check "studio restarted"          calls_have "systemctl --user start gnosia-learn-studio.service"
   else
-    check "studio restarted"          calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.studio"
+    check "studio restarted"          calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.studio"
   fi
   teardown
 }
@@ -616,7 +634,7 @@ test_tldrawkc_rebuilt_when_output_is_gone() {
   touch "$STATE_DIR/operator"
   export STUDIO_ENABLED=1
   run_deploy
-  check "stamped after the first build" grep -qx aaa1111 "$HOME/services/self-learn/state/tldrawkc-sha"
+  check "stamped after the first build" grep -qx aaa1111 "$HOME/services/gnosia-learn/state/tldrawkc-sha"
   rm -rf "$(TL_DIR)/dist" "$(TL_DIR)/node_modules"
   : > "$CALLS_LOG"
   run_poll --force
@@ -637,10 +655,10 @@ test_deploy_leaves_stopped_studio() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "rebuilt"                 calls_have "npm run build"
   if [ "$OS" = "Linux" ]; then
-    check "studio not stopped"    no_call "stop self-learn-studio"
-    check "studio not started"    no_call "start self-learn-studio"
+    check "studio not stopped"    no_call "stop gnosia-learn-studio"
+    check "studio not started"    no_call "start gnosia-learn-studio"
   else
-    check "studio untouched"      no_call "launchctl \(bootout\|bootstrap\|kickstart\).*com.self-learn.studio"
+    check "studio untouched"      no_call "launchctl \(bootout\|bootstrap\|kickstart\).*com.gnosia-learn.studio"
   fi
   teardown
 }
@@ -655,7 +673,7 @@ test_deploy_pinned_sha() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the pinned sha"  out_has "deploying ccc0000"
   check "resets to the pin"       calls_have "reset --hard --quiet ccc0000"
-  check "built sha is the pin"    grep -qx ccc0000 "$HOME/services/self-learn/state/built-sha"
+  check "built sha is the pin"    grep -qx ccc0000 "$HOME/services/gnosia-learn/state/built-sha"
   teardown
 }
 
@@ -671,11 +689,11 @@ test_failed_build_restores() {
   check "exits non-zero"          [ "$CODE" -ne 0 ]
   check "says it restored"        out_has "restoring the pre-deploy snapshot"
   check ".next put back"          [ -d "$(REPO_DIR)/apps/web/.next" ]
-  check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/self-learn/state/built-sha"
+  check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/gnosia-learn/state/built-sha"
   if [ "$OS" = "Linux" ]; then
-    check "old build restarted"   calls_have "systemctl --user start self-learn.service"
+    check "old build restarted"   calls_have "systemctl --user start gnosia-learn.service"
   else
-    check "old build restarted"   calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+    check "old build restarted"   calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
   fi
   teardown
 }
@@ -720,11 +738,11 @@ test_sync_install() {
   check "ignore has .tmp"       grep -q '^/.tmp$' "$HOME/.self-learn/blobs/local/seafile-ignore.txt"
   check "creds persisted"       env_has "SEAFILE_SYNC_REPO=stub-repo-777"
   check "env stays 600"         test "$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")" = 600
-  check "unit written"          test -f "$HOME/.config/systemd/user/self-learn-seafile.service"
-  check "unit enabled"          calls_have "systemctl --user enable self-learn-seafile.service"
-  check "unit restarted"        calls_have "systemctl --user restart self-learn-seafile.service"
-  check "daemon is the process" grep -q "ExecStart=.*seaf-daemon" "$HOME/.config/systemd/user/self-learn-seafile.service"
-  check "unit restarts"         grep -q "Restart=always" "$HOME/.config/systemd/user/self-learn-seafile.service"
+  check "unit written"          test -f "$HOME/.config/systemd/user/gnosia-learn-seafile.service"
+  check "unit enabled"          calls_have "systemctl --user enable gnosia-learn-seafile.service"
+  check "unit restarted"        calls_have "systemctl --user restart gnosia-learn-seafile.service"
+  check "daemon is the process" grep -q "ExecStart=.*seaf-daemon" "$HOME/.config/systemd/user/gnosia-learn-seafile.service"
+  check "unit restarts"         grep -q "Restart=always" "$HOME/.config/systemd/user/gnosia-learn-seafile.service"
   check "admin pw not in argv"  no_call "adminpw"
   check "sync pw not in argv"   no_call " -p "
   teardown
@@ -736,7 +754,7 @@ test_sync_install_idempotent() {
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
 SEAFILE_URL=http://127.0.0.1:8081
-SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -754,7 +772,7 @@ test_sync_install_old_layout() {
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
 SEAFILE_URL=http://127.0.0.1:8081
-SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -773,7 +791,7 @@ test_sync_install_already_linked() {
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
 SEAFILE_URL=http://127.0.0.1:8081
-SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -789,7 +807,7 @@ test_sync_mac_setup_gui() {
   echo "• sync mac-setup: ignore file lands first, GUI steps printed"
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
-SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -798,8 +816,44 @@ EOF
   check "remote ignore written"   grep -q '^/.owner$' "$STATE_DIR/mac_ignore.txt"
   check "ignore covers .tmp"      grep -q '^/.tmp$' "$STATE_DIR/mac_ignore.txt"
   check "prints GUI steps"        out_has "Seafile Client"
-  check "prints the account"      out_has "self-learn-sync@test"
+  check "prints the account"      out_has "gnosia-learn-sync@test"
   check "prints tailnet URL"      out_has "https://test-host.tailfake.ts.net:8443"
+  check "names the library"       out_has '"gnosia-learn-blobs"'
+  teardown
+}
+
+test_sync_mac_setup_legacy_lib_name() {
+  echo "• sync mac-setup: a pre-rename library keeps its self-learn-blobs name in the steps"
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  # the daemon reports the library under its pre-rename name
+  mkdir -p "$STATE_DIR"
+  touch "$STATE_DIR/seaf_synced_stub-repo-777"
+  echo "self-learn-blobs" > "$STATE_DIR/seaf_name_stub-repo-777"
+  run_sync mac-setup
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "names the saved library"   out_has '"self-learn-blobs"'
+  check "not the fresh name"        out_lacks '"gnosia-learn-blobs"'
+  teardown
+}
+
+test_sync_mac_setup_daemon_down() {
+  echo "• sync mac-setup: a dead local daemon falls back to the fresh library name"
+  setup; mk_env; mk_seafile_env
+  cat >> "$SVC/.env" <<EOF
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_PASSWORD=pw
+SEAFILE_SYNC_REPO=stub-repo-777
+EOF
+  touch "$STATE_DIR/seaf_down"
+  run_sync mac-setup
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "falls back to fresh name"  out_has '"gnosia-learn-blobs"'
+  check "steps still printed"       out_has "Seafile Client"
   teardown
 }
 
@@ -807,7 +861,7 @@ test_sync_mac_setup_headless() {
   echo "• sync mac-setup: seaf-cli on the Mac pairs headless + LaunchAgent"
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
-SEAFILE_SYNC_USER=self-learn-sync@test
+SEAFILE_SYNC_USER=gnosia-learn-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -818,7 +872,7 @@ EOF
   # MAC_HOME derives from MAC_SSH (tester@mac.invalid), proving the account,
   # not a hardcoded user, owns the paths. The Mac's data root is ~/.gnosia.
   check "remote links blobs/local" calls_have "-d '/Users/tester/.gnosia/blobs/local'"
-  check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.self-learn.seafile.plist"
+  check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.gnosia-learn.seafile.plist"
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
   check "agent bootstrapped"    calls_have "launchctl bootstrap"
@@ -833,7 +887,7 @@ test_sync_push() {
   run_sync push
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "snapshot via .backup"    calls_have "sqlite3 .*\.backup"
-  check "sender app never stopped" no_call "systemctl --user stop self-learn.service"
+  check "sender app never stopped" no_call "systemctl --user stop gnosia-learn.service"
   check "Mac app probed over ssh" calls_have "pgrep -f 'next"
   check "Mac app killed"          calls_have "kill 1234"
   check "staged dir scp'd"        calls_have "scp .*-pr .*\.sync-stage"
@@ -871,8 +925,8 @@ test_sync_push_no_sqlite3() {
   run_sync push
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "no .backup attempted"    no_call "sqlite3 .*\.backup"
-  check "sender stopped for copy" calls_have "systemctl --user stop self-learn.service"
-  check "sender restarted"        calls_have "systemctl --user start self-learn.service"
+  check "sender stopped for copy" calls_have "systemctl --user stop gnosia-learn.service"
+  check "sender restarted"        calls_have "systemctl --user start gnosia-learn.service"
   check "staged set shipped"      calls_have "scp .*-pr"
   check "wal moves in too"        calls_have "catalog.db-wal"
   teardown
@@ -899,15 +953,15 @@ test_sync_pull() {
   check "remote db checked"       calls_have "ssh .*-f '/Users/tester/.gnosia/catalog.db'"
   check "remote .backup"          calls_have "sqlite3 .*\.backup"
   check "staged dir scp'd back"   calls_have "scp .*-pr"
-  check "app stopped"             calls_have "systemctl --user stop self-learn.service"
+  check "app stopped"             calls_have "systemctl --user stop gnosia-learn.service"
   check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
   check "stale wal dropped"       test ! -e "$HOME/.self-learn/catalog.db-wal"
   check "audit ran"               calls_have "npm run catalog -- blob audit"
   check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.self-learn/catalog.db" "$STATE_DIR/catalog_env.log"
   check "audit got GNOSIA_HOME"   grep -qx "GNOSIA_HOME=$HOME/.self-learn" "$STATE_DIR/catalog_env.log"
   check "no DATABASE_URL passed"  grep -qx "DATABASE_URL=" "$STATE_DIR/catalog_env.log"
-  check "app restarted"           calls_have "systemctl --user start self-learn.service"
-  check "stop before start"       before "stop self-learn.service" "start self-learn.service"
+  check "app restarted"           calls_have "systemctl --user start gnosia-learn.service"
+  check "stop before start"       before "stop gnosia-learn.service" "start gnosia-learn.service"
   check "staging cleaned"         test ! -e "$HOME/.self-learn/.sync-stage"
   check "vault warned"            out_has "vault"
   teardown
@@ -926,6 +980,21 @@ test_sync_pull_old_env() {
   teardown
 }
 
+test_sync_pull_new_env() {
+  echo "• sync pull on a post-rename .env: GNOSIA_HOME only, no SELF_LEARN_HOME"
+  setup; mk_env_new
+  mkdir -p "$HOME/services/gnosia-learn/repo" "$HOME/.gnosia"
+  echo "LOCAL-DB-BYTES" > "$HOME/.gnosia/catalog.db"
+  touch "$STATE_DIR/web_active"
+  run_sync pull
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.gnosia/catalog.db"
+  check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.gnosia/catalog.db" "$STATE_DIR/catalog_env.log"
+  check "audit got GNOSIA_HOME"   grep -qx "GNOSIA_HOME=$HOME/.gnosia" "$STATE_DIR/catalog_env.log"
+  check "staging cleaned"         test ! -e "$HOME/services/gnosia-learn/state/.sync-stage"
+  teardown
+}
+
 test_sync_pull_no_remote_db() {
   echo "• sync pull: no catalog.db on the Mac refuses before anything ships"
   setup; mk_env; mk_db_files
@@ -936,7 +1005,7 @@ test_sync_pull_no_remote_db() {
   check "says why"                out_has "nothing to pull"
   check "nothing shipped"         no_call "scp"
   check "local db untouched"      grep -qx LOCAL-DB-BYTES "$HOME/.self-learn/catalog.db"
-  check "app never stopped"       no_call "systemctl --user stop self-learn.service"
+  check "app never stopped"       no_call "systemctl --user stop gnosia-learn.service"
   teardown
 }
 
@@ -976,15 +1045,15 @@ test_sync_pull_studio() {
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "db replaced"                 grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
   if [ "$OS" = "Linux" ]; then
-    check "studio stopped"            calls_have "systemctl --user stop self-learn-studio.service"
-    check "studio started again"      calls_have "systemctl --user start self-learn-studio.service"
+    check "studio stopped"            calls_have "systemctl --user stop gnosia-learn-studio.service"
+    check "studio started again"      calls_have "systemctl --user start gnosia-learn-studio.service"
     check "studio stops before the app" \
-      [ "$(call_line 'stop self-learn-studio.service')" -lt "$(call_line 'stop self-learn.service')" ]
+      [ "$(call_line 'stop gnosia-learn-studio.service')" -lt "$(call_line 'stop gnosia-learn.service')" ]
     check "studio starts after the app" \
-      [ "$(call_line 'start self-learn.service')" -lt "$(call_line 'start self-learn-studio.service')" ]
+      [ "$(call_line 'start gnosia-learn.service')" -lt "$(call_line 'start gnosia-learn-studio.service')" ]
   else
-    check "studio stopped"            calls_have "launchctl bootout gui/.*/com.self-learn.studio"
-    check "studio started again"      calls_have "launchctl \(bootstrap\|kickstart\).*com.self-learn.studio"
+    check "studio stopped"            calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
+    check "studio started again"      calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.studio"
   fi
   check "studio is up at the end"     test -f "$STATE_DIR/studio_active"
   teardown
@@ -998,8 +1067,8 @@ test_sync_pull_stopped_studio() {
   run_sync pull
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "db replaced"                 grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
-  check "studio never stopped"        no_call "stop self-learn-studio"
-  check "studio never started"        no_call "start self-learn-studio"
+  check "studio never stopped"        no_call "stop gnosia-learn-studio"
+  check "studio never started"        no_call "start gnosia-learn-studio"
   teardown
 }
 
@@ -1011,11 +1080,11 @@ test_sync_pull_stopped_app() {
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "db replaced"         grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
   if [ "$OS" = "Linux" ]; then
-    check "no stop call"      no_call "systemctl --user stop self-learn.service"
-    check "no start call"     no_call "systemctl --user start self-learn.service"
+    check "no stop call"      no_call "systemctl --user stop gnosia-learn.service"
+    check "no start call"     no_call "systemctl --user start gnosia-learn.service"
   else
     check "no bootout"        no_call "launchctl bootout"
-    check "no bootstrap"      no_call "launchctl \(bootstrap\|kickstart\).*com.self-learn.web"
+    check "no bootstrap"      no_call "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
   fi
   check "audit still ran"     calls_have "npm run catalog -- blob audit"
   check "no docker touched"   no_call "^docker "
@@ -1055,7 +1124,7 @@ test_sync_pull_audit_fails() {
   check "exits zero (informational)" [ "$CODE" -eq 0 ]
   check "warns about gaps"           out_has "audit reported gaps"
   check "db still replaced"          grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
-  check "app still restarted"        calls_have "systemctl --user start self-learn.service"
+  check "app still restarted"        calls_have "systemctl --user start gnosia-learn.service"
   teardown
 }
 
@@ -1148,21 +1217,21 @@ test_live() {
     live_check "studio health answers"     curl -fsS "http://127.0.0.1:7250/api/health"
     live_check "no wildcard studio listener" no_external_listener 7250
     if [ "$OS" = "Linux" ]; then
-      live_check "studio unit active"      sh -c "systemctl --user is-active self-learn-studio.service | grep -qx active"
-      live_check "studio unit enabled"     sh -c "systemctl --user is-enabled self-learn-studio.service | grep -qx enabled"
+      live_check "studio unit active"      sh -c "systemctl --user is-active gnosia-learn-studio.service | grep -qx active"
+      live_check "studio unit enabled"     sh -c "systemctl --user is-enabled gnosia-learn-studio.service | grep -qx enabled"
     else
-      live_check "studio agent loaded"     sh -c "launchctl print gui/$(id -u)/com.self-learn.studio"
+      live_check "studio agent loaded"     sh -c "launchctl print gui/$(id -u)/com.gnosia-learn.studio"
     fi
   fi
   if [ "$OS" = "Linux" ]; then
-    live_check "app unit active"           sh -c "systemctl --user is-active self-learn.service | grep -qx active"
-    live_check "app unit enabled"          sh -c "systemctl --user is-enabled self-learn.service | grep -qx enabled"
-    live_check "deploy timer active"       sh -c "systemctl --user is-active self-learn-deploy.timer | grep -qx active"
-    live_check "export timer active"       sh -c "systemctl --user is-active self-learn-export.timer | grep -qx active"
+    live_check "app unit active"           sh -c "systemctl --user is-active gnosia-learn.service | grep -qx active"
+    live_check "app unit enabled"          sh -c "systemctl --user is-enabled gnosia-learn.service | grep -qx enabled"
+    live_check "deploy timer active"       sh -c "systemctl --user is-active gnosia-learn-deploy.timer | grep -qx active"
+    live_check "export timer active"       sh -c "systemctl --user is-active gnosia-learn-export.timer | grep -qx active"
     live_check "lingering enabled"         sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
   else
-    live_check "web agent loaded"          sh -c "launchctl print gui/$(id -u)/com.self-learn.web"
-    live_check "deploy agent loaded"       sh -c "launchctl print gui/$(id -u)/com.self-learn.deploy"
+    live_check "web agent loaded"          sh -c "launchctl print gui/$(id -u)/com.gnosia-learn.web"
+    live_check "deploy agent loaded"       sh -c "launchctl print gui/$(id -u)/com.gnosia-learn.deploy"
   fi
   live_check "serve maps :$port"           sh -c "'$ts' serve status | grep -A2 ':$port' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet HTTPS responds"      curl -fsS -o /dev/null --max-time 30 "$url/"
@@ -1174,7 +1243,7 @@ run_teardown() {
   CODE=$?
 }
 
-SVC_HOME() { printf '%s' "$HOME/services/self-learn"; }
+SVC_HOME() { printf '%s' "$HOME/services/gnosia-learn"; }
 UNIT_DIR() { printf '%s' "$HOME/.config/systemd/user"; }
 # The identity deploy.sh records in .deploy.lock/started for a live pid.
 start_of() {
@@ -1202,11 +1271,11 @@ deployed() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  mkdir -p "$(SVC_HOME)/studio/jobs" "$HOME/.self-learn/archive/latest" "$HOME/.self-learn/vault"
+  mkdir -p "$(SVC_HOME)/studio/jobs" "$HOME/.gnosia/archive/latest" "$HOME/.gnosia/vault"
   echo wal > "$(SVC_HOME)/studio/jobs/wal"
-  echo export > "$HOME/.self-learn/archive/latest/catalog.json"
-  echo blob > "$HOME/.self-learn/blobs/b1"
-  echo db > "$HOME/.self-learn/catalog.db"
+  echo export > "$HOME/.gnosia/archive/latest/catalog.json"
+  echo blob > "$HOME/.gnosia/blobs/b1"
+  echo db > "$HOME/.gnosia/catalog.db"
   cat > "$STATE_DIR/serve_status" <<EOF
 https://test-host.tailfake.ts.net:2283 (tailnet only)
 |-- / proxy http://127.0.0.1:2283
@@ -1231,30 +1300,30 @@ test_teardown_safe() {
   check "never serve reset"             no_call "serve reset"
   check "no docker touched"             no_call "^docker "
   if [ "$OS" = "Linux" ]; then
-    check "deploy timer disabled"       calls_have "systemctl --user disable --now self-learn-deploy.timer"
-    check "export timer disabled"       calls_have "systemctl --user disable --now self-learn-export.timer"
-    check "in-flight deploy stopped"    calls_have "systemctl --user stop self-learn-deploy.service"
-    check "in-flight export stopped"    calls_have "systemctl --user stop self-learn-export.service"
-    check "studio disabled"             calls_have "systemctl --user disable --now self-learn-studio.service"
-    check "app disabled"                calls_have "systemctl --user disable --now self-learn.service"
-    check "timers before studio"        before "disable --now self-learn-export.timer" "disable --now self-learn-studio.service"
-    check "studio before app"           before "disable --now self-learn-studio.service" "disable --now self-learn.service"
-    check "serve off before stops"      before "tailscale serve --https=8107 off" "disable --now self-learn.service"
+    check "deploy timer disabled"       calls_have "systemctl --user disable --now gnosia-learn-deploy.timer"
+    check "export timer disabled"       calls_have "systemctl --user disable --now gnosia-learn-export.timer"
+    check "in-flight deploy stopped"    calls_have "systemctl --user stop gnosia-learn-deploy.service"
+    check "in-flight export stopped"    calls_have "systemctl --user stop gnosia-learn-export.service"
+    check "studio disabled"             calls_have "systemctl --user disable --now gnosia-learn-studio.service"
+    check "app disabled"                calls_have "systemctl --user disable --now gnosia-learn.service"
+    check "timers before studio"        before "disable --now gnosia-learn-export.timer" "disable --now gnosia-learn-studio.service"
+    check "studio before app"           before "disable --now gnosia-learn-studio.service" "disable --now gnosia-learn.service"
+    check "serve off before stops"      before "tailscale serve --https=8107 off" "disable --now gnosia-learn.service"
     check "app inactive"                [ ! -f "$STATE_DIR/web_active" ]
-    check "unit files kept"             [ -f "$(UNIT_DIR)/self-learn.service" ] && [ -f "$(UNIT_DIR)/self-learn-deploy.timer" ]
+    check "unit files kept"             [ -f "$(UNIT_DIR)/gnosia-learn.service" ] && [ -f "$(UNIT_DIR)/gnosia-learn-deploy.timer" ]
     check "no daemon-reload"            no_call "daemon-reload"
   else
-    check "web agent unloaded"          calls_have "launchctl bootout gui/.*/com.self-learn.web"
-    check "deploy before web"           before "bootout gui/.*/com.self-learn.deploy" "bootout gui/.*/com.self-learn.web"
+    check "web agent unloaded"          calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+    check "deploy before web"           before "bootout gui/.*/com.gnosia-learn.deploy" "bootout gui/.*/com.gnosia-learn.web"
     local a
     for a in deploy export studio web; do
-      check "$a agent disabled (no reload at login)" calls_have "launchctl disable gui/.*/com.self-learn.$a"
+      check "$a agent disabled (no reload at login)" calls_have "launchctl disable gui/.*/com.gnosia-learn.$a"
     done
   fi
   check "clone kept"                    [ -d "$(REPO_DIR)/.git" ]
   check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
   check "studio state kept"             [ -f "$(SVC_HOME)/studio/jobs/wal" ]
-  check "exports kept"                  [ -f "$HOME/.self-learn/archive/latest/catalog.json" ]
+  check "exports kept"                  [ -f "$HOME/.gnosia/archive/latest/catalog.json" ]
   check ".env kept"                     [ -f "$SVC/.env" ]
   check "torn-down marker written"      [ -f "$(SVC_HOME)/state/torn-down" ]
   check "says how to bring it back"     out_has "./setup.sh brings it back"
@@ -1274,8 +1343,8 @@ test_teardown_then_setup_restores() {
   check "marker consumed"               [ ! -f "$(SVC_HOME)/state/torn-down" ]
   check "app marked active again"       [ -f "$STATE_DIR/web_active" ]
   if [ "$OS" = "Linux" ]; then
-    check "app restarted"               calls_have "systemctl --user restart self-learn"
-    check "timers re-enabled"           calls_have "systemctl --user enable --now self-learn-deploy.timer"
+    check "app restarted"               calls_have "systemctl --user restart gnosia-learn"
+    check "timers re-enabled"           calls_have "systemctl --user enable --now gnosia-learn-deploy.timer"
   fi
   check "serve republished"             calls_have "tailscale serve --bg --https=8107"
   # A later plain stop is the owner's again.
@@ -1294,16 +1363,16 @@ test_teardown_then_start_and_stop() {
   # What the launcher's Start button does: the stubs run the unit's
   # ExecStartPre / the agent's ProgramArguments, which clear the marker.
   if [ "$OS" = "Linux" ]; then
-    check "unit clears marker on start" grep -q '^ExecStartPre=-/bin/rm -f .*/state/torn-down' "$(UNIT_DIR)/self-learn.service"
-    PATH="$STUBS:$PATH" systemctl --user start self-learn.service >/dev/null
+    check "unit clears marker on start" grep -q '^ExecStartPre=-/bin/rm -f .*/state/torn-down' "$(UNIT_DIR)/gnosia-learn.service"
+    PATH="$STUBS:$PATH" systemctl --user start gnosia-learn.service >/dev/null
     check "start consumed the marker"   [ ! -f "$(SVC_HOME)/state/torn-down" ]
-    PATH="$STUBS:$PATH" systemctl --user stop self-learn.service >/dev/null
+    PATH="$STUBS:$PATH" systemctl --user stop gnosia-learn.service >/dev/null
   else
-    check "agent clears marker on load" grep -qF 'rm -f "$1"; exec "$2" run start' "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
-    check "agent passes marker path"    grep -q '<string>.*/state/torn-down</string>' "$HOME/Library/LaunchAgents/com.self-learn.web.plist"
-    PATH="$STUBS:$PATH" launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.self-learn.web.plist" >/dev/null
+    check "agent clears marker on load" grep -qF 'rm -f "$1"; exec "$2" run start' "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    check "agent passes marker path"    grep -q '<string>.*/state/torn-down</string>' "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    PATH="$STUBS:$PATH" launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist" >/dev/null
     check "load consumed the marker"    [ ! -f "$(SVC_HOME)/state/torn-down" ]
-    PATH="$STUBS:$PATH" launchctl bootout "gui/$(id -u)/com.self-learn.web" >/dev/null
+    PATH="$STUBS:$PATH" launchctl bootout "gui/$(id -u)/com.gnosia-learn.web" >/dev/null
   fi
   : > "$CALLS_LOG"
   run_deploy
@@ -1449,14 +1518,14 @@ test_teardown_purge() {
   echo "• teardown --purge: typed confirmation, then volume, state, units, .env and marker go"
   deployed
   mkdir -p "$(UNIT_DIR)"; echo keep > "$(UNIT_DIR)/neighbour.service"
-  run_teardown --purge "self-lear"
+  run_teardown --purge "gnosia-lear"
   check "wrong name: exits non-zero"    [ "$CODE" -ne 0 ]
   check "wrong name: nothing changed"   untouched
   check "wrong name: state kept"        [ -f "$(SVC_HOME)/state/built-sha" ]
   check "wrong name: no marker written" [ ! -f "$(SVC_HOME)/state/torn-down" ]
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "exits zero"                    [ "$CODE" -eq 0 ]
-  check "warns where the exports are"   out_has "$HOME/.self-learn/archive"
+  check "warns where the exports are"   out_has "$HOME/.gnosia/archive"
   check "serve off for :8107"           calls_have "tailscale serve --https=8107 off"
   check "no docker touched"             no_call "^docker "
   check "clone gone"                    [ ! -e "$(REPO_DIR)" ]
@@ -1466,19 +1535,19 @@ test_teardown_purge() {
   check ".env gone"                     [ ! -f "$SVC/.env" ]
   check "marker dir gone"               [ ! -e "$(SVC_HOME)" ]
   check "services dir itself kept"      [ -d "$HOME/services" ]
-  check "exports kept"                  [ -f "$HOME/.self-learn/archive/latest/catalog.json" ]
-  check "blobs kept"                    [ -f "$HOME/.self-learn/blobs/b1" ]
-  check "vault kept"                    [ -d "$HOME/.self-learn/vault" ]
-  check "catalog.db kept"               [ -f "$HOME/.self-learn/catalog.db" ]
+  check "exports kept"                  [ -f "$HOME/.gnosia/archive/latest/catalog.json" ]
+  check "blobs kept"                    [ -f "$HOME/.gnosia/blobs/b1" ]
+  check "vault kept"                    [ -d "$HOME/.gnosia/vault" ]
+  check "catalog.db kept"               [ -f "$HOME/.gnosia/catalog.db" ]
   check "repo files kept"               [ -f "$SVC/setup.sh" ] && [ -f "$SVC/deploy.sh" ]
   if [ "$OS" = "Linux" ]; then
     local u
-    for u in self-learn.service self-learn-studio.service self-learn-deploy.service \
-             self-learn-deploy.timer self-learn-export.service self-learn-export.timer; do
+    for u in gnosia-learn.service gnosia-learn-studio.service gnosia-learn-deploy.service \
+             gnosia-learn-deploy.timer gnosia-learn-export.service gnosia-learn-export.timer; do
       check "unit $u gone"              [ ! -e "$(UNIT_DIR)/$u" ]
     done
     check "neighbour unit kept"         [ -f "$(UNIT_DIR)/neighbour.service" ]
-    check "daemon-reload after"         before "disable --now self-learn.service" "systemctl --user daemon-reload"
+    check "daemon-reload after"         before "disable --now gnosia-learn.service" "systemctl --user daemon-reload"
   fi
   teardown
 }
@@ -1487,7 +1556,7 @@ test_teardown_purge_missing_data_dir() {
   echo "• teardown --purge: state already gone is fine"
   deployed
   rm -rf "$(SVC_HOME)"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check ".env gone"                     [ ! -f "$SVC/.env" ]
   check "no docker touched"             no_call "^docker "
@@ -1495,24 +1564,24 @@ test_teardown_purge_missing_data_dir() {
 }
 
 test_teardown_purge_refuses_odd_paths() {
-  echo "• teardown --purge: refuses a SERVICE_HOME outside ~/services/self-learn"
+  echo "• teardown --purge: refuses a SERVICE_HOME outside ~/services/gnosia-learn"
   deployed
   set_service_home "$HOME"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "\$HOME: exits non-zero"        [ "$CODE" -ne 0 ]
-  check "  home untouched"              [ -d "$HOME/.self-learn" ]
+  check "  home untouched"              [ -d "$HOME/.gnosia" ]
   check "  nothing changed"             untouched
   set_service_home "$HOME/services/../x"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "'..' refused"                  [ "$CODE" -ne 0 ]
   set_service_home "$HOME/services/"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "services dir itself refused"   [ "$CODE" -ne 0 ]
   mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
   local dotted
-  for dotted in "$HOME/services/." "$HOME/services/./self-learn" "$HOME/services/self-learn/.."; do
+  for dotted in "$HOME/services/." "$HOME/services/./gnosia-learn" "$HOME/services/gnosia-learn/.."; do
     set_service_home "$dotted"
-    run_teardown --purge "self-learn"
+    run_teardown --purge "gnosia-learn"
     check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
   done
   check "neighbour data never touched"  [ -f "$HOME/services/neighbour/keep" ]
@@ -1526,12 +1595,12 @@ test_teardown_purge_trailing_slashes() {
   deployed
   set_service_home "$HOME/services//"
   mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "neighbour data kept"           [ -f "$HOME/services/neighbour/keep" ]
   ln -s "$HOME/services" "$HOME/services/alias"
   set_service_home "$HOME/services/alias"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "symlink to services refused"   [ "$CODE" -ne 0 ]
   check "neighbour still kept"          [ -f "$HOME/services/neighbour/keep" ]
   check "nothing changed"               untouched
@@ -1541,31 +1610,31 @@ test_teardown_purge_trailing_slashes() {
 test_teardown_home_variable_in_env() {
   echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
   deployed
-  sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/self-learn"#' "$SVC/.env"
-  run_teardown --purge "self-learn"
+  sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/gnosia-learn"#' "$SVC/.env"
+  run_teardown --purge "gnosia-learn"
   check "\${HOME} form: exits zero"     [ "$CODE" -eq 0 ]
   check "  state gone"                  [ ! -e "$(SVC_HOME)" ]
   teardown
   deployed
-  sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME='\$HOME/services/self-learn'#" "$SVC/.env"
-  run_teardown --purge "self-learn"
+  sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME='\$HOME/services/gnosia-learn'#" "$SVC/.env"
+  run_teardown --purge "gnosia-learn"
   check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
   teardown
 }
 
 test_teardown_purge_own_dir_only() {
-  echo "• teardown --purge: only ~/services/self-learn itself or inside it"
+  echo "• teardown --purge: only ~/services/gnosia-learn itself or inside it"
   deployed
   mkdir -p "$HOME/services/neighbour/state"; echo x > "$HOME/services/neighbour/state/keep"
   set_service_home "$HOME/services/neighbour"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "another service's dir refused" [ "$CODE" -ne 0 ]
   check "  its data kept"               [ -f "$HOME/services/neighbour/state/keep" ]
   check "  nothing changed"             untouched
-  mkdir -p "$HOME/services/self-learn/a:b"
-  set_service_home "$HOME/services/self-learn/a:b"
-  run_teardown --purge "self-learn"
+  mkdir -p "$HOME/services/gnosia-learn/a:b"
+  set_service_home "$HOME/services/gnosia-learn/a:b"
+  run_teardown --purge "gnosia-learn"
   check "a colon in the path refused"   [ "$CODE" -ne 0 ]
   teardown
 }
@@ -1577,26 +1646,26 @@ test_teardown_purge_services_root_is_a_link() {
   mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
   rmdir "$HOME/services"
   ln -s "$HOME" "$HOME/services"
-  mkdir -p "$HOME/self-learn/state"; echo x > "$HOME/self-learn/state/keep"
-  run_teardown --purge "self-learn"
+  mkdir -p "$HOME/gnosia-learn/state"; echo x > "$HOME/gnosia-learn/state/keep"
+  run_teardown --purge "gnosia-learn"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
-  check "nothing in \$HOME deleted"      [ -f "$HOME/self-learn/state/keep" ]
+  check "nothing in \$HOME deleted"      [ -f "$HOME/gnosia-learn/state/keep" ]
   check "nothing changed"               untouched
   rm -f "$HOME/services"
   teardown
 }
 
 test_teardown_purge_keeps_a_checkout_inside() {
-  echo "• teardown --purge: a checkout living inside ~/services/self-learn survives"
+  echo "• teardown --purge: a checkout living inside ~/services/gnosia-learn survives"
   deployed
-  local repo="$HOME/services/self-learn/setup-server/services/self-learn"
+  local repo="$HOME/services/gnosia-learn/setup-server/services/gnosia-learn"
   mkdir -p "$repo"
   cp -R "$SVC/." "$repo/"
-  echo secret > "$HOME/services/self-learn/setup-server/other.env"
-  OUT="$(printf '%s\n' "self-learn" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  echo secret > "$HOME/services/gnosia-learn/setup-server/other.env"
+  OUT="$(printf '%s\n' "gnosia-learn" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "checkout intact"               [ -f "$repo/teardown.sh" ]
-  check "other services' files kept"    [ -f "$HOME/services/self-learn/setup-server/other.env" ]
+  check "other services' files kept"    [ -f "$HOME/services/gnosia-learn/setup-server/other.env" ]
   check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
   teardown
 }
@@ -1604,46 +1673,56 @@ test_teardown_purge_keeps_a_checkout_inside() {
 test_teardown_purge_symlinked_clone() {
   echo "• teardown --purge: a repo/ symlinked to a working clone in ~/dev is refused"
   deployed
-  mkdir -p "$HOME/dev/self-learn"; echo mine > "$HOME/dev/self-learn/WORK"
-  rm -rf "$(REPO_DIR)"; ln -s "$HOME/dev/self-learn" "$(REPO_DIR)"
-  run_teardown --purge "self-learn"
+  mkdir -p "$HOME/dev/gnosia-learn"; echo mine > "$HOME/dev/gnosia-learn/WORK"
+  rm -rf "$(REPO_DIR)"; ln -s "$HOME/dev/gnosia-learn" "$(REPO_DIR)"
+  run_teardown --purge "gnosia-learn"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
-  check "working clone intact"          [ -f "$HOME/dev/self-learn/WORK" ]
+  check "working clone intact"          [ -f "$HOME/dev/gnosia-learn/WORK" ]
   check "nothing changed"               untouched
   check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
   teardown
 }
 
-test_teardown_purge_keeps_self_learn_home() {
-  echo "• teardown --purge: a SELF_LEARN_HOME inside a purged dir is refused"
+test_teardown_purge_keeps_data_root() {
+  echo "• teardown --purge: a data root inside a purged dir is refused"
   deployed
   mkdir -p "$(SVC_HOME)/state/blobs"
-  sed -i.bak "s#^SELF_LEARN_HOME=.*#SELF_LEARN_HOME=$(SVC_HOME)/state/blobs#" "$SVC/.env"
-  run_teardown --purge "self-learn"
+  sed -i.bak "s#^GNOSIA_HOME=.*#GNOSIA_HOME=$(SVC_HOME)/state/blobs#" "$SVC/.env"
+  run_teardown --purge "gnosia-learn"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "says why"                      out_has "refusing to delete the blob store"
   check "nothing changed"               untouched
   teardown
+  # Same refusal when an old .env names the root only SELF_LEARN_HOME.
+  deployed
+  mkdir -p "$(SVC_HOME)/state/blobs"
+  sed -i.bak '/^GNOSIA_HOME=/d' "$SVC/.env"
+  echo "SELF_LEARN_HOME=$(SVC_HOME)/state/blobs" >> "$SVC/.env"
+  run_teardown --purge "gnosia-learn"
+  check "legacy var: exits non-zero"    [ "$CODE" -ne 0 ]
+  check "  says why"                    out_has "refusing to delete the blob store"
+  check "  nothing changed"             untouched
+  teardown
 }
 
 test_teardown_foreign_sync_unit() {
-  echo "• teardown: sync.sh's self-learn-seafile unit is never touched; purge refused while it exists"
+  echo "• teardown: sync.sh's gnosia-learn-seafile unit is never touched; purge refused while it exists"
   deployed
   mkdir -p "$(UNIT_DIR)" "$(SVC_HOME)/seafile/ccnet"
-  echo unit > "$(UNIT_DIR)/self-learn-seafile.service"
+  echo unit > "$(UNIT_DIR)/gnosia-learn-seafile.service"
   if [ "$OS" != "Linux" ]; then
     mkdir -p "$HOME/Library/LaunchAgents"
-    echo agent > "$HOME/Library/LaunchAgents/com.self-learn.seafile.plist"
+    echo agent > "$HOME/Library/LaunchAgents/com.gnosia-learn.seafile.plist"
   fi
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "purge: exits non-zero"         [ "$CODE" -ne 0 ]
-  check "purge: names the unit"         out_has "self-learn-seafile.service\|com.self-learn.seafile"
+  check "purge: names the unit"         out_has "gnosia-learn-seafile.service\|com.gnosia-learn.seafile"
   check "purge: nothing changed"        untouched
   run_teardown
   check "default: exits zero"           [ "$CODE" -eq 0 ]
   check "default: warns, naming it"     out_has "Not touched (not created by setup.sh): .*seafile"
   check "unit never addressed"          no_call "seafile"
-  check "unit file kept"                [ -f "$(UNIT_DIR)/self-learn-seafile.service" ]
+  check "unit file kept"                [ -f "$(UNIT_DIR)/gnosia-learn-seafile.service" ]
   check "daemon state kept"             [ -d "$(SVC_HOME)/seafile/ccnet" ]
   teardown
 }
@@ -1652,7 +1731,7 @@ test_teardown_purge_sync_credentials() {
   echo "• teardown --purge: refused while .env holds sync.sh's Seafile account"
   deployed
   printf '\n# --- blob/db sync (written by sync.sh install) ---\nSEAFILE_SYNC_USER=sync@x.local\nSEAFILE_SYNC_PASSWORD=pw\n' >> "$SVC/.env"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "says why"                      out_has "SEAFILE_SYNC_USER"
   check "nothing changed"               untouched
@@ -1663,7 +1742,7 @@ test_teardown_purge_keeps_unknown_entries() {
   echo "• teardown --purge: entries setup.sh did not create stay, and so does the marker"
   deployed
   mkdir -p "$(SVC_HOME)/seafile"; echo x > "$(SVC_HOME)/seafile/left"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check "foreign entry kept"            [ -f "$(SVC_HOME)/seafile/left" ]
   check "state gone"                    [ ! -e "$(SVC_HOME)/state" ]
@@ -1686,7 +1765,7 @@ test_teardown_waits_for_lock() {
   check "  says it is starting"         out_has "just starting"
   check "  nothing changed"             untouched
   echo 999999 > "$(SVC_HOME)/.deploy.lock/pid"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "stale lock: exits zero"        [ "$CODE" -eq 0 ]
   check "  lock purged with the rest"   [ ! -e "$(SVC_HOME)/.deploy.lock" ]
   teardown
@@ -1712,11 +1791,11 @@ test_teardown_holds_lock() {
   run_teardown
   check "stale lock with started file: exits zero" [ "$CODE" -eq 0 ]
   check "  whole lock dir cleared"      [ ! -e "$(SVC_HOME)/.deploy.lock" ]
-  run_teardown --purge "self-lear"
+  run_teardown --purge "gnosia-lear"
   check "a run that dies (wrong name) exits non-zero" [ "$CODE" -ne 0 ]
   check "  still drops the lock"        [ ! -e "$(SVC_HOME)/.deploy.lock" ]
   rm -f "$STATE_DIR/lock_at_down"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "purge: exits zero"             [ "$CODE" -eq 0 ]
   check "  lock held during down -v"    grep -q "^live " "$STATE_DIR/lock_at_down"
   check "  lock gone"                   [ ! -e "$(SVC_HOME)/.deploy.lock" ]
@@ -1763,7 +1842,7 @@ test_teardown_marker_refusals() {
   mkdir -p "$HOME/outside/state"; echo precious > "$HOME/outside/state/torn-down"
   set_service_home "$HOME/outside"
   run_teardown
-  check "SERVICE_HOME outside ~/services/self-learn: exits zero" [ "$CODE" -eq 0 ]
+  check "SERVICE_HOME outside ~/services/gnosia-learn: exits zero" [ "$CODE" -eq 0 ]
   check "  warns, no marker"            out_has "not writing the torn-down marker"
   check "  file there not truncated"    [ "$(cat "$HOME/outside/state/torn-down")" = precious ]
   check "  no marker in the real state" [ ! -e "$(SVC_HOME)/state/torn-down" ]
@@ -1795,12 +1874,12 @@ test_teardown_unresolved_variable() {
   echo "• teardown: a path in .env that still names another variable is refused before anything changes"
   deployed
   # setup.sh sources .env, so to it this is state/content, inside a dir the
-  # purge deletes; left literal, the keep-SELF_LEARN_HOME check tests nothing.
+  # purge deletes; left literal, the keep-data-root check tests nothing.
   mkdir -p "$(SVC_HOME)/state/content"; echo blob > "$(SVC_HOME)/state/content/b1"
-  sed -i.bak 's#^SELF_LEARN_HOME=.*#SELF_LEARN_HOME=$SERVICE_HOME/state/content#' "$SVC/.env"
-  run_teardown --purge "self-learn"
-  check "SELF_LEARN_HOME=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  says why"                    out_has "SELF_LEARN_HOME .*still refers to another variable"
+  sed -i.bak 's#^GNOSIA_HOME=.*#GNOSIA_HOME=$SERVICE_HOME/state/content#' "$SVC/.env"
+  run_teardown --purge "gnosia-learn"
+  check "GNOSIA_HOME=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                    out_has "GNOSIA_HOME .*still refers to another variable"
   check "  refused before the prompt"   out_lacks "to confirm"
   check "  content kept"                [ -f "$(SVC_HOME)/state/content/b1" ]
   check "  nothing changed"             untouched
@@ -1811,7 +1890,7 @@ test_teardown_unresolved_variable() {
   teardown
   deployed
   sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/${NAME}"#' "$SVC/.env"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "SERVICE_HOME=...\${NAME}: exits non-zero" [ "$CODE" -ne 0 ]
   check "  nothing changed"             untouched
   teardown
@@ -1823,14 +1902,14 @@ test_teardown_lock_after_prompt() {
   deployed
   lock="$(SVC_HOME)/.deploy.lock"
   printf '%s' "$lock" > "$STATE_DIR/lock_probe"
-  run_purge_at_prompt "self-learn" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
+  run_purge_at_prompt "gnosia-learn" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check "  lock not held while the prompt waits" grep -qx free "$STATE_DIR/lock_at_prompt"
   check "  held by a live pid during down -v" grep -q "^live " "$STATE_DIR/lock_at_down"
   teardown
   deployed
   lock="$(SVC_HOME)/.deploy.lock"
-  run_purge_at_prompt "self-learn" "mkdir '$lock' && echo \$\$ > '$lock/pid'"
+  run_purge_at_prompt "gnosia-learn" "mkdir '$lock' && echo \$\$ > '$lock/pid'"
   check "a deploy/sync that starts during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
   check "  says who holds it"           out_has "holds .*deploy.lock"
   check "  nothing changed"             untouched
@@ -1839,7 +1918,7 @@ test_teardown_lock_after_prompt() {
   deployed
   lock="$(SVC_HOME)/.deploy.lock"
   mkdir -p "$lock"; echo 999999 > "$lock/pid"
-  run_purge_at_prompt "self-learn" "[ -f '$lock/pid' ] && echo kept > '$STATE_DIR/lock_at_prompt' || echo cleared > '$STATE_DIR/lock_at_prompt'"
+  run_purge_at_prompt "gnosia-learn" "[ -f '$lock/pid' ] && echo kept > '$STATE_DIR/lock_at_prompt' || echo cleared > '$STATE_DIR/lock_at_prompt'"
   check "stale lock: exits zero"        [ "$CODE" -eq 0 ]
   check "  not cleared before the answer" grep -qx kept "$STATE_DIR/lock_at_prompt"
   check "  cleared after it"            out_has "Cleared a stale deploy lock"
@@ -1847,14 +1926,14 @@ test_teardown_lock_after_prompt() {
   deployed
   lock="$(SVC_HOME)/.deploy.lock"
   mkdir -p "$lock"; echo 999999 > "$lock/pid"
-  run_teardown --purge "self-lear"
+  run_teardown --purge "gnosia-lear"
   check "wrong name with a stale lock: exits non-zero" [ "$CODE" -ne 0 ]
   check "  stale lock not touched (nothing changed)" [ "$(cat "$lock/pid")" = 999999 ]
   teardown
 }
 
 test_teardown_foreign_units_by_content() {
-  echo "• teardown: a unit/agent whose contents name ~/services/self-learn is listed, never touched; purge refused"
+  echo "• teardown: a unit/agent whose contents name ~/services/gnosia-learn is listed, never touched; purge refused"
   # teardown scans the unit dir on Linux and ~/Library/LaunchAgents on
   # macOS, so the fixture goes where this OS's branch looks.
   local dir job other ext=""
@@ -1865,10 +1944,10 @@ test_teardown_foreign_units_by_content() {
     dir="$HOME/Library/LaunchAgents"; job="com.me.nightly-backup"; other="com.me.unrelated"; ext=".plist"
   fi
   mkdir -p "$dir"
-  printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/self-learn/studio/ /backup/\n' "$HOME" \
+  printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/gnosia-learn/studio/ /backup/\n' "$HOME" \
     > "$dir/$job$ext"
   printf '[Service]\nExecStart=/bin/true\n' > "$dir/$other$ext"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "purge: exits non-zero"         [ "$CODE" -ne 0 ]
   check "  names it"                    out_has "$job"
   check "  nothing changed"             untouched
@@ -1886,7 +1965,7 @@ test_teardown_purge_rechecked_after_lock() {
   local dir job ext=""
   deployed
   rm -rf "$(REPO_DIR)"
-  run_purge_at_prompt "self-learn" "mkdir -p '$(REPO_DIR)/.git'"
+  run_purge_at_prompt "gnosia-learn" "mkdir -p '$(REPO_DIR)/.git'"
   check "repo/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
   check "  says the list changed"       out_has "changed while the prompt waited"
   check "  nothing changed"             untouched
@@ -1895,7 +1974,7 @@ test_teardown_purge_rechecked_after_lock() {
   teardown
   deployed
   mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
-  run_purge_at_prompt "self-learn" "rm -rf '$(SVC_HOME)/studio' && ln -s '$HOME/elsewhere' '$(SVC_HOME)/studio'"
+  run_purge_at_prompt "gnosia-learn" "rm -rf '$(SVC_HOME)/studio' && ln -s '$HOME/elsewhere' '$(SVC_HOME)/studio'"
   check "studio/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
   check "  refuses the link"            out_has "studio is a symlink"
   check "  nothing changed"             untouched
@@ -1903,11 +1982,11 @@ test_teardown_purge_rechecked_after_lock() {
   teardown
   deployed
   if [ "$OS" = "Linux" ]; then
-    dir="$(UNIT_DIR)"; job="self-learn-seafile.service"
+    dir="$(UNIT_DIR)"; job="gnosia-learn-seafile.service"
   else
-    dir="$HOME/Library/LaunchAgents"; job="com.self-learn.seafile"; ext=".plist"
+    dir="$HOME/Library/LaunchAgents"; job="com.gnosia-learn.seafile"; ext=".plist"
   fi
-  run_purge_at_prompt "self-learn" "mkdir -p '$dir' && echo unit > '$dir/$job$ext'"
+  run_purge_at_prompt "gnosia-learn" "mkdir -p '$dir' && echo unit > '$dir/$job$ext'"
   check "blob link installed during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
   check "  names it"                    out_has "--purge refused: $job"
   check "  nothing changed"             untouched
@@ -1923,30 +2002,30 @@ test_teardown_macos_agents() {
   deployed
   export FAKE_UNAME=Darwin
   mkdir -p "$STATE_DIR/launchd"
-  for a in deploy export web; do touch "$STATE_DIR/launchd/com.self-learn.$a"; done
+  for a in deploy export web; do touch "$STATE_DIR/launchd/com.gnosia-learn.$a"; done
   mkdir -p "$HOME/Library/LaunchAgents"
-  printf '<string>%s/services/self-learn/bin/deploy.sh</string>\n' "$HOME" \
+  printf '<string>%s/services/gnosia-learn/bin/deploy.sh</string>\n' "$HOME" \
     > "$HOME/Library/LaunchAgents/com.me.backup.plist"
   run_teardown
   check "exits zero"                    [ "$CODE" -eq 0 ]
   for a in deploy export web; do
-    check "loaded $a agent booted out"  calls_have "launchctl bootout gui/.*/com.self-learn.$a"
+    check "loaded $a agent booted out"  calls_have "launchctl bootout gui/.*/com.gnosia-learn.$a"
   done
-  check "studio (not loaded) not booted out" no_call "launchctl bootout gui/.*/com.self-learn.studio"
+  check "studio (not loaded) not booted out" no_call "launchctl bootout gui/.*/com.gnosia-learn.studio"
   for a in deploy export studio web; do
-    check "$a agent disabled"           calls_have "launchctl disable gui/.*/com.self-learn.$a"
+    check "$a agent disabled"           calls_have "launchctl disable gui/.*/com.gnosia-learn.$a"
   done
-  check "deploy before web"             before "bootout gui/.*/com.self-learn.deploy" "bootout gui/.*/com.self-learn.web"
+  check "deploy before web"             before "bootout gui/.*/com.gnosia-learn.deploy" "bootout gui/.*/com.gnosia-learn.web"
   check "no systemctl"                  no_call "systemctl"
   check "agent named by contents"       out_has "Not touched (not created by setup.sh): com.me.backup"
   teardown
   deployed
   export FAKE_UNAME=Darwin
-  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.self-learn.web"
+  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.gnosia-learn.web"
   touch "$STATE_DIR/launchd_bootout_fails"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  says so"                     out_has "Could not unload LaunchAgent com.self-learn.web"
+  check "  says so"                     out_has "Could not unload LaunchAgent com.gnosia-learn.web"
   check "  deletion not reached"        [ -d "$(REPO_DIR)/.git" ]
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
   check "  .env kept"                   [ -f "$SVC/.env" ]
@@ -1954,7 +2033,7 @@ test_teardown_macos_agents() {
   teardown
   deployed
   export FAKE_UNAME=Darwin
-  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.self-learn.web"
+  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.gnosia-learn.web"
   echo async > "$STATE_DIR/launchd_bootout_fails"
   run_teardown
   check "bootout errors but the agent unloads: exits zero" [ "$CODE" -eq 0 ]
@@ -1963,7 +2042,7 @@ test_teardown_macos_agents() {
   export FAKE_UNAME=Darwin
   mkdir -p "$STATE_DIR/launchd"
   touch "$STATE_DIR/launchd_disable_fails"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
   check "  says it would reload"        out_has "would load again at the next login"
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
@@ -1972,7 +2051,7 @@ test_teardown_macos_agents() {
   deployed
   export FAKE_UNAME=Darwin
   mkdir -p "$STATE_DIR/launchd"
-  run_teardown --purge "self-learn"
+  run_teardown --purge "gnosia-learn"
   check "purge on macOS: exits zero"    [ "$CODE" -eq 0 ]
   check "  state gone"                  [ ! -e "$(SVC_HOME)/state" ]
   check "  no daemon-reload"            no_call "daemon-reload"
@@ -2011,6 +2090,8 @@ test_sync_install_idempotent
 test_sync_install_old_layout
 test_sync_install_already_linked
 test_sync_mac_setup_gui
+test_sync_mac_setup_legacy_lib_name
+test_sync_mac_setup_daemon_down
 test_sync_mac_setup_headless
 test_sync_push
 test_sync_push_quiet_mac
@@ -2018,6 +2099,7 @@ test_sync_push_no_sqlite3
 test_sync_push_no_local_db
 test_sync_pull
 test_sync_pull_old_env
+test_sync_pull_new_env
 test_sync_pull_no_remote_db
 test_sync_pull_no_mac_sqlite3
 test_sync_pull_no_mac_sqlite3_app_running
@@ -2049,7 +2131,7 @@ test_teardown_purge_own_dir_only
 test_teardown_purge_services_root_is_a_link
 test_teardown_purge_keeps_a_checkout_inside
 test_teardown_purge_symlinked_clone
-test_teardown_purge_keeps_self_learn_home
+test_teardown_purge_keeps_data_root
 test_teardown_foreign_sync_unit
 test_teardown_purge_sync_credentials
 test_teardown_purge_keeps_unknown_entries

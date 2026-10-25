@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # launchctl stub (used when the mocked suite runs on macOS, or fakes it with
 # FAKE_UNAME=Darwin): logs and tracks agent loaded state in $STATE_DIR —
-# web_active for com.self-learn.web (and anything else, matching the
+# web_active for com.gnosia-learn.web (and anything else, matching the
 # historical single-marker behaviour), studio_active for
-# com.self-learn.studio. When $STATE_DIR/launchd/ exists (teardown tests),
+# com.gnosia-learn.studio. When $STATE_DIR/launchd/ exists (teardown tests),
 # each label has its own marker there instead: launchd/<label>.
 # Failure switches:
 #   launchd_bootout_fails  — exists => `bootout` fails and the agent stays
@@ -34,7 +34,7 @@ case "${1:-}" in
     [ ! -f "$STATE_DIR/launchd_disable_fails" ] || exit 1
     ;;
   bootstrap|kickstart)
-    # launchd runs the agent's ProgramArguments on load; com.self-learn.web's
+    # launchd runs the agent's ProgramArguments on load; com.gnosia-learn.web's
     # is an `sh -c` wrapper that clears teardown's torn-down marker first —
     # running it here keeps a stubbed bootstrap faithful.
     plist="${*: -1}"

@@ -8,9 +8,26 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Changed
+
+- **self-learn renamed to gnosia-learn**, matching upstream's rename of
+  the app to Gnosia: the service dir, launcher key and icon, systemd
+  units and LaunchAgents (`self-learn*` → `gnosia-learn*`,
+  `com.self-learn.*` → `com.gnosia-learn.*`), Kuma monitors, the Seafile
+  sync account and library defaults (`gnosia-learn-sync@`,
+  `gnosia-learn-blobs`) and the `--purge` confirmation name all follow,
+  and the launcher tile now reads "Gnosia". `GNOSIA_HOME` becomes the
+  canonical data-root name — a fresh `.env` writes only it, defaulting
+  to upstream's own `~/.gnosia` — while `SELF_LEARN_HOME` in an existing
+  `.env` is still honoured, so a pre-rename install keeps its
+  `~/.self-learn` root, its `SEAFILE_SYNC_REPO` library and its
+  `~/services/self-learn` service home with no data move (`.env` is the
+  source of truth). The upstream Git repo itself is still
+  `c-wenlong/self-learn`.
+
 ### Fixed
 
-- **self-learn deploys died at `catalog migrate` after upstream's
+- **gnosia-learn deploys died at `catalog migrate` after upstream's
   Postgres→SQLite migration.** The gnosia catalog is now one SQLite
   file and refuses a `postgres://` `DATABASE_URL` — the value this
   service's `.env` wrote and every deploy stamped into the checkout.
@@ -27,9 +44,9 @@ first, dated by merge.
   the app and export units/LaunchAgents carry
   `GNOSIA_HOME`/`CATALOG_DB`, and the launcher's control list drops
   `self-learn-db`. Bringing the laptop's data over is now a `catalog.db`
-  file copy, and because the file lives under `~/.self-learn`,
-  `teardown.sh --purge` keeps it the way it already kept blobs and the
-  nightly exports.
+  file copy, and because the file lives under the same data root as
+  blobs and the nightly exports, `teardown.sh --purge` keeps it the way
+  it already kept them.
 
 ### Security
 
@@ -41,7 +58,7 @@ first, dated by merge.
   use `homeserver.tail-name.ts.net`, test fixtures keep the suites'
   `test-host.tailfake.ts.net` / `100.77.77.77`, and the admin defaults
   are `admin@example.com` / `Admin` / `User` / `admin`. Beszel's system
-  name derives from `hostname`, self-learn's Mac Postgres URL from the
+  name derives from `hostname`, gnosia-learn's Mac Postgres URL from the
   ssh login, and monitoring's `adguard-dns` monitor resolves
   `tailscale ip -4` in setup.sh (unset ⇒ the monitor is skipped, never
   pointed at a made-up address). Test comments that read
@@ -87,7 +104,7 @@ first, dated by merge.
   longer dies on the empty-array length read under macOS's Bash 3.2 —
   halfway through, after the data but before `.env`.
 
-- **A live deploy can no longer lose self-learn's lock to the 60-minute
+- **A live deploy can no longer lose gnosia-learn's lock to the 60-minute
   rule.** `deploy.sh`, `sync.sh` and `teardown.sh` reclaimed
   `.deploy.lock` on age alone, so a deploy or restore still running past
   the bound got raced by the next invocation — the thing the lock exists
@@ -99,7 +116,7 @@ first, dated by merge.
   never written self-clears past the two-minute write window. Locks
   written by older holders keep the pid-plus-60-minute rule.
 
-- **A launcher Start after Remove no longer fools the next `self-learn`
+- **A launcher Start after Remove no longer fools the next `gnosia-learn`
   setup.sh into restarting the app.** A plain teardown writes
   `state/torn-down` so the next setup brings the stack back, but starting
   and then stopping the app in between (launcher, phone or `systemctl`)
@@ -158,7 +175,7 @@ first, dated by merge.
   each instead. It never runs `paperclipai uninstall`.
 
 - **teardown.sh for the four systemd-poller services**: kaichenpedia,
-  design-systems, sources and self-learn, so each gets the launcher's
+  design-systems, sources and gnosia-learn, so each gets the launcher's
   Remove button. They stop and disable the units setup.sh writes (timers
   before their services) and warn about, but never touch, other units
   that mention the service. On purge, the unit files go too, followed by
@@ -166,9 +183,9 @@ first, dated by merge.
   bootout, and setup.sh `launchctl enable`s it before bootstrap, so a
   removed app does not return at the next login. design-systems and sources
   refuse a relative `SOURCE_REPO` and never delete a clone that holds the
-  checkout. self-learn holds the deploy lock for the whole run, writes a
+  checkout. gnosia-learn holds the deploy lock for the whole run, writes a
   `state/torn-down` marker so the next `./setup.sh` starts it again, and
-  refuses `--purge` while self-learn-seafile.service exists or
+  refuses `--purge` while gnosia-learn-seafile.service exists or
   `SEAFILE_SYNC_USER` is set.
 
 - **teardown.sh for remote-desktop**, so it gets the launcher's Remove
@@ -337,7 +354,7 @@ first, dated by merge.
 
 - **Stopped apps no longer come back after a reboot.** The 15 compose files
   that set `restart: always` (appflowy, coolify, firefly-iii, forgejo,
-  home-assistant, immich, jellyfin, metabase, openhands, plane, self-learn,
+  home-assistant, immich, jellyfin, metabase, openhands, plane, gnosia-learn,
   stirling-pdf, trigger-dev, umami, vaultwarden) now use `unless-stopped` on
   every service. `always` restarts a container whenever dockerd starts, even
   after the `docker stop` the launcher and ntfy-control use, so the

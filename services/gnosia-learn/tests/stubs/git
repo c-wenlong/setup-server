@@ -20,7 +20,7 @@ case "${1:-}" in
     printf '%s\trefs/heads/main\n' "$(cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111)"
     ;;
   clone)
-    # last argument is the target directory; fake a self-learn checkout
+    # last argument is the target directory; fake a gnosia-learn checkout
     target=""
     for a in "$@"; do target="$a"; done
     mkdir -p "$target/.git" "$target/apps/web" "$target/services/catalog" \

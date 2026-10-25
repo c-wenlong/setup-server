@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — pull c-wenlong/self-learn from GitHub and redeploy if it changed.
+# deploy.sh — pull c-wenlong/self-learn (the gnosia repo) from GitHub and
+# redeploy if it changed.
 #
 # The server is tailnet-only, so GitHub webhooks can't reach it; instead this
 # script runs every POLL_SECONDS (systemd user timer on Linux, launchd on
@@ -15,7 +16,7 @@
 # install time — edit the copy in the setup-server repo, then re-run
 # setup.sh).
 #
-# Update order follows docs/HOMESERVER.md step 14 in the self-learn repo:
+# Update order follows docs/HOMESERVER.md step 14 in the gnosia repo:
 # stop the app, pull, npm ci when the lockfile moved, catalog migrate, build,
 # start again. Stopping first matters: `npm ci` replaces node_modules under a
 # running `next start`, and `next build` rewrites .next/ while it is served.
@@ -32,10 +33,11 @@ set -a; . "$ENV_FILE"; set +a
 
 # An .env written before the SQLite cut-over lacks the two catalog paths
 # (and its postgres DATABASE_URL is simply unused now). Derive them the way
-# upstream resolves them — CATALOG_DB under GNOSIA_HOME, which defaults to
-# the SELF_LEARN_HOME data root — so the stamped checkout env files below
-# always carry real paths.
-GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
+# upstream resolves them — CATALOG_DB under GNOSIA_HOME, which falls back to
+# the SELF_LEARN_HOME data root an older .env may still name — so the
+# stamped checkout env files below always carry real paths.
+GNOSIA_HOME="${GNOSIA_HOME:-${SELF_LEARN_HOME:-}}"
+[ -n "$GNOSIA_HOME" ] || { echo "GNOSIA_HOME missing from $ENV_FILE (an older .env names the data root SELF_LEARN_HOME)" >&2; exit 1; }
 CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
 
 # systemd/launchd PATH won't include a nix/nvm/brew node — use the baked path.
@@ -50,10 +52,10 @@ NEXT_DIR="$REPO_DIR/apps/web/.next"
 SNAP="$BUILD_STATE/rollback"
 TL_DIR="$REPO_DIR/tools/tldrawkc"
 TL_SNAP="$BUILD_STATE/rollback-tldrawkc"
-WEB_UNIT="self-learn.service"
-WEB_LABEL="com.self-learn.web"
-STUDIO_UNIT="self-learn-studio.service"
-STUDIO_LABEL="com.self-learn.studio"
+WEB_UNIT="gnosia-learn.service"
+WEB_LABEL="com.gnosia-learn.web"
+STUDIO_UNIT="gnosia-learn-studio.service"
+STUDIO_LABEL="com.gnosia-learn.studio"
 
 # --------------------------------------------------------------------- lock
 # mkdir is the portable atomic lock (macOS has no flock). The holder writes

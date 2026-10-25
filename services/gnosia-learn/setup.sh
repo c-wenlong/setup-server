@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 #
-# setup.sh — one-shot deploy of self-learn (Gnosia study hub) behind
+# setup.sh — one-shot deploy of gnosia-learn (Gnosia study hub) behind
 # Tailscale. Linux + macOS.
 #
 # End state:
-#   - machine-managed clone of github.com/c-wenlong/self-learn at
-#     ~/services/self-learn/repo (hard-reset on every deploy — not a
+#   - machine-managed clone of github.com/c-wenlong/self-learn (the gnosia
+#     repo) at
+#     ~/services/gnosia-learn/repo (hard-reset on every deploy — not a
 #     working copy; write app config via this service's .env)
 #   - the catalog as one SQLite file at $CATALOG_DB under the data root
-#     ($GNOSIA_HOME, the same path as SELF_LEARN_HOME) — no database
-#     server runs (upstream docs/SQLITE-MIGRATION.md)
+#     ($GNOSIA_HOME; SELF_LEARN_HOME names the same root in an older
+#     .env) — no database server runs (upstream docs/SQLITE-MIGRATION.md)
 #   - production Next.js app (`next build` + `next start`) on
 #     127.0.0.1:LOCAL_PORT, under a systemd user unit (Linux) or launchd
 #     LaunchAgent (macOS)
 #   - catalog bootstrapped once: migrate, `import seed`, six `flip`s,
-#     `blob audit --fix` to claim the blob store at SELF_LEARN_HOME
+#     `blob audit --fix` to claim the blob store at $GNOSIA_HOME
 #   - two schedulers: a deploy poller (pull -> ci -> migrate -> build ->
 #     restart, every POLL_SECONDS) and a nightly catalog export (03:00)
 #   - published tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
@@ -35,7 +36,7 @@
 #
 # Idempotent: safe to re-run. Re-running pulls new commits through the poller
 # script, repairs any missing piece, and never overwrites the .env. The
-# seeded marker in ~/services/self-learn/state means the catalog bootstrap
+# seeded marker in ~/services/gnosia-learn/state means the catalog bootstrap
 # runs once, ever.
 
 set -euo pipefail
@@ -134,17 +135,17 @@ LOCAL_PORT=$LOCAL_PORT
 HTTPS_PORT=$HTTPS_PORT
 POLL_SECONDS=$POLL_SECONDS
 
-SERVICE_HOME=$HOME/services/self-learn
+SERVICE_HOME=$HOME/services/gnosia-learn
 # Upstream's own layout (docs/HOMESERVER.md): blobs/, vault/ and archive/
-# live under SELF_LEARN_HOME, outside ~/services — it is the rsync target
-# when the laptop's blob store is copied over.
-SELF_LEARN_HOME=$HOME/.self-learn
-# Upstream reads GNOSIA_HOME as its data root and keeps the catalog as one
-# SQLite file under it (docs/SQLITE-MIGRATION.md) — no database server runs.
-# Both names hold the same path on purpose: the data root stays put, so
-# blobs/ needs no move.
-GNOSIA_HOME=$HOME/.self-learn
-CATALOG_DB=$HOME/.self-learn/catalog.db
+# live under GNOSIA_HOME, outside ~/services — it is the rsync target when
+# the laptop's blob store is copied over. Upstream reads GNOSIA_HOME as its
+# data root (default ~/.gnosia) and keeps the catalog as one SQLite file
+# under it (docs/SQLITE-MIGRATION.md) — no database server runs. An .env
+# written before the rename may hold only SELF_LEARN_HOME; it names the
+# same root and is still honoured (below), so an older install's
+# ~/.self-learn data root stays put.
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
 NODE_BIN=$(dirname "$(command -v node)")
 PUBLIC_URL=https://$host:$HTTPS_PORT
 
@@ -173,15 +174,17 @@ REQUESTED_PORT="$LOCAL_PORT"
 REQUESTED_HTTPS="$HTTPS_PORT"   # only meaningful when HTTPS_PORT_EXPLICIT is set
 set -a; . "$ENV_FILE"; set +a
 SERVICE_HOME="${SERVICE_HOME:?SERVICE_HOME missing from $ENV_FILE}"
-SELF_LEARN_HOME="${SELF_LEARN_HOME:?SELF_LEARN_HOME missing from $ENV_FILE}"
 # An .env written before the SQLite cut-over holds a postgres DATABASE_URL
 # and POSTGRES_* keys instead of the two below; the URL is simply unused now
 # and the leftovers are harmless, so neither is read or required here. The
 # data root and catalog file are derived the way upstream resolves them
-# (docs/SQLITE-MIGRATION.md): CATALOG_DB under GNOSIA_HOME, which defaults to
-# the same path SELF_LEARN_HOME already names. Exported so host-side
+# (docs/SQLITE-MIGRATION.md): CATALOG_DB under GNOSIA_HOME. SELF_LEARN_HOME
+# is the pre-rename name for the same root — an older .env may hold only it
+# — so it still works as the fallback. Exported so host-side
 # `npm run catalog` calls below (the bootstrap) reach the same file.
+SELF_LEARN_HOME="${SELF_LEARN_HOME:-}"
 GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
+[ -n "$GNOSIA_HOME" ] || die "GNOSIA_HOME missing from $ENV_FILE (an older .env names the data root SELF_LEARN_HOME)"
 CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
 export GNOSIA_HOME CATALOG_DB
 NODE_BIN="${NODE_BIN:?NODE_BIN missing from $ENV_FILE}"
@@ -194,8 +197,8 @@ if [ -n "$HTTPS_PORT_EXPLICIT" ] && [ "$HTTPS_PORT" != "$REQUESTED_HTTPS" ]; the
 fi
 REPO_DIR="$SERVICE_HOME/repo"
 UNIT_DIR="$HOME/.config/systemd/user"
-WEB_PLIST="$HOME/Library/LaunchAgents/com.self-learn.web.plist"
-STUDIO_PLIST="$HOME/Library/LaunchAgents/com.self-learn.studio.plist"
+WEB_PLIST="$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+STUDIO_PLIST="$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
 STUDIO_ENABLED="${STUDIO_ENABLED:-0}"
 
 # The studio runner spawns the Claude CLI once per job. `command -v` covers an
@@ -214,11 +217,10 @@ if [ "$STUDIO_ENABLED" = "1" ] && [ -z "$CLAUDE_BIN" ]; then
   warn "STUDIO_ENABLED=1 but no claude CLI found — studio jobs will fail until it is installed."
 fi
 
-# GNOSIA_HOME normally equals SELF_LEARN_HOME, but .env may point either
-# elsewhere — the blob root upstream derives is $GNOSIA_HOME/blobs, and
-# better-sqlite3 will not create a missing parent for $CATALOG_DB.
-mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SELF_LEARN_HOME/blobs" \
-  "$GNOSIA_HOME/blobs" "$(dirname "$CATALOG_DB")"
+# The blob root upstream derives is $GNOSIA_HOME/blobs, and better-sqlite3
+# will not create a missing parent for $CATALOG_DB.
+mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$GNOSIA_HOME/blobs" \
+  "$(dirname "$CATALOG_DB")"
 
 # ------------------------------------------- existing deployment state
 # Captured before anything is touched: a previously deployed app that is
@@ -236,14 +238,14 @@ APP_SHOULD_RUN=1
 TORN_DOWN="$SERVICE_HOME/state/torn-down"
 if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
   if [ "$OS" = "Linux" ]; then
-    if [ -f "$UNIT_DIR/self-learn.service" ] \
-       && ! systemctl --user is-active --quiet self-learn \
-       && ! systemctl --user is-failed --quiet self-learn; then
+    if [ -f "$UNIT_DIR/gnosia-learn.service" ] \
+       && ! systemctl --user is-active --quiet gnosia-learn \
+       && ! systemctl --user is-failed --quiet gnosia-learn; then
       APP_SHOULD_RUN=0
     fi
   else
     if [ -f "$WEB_PLIST" ] \
-       && ! launchctl print "gui/$(id -u)/com.self-learn.web" >/dev/null 2>&1; then
+       && ! launchctl print "gui/$(id -u)/com.gnosia-learn.web" >/dev/null 2>&1; then
       APP_SHOULD_RUN=0
     fi
   fi
@@ -260,11 +262,11 @@ ok "Deploy script installed"
 if [ "$OS" = "Linux" ]; then
   info "Writing systemd user units (app, deploy poller, nightly export)"
   mkdir -p "$UNIT_DIR"
-  cat > "$UNIT_DIR/self-learn.service" <<EOF
-# Generated by services/self-learn/setup.sh — regenerated on every re-run, so edit
+  cat > "$UNIT_DIR/gnosia-learn.service" <<EOF
+# Generated by services/gnosia-learn/setup.sh — regenerated on every re-run, so edit
 # $ENV_FILE and re-run instead of editing here.
 [Unit]
-Description=self-learn (Gnosia study hub, next start)
+Description=gnosia-learn (Gnosia study hub, next start)
 After=network-online.target
 Wants=network-online.target
 
@@ -285,19 +287,19 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 EOF
-  cat > "$UNIT_DIR/self-learn-deploy.service" <<EOF
-# Generated by services/self-learn/setup.sh — regenerated on every re-run.
+  cat > "$UNIT_DIR/gnosia-learn-deploy.service" <<EOF
+# Generated by services/gnosia-learn/setup.sh — regenerated on every re-run.
 [Unit]
-Description=self-learn deploy (pull from GitHub, rebuild + migrate if changed)
+Description=gnosia-learn deploy (pull from GitHub, rebuild + migrate if changed)
 
 [Service]
 Type=oneshot
 ExecStart=$SERVICE_HOME/bin/deploy.sh
 EOF
-  cat > "$UNIT_DIR/self-learn-deploy.timer" <<EOF
-# Generated by services/self-learn/setup.sh — regenerated on every re-run.
+  cat > "$UNIT_DIR/gnosia-learn-deploy.timer" <<EOF
+# Generated by services/gnosia-learn/setup.sh — regenerated on every re-run.
 [Unit]
-Description=self-learn deploy poller (push-to-deploy for a tailnet-only box)
+Description=gnosia-learn deploy poller (push-to-deploy for a tailnet-only box)
 
 [Timer]
 OnBootSec=90
@@ -307,25 +309,24 @@ AccuracySec=15
 [Install]
 WantedBy=timers.target
 EOF
-  cat > "$UNIT_DIR/self-learn-export.service" <<EOF
-# Generated by services/self-learn/setup.sh — regenerated on every re-run.
+  cat > "$UNIT_DIR/gnosia-learn-export.service" <<EOF
+# Generated by services/gnosia-learn/setup.sh — regenerated on every re-run.
 [Unit]
-Description=self-learn nightly catalog export
+Description=gnosia-learn nightly catalog export
 
 [Service]
 Type=oneshot
 WorkingDirectory=$REPO_DIR
-Environment=SELF_LEARN_HOME=$SELF_LEARN_HOME
 Environment=GNOSIA_HOME=$GNOSIA_HOME
 Environment=CATALOG_DB=$CATALOG_DB
 Environment=PATH=$NODE_BIN:/usr/local/bin:/usr/bin:/bin
 ExecStart=$NODE_BIN/node scripts/nightly-export.mjs
 EOF
-  chmod 600 "$UNIT_DIR/self-learn-export.service"   # names .env-derived paths
-  cat > "$UNIT_DIR/self-learn-export.timer" <<EOF
-# Generated by services/self-learn/setup.sh — regenerated on every re-run.
+  chmod 600 "$UNIT_DIR/gnosia-learn-export.service"   # names .env-derived paths
+  cat > "$UNIT_DIR/gnosia-learn-export.timer" <<EOF
+# Generated by services/gnosia-learn/setup.sh — regenerated on every re-run.
 [Unit]
-Description=self-learn nightly export at 03:00
+Description=gnosia-learn nightly export at 03:00
 
 [Timer]
 OnCalendar=*-*-* 03:00:00
@@ -334,11 +335,11 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-  cat > "$UNIT_DIR/self-learn-studio.service" <<EOF
-# Generated by services/self-learn/setup.sh — regenerated on every re-run.
+  cat > "$UNIT_DIR/gnosia-learn-studio.service" <<EOF
+# Generated by services/gnosia-learn/setup.sh — regenerated on every re-run.
 [Unit]
-Description=self-learn studio (diagram job runner, loopback API on 127.0.0.1:7250)
-After=network-online.target self-learn.service
+Description=gnosia-learn studio (diagram job runner, loopback API on 127.0.0.1:7250)
+After=network-online.target gnosia-learn.service
 Wants=network-online.target
 
 [Service]
@@ -360,17 +361,17 @@ else
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
   cat > "$WEB_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated by services/self-learn/setup.sh — regenerated on every re-run. -->
+<!-- Generated by services/gnosia-learn/setup.sh — regenerated on every re-run. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.self-learn.web</string>
+  <key>Label</key><string>com.gnosia-learn.web</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
     <string>rm -f "\$1"; exec "\$2" run start -- -p "\$3" -H 127.0.0.1</string>
-    <string>self-learn-web</string>
+    <string>gnosia-learn-web</string>
     <string>$SERVICE_HOME/state/torn-down</string>
     <string>$NODE_BIN/npm</string>
     <string>$LOCAL_PORT</string>
@@ -385,18 +386,18 @@ else
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/self-learn.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/self-learn.log</string>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/gnosia-learn.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/gnosia-learn.log</string>
 </dict>
 </plist>
 EOF
   cat > "$STUDIO_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated by services/self-learn/setup.sh — regenerated on every re-run. -->
+<!-- Generated by services/gnosia-learn/setup.sh — regenerated on every re-run. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.self-learn.studio</string>
+  <key>Label</key><string>com.gnosia-learn.studio</string>
   <key>ProgramArguments</key>
   <array>
     <string>$NODE_BIN/npm</string>
@@ -412,18 +413,18 @@ EOF
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/self-learn-studio.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/self-learn-studio.log</string>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/gnosia-learn-studio.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/gnosia-learn-studio.log</string>
 </dict>
 </plist>
 EOF
-  cat > "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" <<EOF
+  cat > "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated by services/self-learn/setup.sh — regenerated on every re-run. -->
+<!-- Generated by services/gnosia-learn/setup.sh — regenerated on every re-run. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.self-learn.deploy</string>
+  <key>Label</key><string>com.gnosia-learn.deploy</string>
   <key>ProgramArguments</key>
   <array><string>$SERVICE_HOME/bin/deploy.sh</string></array>
   <key>EnvironmentVariables</key>
@@ -432,18 +433,18 @@ EOF
   </dict>
   <key>StartInterval</key><integer>$POLL_SECONDS</integer>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/self-learn-deploy.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/self-learn-deploy.log</string>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/gnosia-learn-deploy.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/gnosia-learn-deploy.log</string>
 </dict>
 </plist>
 EOF
-  cat > "$HOME/Library/LaunchAgents/com.self-learn.export.plist" <<EOF
+  cat > "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated by services/self-learn/setup.sh — regenerated on every re-run. -->
+<!-- Generated by services/gnosia-learn/setup.sh — regenerated on every re-run. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.self-learn.export</string>
+  <key>Label</key><string>com.gnosia-learn.export</string>
   <key>ProgramArguments</key>
   <array>
     <string>$NODE_BIN/node</string>
@@ -452,19 +453,18 @@ EOF
   <key>WorkingDirectory</key><string>$REPO_DIR</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>SELF_LEARN_HOME</key><string>$SELF_LEARN_HOME</string>
     <key>GNOSIA_HOME</key><string>$GNOSIA_HOME</string>
     <key>CATALOG_DB</key><string>$CATALOG_DB</string>
     <key>PATH</key><string>$NODE_BIN:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/self-learn-export.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/self-learn-export.log</string>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/gnosia-learn-export.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/gnosia-learn-export.log</string>
 </dict>
 </plist>
 EOF
-  chmod 600 "$HOME/Library/LaunchAgents/com.self-learn.export.plist"  # names .env-derived paths
+  chmod 600 "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"  # names .env-derived paths
 fi
 
 # ------------------------------------------------------------ initial deploy
@@ -503,58 +503,58 @@ fi
 # ------------------------------------------------------------------ service
 if [ "$OS" = "Linux" ]; then
   if [ "$APP_SHOULD_RUN" = "1" ]; then
-    info "Enabling and (re)starting self-learn.service"
-    systemctl --user enable self-learn >/dev/null 2>&1
-    systemctl --user restart self-learn
+    info "Enabling and (re)starting gnosia-learn.service"
+    systemctl --user enable gnosia-learn >/dev/null 2>&1
+    systemctl --user restart gnosia-learn
   else
-    warn "self-learn.service is stopped — leaving it stopped (start: systemctl --user start self-learn)"
+    warn "gnosia-learn.service is stopped — leaving it stopped (start: systemctl --user start gnosia-learn)"
   fi
   if [ "$STUDIO_ENABLED" = "1" ]; then
     # The runner follows the app's run state: it lives off the same checkout
     # and node_modules, and an owner who stopped the app meant the stack.
-    systemctl --user enable self-learn-studio >/dev/null 2>&1
+    systemctl --user enable gnosia-learn-studio >/dev/null 2>&1
     if [ "$APP_SHOULD_RUN" = "1" ]; then
-      systemctl --user restart self-learn-studio
+      systemctl --user restart gnosia-learn-studio
     else
-      warn "self-learn-studio.service is stopped — leaving it stopped (start: systemctl --user start self-learn-studio)"
+      warn "gnosia-learn-studio.service is stopped — leaving it stopped (start: systemctl --user start gnosia-learn-studio)"
     fi
   else
     # Flipping STUDIO_ENABLED to 0 must actually stop the runner, not just
     # skip a start — disable --now covers a unit left running by an older
     # install or a manual start.
-    systemctl --user disable --now self-learn-studio >/dev/null 2>&1 || true
+    systemctl --user disable --now gnosia-learn-studio >/dev/null 2>&1 || true
   fi
-  systemctl --user enable --now self-learn-deploy.timer >/dev/null 2>&1
-  systemctl --user enable --now self-learn-export.timer >/dev/null 2>&1
+  systemctl --user enable --now gnosia-learn-deploy.timer >/dev/null 2>&1
+  systemctl --user enable --now gnosia-learn-export.timer >/dev/null 2>&1
   ok "Deploy/export timers active"
 else
   info "Loading LaunchAgents"
   if [ "$APP_SHOULD_RUN" = "1" ]; then
-    launchctl bootout "gui/$(id -u)/com.self-learn.web" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/com.gnosia-learn.web" 2>/dev/null || true
     # teardown.sh disables each label so login does not reload it; undo that.
-    launchctl enable "gui/$(id -u)/com.self-learn.web" 2>/dev/null || true
+    launchctl enable "gui/$(id -u)/com.gnosia-learn.web" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$WEB_PLIST"
     if [ "$STUDIO_ENABLED" = "1" ]; then
-      launchctl bootout "gui/$(id -u)/com.self-learn.studio" 2>/dev/null || true
-      launchctl enable "gui/$(id -u)/com.self-learn.studio" 2>/dev/null || true
+      launchctl bootout "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
+      launchctl enable "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$STUDIO_PLIST"
     fi
   else
     # Left stopped, but not disabled: the start command below must work.
-    launchctl enable "gui/$(id -u)/com.self-learn.web" 2>/dev/null || true
-    warn "com.self-learn.web is unloaded — leaving it stopped (start: launchctl bootstrap gui/$(id -u) $WEB_PLIST)"
+    launchctl enable "gui/$(id -u)/com.gnosia-learn.web" 2>/dev/null || true
+    warn "com.gnosia-learn.web is unloaded — leaving it stopped (start: launchctl bootstrap gui/$(id -u) $WEB_PLIST)"
   fi
   if [ "$STUDIO_ENABLED" != "1" ]; then
     # Same as the Linux disable --now: a studio left loaded by an older run
     # goes away when the flag is off, regardless of the app's run state.
-    launchctl bootout "gui/$(id -u)/com.self-learn.studio" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/com.gnosia-learn.studio" 2>/dev/null || true
   fi
-  for agent in com.self-learn.deploy com.self-learn.export; do
+  for agent in com.gnosia-learn.deploy com.gnosia-learn.export; do
     launchctl bootout "gui/$(id -u)/$agent" 2>/dev/null || true
     launchctl enable "gui/$(id -u)/$agent" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$agent.plist"
   done
-  ok "LaunchAgents loaded (logs: ~/Library/Logs/self-learn*.log)"
+  ok "LaunchAgents loaded (logs: ~/Library/Logs/gnosia-learn*.log)"
 fi
 rm -f "$TORN_DOWN"   # the stack is enabled again; a later stop is the owner's
 
@@ -566,8 +566,8 @@ if [ "$APP_SHOULD_RUN" = "1" ]; then
       break
     fi
     if [ "$i" -eq 60 ]; then
-      [ "$OS" = "Linux" ] && die "App did not come up. Logs: journalctl --user -u self-learn"
-      die "App did not come up. Logs: ~/Library/Logs/self-learn.log"
+      [ "$OS" = "Linux" ] && die "App did not come up. Logs: journalctl --user -u gnosia-learn"
+      die "App did not come up. Logs: ~/Library/Logs/gnosia-learn.log"
     fi
     sleep 2
   done
@@ -583,9 +583,9 @@ if [ "$APP_SHOULD_RUN" = "1" ]; then
       fi
       if [ "$i" -eq 15 ]; then
         if [ "$OS" = "Linux" ]; then
-          warn "Studio runner not answering yet. Logs: journalctl --user -u self-learn-studio"
+          warn "Studio runner not answering yet. Logs: journalctl --user -u gnosia-learn-studio"
         else
-          warn "Studio runner not answering yet. Logs: ~/Library/Logs/self-learn-studio.log"
+          warn "Studio runner not answering yet. Logs: ~/Library/Logs/gnosia-learn-studio.log"
         fi
       fi
       sleep 2
@@ -632,9 +632,9 @@ fi
 
 echo
 if [ "$APP_SHOULD_RUN" = "0" ]; then
-  printf '\033[1;32mDone.\033[0m self-learn was updated but left stopped (deliberate stop respected). Start it when ready.\n'
+  printf '\033[1;32mDone.\033[0m gnosia-learn was updated but left stopped (deliberate stop respected). Start it when ready.\n'
 else
-  printf '\033[1;32mDone.\033[0m self-learn is at \033[1m%s\033[0m (tailnet only).\n' "$PUBLIC_URL"
+  printf '\033[1;32mDone.\033[0m gnosia-learn is at \033[1m%s\033[0m (tailnet only).\n' "$PUBLIC_URL"
 fi
 echo
 echo "  Sign in at $PUBLIC_URL/sign-in with OWNER_PASSWORD from $ENV_FILE"
@@ -644,12 +644,12 @@ echo "  Bringing the laptop's catalog.db over instead of the seed: SETUP.md, 'Br
 echo
 echo "Manage:"
 if [ "$OS" = "Linux" ]; then
-  echo "  systemctl --user status|restart self-learn"
-  echo "  journalctl --user -u self-learn -f                       # app logs"
-  echo "  systemctl --user list-timers self-learn-*                # poller + export"
-  echo "  journalctl --user -u self-learn-deploy -n 50             # deploy logs"
+  echo "  systemctl --user status|restart gnosia-learn"
+  echo "  journalctl --user -u gnosia-learn -f                       # app logs"
+  echo "  systemctl --user list-timers gnosia-learn-*                # poller + export"
+  echo "  journalctl --user -u gnosia-learn-deploy -n 50             # deploy logs"
 else
-  echo "  launchctl kickstart -k gui/\$(id -u)/com.self-learn.web  # restart"
-  echo "  tail -f ~/Library/Logs/self-learn.log"
+  echo "  launchctl kickstart -k gui/\$(id -u)/com.gnosia-learn.web  # restart"
+  echo "  tail -f ~/Library/Logs/gnosia-learn.log"
 fi
 echo "  tailscale serve status        # or: tailscale serve --https=$HTTPS_PORT off"

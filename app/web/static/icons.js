@@ -44,9 +44,9 @@
        artwork in the kaichenpedia repo, so it needs no plate on either theme.
        Raster because no vector original exists. */
     'kaichenpedia':  { file: 'kaichenpedia', ext: 'png' },
-    /* The Gnosia mark from the self-learn repo's own brand set
+    /* The Gnosia mark from the gnosia repo's own brand set
        (apps/web/public/brand/mark.png). Raster, no vector original. */
-    'self-learn':    { file: 'self-learn',    ext: 'png' },
+    'gnosia-learn':  { file: 'gnosia-learn',  ext: 'png' },
     /* The site's own favicon (site/favicon.svg in the sources repo) — the
        filled lavender plate reads on both tile themes, so no -dark pair. */
     'sources':       { file: 'sources' },
