@@ -17,14 +17,11 @@
       },
       {
         "unit": "self-learn.service"
-      },
-      {
-        "container": "self-learn-db"
       }
     ],
     "primary": "self-learn.service",
     "kuma": "self-learn",
-    "_comment": "`primary` is the web app: the studio runner is first in stop order but only exists while STUDIO_ENABLED=1, so it must not be the part whose state the phone reports. Stop order: the diagram studio runner first (a systemd user unit that only exists while STUDIO_ENABLED=1 in services/self-learn/.env, hence optional, and the one that talks to both the app's node_modules and the database), then the Next.js app (systemd user unit), then its Postgres container. Start is the reverse. A stopped app stays stopped across daily deploys — the poller rebuilds and migrates but only restarts the app, and the runner, if they were running."
+    "_comment": "`primary` is the web app: the studio runner is first in stop order but only exists while STUDIO_ENABLED=1, so it must not be the part whose state the phone reports. Stop order: the diagram studio runner first (a systemd user unit that only exists while STUDIO_ENABLED=1 in services/self-learn/.env, hence optional, and the one that talks to both the app's node_modules and the database), then the Next.js app (systemd user unit). Start is the reverse. A stopped app stays stopped across daily deploys — the poller rebuilds and migrates but only restarts the app, and the runner, if they were running."
   },
-  "description": "Gnosia study hub: the private self-learn repo's Next.js roadmap and Claude tutoring loop over a Postgres catalog — courses, concept notes, spaced-repetition reviews, indexed videos and diagrams. Native `next start` under a systemd user unit on 127.0.0.1:8107 behind Serve; Postgres 17 is a container on loopback :5432 because the catalog CLI runs on the host. A daily poller pulls main and rebuilds (stop app, npm ci, migrate, next build, start), and a nightly 03:00 timer exports the catalog to ~/.self-learn/archive. Sign-in is the app's own OWNER_PASSWORD from .env — the tailnet is still the perimeter, the password just gates one owner from another tailnet device."
+  "description": "Gnosia study hub: the private self-learn repo's Next.js roadmap and Claude tutoring loop over a catalog that is one SQLite file under the data root — courses, concept notes, spaced-repetition reviews, indexed videos and diagrams. Native `next start` under a systemd user unit on 127.0.0.1:8107 behind Serve; no database server runs. A daily poller pulls main and rebuilds (stop app, npm ci, migrate, next build, start), and a nightly 03:00 timer exports the catalog to ~/.self-learn/archive. Sign-in is the app's own OWNER_PASSWORD from .env — the tailnet is still the perimeter, the password just gates one owner from another tailnet device."
 }

@@ -2,15 +2,17 @@
 
 A production build of the private
 [c-wenlong/self-learn](https://github.com/c-wenlong/self-learn) repo: a
-Next.js 16 app over a Postgres 17 catalog, served natively and published
+Next.js 16 app over a SQLite catalog, served natively and published
 tailnet-only. Push to `main` and the box picks it up on its daily poll —
 or immediately with `~/services/self-learn/bin/deploy.sh --force`.
 
 The repo's own `docs/HOMESERVER.md` describes this exact deployment shape;
 this service wraps it in the repo's usual one-shot, idempotent form. Where
 they differ: systemd **user** units instead of system units (the repo's
-sudo rule), generated Postgres credentials instead of `catalog:catalog`,
-and the deploy/update order from upstream step 14 baked into a poller.
+sudo rule), and the deploy/update order from upstream step 14 baked into a
+poller. Upstream moved the catalog from Postgres to a single SQLite file
+(`docs/SQLITE-MIGRATION.md` there): it lives at `$CATALOG_DB` under the
+data root, so no database container runs at all.
 
 ## Architecture
 
@@ -44,17 +46,14 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
                      │                            (tailnet only)
                      │  /studio/api/* proxied to ──► self-learn-studio.service
                      ▼          (npm run studio — diagram job runner, spawns
-        self-learn-db            the claude CLI per job, loopback-only on
-        (postgres:17)            127.0.0.1:7250 — never Serve-published.
-                     ▲           Runs only while STUDIO_ENABLED=1 in .env;
-        app + catalog CLI +      job state under ~/services/self-learn/studio)
-        studio all connect
-        here (127.0.0.1:5432)
-   ~/.self-learn/  blobs/ vault/ archive/  (upstream layout — rsync target)
-
-   self-learn-db (postgres:17 container) 127.0.0.1:5432
-        ▲ app + `npm run catalog` on the host both connect here
-   ~/.self-learn/  blobs/ vault/ archive/  (upstream layout — rsync target)
+        the catalog: one SQLite  the claude CLI per job, loopback-only on
+        file the app, catalog    127.0.0.1:7250 — never Serve-published.
+        CLI and studio all open  Runs only while STUDIO_ENABLED=1 in .env;
+                     │           job state under ~/services/self-learn/studio)
+                     ▼
+   ~/.self-learn/  catalog.db  blobs/ vault/ archive/
+        (upstream layout — rsync target; catalog.db is the whole database,
+        no server to run)
 ```
 
 ## Security model
@@ -63,19 +62,15 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
   Serve. Upstream's S6 notes Serve forwards `Host` and
   `X-Forwarded-Proto: https`, which is exactly what the app's session
   cookie and same-origin check read — no app-side setting needed.
-- Postgres is published on `127.0.0.1:5432` — wider than other services'
-  databases because the catalog CLI runs on the **host**, not in a
-  container. Loopback is the narrowest bind that allows it; Docker
-  publishes past ufw, so `0.0.0.0` would have opened the database to the
-  LAN. Credentials are generated into `.env`, not upstream's literal
-  `catalog:catalog`.
+- The catalog is one SQLite file at `$CATALOG_DB` under `~/.self-learn`:
+  no server, no port, no credentials — its only boundary is the
+  filesystem, which already holds the blob store beside it.
 - Sign-in is the app's own `OWNER_PASSWORD` + signed cookie (one owner,
   upstream's "one reader" model). Tailnet is still the perimeter; the
   password gates a roommate on the tailnet, not the internet.
-- `OWNER_PASSWORD` / `AUTH_SECRET` / `POSTGRES_PASSWORD` are generated
-  into `.env` (mode 600) on first run and never overwritten. Every file
-  that carries them — the checkout env files below and the export
-  unit/plist with `DATABASE_URL` in it — is written mode 600.
+- `OWNER_PASSWORD` / `AUTH_SECRET` are generated into `.env` (mode 600)
+  on first run and never overwritten. Every file that carries them — the
+  checkout env files below — is written mode 600.
 - The deploy clone (`~/services/self-learn/repo`) is machine-managed and
   hard-reset on every deploy — **never edit it by hand**. The two env
   files inside it (`apps/web/.env.local`, `services/catalog/.env`) are
@@ -83,8 +78,7 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
   `deploy.sh --force`.
 - A deliberately stopped app stays stopped across deploys *and* setup
   re-runs: the poller rebuilds and migrates but only restarts the app if
-  it was running, and Postgres is returned to whatever state it was
-  found in. If a deploy step fails partway, the previous
+  it was running. If a deploy step fails partway, the previous
   `node_modules`/`.next` are restored from the rename-aside snapshot and
   the old build restarted — never a half-written tree.
 
@@ -94,13 +88,13 @@ self-learn-deploy.timer ──► bin/deploy.sh          self-learn-export.timer
 |---|---|---|
 | git + non-interactive repo access | poller fetches the private repo unattended | `git ls-remote` with prompts disabled |
 | Node.js >= 22.22.2 (+ npm) | upstream `engines`; build, catalog CLI, `next start`, studio runner | version compare |
-| Docker + Compose v2 | Postgres container | daemon reachable |
 | Tailscale (running) | HTTPS publish | backend state |
 | `claude` CLI, logged in | the studio runner spawns it per job | resolved at unit-write time (`PATH`, then `~/.nix-profile`, `~/.claude/local`, homebrew); a miss only **warns** — the app deploys fine, studio jobs just fail until it lands |
 
-Not needed: Postgres client tools (migrations and the seed go through the
-catalog CLI; a dump restore can run `pg_restore` inside the container),
-the video-tool submodules (`tools/manimkc`, `tools/remotionkc`,
+Not needed: Docker or any database tools (the catalog is a SQLite file;
+migrations and the seed go through the catalog CLI, and bringing the
+laptop's data over is a file copy — below), the video-tool submodules
+(`tools/manimkc`, `tools/remotionkc`,
 `tools/revideokc` stay uninitialised — the seed import is pointed at
 `/nonexistent` roots). The one submodule exception is `tools/tldrawkc`:
 the studio runner refuses to queue jobs without it built, so while
@@ -110,10 +104,13 @@ it whenever the recorded gitlink moves.
 ## What setup.sh does
 
 1. Preflight (above).
-2. Writes `.env` if absent (ports, paths, generated `OWNER_PASSWORD`,
-   `AUTH_SECRET`, `POSTGRES_PASSWORD`, assembled `DATABASE_URL`). Re-runs
+2. Writes `.env` if absent (ports, paths, the `GNOSIA_HOME`/`CATALOG_DB`
+   catalog location, generated `OWNER_PASSWORD` and `AUTH_SECRET`). Re-runs
    read `.env` as the source of truth — `LOCAL_PORT=...` on the command
-   line is ignored once `.env` exists.
+   line is ignored once `.env` exists. An `.env` written before the SQLite
+   cut-over keeps working: its stale `postgres://` `DATABASE_URL` is
+   unused, and `GNOSIA_HOME`/`CATALOG_DB` derive to the data root it names
+   through `SELF_LEARN_HOME`.
 3. Installs `deploy.sh` -> `~/services/self-learn/bin/` (refreshed every
    run) and creates `~/.self-learn/blobs`.
 4. Writes the units — `self-learn.service` (the app),
@@ -122,18 +119,19 @@ it whenever the recorded gitlink moves.
    The studio unit gets the resolved `claude` path baked in as
    `STUDIO_CLAUDE_BIN` and `STUDIO_HOME=~/services/self-learn/studio`,
    so job workspaces survive a checkout re-clone.
-5. Runs the initial deploy: clone, env files, `npm ci`, Postgres up,
-   `catalog migrate`, `next build`.
+5. Runs the initial deploy: clone, env files, `npm ci`, `catalog
+   migrate` (creates the SQLite file on first connect), `next build`.
 6. Bootstraps the catalog **once** (marker `state/db-bootstrapped`):
    `catalog import seed`, six `catalog flip`s in upstream order, and
    `catalog blob audit --fix` to claim the blob root for this database.
-   `SKIP_SEED=1` skips this for a dump restore instead (below).
+   `SKIP_SEED=1` skips this so the laptop's `catalog.db` can be dropped
+   in place instead (below).
 7. Enables + starts the app and both timers, enables lingering (Linux),
    and publishes `tailscale serve --bg --https=8107`. The studio runner
    is enabled + started only while `STUDIO_ENABLED=1` — flipping the flag
    to 0 and re-running stops and disables it. An app that was
    deliberately stopped before the re-run is left stopped (studio
-   follows it, and Postgres is put back the way it was found).
+   follows it).
 
 ## Deploy
 
@@ -142,9 +140,9 @@ cd services/self-learn && ./setup.sh
 ```
 
 Overrides (first run only — after that, edit `.env`): `LOCAL_PORT` /
-`HTTPS_PORT` (default 8107), `PG_PORT` (5432), `REPO_URL`, `BRANCH`
+`HTTPS_PORT` (default 8107), `REPO_URL`, `BRANCH`
 (main), `POLL_SECONDS` (86400 = daily), `SKIP_SEED` (1 = leave the
-catalog empty for a dump restore), `OWNER_PASSWORD`, `AUTH_SECRET`,
+catalog empty for a `catalog.db` drop-in), `OWNER_PASSWORD`, `AUTH_SECRET`,
 `STUDIO_ENABLED` (0; 1 = run the studio job runner + UI — needs a
 logged-in `claude`), `ASSET_FILES_ENABLED` (1).
 
@@ -158,39 +156,68 @@ not used to encrypt anything — it can differ freely.
 
 The homeserver's database is its own `primary`, meant to diverge from
 the laptop's (upstream S1) — the seed is only the demo slice. To move
-the real history instead:
+the real history instead, copy the catalog file: the database is one
+SQLite file now, so the old pg_dump/restore dance is a file copy.
 
 ```sh
-# on the laptop
-pg_dump -Fc self_learn > ~/self_learn.dump
-scp ~/self_learn.dump homeserver:~/
+# on the laptop — .backup makes a consistent single file even while a
+# dev checkout has the database open
+sqlite3 ~/.self-learn/catalog.db ".backup '$HOME/laptop-catalog.db'"
+scp ~/laptop-catalog.db homeserver:~/catalog.db
 rsync -a --exclude .owner ~/.self-learn/blobs/ homeserver:~/.self-learn/blobs/
 
-# first deploy here — leave the catalog empty
+# first deploy here — leave the catalog file empty
 cd services/self-learn && SKIP_SEED=1 AUTH_SECRET=<laptop's> ./setup.sh
 
-# restore into the running container: drop the migrated-but-empty
-# database first — the deploy already ran `catalog migrate`, and a bare
-# pg_restore into that schema errors on existing objects
-docker exec -it self-learn-db psql -U catalog -d postgres \
-  -c 'DROP DATABASE self_learn WITH (FORCE); CREATE DATABASE self_learn;'
-docker exec -i self-learn-db pg_restore --no-owner -U catalog -d self_learn < ~/self_learn.dump
+# swap the laptop's file in for the migrated-but-empty one the deploy
+# left (the app must be stopped while the file is replaced), then claim
+# the blob root for it
+systemctl --user stop self-learn
+mv ~/catalog.db ~/.self-learn/catalog.db
 cd ~/services/self-learn/repo && npm run catalog -- doctor && npm run catalog -- blob audit --fix
+systemctl --user start self-learn
 ```
 
-(The psql step prompts for `POSTGRES_PASSWORD` from `.env`. The same
-drop-and-recreate covers a database that *was* seeded.) The
-`--exclude .owner` matters: the blob store's marker names the laptop's
-database, and a copied marker makes uploads and `audit --fix` refuse the
-root (upstream S3).
+(The same swap covers a catalog that *was* seeded — `mv` replaces the
+file wholesale. On macOS the stop/start is `launchctl bootout` /
+`bootstrap` on `com.self-learn.web`.) The `--exclude .owner` matters:
+the blob store's marker names its database by resolved path, so a copied
+marker names the laptop's file — a path that is not here — and uploads
+and `audit --fix` would refuse the root (upstream S3).
+
+### Coming from the Postgres deployment
+
+A box deployed before the cut-over keeps its catalog in the old
+`self-learn-db` container (named volume `self-learn-postgres`) — the
+scripts no longer manage either, so port the data once, then remove
+them. The container still answers on its old loopback port even though
+`docker-compose.yml` is gone:
+
+```sh
+docker start self-learn-db   # no-op if it is already running
+set -a; . services/self-learn/.env; set +a   # POSTGRES_USER, _PASSWORD, _DB, PG_PORT
+cd ~/services/self-learn/repo
+node services/catalog/scripts/pg-to-sqlite.mjs \
+  --from "postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@127.0.0.1:$PG_PORT/$POSTGRES_DB" \
+  --to ~/.self-learn/catalog.db
+```
+
+The port migrates the fresh file to head, copies every table and runs
+`foreign_key_check` before finishing (upstream
+`docs/SQLITE-MIGRATION.md`); it refuses if `catalog.db` already exists —
+delete the empty one a fresh deploy created first. Afterwards:
+`npm run catalog -- doctor && npm run catalog -- blob audit --fix`, then
+`docker rm -f self-learn-db && docker volume rm self-learn-postgres`.
+Blobs need no move — `SELF_LEARN_HOME` and `GNOSIA_HOME` name the same
+root.
 
 ## Syncing with the MacBook (`sync.sh`)
 
 The one-shot rsync above becomes continuous with `sync.sh`. Blobs ride a
 dedicated Seafile library in both directions; the database rides
 `push`/`pull` only when asked — the two catalogs are meant to diverge,
-so a transfer is always a full replace (`pg_dump` → drop+create →
-`pg_restore`), never a merge.
+so a transfer is always a full replace (a copy of the whole `catalog.db`
+file, swapped in while the receiving app is stopped), never a merge.
 
 ```
 server                          Seafile                          MacBook
@@ -199,8 +226,8 @@ server                          Seafile                          MacBook
   (self-learn-         (.owner + .tmp sit beside local/,          (GUI pairing —
    seafile.service)     outside the synced tree)                   no seaf-cli on macOS)
 
-./sync.sh push ──► pg_dump here ──► scp ──► drop+create ──► pg_restore on the Mac
-./sync.sh pull ──► pg_dump on the Mac ──► scp ──► stop app ──► drop+create ──► restore
+./sync.sh push ──► copy catalog.db here ──► scp ──► swap it in on the Mac
+./sync.sh pull ──► copy catalog.db on the Mac ──► scp ──► stop app ──► swap it in
 ```
 
 ```sh
@@ -229,15 +256,15 @@ server                          Seafile                          MacBook
   `seaf-cli` for macOS, so pairing is the four
   GUI steps it prints (if a nix `seaf-cli` is ever present it pairs
   headless plus a LaunchAgent instead).
-- `push`/`pull` rewrite the receiver's `blobs/.owner` for the new
-  `pg_database` oid after every restore, and warn that the receiver's
+- `push`/`pull` rewrite the receiver's `blobs/.owner` for its own
+  `catalog.db` path after every swap, and warn that the receiver's
   `vault/` is stale — rebuild it with `learn vault pull` on that
-  machine. `pull` stops `self-learn.service` for the restore (and
+  machine. `pull` stops `self-learn.service` for the swap (and
   restarts it only if it was running); `push` warns if a Next dev server
-  is holding connections on the Mac.
+  is holding the file open on the Mac.
 - Both directions take the same `.deploy.lock` the poller uses: a sync
   blocks a deploy and vice versa — a deploy must never migrate a
-  database mid-restore.
+  database mid-swap.
 - `status` tables each catalog table (count + newest timestamp) on both
   ends, plus `.owner`, blob counts, and whether each side's sync client
   is live — the quick way to see how far the two primaries have drifted.
@@ -253,9 +280,7 @@ curl -s http://127.0.0.1:7250/api/health             # runner health (loopback)
 journalctl --user -u self-learn-deploy -n 50         # deploy history
 journalctl --user -u self-learn-export               # nightly export runs
 systemctl --user list-timers self-learn-*
-docker compose --project-directory ~/dev/setup-server/services/self-learn ps|logs
-docker compose --project-directory ~/dev/setup-server/services/self-learn exec db \
-  psql -U catalog self_learn                         # SQL in (password in .env)
+ls -l ~/.self-learn/catalog.db                       # the whole catalog, one file
 ls ~/.self-learn/archive/latest                      # newest readable export
 tailscale serve status
 ./sync.sh status                                     # both catalogs + blob stores
@@ -263,19 +288,19 @@ systemctl --user status self-learn-seafile           # blob-sync daemon
 ```
 
 Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
-port that proxies to the app, disables the deploy and export timers, stops
-the studio runner, the app and Postgres (`compose down`), and keeps the
-catalog volume, `~/services/self-learn` and `.env`, so `./setup.sh` brings
-it back running. `./teardown.sh --purge` (type the name) also drops the
-volume (`down -v`), the deploy clone, state, studio and bin dirs, the unit
-files and `.env`. Neither touches `~/.self-learn` (the nightly exports in
-`archive/` survive a purge) or `sync.sh`'s `self-learn-seafile.service`;
+port that proxies to the app, disables the deploy and export timers and
+stops the studio runner and the app, and keeps `~/services/self-learn`
+and `.env`, so `./setup.sh` brings it back running. `./teardown.sh
+--purge` (type the name) also deletes the deploy clone, state, studio
+and bin dirs, the unit files and `.env`. Neither touches `~/.self-learn`
+— `catalog.db`, `blobs`, `vault` and the nightly exports in `archive/`
+all survive a purge — or `sync.sh`'s `self-learn-seafile.service`;
 purge refuses while that blob link is installed. See TROUBLESHOOT.md,
 "Nuke and pave".
 
 The catalog CLI works in the checkout (`cd ~/services/self-learn/repo &&
 npm run catalog -- status`) — `services/catalog/.env` there points it at
-this database.
+this `catalog.db`.
 
 ## The studio runner
 
@@ -283,8 +308,8 @@ this database.
 `self-learn-studio` (`npm run studio` — `tsx services/studio/src/index.ts`),
 the diagram job runner behind the app's `/studio/api/*` proxy. It binds
 `127.0.0.1:7250`, is never published through Serve (the app proxies to it
-and stamps the signed-in owner itself), and reaches Postgres the way the
-app's own CLI does — it spawns `npm run catalog --`, which reads the
+and stamps the signed-in owner itself), and reaches the catalog the way
+the app's own CLI does — it spawns `npm run catalog --`, which reads the
 deploy-written `services/catalog/.env`. Each job spawns the `claude` CLI
 resolved at setup time (`STUDIO_CLAUDE_BIN` in the unit), authenticating
 with the login credentials in `~/.claude` — the runner's default

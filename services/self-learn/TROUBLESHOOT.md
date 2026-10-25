@@ -1,14 +1,13 @@
 # self-learn — troubleshooting
 
-Layered triage: deploy pipeline → database → app → publish → client. Work
+Layered triage: deploy pipeline → catalog → app → publish → client. Work
 top-down; each layer assumes the one above it is healthy.
 
 **A deliberately stopped app stays stopped.** The poller rebuilds and
-migrates but only restarts the app if it was running, and Postgres is
-put back in the state it was found (this is how the launcher's stop
-button survives the daily poll and setup re-runs). So a red tile with
-fresh deploy logs means stopped-on-purpose, not broken — `systemctl
---user start self-learn` or the launcher's start button.
+migrates but only restarts the app if it was running (this is how the
+launcher's stop button survives the daily poll and setup re-runs). So a
+red tile with fresh deploy logs means stopped-on-purpose, not broken —
+`systemctl --user start self-learn` or the launcher's start button.
 
 ## Quick status
 
@@ -17,15 +16,11 @@ systemctl --user is-active self-learn                  # app up?
 systemctl --user list-timers self-learn-*              # poller + export scheduled?
 journalctl --user -u self-learn-deploy -n 30           # last deploy runs
 cat ~/services/self-learn/state/built-sha              # what was last built
-docker inspect -f '{{.State.Status}}' self-learn-db    # Postgres up?
+ls -l ~/.self-learn/catalog.db                       # the catalog file
 curl -sI http://127.0.0.1:8107/ | head -1              # app answering locally?
 tailscale serve status                               # :8107 published?
 ls ~/.self-learn/archive/latest                      # nightly export landing?
 ```
-
-If `docker` says "permission denied while trying to connect to the docker
-API", you are not in the `docker` group *in this shell* — re-run under
-`sg docker -c '...'`.
 
 ## Layer 1 — deploys not happening
 
@@ -52,11 +47,14 @@ API", you are not in the `docker` group *in this shell* — re-run under
 `~/services/self-learn/bin/deploy.sh --force`
 
 - `npm ci` / network errors → transient; the next timer tick retries.
-- `catalog migrate` fails → Postgres down or `DATABASE_URL` wrong:
-  `docker ps | grep self-learn-db`, and compare `DATABASE_URL` in
-  `services/self-learn/.env` against `services/catalog/.env` inside the checkout —
-  deploy.sh rewrites the checkout copy from `.env` on every run, so an
-  edited-here value is the fix, not a symptom.
+- `catalog migrate` fails → the catalog path is wrong or the file
+  unwritable. Compare `GNOSIA_HOME`/`CATALOG_DB` in
+  `services/self-learn/.env` against `services/catalog/.env` inside the
+  checkout — deploy.sh rewrites the checkout copy from `.env` on every
+  run, so an edited-here value is the fix, not a symptom. If the error
+  says `DATABASE_URL is a Postgres URL`, the checkout's `.env` is a stale
+  pre-SQLite stamp: `deploy.sh --force` rewrites it (a `postgres://`
+  `DATABASE_URL` left in the service's own `.env` is simply unused).
 - `next build` fails after a pull → usually a real upstream regression;
   the deploy restores the previous `node_modules`/`.next` from its
   rename-aside snapshot and restarts the old build, so the site stays up
@@ -66,25 +64,24 @@ API", you are not in the `docker` group *in this shell* — re-run under
   and live where `.env`'s `NODE_BIN` points; if node moved (e.g. nix
   generation change), update `NODE_BIN` in `.env` and re-run `setup.sh`.
 
-## Layer 2 — database broken
+## Layer 2 — catalog broken
 
-**`docker ps` shows self-learn-db down or restarting.**
+**`cd ~/services/self-learn/repo && npm run catalog -- status` fails.**
 
-- `docker logs self-learn-db` — a bad `POSTGRES_PASSWORD` change in
-  `.env` is the classic: the password only applies at *first* container
-  init; editing it later makes the app and CLI fail auth while the
-  container itself is healthy. Revert `.env` to the generated value, or
-  change it inside Postgres too.
-- Port clash on :5432 → `ss -ltn | grep 5432` — a host Postgres or
-  another container claimed it. Move ours: `PG_PORT=` in `.env`, update
-  `DATABASE_URL` to match, re-run `setup.sh`.
-- Dump restore failed partway → drop and recreate, then restore again:
-  `docker exec -it self-learn-db psql -U catalog -d postgres -c 'DROP DATABASE self_learn WITH (FORCE); CREATE DATABASE self_learn;'`
-  (password in `.env`), re-run `pg_restore`, then
-  `npm run catalog -- migrate` in the checkout.
-- `blob audit` refuses the root ("owner names another database") → a
-  `.owner` marker was rsynced over from the laptop. Delete
-  `~/.self-learn/blobs/.owner`, then
+- `CATALOG_DB`/`GNOSIA_HOME` wrong → `services/catalog/.env` in the
+  checkout is rewritten from `services/self-learn/.env` on every deploy;
+  fix `.env`, then `deploy.sh --force`.
+- `catalog.db` itself damaged or replaced with a partial copy →
+  `npm run catalog -- migrate` first (a copy carries its own migration
+  journal, so this is a hash check and shows whether the file opens at
+  all). Rebuild content from the newest export in
+  `~/.self-learn/archive/latest` (`catalog import`), or swap a known-good
+  `catalog.db` in while the app is stopped — `sync.sh pull` does the
+  whole replace from the Mac.
+- `blob audit` refuses the root ("belongs to database ...") → a
+  `.owner` marker was rsynced over from the laptop; it names the
+  database by its resolved path, so a copied marker always names a file
+  that is not here. Delete `~/.self-learn/blobs/.owner`, then
   `npm run catalog -- blob audit --fix` in the checkout.
 
 ## Layer 3 — app broken
@@ -95,14 +92,14 @@ API", you are not in the `docker` group *in this shell* — re-run under
   `next` binary missing (an interrupted `npm ci` — re-run
   `deploy.sh --force`)?
 - Landing page loads but every content page says "could not read its
-  content" → the app reaches Postgres but a type isn't flipped (fresh
-  seed path runs six flips; a restored dump carries its own). Check:
-  `cd ~/services/self-learn/repo && npm run catalog -- status`, and flip
-  what it names.
-- Pages load but say the database is unreachable / writes 503 →
-  `DATABASE_URL` mismatch: `apps/web/.env.local` in the checkout is
-  rewritten from `services/self-learn/.env` each deploy; fix `.env`, then
-  `deploy.sh --force`.
+  content" → the app reaches the catalog but a type isn't flipped (fresh
+  seed path runs six flips; a swapped-in catalog.db carries its own).
+  Check: `cd ~/services/self-learn/repo && npm run catalog -- status`,
+  and flip what it names.
+- Pages load but say the catalog is unreachable / writes 503 → the app
+  cannot open `catalog.db`: the path comes from `services/catalog/.env`
+  in the checkout (rewritten from `services/self-learn/.env` each
+  deploy), so fix `.env`, then `deploy.sh --force`.
 - Sign-in refuses the correct password → you edited
   `apps/web/.env.local` in the checkout and a deploy reverted it; the
   source of truth is `services/self-learn/.env`. An `.env.local` at the repo ROOT
@@ -156,7 +153,7 @@ API", you are not in the `docker` group *in this shell* — re-run under
   spawns `STUDIO_CLAUDE_BIN` (baked into the unit at setup time). Check
   `claude` still exists at that path and `~/.claude` credentials are
   still valid — `claude -p 'say hi'` as the deploy user proves both.
-- Jobs fail with "catalog" errors → the runner reaches Postgres by
+- Jobs fail with "catalog" errors → the runner reaches the catalog by
   spawning `npm run catalog` in the checkout, which reads
   `services/catalog/.env` — same diagnosis as Layer 2.
 - A deploy appeared to kill a job mid-run → expected: the poller stops
@@ -203,13 +200,13 @@ drain, the daemon on one end is dead (above). Do **not** run `blob audit
 --fix` on either machine: it deletes orphans older than a day, and on a
 shared store a delete propagates to the other side.
 
-**`blob audit` refuses the root ("owner names another database").**
+**`blob audit` refuses the root ("belongs to database ...").**
 
 A foreign `.owner` landed — only possible via manual file copy or a
-`push`/`pull` restore that didn't rewrite the marker (`.owner` sits
+`push`/`pull` swap that didn't rewrite the marker (`.owner` sits
 outside the synced `blobs/local` tree, so Seafile can't deliver one). Fix: delete `blobs/.owner` on the affected machine
 and re-run `./sync.sh push` or `pull` (it rewrites the marker for the
-current `pg_database` oid), or `npm run catalog -- blob audit --fix` in
+receiver's `catalog.db` path), or `npm run catalog -- blob audit --fix` in
 the local checkout if nothing is mid-transfer.
 
 **`push`/`pull` fails.**
@@ -221,15 +218,14 @@ the local checkout if nothing is mid-transfer.
   Same rules as deploy: it self-clears once the recorded owner is gone
   (dead pid, a pid now owned by a different process, or a lock whose pid
   was never written), or `rm -rf ~/services/self-learn/.deploy.lock`.
-- `pg_restore failed` on either side → the receiving database may be
-  left empty/partial — re-run the same command; a restore is always
-  drop+create first, so retrying is safe. pg version skew matters:
-  `pg_restore` on the receiver must be >= the dumper's major version.
-- `pull` stops `self-learn.service` for the restore; if it dies between
+- The copy or swap failed on either side → the receiving `catalog.db`
+  may be left empty/partial — re-run the same command; a transfer always
+  replaces the whole file, so retrying is safe.
+- `pull` stops `self-learn.service` for the swap; if it dies between
   stop and start the app stays stopped —
-  `systemctl --user start self-learn` once the DB is whole.
+  `systemctl --user start self-learn` once the file is in place.
 - A `pgrep` warning about a Next dev server on the Mac means `push`'s
-  `DROP … WITH (FORCE)` will sever its connections — expected; restart
+  swap replaces the file under a live reader — expected; restart
   the dev server after.
 
 **Undoing the sync.** Mac: right-click the library in Seafile Client →
@@ -260,28 +256,27 @@ rolled-back app against a migrated DB is upstream's expected state
 Use `teardown.sh`, not a hand recipe. It unpublishes only the Serve ports
 that proxy to the app's port, disables the deploy + export timers first (so
 the poller cannot restart anything mid-teardown), then stops the studio
-runner, the app and Postgres, and refuses to start while a deploy or
+runner and the app, and refuses to start while a deploy or
 `sync.sh` push/pull holds the deploy lock, then holds that lock itself until
 it finishes. It never touches
-`~/.self-learn` (blobs, vault, nightly exports) or anything `sync.sh`
-installed.
+`~/.self-learn` (catalog.db, blobs, vault, nightly exports) or anything
+`sync.sh` installed.
 
-Back up first. `--purge` drops the Postgres volume, and the newest export
-in `~/.self-learn/archive/` is then the only copy of the catalog:
+Back up first. A copy of `catalog.db` plus the newest export in
+`~/.self-learn/archive/` is a full backup:
 
 ```sh
 systemctl --user start self-learn-export.service       # fresh export into ~/.self-learn/archive
-docker compose --project-directory ~/dev/setup-server/services/self-learn exec -T db \
-  pg_dump -U catalog -Fc self_learn > ~/self_learn-$(date +%F).dump   # also keeps sealed provider keys
+cp ~/.self-learn/catalog.db ~/catalog-$(date +%F).db   # the whole catalog, sealed provider keys included
 cp ~/dev/setup-server/services/self-learn/.env ~/self-learn.env.bak  # AUTH_SECRET unseals those keys
 ```
 
 Then, from `~/dev/setup-server/services/self-learn`:
 
 ```sh
-./teardown.sh            # remove, keep the volume, state + .env (the launcher's Remove)
-./teardown.sh --purge    # also drop the volume (down -v), the deploy clone, state/,
-                         # studio/, bin/, the unit files and .env; type the name
+./teardown.sh            # remove, keep state + .env (the launcher's Remove)
+./teardown.sh --purge    # also delete the deploy clone, state/, studio/, bin/,
+                         # the unit files and .env; type the name
 ./setup.sh               # bring it back (after a plain teardown it starts the stack again)
 ```
 
@@ -306,11 +301,11 @@ rm -rf ~/services/self-learn/seafile
 # the self-learn-sync account and its library stay in Seafile until you delete them there
 ```
 
-`rm -rf ~/.self-learn` (blobs, vault, exports) is never scripted; do it by
-hand only if you really want the blob store gone.
+`rm -rf ~/.self-learn` (catalog.db, blobs, vault, exports) is never
+scripted; do it by hand only if you really want the data root gone.
 
-The only irreplaceable state is the Postgres volume (learner history) and
-`~/.self-learn/blobs` (videos, diagrams). A `pg_dump` plus the latest
-`~/.self-learn/archive/` export is a full backup; `pg_dump` also covers
-the sealed provider keys, which `~/.self-learn` alone does not — and a
-dump only restores sealed keys under the same `AUTH_SECRET`.
+The only irreplaceable state is `~/.self-learn/catalog.db` (learner
+history, sealed provider keys) and `~/.self-learn/blobs` (videos,
+diagrams). A copy of `catalog.db` plus the latest `~/.self-learn/archive/`
+export is a full backup — and the copied file only restores sealed keys
+under the same `AUTH_SECRET`.
