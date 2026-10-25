@@ -223,7 +223,7 @@
     try { document.documentElement.setAttribute('data-theme', themeMode); }
     catch (e) { /* nothing to paint onto */ }
     var meta = document.getElementById('theme-color');
-    if (meta) meta.setAttribute('content', resolvedDark() ? '#0e0e11' : '#f5f5f6');
+    if (meta) meta.setAttribute('content', resolvedDark() ? '#000000' : '#f5f5f6');
     paintThemeButton();
     if (window.ICONS && typeof window.ICONS.repaint === 'function') {
       try { window.ICONS.repaint(); } catch (e) { /* icons stay as they are */ }

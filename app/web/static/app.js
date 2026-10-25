@@ -2410,6 +2410,10 @@
      browser's own find is left alone (it lives on ⌘F). */
   document.addEventListener('keydown', function (e) {
     if ((e.key === 'k' || e.key === 'K') && (e.metaKey || e.ctrlKey)) {
+      /* Not while a sheet owns the modal layer (focus would land behind
+         it), and not on routes where the field is hidden — the detail page
+         has no search at all, and the catalogue focuses its own. */
+      if (!elSheet.hidden || elSearch.hidden) return;
       e.preventDefault();
       elFilter.focus();
       elFilter.select();
