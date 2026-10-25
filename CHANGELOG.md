@@ -20,6 +20,14 @@ first, dated by merge.
 
 ### Added
 
+- **teardown.sh for forgejo**, so it gets the launcher's Remove button.
+  The default keeps repos, `.env` and the hidden `.admin-created` marker.
+  `--purge` warns that every repository, issue, PR, wiki, LFS object and
+  account goes with no other copy, prints a `forgejo dump` command that
+  writes outside the data dir, then deletes data, the marker and `.env`.
+  An SSH TCP forward is only turned off if the compose SSH port line is
+  actually enabled.
+
 - **teardown.sh for code-server**, so it gets the launcher's Remove
   button. On `:443` it turns off only code-server's own path (`/`), so
   the launcher's `/home` stays up; a port that is all code-server goes
