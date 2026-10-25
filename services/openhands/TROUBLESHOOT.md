@@ -113,6 +113,11 @@ What it will not do on its own:
   stopped: setup.sh installs none.
 - The uid 10001 ACLs on `~/agent-workspaces` stay. `--purge` prints the
   exact `setfacl -x u:10001 ...` lines to run once nothing needs them.
+- `--purge` refuses when `AGENT_WORKSPACES` (symlinks resolved) is inside
+  the data dir or holds it, or when any bind mount source lands inside it.
+  It reads mounts from `docker compose config`; without that, it reads only
+  the short `- SOURCE:TARGET` overlay lines setup.sh writes and refuses on
+  anything else (long-form `type: bind` / `source:` included).
 - `docker-compose.creds.yml` stays (it only lists mount paths). Delete it
   to stop mounting `~/.claude` / `~/.codex` on the next `./setup.sh`.
 - If the data dir has files the container user owns and the image is no

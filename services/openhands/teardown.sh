@@ -148,6 +148,62 @@ env_lint() {
   [ -z "$problem" ] || die "$ENV_FILE: $problem. Fix that line (teardown will not guess how Compose reads it) and re-run."
 }
 env_lint
+
+# Where an absolute path really lands, symlinks and all, whether or not it
+# exists yet: the deepest part that exists is resolved with `pwd -P` and the
+# missing rest is appended (the parent-resolve idea of real_dir, applied
+# upwards). A symlinked file leaf is followed hop by hop. Refused (non-zero)
+# for a relative path, a `.`/`..` component, a newline, a path that runs
+# through a file, or a symlink that points nowhere.
+phys_path() {
+  local p="$1" rest="" dir leaf t hops=0 nl
+  nl='
+'
+  case "$p" in /*) ;; *) return 1 ;; esac
+  case "$p" in *"$nl"*) return 1 ;; esac
+  case "/$p/" in */./*|*/../*) return 1 ;; esac
+  while [ ! -e "$p" ] && [ ! -L "$p" ]; do
+    rest="/$(basename "$p")$rest"
+    p="$(dirname "$p")"
+  done
+  if [ -d "$p" ]; then
+    dir="$(cd "$p" && pwd -P)" || return 1
+  else
+    [ -z "$rest" ] || return 1
+    dir="$(cd "$(dirname "$p")" && pwd -P)" || return 1
+    leaf="$(basename "$p")"
+    while [ -L "$dir/$leaf" ]; do
+      hops=$((hops + 1)); [ "$hops" -le 40 ] || return 1
+      t="$(readlink "$dir/$leaf")" || return 1
+      case "$t" in /*) ;; *) t="$dir/$t" ;; esac
+      dir="$(cd "$(dirname "$t")" && pwd -P)" || return 1
+      leaf="$(basename "$t")"
+    done
+    [ -e "$dir/$leaf" ] || return 1
+    rest="/$leaf"
+  fi
+  case "$dir$rest" in *"$nl"*) return 1 ;; esac
+  if [ "$dir" = / ]; then printf '%s' "${rest:-/}"; else printf '%s%s' "$dir" "$rest"; fi
+}
+
+# True when one physical path is the other or sits inside it.
+paths_overlap() {
+  [ "$1" = / ] || [ "$2" = / ] && return 0
+  case "$1/" in "$2"/*) return 0 ;; esac
+  case "$2/" in "$1"/*) return 0 ;; esac
+  return 1
+}
+
+# ~/ and $HOME / ${HOME} in a mount source, as Compose expands them. A
+# relative source is relative to the project directory (Compose's rule).
+expand_src() {
+  local s="$1"
+  case "$s" in \~/*) s="$HOME/${s#\~/}" ;; esac
+  s="${s//\$\{HOME\}/$HOME}"; s="${s//\$HOME/$HOME}"
+  case "$s" in /*) ;; *) s="$SERVICE_DIR/${s#./}" ;; esac
+  printf '%s' "$s"
+}
+
 LOCAL_PORT="$(env_get OPENHANDS_PORT)"
 DATA_DIR="$(env_get OPENHANDS_DATA)"
 WORKSPACES="$(env_get AGENT_WORKSPACES)"
@@ -233,29 +289,91 @@ if [ "$PURGE" -eq 1 ]; then
       *) die "OPENHANDS_DATA=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;
     esac
   fi
-  # Host credentials are bind-mounted by the creds overlay, never copied.
-  # However ~/.claude, ~/.codex or any other overlay mount source is reached
-  # (a symlink, a hand-edited overlay), it must not sit inside what is about
-  # to be deleted.
   if [ -n "$PURGE_DIR" ]; then
-    srcs="$HOME/.claude
-$HOME/.codex"
-    if [ -f "$CREDS_FILE" ]; then
-      srcs="$srcs
-$(sed -n 's/^[[:space:]]*-[[:space:]]*["'\'']\{0,1\}\([^:"'\'']*\):.*/\1/p' "$CREDS_FILE")"
+    # The project tree is the user's work and is never purged. setup.sh
+    # accepts any AGENT_WORKSPACES, including one inside the data dir (or
+    # one holding it), so compare where both really land, symlinks
+    # resolved, before anything changes.
+    ws="${WORKSPACES:-$HOME/agent-workspaces}"
+    case "$ws" in \~/*) ws="$HOME/${ws#\~/}" ;; esac
+    ws_real="$(phys_path "$ws")" \
+      || die "AGENT_WORKSPACES=$ws in $ENV_FILE cannot be resolved to a real path (relative, a '.' or '..' part, or a broken symlink), so teardown cannot prove --purge spares your projects. Refusing; nothing was changed."
+    if paths_overlap "$ws_real" "$PURGE_DIR"; then
+      die "AGENT_WORKSPACES=$ws (your projects) resolves to $ws_real, which overlaps $PURGE_DIR, the data dir --purge deletes. Refusing; nothing was changed. Move the workspace or OPENHANDS_DATA so neither holds the other, then re-run."
     fi
-    while IFS= read -r src; do
+
+    # Host credentials are bind-mounted, never copied. However ~/.claude,
+    # ~/.codex or any other bind source is reached (a symlink, a hand-edited
+    # overlay), it must not sit inside what is about to be deleted. The
+    # bind list comes from `compose config` (read-only; every syntax already
+    # resolved by Compose itself). Where that is unavailable, only the short
+    # `- SOURCE:TARGET` lines setup.sh writes are read from the overlay, and
+    # anything else in it stops the purge rather than being skipped.
+    tab="$(printf '\t')"
+    nl='
+'
+    srcs="$HOME/.claude${tab}host credentials
+$HOME/.codex${tab}host credentials"
+    binds=""
+    cfg="$("${COMPOSE[@]}" config --format json 2>/dev/null)" || cfg=""
+    if [ -n "$cfg" ]; then
+      binds="$(printf '%s\n' "$cfg" | awk '
+        function val(line) { sub(/^[[:space:]]*"[a-z_]+": "/, "", line); sub(/",?[[:space:]]*$/, "", line); return line }
+        /^[[:space:]]*"type": "/   { type = val($0); src = ""; next }
+        /^[[:space:]]*"source": "/ { src = $0; next }
+        /^[[:space:]]*"target": "/ {
+          if (type == "bind" && src != "") {
+            s = val(src); t = val($0)
+            if (index(s, "\\") || index(t, "\\") || s !~ /^\//) { print "BAD"; exit }
+            print s "\t" t
+          }
+          type = ""; src = ""
+        }')"
+      # Pretty-printed JSON is what this reads. If the data mount from
+      # docker-compose.yml is not in what it found, the output was some
+      # other shape: fall back to the overlay rather than trust a short list.
+      case "$binds" in
+        BAD*|*"$nl"BAD*) die "compose config lists a bind mount whose path teardown cannot read safely (an escape or a relative path). Refusing --purge; nothing was changed." ;;
+      esac
+      printf '%s\n' "$binds" | grep -q "${tab}/home/openhands/\.openhands\$" || binds=""
+    fi
+    if [ -z "$binds" ] && [ -f "$CREDS_FILE" ]; then
+      binds="$(awk '
+        { sub(/\r$/, "") }
+        /^[[:space:]]*(#.*)?$/                  { next }
+        /^services:[[:space:]]*$/               { next }
+        /^[[:space:]]+openhands:[[:space:]]*$/  { next }
+        /^[[:space:]]+volumes:[[:space:]]*$/    { next }
+        /^[[:space:]]+-[[:space:]]+[^[:space:]]/ {
+          v = $0; sub(/^[[:space:]]+-[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+          q = substr(v, 1, 1)
+          if (q == "\"" || q == "\047") {
+            if (length(v) < 2 || substr(v, length(v), 1) != q) { print "BAD " NR; exit }
+            v = substr(v, 2, length(v) - 2)
+          }
+          if (index(v, "\"") || index(v, "\047") || index(v, "\\") || index(v, "#") || index(v, "\t")) { print "BAD " NR; exit }
+          n = split(v, part, ":")
+          if (n < 2 || n > 3 || part[2] !~ /^\//) { print "BAD " NR; exit }
+          if (part[1] !~ /^(\/|~\/|\.\/|\$HOME(\/|$)|\$\{HOME\}(\/|$))/) { print "BAD " NR; exit }
+          print part[1] "\t" part[2]; next
+        }
+        { print "BAD " NR; exit }' "$CREDS_FILE")"
+      case "$binds" in
+        "BAD "*|*"$nl""BAD "*) die "$CREDS_FILE line ${binds##*BAD } is not a short '- SOURCE:TARGET' mount with an absolute, ~/ or \$HOME source (the only form setup.sh writes), and compose config could not list the mounts for it. teardown will not guess whether that mount reaches the data dir. Refusing --purge; nothing was changed." ;;
+      esac
+    fi
+    [ -z "$binds" ] || srcs="$srcs
+$binds"
+    while IFS="$tab" read -r src target; do
       [ -n "$src" ] || continue
-      case "$src" in \~/*) src="$HOME/${src#\~/}" ;; esac
-      src="${src//\$\{HOME\}/$HOME}"; src="${src//\$HOME/$HOME}"
+      src="$(expand_src "$src")"
+      case "$src" in *'$'*) die "Mount source $src (at $target) uses a variable teardown does not expand. Refusing --purge; nothing was changed." ;; esac
       [ -e "$src" ] || continue
-      if [ -d "$src" ]; then
-        sreal="$(cd "$src" && pwd -P)" || die "Cannot resolve $src — refusing."
-      else
-        sreal="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")" || die "Cannot resolve $src — refusing."
-      fi
+      sreal="$(phys_path "$src")" || die "Cannot resolve mount source $src (at $target). Refusing --purge; nothing was changed."
+      # The data mount itself is what --purge is for.
+      [ "$target" = /home/openhands/.openhands ] && [ "$sreal" = "$PURGE_DIR" ] && continue
       case "$sreal/" in
-        "$PURGE_DIR"/*) die "$src (mounted into the container as credentials) resolves to $sreal, inside $PURGE_DIR — refusing to delete it. Move it out first. Nothing was changed." ;;
+        "$PURGE_DIR"/*) die "$src (mounted into the container at $target) resolves to $sreal, inside $PURGE_DIR. Refusing to delete it; move it out first. Nothing was changed." ;;
       esac
     done <<EOF
 $srcs

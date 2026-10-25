@@ -7,6 +7,9 @@
 #                      tests), one `name|compose-project` line per container
 #   ps_list_fails    — exists => that listing fails
 #   docker_run_fails — exists => `docker run --entrypoint sh` (purge cleanup) fails
+#   compose_config_json — what `compose ... config --format json` prints; when
+#                      absent, config fails like a Compose without --format,
+#                      so teardown falls back to reading the creds overlay
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -56,6 +59,11 @@ case "$1" in
             up)   touch "$STATE_DIR/compose_up" ;;
             pull) touch "$STATE_DIR/compose_pull" ;;
             down) touch "$STATE_DIR/compose_down" ;;
+            config)
+              [ -f "$STATE_DIR/compose_config_json" ] || { echo "unknown flag: --format" >&2; exit 1; }
+              cat "$STATE_DIR/compose_config_json"
+              exit 0
+              ;;
           esac
         done
         ;;

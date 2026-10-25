@@ -672,8 +672,136 @@ test_teardown_purge_protects_creds() {
     > "$SVC/docker-compose.creds.yml"
   run_teardown --purge "openhands"
   check "overlay mount inside data: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  says it is mounted as credentials" out_has "mounted into the container as credentials"
+  check "  names where it is mounted"   out_has "mounted into the container at /home/openhands/.codex"
   check "  mounted file kept"         [ -f "$dir/codex-copy/auth.json" ]
+  teardown
+}
+
+set_env() { sed -i.bak "s#^$1=.*#$1=$2#" "$SVC/.env"; }
+
+test_teardown_purge_spares_workspaces() {
+  echo "• teardown --purge: a workspace inside (or holding) the data dir is refused"
+  deployed
+  local dir; dir="$(data_dir)"
+  mkdir -p "$dir/projects/app"; echo code > "$dir/projects/app/main.py"
+  set_env AGENT_WORKSPACES "$dir/projects"
+  run_teardown --purge "openhands"
+  check "workspace inside data: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it is your projects"  out_has "AGENT_WORKSPACES=$dir/projects (your projects)"
+  check "  projects kept"             [ -f "$dir/projects/app/main.py" ]
+  check "  data kept"                 [ -f "$dir/settings.json" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  nothing unpublished"       no_call " off"
+  set_env AGENT_WORKSPACES "$dir/not-yet/deeper"
+  run_teardown --purge "openhands"
+  check "workspace not created yet, inside data: refused" [ "$CODE" -ne 0 ]
+  ln -s "$dir" "$HOME/ws-link"
+  set_env AGENT_WORKSPACES "$HOME/ws-link/projects"
+  run_teardown --purge "openhands"
+  check "symlink into data: refused"  [ "$CODE" -ne 0 ]
+  check "  names the resolved path"   out_has "resolves to $dir/projects"
+  check "  projects kept"             [ -f "$dir/projects/app/main.py" ]
+  set_env AGENT_WORKSPACES "$HOME/ws-link/new/deeper"
+  run_teardown --purge "openhands"
+  check "missing path under a symlink into data: refused" [ "$CODE" -ne 0 ]
+  ln -s "$HOME/ws-link/projects" "$HOME/ws-link2"
+  set_env AGENT_WORKSPACES "$HOME/ws-link2"
+  run_teardown --purge "openhands"
+  check "symlink to a symlink into data: refused" [ "$CODE" -ne 0 ]
+  set_env AGENT_WORKSPACES "$HOME/services/openhands"
+  run_teardown --purge "openhands"
+  check "workspace holding the data dir: refused" [ "$CODE" -ne 0 ]
+  ln -s "$HOME/services" "$HOME/svc-link"
+  set_env AGENT_WORKSPACES "$HOME/svc-link"
+  run_teardown --purge "openhands"
+  check "symlink to a dir holding the data dir: refused" [ "$CODE" -ne 0 ]
+  set_env AGENT_WORKSPACES "agent-workspaces"
+  run_teardown --purge "openhands"
+  check "relative workspace: refused" [ "$CODE" -ne 0 ]
+  set_env AGENT_WORKSPACES "$HOME/agent-workspaces/../services/openhands/data"
+  run_teardown --purge "openhands"
+  check "'..' in workspace: refused"  [ "$CODE" -ne 0 ]
+  check "everything still kept"       [ -f "$dir/projects/app/main.py" ] && [ -f "$dir/settings.json" ]
+  check "never stopped"               [ ! -f "$STATE_DIR/compose_down" ]
+  ln -s "$HOME/agent-workspaces" "$HOME/ws-elsewhere"
+  set_env AGENT_WORKSPACES "$HOME/ws-elsewhere"
+  run_teardown --purge "openhands"
+  check "symlinked workspace outside data: purge runs" [ "$CODE" -eq 0 ]
+  check "  data dir gone"             [ ! -e "$dir" ]
+  check "  workspace kept"            [ -f "$HOME/agent-workspaces/openhands-test/work.txt" ]
+  teardown
+}
+
+# `compose config --format json` volumes, pretty-printed like Compose:
+# one "source<TAB>target" pair per argument, all type bind.
+config_json() {
+  local first=1 pair
+  printf '{\n  "name": "openhands",\n  "services": {\n    "openhands": {\n      "volumes": [\n'
+  for pair in "$@"; do
+    [ "$first" -eq 1 ] || printf ',\n'
+    first=0
+    printf '        {\n          "type": "bind",\n          "source": "%s",\n          "target": "%s",\n          "bind": {\n            "create_host_path": true\n          }\n        }' \
+      "${pair%%	*}" "${pair#*	}"
+  done
+  printf '\n      ]\n    }\n  }\n}\n'
+}
+
+long_form_overlay() {
+  printf 'services:\n  openhands:\n    volumes:\n      - type: bind\n        source: %s\n        target: /home/openhands/.codex\n' "$1" \
+    > "$SVC/docker-compose.creds.yml"
+}
+
+test_teardown_purge_long_form_mounts() {
+  echo "• teardown --purge: long-form overlay mounts are resolved by compose config or refused"
+  local T='	'
+  deployed
+  local dir; dir="$(data_dir)"
+  mkdir -p "$dir/codex-copy"; echo tok > "$dir/codex-copy/auth.json"
+  long_form_overlay "$dir/codex-copy"
+  run_teardown --purge "openhands"
+  check "no compose config, long form: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  asked compose config first" calls_have "config --format json"
+  check "  says which line it cannot read" out_has "docker-compose.creds.yml line 4 is not a short"
+  check "  mounted file kept"         [ -f "$dir/codex-copy/auth.json" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  nothing unpublished"       no_call " off"
+  long_form_overlay "$HOME/.codex"
+  run_teardown --purge "openhands"
+  check "  even pointing outside data, unread syntax refused" [ "$CODE" -ne 0 ]
+  config_json "$dir${T}/home/openhands/.openhands" "$HOME/agent-workspaces${T}/projects" \
+    "$dir/codex-copy${T}/home/openhands/.codex" > "$STATE_DIR/compose_config_json"
+  run_teardown --purge "openhands"
+  check "compose config: long-form source inside data refused" [ "$CODE" -ne 0 ]
+  check "  names the mount"           out_has "mounted into the container at /home/openhands/.codex"
+  check "  mounted file kept"         [ -f "$dir/codex-copy/auth.json" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  mkdir -p "$HOME/elsewhere"; ln -s "$dir/codex-copy" "$HOME/elsewhere/codex"
+  config_json "$dir${T}/home/openhands/.openhands" "$HOME/agent-workspaces${T}/projects" \
+    "$HOME/elsewhere/codex${T}/home/openhands/.codex" > "$STATE_DIR/compose_config_json"
+  run_teardown --purge "openhands"
+  check "compose config: symlinked source into data refused" [ "$CODE" -ne 0 ]
+  check "  resolved through the link" out_has "resolves to $dir/codex-copy"
+  printf '{"services":{"openhands":{"volumes":[{"type":"bind","source":"%s","target":"/x"}]}}}\n' "$HOME" \
+    > "$STATE_DIR/compose_config_json"
+  run_teardown --purge "openhands"
+  check "unrecognised config shape: falls back and refuses the long form" [ "$CODE" -ne 0 ]
+  check "  via the overlay check"     out_has "is not a short"
+  config_json "$dir${T}/home/openhands/.openhands" "$HOME/agent-workspaces${T}/projects" \
+    "$HOME/.claude${T}/home/openhands/.claude" > "$STATE_DIR/compose_config_json"
+  rm -rf "$dir/codex-copy"
+  run_teardown --purge "openhands"
+  check "compose config, long form outside data: purge runs" [ "$CODE" -eq 0 ]
+  check "  data dir gone"             [ ! -e "$dir" ]
+  check "  host creds kept"           grep -qx 'host-cred' "$HOME/.claude/.credentials.json"
+  teardown
+  deployed
+  dir="$(data_dir)"
+  printf 'services:\n  openhands:\n    volumes:\n      - "%s:/home/openhands/.claude:ro"\n' "$HOME/.claude" \
+    > "$SVC/docker-compose.creds.yml"
+  run_teardown --purge "openhands"
+  check "quoted short form with a mode: purge runs" [ "$CODE" -eq 0 ]
+  check "  data dir gone"             [ ! -e "$dir" ]
   teardown
 }
 
@@ -961,6 +1089,8 @@ test_teardown_purge_container_owned
 test_teardown_ambiguous_containers
 test_teardown_foreign_units
 test_teardown_purge_protects_creds
+test_teardown_purge_spares_workspaces
+test_teardown_purge_long_form_mounts
 test_teardown_purge_refuses_odd_paths
 test_teardown_every_port_pointing_here
 test_teardown_serve_status_fails
