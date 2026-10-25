@@ -212,7 +212,10 @@ SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
 #     key twice in any object, no escaped key;
 #   - TailscaleDNS a boolean and CurrentTailnet a non-null object (null or
 #     missing when logged out);
-#   - all four resolver keys present (the CLI never omits them), each with
+#   - at least one of the four resolver keys present (the CLI omits empty
+#     ones: a live 1.10x node prints Resolvers and SplitDNSRoutes only, and
+#     an absent key means none; all four absent is "unknown", so a renamed
+#     field never reads as clear), each present one with
 #     the type it has in the CLI: Resolvers and FallbackResolvers null or an
 #     array of objects with a string Addr, SplitDNSRoutes null or an object
 #     whose values are null or such arrays, Nameservers null or an array of
@@ -336,18 +339,29 @@ dns_verdict() {  # dns_verdict -> "listed <Key>"..., "clear", or "unknown"
       }
       return 1
     }
-    function shape_ok(   p, i) {
-      p = R SEP "Resolvers";         if (!(p in T) || !resolver_list(p)) return 0
-      p = R SEP "FallbackResolvers"; if (!(p in T) || !resolver_list(p)) return 0
-      p = R SEP "SplitDNSRoutes";    if (!(p in T)) return 0
-      if (T[p] == "object") {
-        for (i = 1; i <= N[p]; i++) if (!resolver_list(p SEP K[p, i])) return 0
-      } else if (T[p] != "null") return 0
-      p = R SEP "Nameservers";       if (!(p in T)) return 0
-      if (T[p] == "array") {
-        for (i = 1; i <= N[p]; i++) if (T[p SEP i] != "string") return 0
-      } else if (T[p] != "null") return 0
-      return 1
+    # An absent key is how the CLI says "none" (omitempty); at least one must be
+    # there, so output whose fields were all renamed is never clear.
+    function shape_ok(   p, i, seen) {
+      seen = 0
+      p = R SEP "Resolvers"
+      if (p in T) { seen++; if (!resolver_list(p)) return 0 }
+      p = R SEP "FallbackResolvers"
+      if (p in T) { seen++; if (!resolver_list(p)) return 0 }
+      p = R SEP "SplitDNSRoutes"
+      if (p in T) {
+        seen++
+        if (T[p] == "object") {
+          for (i = 1; i <= N[p]; i++) if (!resolver_list(p SEP K[p, i])) return 0
+        } else if (T[p] != "null") return 0
+      }
+      p = R SEP "Nameservers"
+      if (p in T) {
+        seen++
+        if (T[p] == "array") {
+          for (i = 1; i <= N[p]; i++) if (T[p SEP i] != "string") return 0
+        } else if (T[p] != "null") return 0
+      }
+      return (seen > 0)
     }
     BEGIN {
       SEP = "\034"; R = "$"; n = 0
