@@ -953,8 +953,10 @@ test_teardown_macos() {
   local plist="$HOME/Library/LaunchAgents/ing.paperclip.paperclipai.plist"
   mkdir -p "$(dirname "$plist")"; echo '<plist/>' > "$plist"
   export FAKE_OS=Darwin
+  touch "$STATE_DIR/launchd_loaded"
   run_teardown
   check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "asks launchd first"           calls_have "launchctl print gui/1000/ing.paperclip.paperclipai"
   check "bootout gui/<uid>/label"      calls_have "launchctl bootout gui/1000/ing.paperclip.paperclipai"
   check "disable gui/<uid>/label"      calls_have "launchctl disable gui/1000/ing.paperclip.paperclipai"
   check "no systemctl on macOS"        no_call "^systemctl "
@@ -966,6 +968,79 @@ test_teardown_macos() {
   check "purge: Linux unit file untouched" [ -f "$(unit_file)" ]
   check "purge: instance kept"         host_state_intact
   unset FAKE_OS
+  teardown
+}
+
+test_teardown_macos_launchctl_failures() {
+  echo "• teardown on macOS: a job launchd will not stop or disable stops the purge"
+  local plist
+  deployed
+  plist="$HOME/Library/LaunchAgents/ing.paperclip.paperclipai.plist"
+  mkdir -p "$(dirname "$plist")"; echo '<plist/>' > "$plist"
+  export FAKE_OS=Darwin
+  touch "$STATE_DIR/launchd_loaded" "$STATE_DIR/launchd_bootout_fails"
+  run_teardown --purge "paperclip"
+  check "bootout fails, still loaded: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                   out_has "bootout gui/1000/ing.paperclip.paperclipai failed"
+  check "  .env kept"                  [ -f "$SVC/.env" ]
+  check "  plist kept"                 [ -f "$plist" ]
+  check "  markers kept"               [ -f "$HOME/services/paperclip/ceo-invite.txt" ]
+  check "  no disable after it"        no_call "launchctl disable"
+  rm -f "$STATE_DIR/launchd_bootout_fails"
+  touch "$STATE_DIR/launchd_disable_fails"
+  : > "$CALLS_LOG"
+  run_teardown --purge "paperclip"
+  check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                   out_has "disable gui/1000/ing.paperclip.paperclipai failed"
+  check "  .env, plist, markers kept"  [ -f "$SVC/.env" ] && [ -f "$plist" ] && [ -f "$HOME/services/paperclip/ceo-invite.txt" ]
+  rm -f "$STATE_DIR/launchd_disable_fails"
+  touch "$STATE_DIR/launchd_loaded" "$STATE_DIR/launchd_bootout_fails_gone"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "bootout fails but job gone: exits zero" [ "$CODE" -eq 0 ]
+  check "  still disables"             calls_have "launchctl disable gui/1000/ing.paperclip.paperclipai"
+  rm -f "$STATE_DIR/launchd_bootout_fails_gone" "$plist"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "not loaded, no plist: exits zero" [ "$CODE" -eq 0 ]
+  check "  no bootout"                 no_call "launchctl bootout"
+  check "  no disable"                 no_call "launchctl disable"
+  unset FAKE_OS
+  teardown
+}
+
+test_teardown_purge_instance_layouts() {
+  echo "• teardown --purge: the printed instance rm follows the config it found"
+  deployed
+  mkdir -p "$HOME/pcflat/secrets"
+  echo '{}' > "$HOME/pcflat/config.json"; echo k > "$HOME/pcflat/secrets/master.key"
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME/pcflat#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "flat instance: exits zero"    [ "$CODE" -eq 0 ]
+  check "  prints its rm"              out_has "rm -rf -- '$HOME/pcflat'$"
+  check "  prints its master.key"      out_has "cp -p '$HOME/pcflat/secrets/master.key'"
+  check "  no nested path"             out_lacks "pcflat/instances/default"
+  check "  instance kept"              [ -f "$HOME/pcflat/secrets/master.key" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/pcempty"
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME/pcempty#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "~/.paperclip fallback: exits zero" [ "$CODE" -eq 0 ]
+  check "  prints its rm"              out_has "rm -rf -- '$HOME/.paperclip/instances/default'"
+  check "  prints its master.key"      out_has "cp -p '$(master_key)'"
+  check "  no rm for the empty data dir" out_lacks "pcempty/instances"
+  check "  instance kept"              [ -f "$(pc_cfg)" ] && [ -f "$(master_key)" ]
+  teardown
+  deployed
+  rm -f "$(pc_cfg)"
+  mkdir -p "$HOME/pcnone/instances/default/secrets"
+  echo k > "$HOME/pcnone/instances/default/secrets/master.key"
+  sed -i.bak "s#^PAPERCLIP_DATA=.*#PAPERCLIP_DATA=$HOME/pcnone#" "$SVC/.env"
+  run_teardown --purge "paperclip"
+  check "no config anywhere: exits zero" [ "$CODE" -eq 0 ]
+  check "  falls back to the nested default" out_has "rm -rf -- '$HOME/pcnone/instances/default'"
+  check "  prints its master.key"      out_has "cp -p '$HOME/pcnone/instances/default/secrets/master.key'"
   teardown
 }
 
@@ -1088,6 +1163,8 @@ test_teardown_env_lint
 test_teardown_refuses_compose_overrides
 test_teardown_leaves_neighbours_alone
 test_teardown_macos
+test_teardown_macos_launchctl_failures
+test_teardown_purge_instance_layouts
 
 if [ "${1:-}" = "--live" ]; then
   echo

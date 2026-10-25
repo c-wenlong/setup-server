@@ -232,6 +232,12 @@ if [ -n "$CFG" ]; then
     warn "$inst/.env says PORT=$iport but $ENV_FILE says $LOCAL_PORT. Only :$LOCAL_PORT is treated as Paperclip's; check tailscale serve status for :$iport."
   fi
 fi
+# The instance --purge points at when it prints how to delete it: the folder
+# that holds the config found above (a nested instances/default, a flat
+# instance in PAPERCLIP_DATA, or the ~/.paperclip fallback), else the nested
+# default under PAPERCLIP_DATA.
+INST="$PAPERCLIP_DATA/instances/default"
+[ -z "$CFG" ] || INST="$(dirname "$CFG")"
 TARGETS=""
 for p in $PORTS; do TARGETS="$TARGETS http://127.0.0.1:$p"; done
 
@@ -292,6 +298,7 @@ PURGE_FILES=""
 if [ "$PURGE" -eq 1 ]; then
   PAPERCLIP_DATA="$(kept_path PAPERCLIP_DATA "$PAPERCLIP_DATA")" || exit 1
   [ -z "$WORKSPACES" ] || { WORKSPACES="$(kept_path AGENT_WORKSPACES "$WORKSPACES")" || exit 1; }
+  INST="$(kept_path PAPERCLIP_INSTANCE "$INST")" || exit 1
   # Only the files setup.sh writes there, each through real_dir: a symlinked
   # ~/services, ~/services/paperclip or marker file is refused, so nothing
   # outside the real ~/services/paperclip (~/.claude above all) is reachable.
@@ -370,11 +377,25 @@ if [ "$OS" = "Linux" ]; then
     ok "No $UNIT_FILE (service not installed)"
   fi
 else
-  domain="gui/$(id -u)"
-  info "Stopping and disabling $LAUNCHD_LABEL (launchd)"
-  launchctl bootout "$domain/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
-  launchctl disable "$domain/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
-  ok "$LAUNCHD_LABEL booted out and disabled; ${UNIT_FILE} kept"
+  # Every failure here stops the script before the purge deletes anything:
+  # a job launchd still has loaded keeps running Paperclip.
+  target="gui/$(id -u)/$LAUNCHD_LABEL"
+  if launchctl print "$target" >/dev/null 2>&1; then
+    info "Stopping and disabling $LAUNCHD_LABEL (launchd)"
+    if ! launchctl bootout "$target" >/dev/null 2>&1 \
+       && launchctl print "$target" >/dev/null 2>&1; then
+      die "launchctl bootout $target failed and the job is still loaded. Serve is already off; nothing else was changed. Re-run once fixed."
+    fi
+    launchctl disable "$target" \
+      || die "launchctl disable $target failed, so it would start again at login. Serve is already off and the job is stopped; nothing else was changed. Re-run once fixed."
+    ok "$LAUNCHD_LABEL booted out and disabled; ${UNIT_FILE} kept"
+  elif [ -e "$UNIT_FILE" ]; then
+    launchctl disable "$target" \
+      || die "launchctl disable $target failed, so it would start again at login. Serve is already off; nothing else was changed. Re-run once fixed."
+    ok "$LAUNCHD_LABEL was not loaded; disabled it; ${UNIT_FILE} kept"
+  else
+    ok "$LAUNCHD_LABEL is not loaded and $UNIT_FILE is absent (service not installed)"
+  fi
 fi
 
 # ---------------------------------------------------------------- purge
@@ -428,7 +449,7 @@ if [ "$PURGE" -eq 1 ]; then
   printf '\033[1;32mDone.\033[0m %s is removed, with its .env, unit file and markers.\n' "$NAME"
   echo
   echo "Kept on purpose (outside ~/services; this script never deletes them):"
-  inst="$PAPERCLIP_DATA/instances/default"
+  inst="$INST"
   key=""
   for p in "$inst/secrets/master.key" "$PAPERCLIP_DATA/secrets/master.key"; do
     if [ -f "$p" ]; then key="$p"; break; fi
