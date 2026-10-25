@@ -162,7 +162,13 @@ journalctl --user -u design-systems-deploy -n 50          # deploy history
 systemctl --user list-timers design-systems-deploy.timer
 docker compose --project-directory ~/dev/setup-server/services/design-systems ps|logs|restart
 tailscale serve status
+./teardown.sh             # Remove: unpublish, stop poller + container; keeps state, .env, your clone
+./teardown.sh --purge     # also delete ~/services/design-systems state, the unit files and .env (asks first)
 ```
+
+`teardown.sh` never touches the clone at `~/dev/design-systems` or
+`designs-trigger.service` (which `setup.sh` does not create); it warns about
+the latter if present.
 
 A failed build leaves `www/current` pointing at the last release — a
 broken commit never takes the site down, and the repoint itself is one

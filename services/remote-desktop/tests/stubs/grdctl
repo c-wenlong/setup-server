@@ -34,6 +34,8 @@
 #   grd_status_fails    — exists => `status` exits non-zero (polkit denial)
 #   grd_enable_fails    — exists => `rdp enable` fails
 #   grd_no_system       — exists => --system is unsupported (older build)
+#   grd_disable_fails   — exists => `rdp disable` fails (teardown --system)
+#   grd_disable_noop    — exists => `rdp disable` succeeds, 3389 stays up
 echo "grdctl $*" >> "$CALLS_LOG"
 
 SYSTEM=0; HEADLESS=0
@@ -121,7 +123,11 @@ EOF
         touch "$STATE_DIR/grd_rdp_enabled"
         ;;
       disable)
-        rm -f "$STATE_DIR/grd_rdp_enabled"
+        [ -f "$STATE_DIR/grd_disable_fails" ] && {
+          echo "Error: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: Not authorized" >&2
+          exit 1; }
+        # grd_disable_noop: disable "succeeds" but the listener stays up.
+        [ -f "$STATE_DIR/grd_disable_noop" ] || rm -f "$STATE_DIR/grd_rdp_enabled"
         ;;
       set-port)
         [ -n "${2:-}" ] || { echo "grdctl: set-port needs a port" >&2; exit 2; }

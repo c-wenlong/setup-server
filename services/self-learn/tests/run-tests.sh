@@ -29,6 +29,7 @@ setup() {
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
   cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/docker-compose.yml" \
+    "$SERVICE_DIR/teardown.sh" \
     "$SERVICE_DIR/sync.sh" "$SVC/"
 }
 
@@ -96,7 +97,7 @@ EOF
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID LOCAL_PORT HTTPS_PORT PG_PORT REPO_URL BRANCH POLL_SECONDS \
+  unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT PG_PORT REPO_URL BRANCH POLL_SECONDS \
     SKIP_SEED OWNER_PASSWORD AUTH_SECRET STATE_DIR CALLS_LOG \
     STUDIO_ENABLED ASSET_FILES_ENABLED \
     SEAFILE_ENV MAC_SSH MAC_HOME MAC_REPO MAC_PGBIN MAC_DB MAC_DB_URL \
@@ -133,6 +134,7 @@ check() {
 }
 
 out_has()    { grep -q -- "$1" <<<"$OUT"; }
+out_lacks()  { ! grep -q -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q -- "$1" "$SVC/.env"; }
@@ -254,6 +256,11 @@ test_fresh_deploy() {
     check "deploy agent sets PATH"      grep -q "/opt/homebrew/bin" "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
     check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.self-learn.web"
     check "studio agent not loaded"     no_call "launchctl bootstrap .*com.self-learn.studio"
+    local a
+    for a in web deploy export; do
+      check "$a label enabled before bootstrap (undoes teardown's disable)" \
+        before "launchctl enable gui/.*/com.self-learn.$a" "launchctl bootstrap .*com.self-learn.$a"
+    done
   fi
   check "served on tailscale :8107"     calls_have "tailscale serve --bg --https=8107 http://127.0.0.1:8107"
   check "prints final URL"              out_has "https://test-host.tailfake.ts.net:8107"
@@ -980,12 +987,804 @@ test_live() {
   live_check "tailnet HTTPS responds"      curl -fsS -o /dev/null --max-time 30 "$url/"
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+SVC_HOME() { printf '%s' "$HOME/services/self-learn"; }
+UNIT_DIR() { printf '%s' "$HOME/.config/systemd/user"; }
+# Point SERVICE_HOME in .env somewhere else (odd-path tests).
+set_service_home() { sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME=$1#" "$SVC/.env"; }
+# Two call lines in order (both present, first before second).
+before() {
+  local a b; a="$(call_line "$1")"; b="$(call_line "$2")"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+# Nothing a teardown changes happened.
+untouched() {
+  [ ! -f "$STATE_DIR/compose_down" ] && no_call " off" \
+    && no_call "systemctl --user disable" && no_call "launchctl bootout" \
+    && no_call "launchctl disable" \
+    && [ -f "$SVC/.env" ]
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps this port to this service,
+# neighbours sit on other ports (one a lookalike suffix), the studio has
+# state and a nightly export has landed.
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  mkdir -p "$(SVC_HOME)/studio/jobs" "$HOME/.self-learn/archive/latest" "$HOME/.self-learn/vault"
+  echo wal > "$(SVC_HOME)/studio/jobs/wal"
+  echo export > "$HOME/.self-learn/archive/latest/catalog.json"
+  echo blob > "$HOME/.self-learn/blobs/b1"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8107 (tailnet only)
+|-- / proxy http://127.0.0.1:8107
+
+https://test-host.tailfake.ts.net:18107 (tailnet only)
+|-- / proxy http://127.0.0.1:18107
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove stops timers, studio, app, then Postgres; keeps data"
+  deployed
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "serve off for :8107"           calls_have "tailscale serve --https=8107 off"
+  check "neighbour :2283 untouched"     no_call "https=2283"
+  check "lookalike :18107 untouched"    no_call "https=18107"
+  check "never serve reset"             no_call "serve reset"
+  check "compose down"                  [ -f "$STATE_DIR/compose_down" ]
+  check "down keeps the volume (no -v)" [ -z "$(cat "$STATE_DIR/compose_down" 2>/dev/null)" ]
+  if [ "$OS" = "Linux" ]; then
+    check "deploy timer disabled"       calls_have "systemctl --user disable --now self-learn-deploy.timer"
+    check "export timer disabled"       calls_have "systemctl --user disable --now self-learn-export.timer"
+    check "in-flight deploy stopped"    calls_have "systemctl --user stop self-learn-deploy.service"
+    check "in-flight export stopped"    calls_have "systemctl --user stop self-learn-export.service"
+    check "studio disabled"             calls_have "systemctl --user disable --now self-learn-studio.service"
+    check "app disabled"                calls_have "systemctl --user disable --now self-learn.service"
+    check "timers before studio"        before "disable --now self-learn-export.timer" "disable --now self-learn-studio.service"
+    check "studio before app"           before "disable --now self-learn-studio.service" "disable --now self-learn.service"
+    check "app before Postgres"         before "disable --now self-learn.service" "compose --project-directory .* down"
+    check "app inactive"                [ ! -f "$STATE_DIR/web_active" ]
+    check "unit files kept"             [ -f "$(UNIT_DIR)/self-learn.service" ] && [ -f "$(UNIT_DIR)/self-learn-deploy.timer" ]
+    check "no daemon-reload"            no_call "daemon-reload"
+  else
+    check "web agent unloaded"          calls_have "launchctl bootout gui/.*/com.self-learn.web"
+    check "deploy before web"           before "bootout gui/.*/com.self-learn.deploy" "bootout gui/.*/com.self-learn.web"
+    local a
+    for a in deploy export studio web; do
+      check "$a agent disabled (no reload at login)" calls_have "launchctl disable gui/.*/com.self-learn.$a"
+    done
+  fi
+  check "clone kept"                    [ -d "$(REPO_DIR)/.git" ]
+  check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "studio state kept"             [ -f "$(SVC_HOME)/studio/jobs/wal" ]
+  check "exports kept"                  [ -f "$HOME/.self-learn/archive/latest/catalog.json" ]
+  check ".env kept"                     [ -f "$SVC/.env" ]
+  check "torn-down marker written"      [ -f "$(SVC_HOME)/state/torn-down" ]
+  check "says how to bring it back"     out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"             [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_then_setup_restores() {
+  echo "• teardown then ./setup.sh: the stack comes back up (not read as a deliberate stop)"
+  deployed
+  run_teardown
+  : > "$CALLS_LOG"
+  run_deploy
+  check "setup exits zero"              [ "$CODE" -eq 0 ]
+  check "not left stopped"              out_lacks "leaving it stopped"
+  check "marker consumed"               [ ! -f "$(SVC_HOME)/state/torn-down" ]
+  check "postgres up again"             [ -f "$STATE_DIR/db_running" ]
+  if [ "$OS" = "Linux" ]; then
+    check "app restarted"               calls_have "systemctl --user restart self-learn"
+    check "timers re-enabled"           calls_have "systemctl --user enable --now self-learn-deploy.timer"
+  fi
+  check "serve republished"             calls_have "tailscale serve --bg --https=8107"
+  # A later plain stop is the owner's again.
+  rm -f "$STATE_DIR/web_active" "$STATE_DIR/db_running"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "next stop respected again"     out_has "leaving it stopped"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no serve off"                  no_call " off"
+  check "says already off"              out_has "already off"
+  check "still compose down"            [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8107 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no serve off"                  no_call " off"
+  check "says nothing points here"      out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay; studio/pg never"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8110 (tailnet only)
+|-- / proxy http://127.0.0.1:8107
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8107
+
+https://test-host.tailfake.ts.net:7250 (tailnet only)
+|-- / proxy http://127.0.0.1:7250
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /learn proxy http://127.0.0.1:8107
+EOF
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ":8110 off"                     calls_have "serve --https=8110 off"
+  check ":8443 off"                     calls_have "serve --https=8443 off"
+  check "unrelated :7250 left alone"    no_call "https=7250"
+  check "shared :443 left on"           no_call "https=443 off"
+  check "warns about the shared port"   out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "says why"                      out_has "Could not read Tailscale Serve status"
+  check "nothing changed"               untouched
+  check "no torn-down marker"           [ ! -f "$(SVC_HOME)/state/torn-down" ]
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "no .env: explains"             out_has "nothing to tear down"
+  check "no .env: touched nothing"      [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"          [ "$CODE" -ne 0 ]
+  check "root: touched nothing"         untouched
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: touched nothing" untouched
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no docker: touched nothing"    untouched
+  rm -f "$STATE_DIR/docker_no_perm"
+  sed -i.bak '/^SERVICE_HOME=/d' "$SVC/.env"
+  run_teardown
+  check "no SERVICE_HOME: exits non-zero" [ "$CODE" -ne 0 ]
+  check "no SERVICE_HOME: touched nothing" untouched
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8107'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"        [ "$CODE" -eq 0 ]
+  check ":8107 off"                     calls_have "serve --https=8107 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8107"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"                 [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8107 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"                [ "$CODE" -eq 0 ]
+  check "  :8107 off"                   calls_have "serve --https=8107 off"
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'SERVICE_HOME=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"               out_has "SERVICE_HOME is set more than once"
+  check "  touched nothing"             untouched
+  teardown
+  deployed
+  printf 'X="first\nSERVICE_HOME=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"      out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  touched nothing"             untouched
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_FILE / COMPOSE_PROJECT_NAME / ... in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "self-learn"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  touched nothing"           untouched
+    check "  state kept"                [ -d "$(SVC_HOME)/state" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  touched nothing"             untouched
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then volume, state, units, .env and marker go"
+  deployed
+  mkdir -p "$(UNIT_DIR)"; echo keep > "$(UNIT_DIR)/neighbour.service"
+  run_teardown --purge "self-lear"
+  check "wrong name: exits non-zero"    [ "$CODE" -ne 0 ]
+  check "wrong name: nothing changed"   untouched
+  check "wrong name: state kept"        [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "wrong name: no marker written" [ ! -f "$(SVC_HOME)/state/torn-down" ]
+  run_teardown --purge "self-learn"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "warns where the exports are"   out_has "$HOME/.self-learn/archive"
+  check "serve off for :8107"           calls_have "tailscale serve --https=8107 off"
+  check "down -v (volume dropped)"      [ "$(cat "$STATE_DIR/compose_down" 2>/dev/null)" = "-v" ]
+  check "clone gone"                    [ ! -e "$(REPO_DIR)" ]
+  check "bin gone"                      [ ! -e "$(SVC_HOME)/bin" ]
+  check "state gone"                    [ ! -e "$(SVC_HOME)/state" ]
+  check "studio state gone"             [ ! -e "$(SVC_HOME)/studio" ]
+  check ".env gone"                     [ ! -f "$SVC/.env" ]
+  check "marker dir gone"               [ ! -e "$(SVC_HOME)" ]
+  check "services dir itself kept"      [ -d "$HOME/services" ]
+  check "exports kept"                  [ -f "$HOME/.self-learn/archive/latest/catalog.json" ]
+  check "blobs kept"                    [ -f "$HOME/.self-learn/blobs/b1" ]
+  check "vault kept"                    [ -d "$HOME/.self-learn/vault" ]
+  check "repo files kept"               [ -f "$SVC/docker-compose.yml" ] && [ -f "$SVC/setup.sh" ]
+  if [ "$OS" = "Linux" ]; then
+    local u
+    for u in self-learn.service self-learn-studio.service self-learn-deploy.service \
+             self-learn-deploy.timer self-learn-export.service self-learn-export.timer; do
+      check "unit $u gone"              [ ! -e "$(UNIT_DIR)/$u" ]
+    done
+    check "neighbour unit kept"         [ -f "$(UNIT_DIR)/neighbour.service" ]
+    check "daemon-reload after"         before "compose --project-directory .* down" "systemctl --user daemon-reload"
+  fi
+  teardown
+}
+
+test_teardown_purge_missing_data_dir() {
+  echo "• teardown --purge: state already gone is fine"
+  deployed
+  rm -rf "$(SVC_HOME)"
+  run_teardown --purge "self-learn"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check ".env gone"                     [ ! -f "$SVC/.env" ]
+  check "down -v"                       [ "$(cat "$STATE_DIR/compose_down" 2>/dev/null)" = "-v" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses a SERVICE_HOME outside ~/services/self-learn"
+  deployed
+  set_service_home "$HOME"
+  run_teardown --purge "self-learn"
+  check "\$HOME: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "  home untouched"              [ -d "$HOME/.self-learn" ]
+  check "  nothing changed"             untouched
+  set_service_home "$HOME/services/../x"
+  run_teardown --purge "self-learn"
+  check "'..' refused"                  [ "$CODE" -ne 0 ]
+  set_service_home "$HOME/services/"
+  run_teardown --purge "self-learn"
+  check "services dir itself refused"   [ "$CODE" -ne 0 ]
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  local dotted
+  for dotted in "$HOME/services/." "$HOME/services/./self-learn" "$HOME/services/self-learn/.."; do
+    set_service_home "$dotted"
+    run_teardown --purge "self-learn"
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+  done
+  check "neighbour data never touched"  [ -f "$HOME/services/neighbour/keep" ]
+  check "state still there"             [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "nothing changed at all"        untouched
+  teardown
+}
+
+test_teardown_purge_trailing_slashes() {
+  echo "• teardown --purge: trailing slashes and symlinks cannot reach ~/services"
+  deployed
+  set_service_home "$HOME/services//"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "self-learn"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "neighbour data kept"           [ -f "$HOME/services/neighbour/keep" ]
+  ln -s "$HOME/services" "$HOME/services/alias"
+  set_service_home "$HOME/services/alias"
+  run_teardown --purge "self-learn"
+  check "symlink to services refused"   [ "$CODE" -ne 0 ]
+  check "neighbour still kept"          [ -f "$HOME/services/neighbour/keep" ]
+  check "nothing changed"               untouched
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/self-learn"#' "$SVC/.env"
+  run_teardown --purge "self-learn"
+  check "\${HOME} form: exits zero"     [ "$CODE" -eq 0 ]
+  check "  state gone"                  [ ! -e "$(SVC_HOME)" ]
+  teardown
+  deployed
+  sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME='\$HOME/services/self-learn'#" "$SVC/.env"
+  run_teardown --purge "self-learn"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
+  teardown
+}
+
+test_teardown_purge_own_dir_only() {
+  echo "• teardown --purge: only ~/services/self-learn itself or inside it"
+  deployed
+  mkdir -p "$HOME/services/neighbour/state"; echo x > "$HOME/services/neighbour/state/keep"
+  set_service_home "$HOME/services/neighbour"
+  run_teardown --purge "self-learn"
+  check "another service's dir refused" [ "$CODE" -ne 0 ]
+  check "  its data kept"               [ -f "$HOME/services/neighbour/state/keep" ]
+  check "  nothing changed"             untouched
+  mkdir -p "$HOME/services/self-learn/a:b"
+  set_service_home "$HOME/services/self-learn/a:b"
+  run_teardown --purge "self-learn"
+  check "a colon in the path refused"   [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/self-learn/state"; echo x > "$HOME/self-learn/state/keep"
+  run_teardown --purge "self-learn"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"      [ -f "$HOME/self-learn/state/keep" ]
+  check "nothing changed"               untouched
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/self-learn survives"
+  deployed
+  local repo="$HOME/services/self-learn/setup-server/services/self-learn"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/self-learn/setup-server/other.env"
+  OUT="$(printf '%s\n' "self-learn" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "checkout intact"               [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"    [ -f "$HOME/services/self-learn/setup-server/other.env" ]
+  check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
+  teardown
+}
+
+test_teardown_purge_symlinked_clone() {
+  echo "• teardown --purge: a repo/ symlinked to a working clone in ~/dev is refused"
+  deployed
+  mkdir -p "$HOME/dev/self-learn"; echo mine > "$HOME/dev/self-learn/WORK"
+  rm -rf "$(REPO_DIR)"; ln -s "$HOME/dev/self-learn" "$(REPO_DIR)"
+  run_teardown --purge "self-learn"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "working clone intact"          [ -f "$HOME/dev/self-learn/WORK" ]
+  check "nothing changed"               untouched
+  check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
+  teardown
+}
+
+test_teardown_purge_keeps_self_learn_home() {
+  echo "• teardown --purge: a SELF_LEARN_HOME inside a purged dir is refused"
+  deployed
+  mkdir -p "$(SVC_HOME)/state/blobs"
+  sed -i.bak "s#^SELF_LEARN_HOME=.*#SELF_LEARN_HOME=$(SVC_HOME)/state/blobs#" "$SVC/.env"
+  run_teardown --purge "self-learn"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "says why"                      out_has "refusing to delete the blob store"
+  check "nothing changed"               untouched
+  teardown
+}
+
+test_teardown_foreign_sync_unit() {
+  echo "• teardown: sync.sh's self-learn-seafile unit is never touched; purge refused while it exists"
+  deployed
+  mkdir -p "$(UNIT_DIR)" "$(SVC_HOME)/seafile/ccnet"
+  echo unit > "$(UNIT_DIR)/self-learn-seafile.service"
+  if [ "$OS" != "Linux" ]; then
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo agent > "$HOME/Library/LaunchAgents/com.self-learn.seafile.plist"
+  fi
+  run_teardown --purge "self-learn"
+  check "purge: exits non-zero"         [ "$CODE" -ne 0 ]
+  check "purge: names the unit"         out_has "self-learn-seafile.service\|com.self-learn.seafile"
+  check "purge: nothing changed"        untouched
+  run_teardown
+  check "default: exits zero"           [ "$CODE" -eq 0 ]
+  check "default: warns, naming it"     out_has "Not touched (not created by setup.sh): .*seafile"
+  check "unit never addressed"          no_call "seafile"
+  check "unit file kept"                [ -f "$(UNIT_DIR)/self-learn-seafile.service" ]
+  check "daemon state kept"             [ -d "$(SVC_HOME)/seafile/ccnet" ]
+  teardown
+}
+
+test_teardown_purge_sync_credentials() {
+  echo "• teardown --purge: refused while .env holds sync.sh's Seafile account"
+  deployed
+  printf '\n# --- blob/db sync (written by sync.sh install) ---\nSEAFILE_SYNC_USER=sync@x.local\nSEAFILE_SYNC_PASSWORD=pw\n' >> "$SVC/.env"
+  run_teardown --purge "self-learn"
+  check "exits non-zero"                [ "$CODE" -ne 0 ]
+  check "says why"                      out_has "SEAFILE_SYNC_USER"
+  check "nothing changed"               untouched
+  teardown
+}
+
+test_teardown_purge_keeps_unknown_entries() {
+  echo "• teardown --purge: entries setup.sh did not create stay, and so does the marker"
+  deployed
+  mkdir -p "$(SVC_HOME)/seafile"; echo x > "$(SVC_HOME)/seafile/left"
+  run_teardown --purge "self-learn"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "foreign entry kept"            [ -f "$(SVC_HOME)/seafile/left" ]
+  check "state gone"                    [ ! -e "$(SVC_HOME)/state" ]
+  check "warns the marker stayed"       out_has "is not empty"
+  teardown
+}
+
+test_teardown_waits_for_lock() {
+  echo "• teardown: a live deploy/sync lock stops it before anything changes; a stale one does not"
+  deployed
+  mkdir -p "$(SVC_HOME)/.deploy.lock"; echo $$ > "$(SVC_HOME)/.deploy.lock/pid"
+  run_teardown
+  check "live lock: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "  says why"                    out_has "holds .*deploy.lock"
+  check "  nothing changed"             untouched
+  check "  lock left to its owner"      [ "$(cat "$(SVC_HOME)/.deploy.lock/pid")" = "$$" ]
+  rm -f "$(SVC_HOME)/.deploy.lock/pid"
+  run_teardown
+  check "fresh lock, no pid yet: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it is starting"         out_has "just starting"
+  check "  nothing changed"             untouched
+  echo 999999 > "$(SVC_HOME)/.deploy.lock/pid"
+  run_teardown --purge "self-learn"
+  check "stale lock: exits zero"        [ "$CODE" -eq 0 ]
+  check "  lock purged with the rest"   [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  teardown
+}
+
+test_teardown_holds_lock() {
+  echo "• teardown: takes the deploy lock for the run (mkdir + pid) and drops it on exit"
+  deployed
+  printf '%s' "$(SVC_HOME)/.deploy.lock" > "$STATE_DIR/lock_probe"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "lock held by a live pid during down" grep -q "^live " "$STATE_DIR/lock_at_down"
+  check "lock gone after the run"       [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  mkdir -p "$(SVC_HOME)/.deploy.lock"; echo 999999 > "$(SVC_HOME)/.deploy.lock/pid"
+  rm -f "$STATE_DIR/lock_at_down"
+  run_teardown
+  check "stale lock (dead pid), plain run: exits zero" [ "$CODE" -eq 0 ]
+  check "  says it cleared it"          out_has "stale deploy lock"
+  check "  taken over during down"      grep -q "^live " "$STATE_DIR/lock_at_down"
+  check "  gone after the run"          [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  run_teardown --purge "self-lear"
+  check "a run that dies (wrong name) exits non-zero" [ "$CODE" -ne 0 ]
+  check "  still drops the lock"        [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  rm -f "$STATE_DIR/lock_at_down"
+  run_teardown --purge "self-learn"
+  check "purge: exits zero"             [ "$CODE" -eq 0 ]
+  check "  lock held during down -v"    grep -q "^live " "$STATE_DIR/lock_at_down"
+  check "  lock gone"                   [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  check "  marker dir gone (lock did not keep it)" [ ! -e "$(SVC_HOME)" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"
+  ln -s "$HOME/elsewhere" "$(SVC_HOME)/.deploy.lock"
+  run_teardown
+  check "symlinked lock: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  check "  link left as it was"         [ -L "$(SVC_HOME)/.deploy.lock" ] && [ -d "$HOME/elsewhere" ]
+  rm -f "$(SVC_HOME)/.deploy.lock"
+  mkdir -p "$(SVC_HOME)/.deploy.lock"; echo 999999 > "$(SVC_HOME)/.deploy.lock/pid"
+  echo mine > "$(SVC_HOME)/.deploy.lock/notes"
+  run_teardown
+  check "stale lock with other files: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  check "  its files kept"              [ -f "$(SVC_HOME)/.deploy.lock/notes" ]
+  teardown
+}
+
+test_teardown_marker_refusals() {
+  echo "• teardown: the torn-down marker is only written inside a real state dir, never through a link"
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/torn-down"
+  rm -rf "$(SVC_HOME)/state"; ln -s "$HOME/elsewhere" "$(SVC_HOME)/state"
+  run_teardown
+  check "symlinked state/: exits zero"  [ "$CODE" -eq 0 ]
+  check "  warns, no marker"            out_has "not writing the torn-down marker"
+  check "  file behind the link intact" [ "$(cat "$HOME/elsewhere/torn-down")" = precious ]
+  check "  still stopped Postgres"      [ -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/file"
+  ln -s "$HOME/elsewhere/file" "$(SVC_HOME)/state/torn-down"
+  run_teardown
+  check "symlinked marker: exits zero"  [ "$CODE" -eq 0 ]
+  check "  warns, no marker"            out_has "not writing the torn-down marker"
+  check "  link target not truncated"   [ "$(cat "$HOME/elsewhere/file")" = precious ]
+  check "  link left as it was"         [ -L "$(SVC_HOME)/state/torn-down" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/outside/state"; echo precious > "$HOME/outside/state/torn-down"
+  set_service_home "$HOME/outside"
+  run_teardown
+  check "SERVICE_HOME outside ~/services/self-learn: exits zero" [ "$CODE" -eq 0 ]
+  check "  warns, no marker"            out_has "not writing the torn-down marker"
+  check "  file there not truncated"    [ "$(cat "$HOME/outside/state/torn-down")" = precious ]
+  check "  no marker in the real state" [ ! -e "$(SVC_HOME)/state/torn-down" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 # A stub that isn't executable is skipped by PATH lookup and the REAL command
 # runs — for ssh/scp that means the real Mac. Refuse to run rather than risk it.
 for f in "$STUBS"/*; do
   [ -x "$f" ] || { red "stub not executable: $f — chmod +x it"; exit 1; }
 done
+
+
+# teardown.sh --purge, with a hook run while the confirmation prompt waits:
+# $1 is the answer, $2 a snippet run once the prompt is on screen (before
+# the answer is sent). Sets OUT and CODE like run_teardown.
+run_purge_at_prompt() {
+  local out="$SANDBOX/teardown.out"
+  : > "$out"
+  { for _ in $(seq 1 100); do grep -q "to confirm" "$out" && break; sleep 0.1; done
+    eval "$2"
+    printf '%s\n' "$1"; } | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge > "$out" 2>&1
+  CODE=$?
+  OUT="$(cat "$out")"
+}
+
+test_teardown_unresolved_variable() {
+  echo "• teardown: a path in .env that still names another variable is refused before anything changes"
+  deployed
+  # setup.sh sources .env, so to it this is state/content, inside a dir the
+  # purge deletes; left literal, the keep-SELF_LEARN_HOME check tests nothing.
+  mkdir -p "$(SVC_HOME)/state/content"; echo blob > "$(SVC_HOME)/state/content/b1"
+  sed -i.bak 's#^SELF_LEARN_HOME=.*#SELF_LEARN_HOME=$SERVICE_HOME/state/content#' "$SVC/.env"
+  run_teardown --purge "self-learn"
+  check "SELF_LEARN_HOME=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                    out_has "SELF_LEARN_HOME .*still refers to another variable"
+  check "  refused before the prompt"   out_lacks "to confirm"
+  check "  content kept"                [ -f "$(SVC_HOME)/state/content/b1" ]
+  check "  nothing changed"             untouched
+  run_teardown
+  check "plain run: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  check "  no lock left behind"         [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  teardown
+  deployed
+  sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/${NAME}"#' "$SVC/.env"
+  run_teardown --purge "self-learn"
+  check "SERVICE_HOME=...\${NAME}: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing changed"             untouched
+  teardown
+}
+
+test_teardown_lock_after_prompt() {
+  echo "• teardown --purge: the deploy lock is taken after the typed confirmation, and re-checked then"
+  local lock
+  deployed
+  lock="$(SVC_HOME)/.deploy.lock"
+  printf '%s' "$lock" > "$STATE_DIR/lock_probe"
+  run_purge_at_prompt "self-learn" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "  lock not held while the prompt waits" grep -qx free "$STATE_DIR/lock_at_prompt"
+  check "  held by a live pid during down -v" grep -q "^live " "$STATE_DIR/lock_at_down"
+  teardown
+  deployed
+  lock="$(SVC_HOME)/.deploy.lock"
+  run_purge_at_prompt "self-learn" "mkdir '$lock' && echo \$\$ > '$lock/pid'"
+  check "a deploy/sync that starts during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says who holds it"           out_has "holds .*deploy.lock"
+  check "  nothing changed"             untouched
+  check "  lock left to its owner"      [ -f "$lock/pid" ]
+  teardown
+  deployed
+  lock="$(SVC_HOME)/.deploy.lock"
+  mkdir -p "$lock"; echo 999999 > "$lock/pid"
+  run_purge_at_prompt "self-learn" "[ -f '$lock/pid' ] && echo kept > '$STATE_DIR/lock_at_prompt' || echo cleared > '$STATE_DIR/lock_at_prompt'"
+  check "stale lock: exits zero"        [ "$CODE" -eq 0 ]
+  check "  not cleared before the answer" grep -qx kept "$STATE_DIR/lock_at_prompt"
+  check "  cleared after it"            out_has "Cleared a stale deploy lock"
+  teardown
+  deployed
+  lock="$(SVC_HOME)/.deploy.lock"
+  mkdir -p "$lock"; echo 999999 > "$lock/pid"
+  run_teardown --purge "self-lear"
+  check "wrong name with a stale lock: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  stale lock not touched (nothing changed)" [ "$(cat "$lock/pid")" = 999999 ]
+  teardown
+}
+
+test_teardown_foreign_units_by_content() {
+  echo "• teardown: a unit/agent whose contents name ~/services/self-learn is listed, never touched; purge refused"
+  # teardown scans the unit dir on Linux and ~/Library/LaunchAgents on
+  # macOS, so the fixture goes where this OS's branch looks.
+  local dir job other ext=""
+  deployed
+  if [ "$OS" = "Linux" ]; then
+    dir="$(UNIT_DIR)"; job="nightly-backup.service"; other="unrelated.service"
+  else
+    dir="$HOME/Library/LaunchAgents"; job="com.me.nightly-backup"; other="com.me.unrelated"; ext=".plist"
+  fi
+  mkdir -p "$dir"
+  printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/self-learn/studio/ /backup/\n' "$HOME" \
+    > "$dir/$job$ext"
+  printf '[Service]\nExecStart=/bin/true\n' > "$dir/$other$ext"
+  run_teardown --purge "self-learn"
+  check "purge: exits non-zero"         [ "$CODE" -ne 0 ]
+  check "  names it"                    out_has "$job"
+  check "  nothing changed"             untouched
+  run_teardown
+  check "default: exits zero"           [ "$CODE" -eq 0 ]
+  check "  warns, naming it"            out_has "Not touched (not created by setup.sh): $job"
+  check "  unrelated not named"         out_lacks "$other"
+  check "  never addressed"             no_call "nightly-backup"
+  check "  unit kept"                   [ -f "$dir/$job$ext" ]
+  teardown
+}
+
+test_teardown_purge_rechecked_after_lock() {
+  echo "• teardown --purge: targets are worked out again once the lock is held; a change during the prompt deletes nothing"
+  local dir job ext=""
+  deployed
+  rm -rf "$(REPO_DIR)"
+  run_purge_at_prompt "self-learn" "mkdir -p '$(REPO_DIR)/.git'"
+  check "repo/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says the list changed"       out_has "changed while the prompt waited"
+  check "  nothing changed"             untouched
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "  lock dropped"                [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
+  run_purge_at_prompt "self-learn" "rm -rf '$(SVC_HOME)/studio' && ln -s '$HOME/elsewhere' '$(SVC_HOME)/studio'"
+  check "studio/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  refuses the link"            out_has "studio is a symlink"
+  check "  nothing changed"             untouched
+  check "  link target kept"            [ -f "$HOME/elsewhere/keep" ]
+  teardown
+  deployed
+  if [ "$OS" = "Linux" ]; then
+    dir="$(UNIT_DIR)"; job="self-learn-seafile.service"
+  else
+    dir="$HOME/Library/LaunchAgents"; job="com.self-learn.seafile"; ext=".plist"
+  fi
+  run_purge_at_prompt "self-learn" "mkdir -p '$dir' && echo unit > '$dir/$job$ext'"
+  check "blob link installed during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names it"                    out_has "--purge refused: $job"
+  check "  nothing changed"             untouched
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
+  teardown
+}
+
+# macOS branch on any box: FAKE_UNAME=Darwin makes teardown.sh take it, and
+# $STATE_DIR/launchd/ gives the launchctl stub one loaded marker per label.
+test_teardown_macos_agents() {
+  echo "• teardown (macOS branch): only loaded agents are booted out; a failed unload stops before --purge deletes anything"
+  local a
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"
+  for a in deploy export web; do touch "$STATE_DIR/launchd/com.self-learn.$a"; done
+  mkdir -p "$HOME/Library/LaunchAgents"
+  printf '<string>%s/services/self-learn/bin/deploy.sh</string>\n' "$HOME" \
+    > "$HOME/Library/LaunchAgents/com.me.backup.plist"
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  for a in deploy export web; do
+    check "loaded $a agent booted out"  calls_have "launchctl bootout gui/.*/com.self-learn.$a"
+  done
+  check "studio (not loaded) not booted out" no_call "launchctl bootout gui/.*/com.self-learn.studio"
+  for a in deploy export studio web; do
+    check "$a agent disabled"           calls_have "launchctl disable gui/.*/com.self-learn.$a"
+  done
+  check "deploy before web"             before "bootout gui/.*/com.self-learn.deploy" "bootout gui/.*/com.self-learn.web"
+  check "no systemctl"                  no_call "systemctl"
+  check "agent named by contents"       out_has "Not touched (not created by setup.sh): com.me.backup"
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.self-learn.web"
+  touch "$STATE_DIR/launchd_bootout_fails"
+  run_teardown --purge "self-learn"
+  check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says so"                     out_has "Could not unload LaunchAgent com.self-learn.web"
+  check "  Postgres left up (no down -v)" [ ! -f "$STATE_DIR/compose_down" ]
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "  .env kept"                   [ -f "$SVC/.env" ]
+  check "  lock dropped"                [ ! -e "$(SVC_HOME)/.deploy.lock" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.self-learn.web"
+  echo async > "$STATE_DIR/launchd_bootout_fails"
+  run_teardown
+  check "bootout errors but the agent unloads: exits zero" [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"
+  touch "$STATE_DIR/launchd_disable_fails"
+  run_teardown --purge "self-learn"
+  check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it would reload"        out_has "would load again at the next login"
+  check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
+  check "  .env kept"                   [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  export FAKE_UNAME=Darwin
+  mkdir -p "$STATE_DIR/launchd"
+  run_teardown --purge "self-learn"
+  check "purge on macOS: exits zero"    [ "$CODE" -eq 0 ]
+  check "  state gone"                  [ ! -e "$(SVC_HOME)/state" ]
+  check "  no daemon-reload"            no_call "daemon-reload"
+  teardown
+}
 
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
@@ -1029,6 +1828,37 @@ test_sync_push_locked
 test_sync_push_pg_fails
 test_sync_status
 test_sync_status_unreachable
+test_teardown_safe
+test_teardown_then_setup_restores
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_preflight
+test_teardown_quoted_env
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
+test_teardown_purge
+test_teardown_purge_missing_data_dir
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_trailing_slashes
+test_teardown_home_variable_in_env
+test_teardown_purge_own_dir_only
+test_teardown_purge_services_root_is_a_link
+test_teardown_purge_keeps_a_checkout_inside
+test_teardown_purge_symlinked_clone
+test_teardown_purge_keeps_self_learn_home
+test_teardown_foreign_sync_unit
+test_teardown_purge_sync_credentials
+test_teardown_purge_keeps_unknown_entries
+test_teardown_waits_for_lock
+test_teardown_holds_lock
+test_teardown_marker_refusals
+test_teardown_unresolved_variable
+test_teardown_lock_after_prompt
+test_teardown_foreign_units_by_content
+test_teardown_purge_rechecked_after_lock
+test_teardown_macos_agents
 
 if [ "${1:-}" = "--live" ]; then
   echo
