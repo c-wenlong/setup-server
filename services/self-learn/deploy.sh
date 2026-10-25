@@ -51,16 +51,40 @@ STUDIO_LABEL="com.self-learn.studio"
 
 # --------------------------------------------------------------------- lock
 # mkdir is the portable atomic lock (macOS has no flock). The holder writes
-# its pid inside; a lock whose owner is dead — or that is older than 60 min —
-# is reclaimed. Checking ownership first means a long-but-alive deploy is
-# never raced by a second invocation.
+# its start identity, then its pid: pid + start uniquely names a process
+# instance, so a dead holder, a reused pid or a lock whose pid was never
+# written all reclaim — while a live holder is never raced, no matter how
+# old the lock is. A lock with a pid but no start is a pre-start-tracking
+# holder: identity cannot be proven, so it is kept only while its pid
+# lives, with the old 60-min bound as the backstop.
+pid_start() {  # the start identity of pid $1; empty when it is gone
+  if [ "$OS" = "Linux" ]; then
+    sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+  else
+    ps -o lstart= -p "$1" 2>/dev/null
+  fi
+}
 if [ -d "$LOCK" ]; then
   owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-    echo "removing stale deploy lock (owner pid $owner is gone)"
-    rm -rf "$LOCK"
-  elif [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
-    echo "removing stale deploy lock (>60 min old)"
+  started="$(cat "$LOCK/started" 2>/dev/null || true)"
+  if [ -n "$owner" ] && [ -n "$started" ]; then
+    if ! kill -0 "$owner" 2>/dev/null; then
+      echo "removing stale deploy lock (owner pid $owner is gone)"
+      rm -rf "$LOCK"
+    elif [ "$(pid_start "$owner")" != "$started" ]; then
+      echo "removing stale deploy lock (pid $owner now belongs to another process)"
+      rm -rf "$LOCK"
+    fi
+  elif [ -n "$owner" ]; then
+    if ! kill -0 "$owner" 2>/dev/null; then
+      echo "removing stale deploy lock (owner pid $owner is gone)"
+      rm -rf "$LOCK"
+    elif [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
+      echo "removing stale deploy lock (>60 min old, owner not verifiable)"
+      rm -rf "$LOCK"
+    fi
+  elif [ -n "$(find "$LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+    echo "removing stale deploy lock (owner never recorded)"
     rm -rf "$LOCK"
   fi
 fi
@@ -68,6 +92,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   echo "another deploy is running — skipping"
   exit 0
 fi
+pid_start $$ > "$LOCK/started"
 echo $$ > "$LOCK/pid"
 # Only remove the lock while it is still ours — a reclaimed-out process must
 # not delete the next owner's lock on exit.

@@ -232,24 +232,33 @@ SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
 # or restores the database. Taking Postgres down under either would leave a
 # half-migrated or half-restored catalog, so wait for it instead. A live
 # owner pid always means held, however old the lock is; a lock with no pid
-# yet is a run just starting unless it is over 60 min old (deploy.sh's
-# stale rule); a dead owner is stale. lock_check only looks, and runs before
+# yet is a run just starting unless it is over 2 min old (long past the
+# pid-write window); a dead or unverifiable owner is stale. lock_check only
+# looks, and runs before
 # the --purge prompt so a held lock refuses up front. lock_take runs after
 # the prompt (which can wait any length of time, long enough for deploy.sh
 # or sync.sh to call a lock stale and take it): it checks again, clears a
-# stale lock, then takes it itself (the same mkdir + pid scheme deploy.sh and
-# sync.sh use), so neither can start until teardown is done, and drops it
-# on exit. No SERVICE_HOME on disk: nothing can hold it, so nothing to take.
+# stale lock, then takes it itself (the same mkdir + started/pid scheme
+# deploy.sh and sync.sh use), so neither can start until teardown is done,
+# and drops it on exit. No SERVICE_HOME on disk: nothing can hold it, so
+# nothing to take.
 LOCK="$SERVICE_HOME/.deploy.lock"
 LOCK_HELD=0
 LOCK_STALE=0
 owner=""
+pid_start() {  # the start identity of pid $1; empty when it is gone
+  if [ "$OS" = "Linux" ]; then
+    sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+  else
+    ps -o lstart= -p "$1" 2>/dev/null
+  fi
+}
 release_lock() {
   [ "$LOCK_HELD" -eq 1 ] || return 0
   LOCK_HELD=0
   # Only while it is still ours, as in deploy.sh.
   [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$$" ] || return 0
-  rm -f -- "$LOCK/pid"
+  rm -f -- "$LOCK/pid" "$LOCK/started"
   rmdir -- "$LOCK" 2>/dev/null || true
 }
 lock_check() {
@@ -259,12 +268,23 @@ lock_check() {
   fi
   [ -d "$LOCK" ] || return 0
   owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-    die "A deploy or sync.sh run (pid $owner) holds $LOCK — try again after it finishes. Nothing was changed."
-  elif [ -z "$owner" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
+  started="$(cat "$LOCK/started" 2>/dev/null || true)"
+  # pid + start uniquely names a process instance: a matching pair is a live
+  # holder no matter the lock's age; a live pid without a start record is a
+  # pre-start-tracking holder and gets the same respect.
+  if [ -n "$owner" ] && [ -n "$started" ]; then
+    if kill -0 "$owner" 2>/dev/null && [ "$(pid_start "$owner")" = "$started" ]; then
+      die "A deploy or sync.sh run (pid $owner) holds $LOCK — try again after it finishes. Nothing was changed."
+    fi
+  elif [ -n "$owner" ]; then
+    if kill -0 "$owner" 2>/dev/null; then
+      die "A deploy or sync.sh run (pid $owner) holds $LOCK — try again after it finishes. Nothing was changed."
+    fi
+  elif [ -z "$(find "$LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
     die "A deploy or sync.sh run is just starting ($LOCK) — try again in a minute. Nothing was changed."
   fi
   [ ! -L "$LOCK/pid" ] || die "$LOCK/pid is a symlink — refusing. Nothing was changed."
+  [ ! -L "$LOCK/started" ] || die "$LOCK/started is a symlink — refusing. Nothing was changed."
   LOCK_STALE=1
 }
 lock_take() {
@@ -272,16 +292,18 @@ lock_take() {
   [ -d "$SERVICE_HOME" ] || return 0
   if [ "$LOCK_STALE" -eq 1 ]; then
     # Clear it the way deploy.sh would, but never recursively — a lock
-    # holds only its pid file, so anything more means it is not one.
-    rm -f -- "$LOCK/pid"
+    # holds only its pid and started files, so anything more means it is
+    # not one.
+    rm -f -- "$LOCK/pid" "$LOCK/started"
     rmdir -- "$LOCK" 2>/dev/null \
-      || die "$LOCK holds more than a stale deploy lock's pid file — look inside, remove it by hand, then re-run. Nothing was changed."
+      || die "$LOCK holds more than a stale deploy lock's pid/started files — look inside, remove it by hand, then re-run. Nothing was changed."
     ok "Cleared a stale deploy lock (${owner:+owner pid $owner is gone, }no deploy is running)"
   fi
   trap release_lock EXIT
   mkdir -- "$LOCK" 2>/dev/null \
     || die "A deploy or sync.sh run took $LOCK just now — try again after it finishes. Nothing was changed."
   LOCK_HELD=1
+  pid_start $$ > "$LOCK/started"
   echo $$ > "$LOCK/pid"
 }
 lock_check

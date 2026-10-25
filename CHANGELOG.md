@@ -10,6 +10,18 @@ first, dated by merge.
 
 ### Fixed
 
+- **A live deploy can no longer lose self-learn's lock to the 60-minute
+  rule.** `deploy.sh`, `sync.sh` and `teardown.sh` reclaimed
+  `.deploy.lock` on age alone, so a deploy or restore still running past
+  the bound got raced by the next invocation — the thing the lock exists
+  to prevent, and the pid-only check it guarded against (a pid reused
+  after the holder died) was the reason the bound existed. Holders now
+  record their process start identity beside the pid, which names a
+  process instance exactly: a matching pair is a live holder whatever the
+  lock's age, a dead or mismatched pair is stale, and a lock whose pid was
+  never written self-clears past the two-minute write window. Locks
+  written by older holders keep the pid-plus-60-minute rule.
+
 - **Stopping AdGuard from the launcher or the phone now checks tailnet DNS
   first.** Stop used to run a plain `docker stop`, skipping the check that
   `teardown.sh` makes, so one tap could cut DNS for every device. A service's
