@@ -5616,8 +5616,10 @@ class DeploydTest(SandboxTest):
 
     def test_orphans_and_self_update_pending(self):
         state = self.state_dir()
-        open(os.path.join(state, "ghost.sha"), "w").write("x\n")
-        open(os.path.join(state, "self-update.pending"), "w").write("")
+        with open(os.path.join(state, "ghost.sha"), "w") as fh:
+            fh.write("x\n")
+        with open(os.path.join(state, "self-update.pending"), "w") as fh:
+            fh.write("")
         payload = server.deployd_payload()
         self.assertTrue(payload["installed"])
         self.assertTrue(payload["self_update_pending"])
@@ -5631,7 +5633,8 @@ class DeploydTest(SandboxTest):
                                ".env"), "w") as fh:
             fh.write("SERVICE_HOME=%s\n" % elsewhere)
         os.makedirs(os.path.join(elsewhere, "state"))
-        open(os.path.join(elsewhere, "state", "alpha.sha"), "w").write("e5e5\n")
+        with open(os.path.join(elsewhere, "state", "alpha.sha"), "w") as fh:
+            fh.write("e5e5\n")
         payload = server.deployd_payload()
         self.assertTrue(payload["installed"])
         self.assertEqual(payload["state_dir"],

@@ -1040,6 +1040,8 @@
       "group": "infra",
       "icon": "workflow",
       "author": "c-wenlong",
+      "url": null,
+      "health": null,
       "marker": "~/services/deployd",
       "setup": "services/deployd/setup.sh",
       "env": "services/deployd/.env",
