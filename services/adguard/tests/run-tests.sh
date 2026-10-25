@@ -1856,6 +1856,78 @@ test_teardown_refuses_compose_overrides() {
   teardown
 }
 
+# ---- --check-dns: the launcher's and ntfy-control's stop guard -----------
+# Read-only: the preflight and the DNS gate, nothing else. Docker is only
+# asked whether it answers; Serve is never read or changed.
+check_dns_read_only() {  # check_dns_read_only <label>
+  check "$1: no docker call past the preflight" \
+    [ -z "$(grep '^docker ' "$CALLS_LOG" | grep -v '^docker ps$' | grep -v '^docker compose version$' || true)" ]
+  check "$1: no serve call at all"     no_call "^tailscale serve"
+  check "$1: container not stopped"    [ ! -f "$STATE_DIR/compose_down" ]
+  check "$1: config kept"              [ -f "$(conf_dir)/AdGuardHome.yaml" ]
+  check "$1: .env kept"                [ -f "$SVC/.env" ]
+}
+
+test_teardown_check_dns() {
+  echo "• teardown --check-dns: clear, listed and unreadable, changing nothing"
+  deployed
+  run_teardown --check-dns
+  check "clear: exits zero"            [ "$CODE" -eq 0 ]
+  check "clear: read the tailnet DNS config" calls_have "^tailscale dns status --json"
+  check "clear: says the check passed" out_has "DNS check passed"
+  check "clear: no Done banner"        out_lacks "is removed"
+  check_dns_read_only "clear"
+  teardown
+
+  deployed
+  dns_json '  "Nameservers": [
+    "'"$FAKE_TS_IP"'"
+  ]'
+  run_teardown --check-dns
+  check "listed: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "listed: same message as teardown" out_has "The tailnet still uses $FAKE_TS_IP for DNS"
+  check "listed: names the key"        out_has "lists it under: Nameservers"
+  check "listed: no --dns-removed talk" out_lacks "dns-removed"
+  check "listed: last line is the reason" grep -q "Nothing was changed" <<<"$(tail -1 <<<"$OUT")"
+  check_dns_read_only "listed"
+  teardown
+
+  deployed
+  touch "$STATE_DIR/dns_status_fails"
+  run_teardown --check-dns
+  check "unreadable: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "unreadable: says it could not tell" out_has "Could not tell whether"
+  check "unreadable: points at a terminal stop" out_has "docker stop adguard"
+  check "unreadable: no --dns-removed advice" out_lacks "dns-removed"
+  check_dns_read_only "unreadable"
+  teardown
+
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown --check-dns
+  check "Serve unreadable: still answers the DNS question" [ "$CODE" -eq 0 ]
+  check_dns_read_only "Serve unreadable"
+  teardown
+
+  deployed
+  local combo
+  for combo in "--check-dns --dns-removed" "--dns-removed --check-dns" "--check-dns --purge" "--check-dns --check-dns"; do
+    # shellcheck disable=SC2086
+    run_teardown_args "adguard" $combo
+    check "$combo: refused"            [ "$CODE" -ne 0 ]
+    check "$combo: says it stands alone" out_has "takes no other option"
+    check "$combo: DNS never read"     no_call "^tailscale dns"
+  done
+  check_dns_read_only "flag combos"
+  teardown
+
+  setup
+  run_teardown --check-dns
+  check "no .env: exits non-zero"      [ "$CODE" -ne 0 ]
+  check "no .env: explains"            out_has "nothing to tear down"
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/adguard/setup.sh or services/adguard/docker-compose.yml is missing — nothing to test."
@@ -1912,6 +1984,7 @@ test_teardown_dns_gate_listed
 test_teardown_dns_gate_address_moved
 test_teardown_dns_gate_clear
 test_teardown_dns_gate_unknown
+test_teardown_check_dns
 test_teardown_foreign_units_left_alone
 test_teardown_purge
 test_teardown_purge_root_owned

@@ -10,6 +10,16 @@ first, dated by merge.
 
 ### Fixed
 
+- **Stopping AdGuard from the launcher or the phone now checks tailnet DNS
+  first.** Stop used to run a plain `docker stop`, skipping the check that
+  `teardown.sh` makes, so one tap could cut DNS for every device. A service's
+  `control` block may now name a `stop_guard` (AdGuard's is the new
+  read-only `teardown.sh --check-dns`), and both front ends run it before
+  Stop, refusing with its message when it fails. The launcher also runs it
+  before Remove unless it is the same teardown.sh. Restart is not guarded:
+  it costs a few seconds of DNS, and it is the usual fix for a stuck
+  resolver.
+
 - **Stop and Remove now pause every Kuma monitor a service has.** A
   service's `kuma` field may now be a list of monitor names as well as one
   name. The launcher and ntfy-control pause each one on stop and remove,

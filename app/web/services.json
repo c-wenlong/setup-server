@@ -46,6 +46,15 @@
     "                      A list of names when the service has several",
     "                      monitors (adguard: [\"adguard\", \"adguard-dns\"]);",
     "                      each is paused and resumed on its own.",
+    "            stop_guard - optional argv run before Stop (launcher and",
+    "                      ntfy-control) and before Remove unless it is the",
+    "                      teardown.sh Remove runs anyway. In an app.json it",
+    "                      is relative to the service folder, first item a",
+    "                      file there ([\"teardown.sh\", \"--check-dns\"]);",
+    "                      the generator makes it repo-relative. Non-zero",
+    "                      refuses the action before anything changes, with",
+    "                      its last stderr line as the reason. Restart is not",
+    "                      guarded: it is the usual fix for a stuck service.",
     "            locked  - present means NOT controllable, and the string is",
     "                      the reason both UIs show and the API refuses with.",
     "          Absent control entirely also means not controllable. Three keys",
@@ -671,7 +680,11 @@
           "adguard",
           "adguard-dns"
         ],
-        "_comment": "Single container. Stopping it is safe ONLY while the tailnet is not pointed at it as a nameserver — see the description."
+        "stop_guard": [
+          "services/adguard/teardown.sh",
+          "--check-dns"
+        ],
+        "_comment": "Single container. Stopping it is safe ONLY while the tailnet is not pointed at it as a nameserver — see the description. stop_guard makes both Stop buttons check that first; Restart is not guarded (a few seconds of DNS, not an outage)."
       }
     },
     {

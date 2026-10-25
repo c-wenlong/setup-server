@@ -50,6 +50,27 @@ def _load(path):
         raise RegistryError("%s is not valid JSON: %s" % (path, exc))
 
 
+def _stop_guard(folder, key, guard):
+    """control.stop_guard: argv relative to the service folder -> repo-relative.
+
+    A non-empty list of strings whose first item names a file inside
+    services/<folder>/ (no absolute path, no way out of the folder). The
+    generator rewrites that item to services/<folder>/<file>, the same way
+    `env` is rewritten, so both front ends resolve it from the repo root.
+    """
+    where = "services/%s/%s (%s): control.stop_guard" % (folder, MANIFEST, key)
+    if (not isinstance(guard, list) or not guard
+            or not all(isinstance(a, str) and a for a in guard)):
+        raise RegistryError("%s must be a non-empty list of non-empty strings" % where)
+    script = guard[0]
+    base = os.path.realpath(os.path.join(ROOT, "services", folder))
+    path = os.path.realpath(os.path.join(base, script))
+    if (os.path.isabs(script) or script.startswith("~")
+            or not path.startswith(base + os.sep) or not os.path.isfile(path)):
+        raise RegistryError("%s: %r is not a file in services/%s/" % (where, script, folder))
+    return ["services/%s/%s" % (folder, os.path.relpath(path, base))] + guard[1:]
+
+
 def _from_manifest(folder, entry):
     """One manifest entry -> one services.json entry, with setup/env filled in."""
     if not isinstance(entry, dict) or not entry.get("key"):
@@ -60,6 +81,9 @@ def _from_manifest(folder, entry):
             % (folder, MANIFEST, entry["key"], folder))
     out = {}
     for name, value in entry.items():
+        if name == "control" and isinstance(value, dict) and "stop_guard" in value:
+            value = dict(value)
+            value["stop_guard"] = _stop_guard(folder, entry["key"], value["stop_guard"])
         if name == "env" and isinstance(value, str) and not value.startswith(("/", "~")):
             value = "services/%s/%s" % (folder, value)
         if name == "env":

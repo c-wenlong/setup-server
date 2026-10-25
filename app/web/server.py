@@ -1737,13 +1737,16 @@ def sg_docker(argv):
     return [sg, "docker", "-c", " ".join(shlex.quote(a) for a in argv)]
 
 
-def build_command(script):
-    """argv for running a deploy script, as a list — never a shell string."""
+def build_command(script, args=()):
+    """argv for running a deploy script, as a list — never a shell string.
+
+    `args` are registry words only (a stop_guard's flags), never request data.
+    """
     if os.access(script, os.X_OK):
         direct = [script]
     else:
         direct = ["/bin/bash", script]
-    return sg_docker(direct)
+    return sg_docker(direct + list(args))
 
 
 def _which(name):
@@ -2098,6 +2101,10 @@ def write_receipt(key, job_id, source=None):
 #     "kuma": "immich",             # monitor paused on stop, resumed on start;
 #                                   # a list (["adguard", "adguard-dns"]) when
 #                                   # the service has several monitors
+#     "stop_guard": ["services/adguard/teardown.sh", "--check-dns"],
+#                                   # run before stop (and remove, unless it is
+#                                   # the teardown.sh remove runs anyway);
+#                                   # non-zero refuses before anything changes
 #     "locked": "why this one is deliberately not controllable"
 #   }
 
@@ -2188,6 +2195,45 @@ def control_status(svc):
         return {"controllable": False,
                 "reason": "this service has no start/stop configuration"}
     return {"controllable": True, "reason": None}
+
+
+# A stop_guard's flags go into an argv (and, through sg, a shlex-quoted
+# string), so they get the same shape gate as part names.
+_GUARD_ARG_RE = re.compile(r"^[A-Za-z0-9._=:/@+-]{1,128}$")
+
+
+def stop_guard(svc):
+    """(script, args) of the service's stop_guard, None when it has none.
+
+    The guard is a read-only check that must pass before anything is
+    stopped: AdGuard's is `teardown.sh --check-dns`, which fails while the
+    tailnet still uses this node as its DNS server. A guard that is present
+    but cannot run (malformed, outside the allowed roots, missing) refuses
+    the action: skipping it would stop the service it exists to protect.
+    """
+    block = control_block(svc)
+    if "stop_guard" not in block:
+        return None
+    raw = block.get("stop_guard")
+    if (not isinstance(raw, list) or not raw
+            or not all(isinstance(a, str) and a for a in raw)
+            or not all(_GUARD_ARG_RE.match(a) for a in raw[1:])):
+        raise DeployError(403, "this service's stop_guard is malformed, so "
+                               "it cannot be stopped from here")
+    script = resolve_registry_path(raw[0], "stop_guard")
+    if not os.path.isfile(script):
+        raise DeployError(403, "this service's stop_guard (%s) is missing, so "
+                               "it cannot be stopped from here" % raw[0])
+    return script, raw[1:]
+
+
+def _guard_step(guard):
+    """The guard as the first step of a plan. `guard` marks it so a failure
+    skips every later step, even the `always` ones: nothing ran, so there is
+    nothing to undo."""
+    script, args = guard
+    return {"argv": build_command(script, args), "optional": False,
+            "always": False, "env": None, "guard": True}
 
 
 def teardown_script(svc):
@@ -2313,10 +2359,17 @@ def plan_action(svc, action):
 
     Kuma is paused before anything stops and resumed after everything starts,
     which is also what makes `restart` silent rather than a guaranteed page.
+
+    Stop runs the service's stop_guard first, before even the Kuma pause.
+    Restart does not: it is the usual fix for a stuck service, and for
+    AdGuard it costs a few seconds of DNS rather than an outage. Remove runs
+    it too, unless the guard is the same teardown.sh that Remove runs (that
+    script checks before it changes anything, so a second run adds nothing).
     """
     block = control_block(svc)
     parts = control_parts(block)
     monitors = control_monitors(block)
+    guard = stop_guard(svc) if action in ("stop", "remove") else None
     steps = []
 
     if action == "remove":
@@ -2327,6 +2380,8 @@ def plan_action(svc, action):
         teardown = teardown_script(svc)
         if not teardown:
             return []
+        if guard and os.path.realpath(guard[0]) != os.path.realpath(teardown):
+            steps.append(_guard_step(guard))
         steps.extend(_kuma_steps("pause", monitors))
         steps.append({"argv": build_command(teardown), "optional": False,
                       "always": False, "env": None})
@@ -2335,6 +2390,8 @@ def plan_action(svc, action):
         steps.extend(_kuma_steps("resume", monitors, on_failure=True))
         return steps
 
+    if guard:
+        steps.append(_guard_step(guard))
     if action in ("stop", "restart"):
         steps.extend(_kuma_steps("pause", monitors))
         steps.extend(_part_step(p, "stop") for p in parts)
@@ -2387,8 +2444,14 @@ def _run_steps(job, steps):
                 logfile.write(
                     ("[skipped: exited %d, continuing]\n" % result).encode())
                 continue
-            logfile.write(("[failed: exited %d]\n" % result).encode())
             code = result
+            if step.get("guard"):
+                logfile.write(("[refused by the stop guard: exited %d; "
+                               "nothing was changed]\n" % result).encode())
+                with _jobs_lock:
+                    job["refused"] = True
+                break
+            logfile.write(("[failed: exited %d]\n" % result).encode())
             for tail in steps[index + 1:]:
                 if tail.get("always") or tail.get("on_failure"):
                     run_one(tail)
@@ -2467,6 +2530,9 @@ def job_payload(job_id):
         "action": snapshot.get("action") or "deploy",
         "status": snapshot["status"],
         "exit_code": snapshot["exit_code"],
+        # True when the stop guard said no: the job failed before it changed
+        # anything, so the UI must not say "part way between states".
+        "refused": bool(snapshot.get("refused")),
         "log": text,
     }
 

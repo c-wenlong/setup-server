@@ -429,6 +429,106 @@ test_live() {
   live_check "status round-trip"     sh -c "curl -fsS 'http://127.0.0.1:$port/alerts/json?poll=1&since=30s' | grep -q 'server-control'"
 }
 
+# A stop_guard is a script in the repo, so these run against a fixture repo
+# rather than the shipped registry: the real one would run the real
+# services/adguard/teardown.sh. The guard here is a stub that records its
+# argv and passes or fails on $STATE_DIR/guard_says_no.
+guard_repo() {  # guard_repo <stop_guard JSON>
+  GREPO="$SANDBOX/repo"
+  mkdir -p "$GREPO/app/web" "$GREPO/services/adguard"
+  cat > "$GREPO/services/adguard/guard.sh" <<'SH'
+#!/usr/bin/env bash
+echo "guard $*" >> "$CALLS_LOG"
+echo "checking things on stdout"
+if [ -f "$STATE_DIR/guard_says_no" ]; then
+  printf '\033[1;31m \342\234\227 \033[0m%s\n' "The tailnet still uses 100.77.77.77 for DNS. Nothing was changed." >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$GREPO/services/adguard/guard.sh"
+  cat > "$GREPO/app/web/services.json" <<JSON
+{"services": [
+  {"key": "adguard", "control": {"parts": [{"container": "adguard"}],
+   "kuma": ["adguard", "adguard-dns"], "stop_guard": $1}},
+  {"key": "n8n", "control": {"parts": [{"container": "n8n"}], "kuma": "n8n"}}
+]}
+JSON
+}
+
+run_handle_fixture() {
+  OUT="$(NTFY_BASE_URL=http://127.0.0.1:3003 CONTROL_TOPIC=control REPLY_TOPIC=alerts \
+    CONTROL_REGISTRY="$GREPO/app/web/services.json" \
+    KUMA_ENV_FILE="$SANDBOX/kuma.env" \
+    PATH="$STUBS:$PATH" python3 "$SERVICE_DIR/control_listener.py" --handle "$1" 2>&1)"
+  CODE=$?
+}
+
+test_handle_stop_guard() {
+  echo "• handler: a stop_guard runs before stop, and a failing one refuses it"
+  setup
+  echo "KUMA_PORT=3002" > "$SANDBOX/kuma.env"
+  guard_repo '["services/adguard/guard.sh", "--check-dns"]'
+  touch "$STATE_DIR/guard_says_no"
+  run_handle_fixture "stop adguard"
+  check "exits zero"                   [ "$CODE" -eq 0 ]
+  check "ran the guard with its flag"  calls_have "^guard --check-dns$"
+  check "container not stopped"        no_call "docker stop"
+  check "kuma never paused"            no_call "kuma_toggle.py pause"
+  check "replies refused"              calls_have "adguard: stop refused, nothing was changed"
+  check "  with the guard's reason"    calls_have "still uses 100.77.77.77 for DNS. Nothing was changed."
+  check "  without colour codes"       no_call $'\033\\['
+  check "  and without the cross"      no_call $'\342\234\227'
+  check "  and not its stdout chatter" no_call "checking things on stdout"
+  check "reply still offers stop (it is running)" calls_have 'stop refused.*X-Actions.*"body": "stop adguard"'
+  teardown
+
+  setup
+  echo "KUMA_PORT=3002" > "$SANDBOX/kuma.env"
+  guard_repo '["services/adguard/guard.sh", "--check-dns"]'
+  run_handle_fixture "stop adguard"
+  check "passing guard: ran first"     calls_in_order "^guard --check-dns$" "kuma_toggle.py pause adguard" "docker stop adguard"
+  check "passing guard: stop ok"       calls_have "adguard: stop ok"
+  teardown
+
+  setup
+  guard_repo '["services/adguard/guard.sh", "--check-dns"]'
+  touch "$STATE_DIR/guard_says_no"
+  run_handle_fixture "restart adguard"
+  check "restart is not guarded"       no_call "^guard"
+  check "  and restarts"               calls_in_order "docker stop adguard" "docker start adguard"
+  run_handle_fixture "start adguard"
+  check "start is not guarded"         no_call "^guard"
+  run_handle_fixture "stop n8n"
+  check "a service with no guard stops as before" calls_have "docker stop n8n"
+  teardown
+
+  local bad
+  for bad in '["services/adguard/missing.sh"]' '["../outside.sh"]' '"services/adguard/guard.sh"' \
+      '["services/adguard/guard.sh", "--x;rm"]' '[]'; do
+    setup
+    guard_repo "$bad"
+    touch "$SANDBOX/outside.sh"; chmod +x "$SANDBOX/outside.sh"
+    run_handle_fixture "stop adguard"
+    check "unusable guard $bad: refused"  calls_have "adguard: stop refused"
+    check "  container not stopped"       no_call "docker stop"
+    check "  guard never ran"             no_call "^guard"
+    teardown
+  done
+}
+
+test_shipped_adguard_guard() {
+  echo "• allowlist: the shipped registry guards adguard's stop with teardown.sh --check-dns"
+  check "registry carries the guard" python3 -c '
+import json, os, sys
+doc = json.load(open(sys.argv[1]))
+svc = {s["key"]: s for s in doc["services"]}["adguard"]
+g = svc["control"]["stop_guard"]
+repo = os.path.dirname(os.path.dirname(os.path.dirname(sys.argv[1])))
+sys.exit(0 if g == ["services/adguard/teardown.sh", "--check-dns"]
+         and os.path.isfile(os.path.join(repo, g[0])) else 1)' "$REGISTRY"
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_ntfy_down
@@ -450,6 +550,8 @@ test_handle_pick
 test_handle_pick_empty
 test_handle_status
 test_handle_rejects_unknown
+test_handle_stop_guard
+test_shipped_adguard_guard
 
 if [ "${1:-}" = "--live" ]; then
   echo

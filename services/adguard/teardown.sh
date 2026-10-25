@@ -44,6 +44,13 @@
 #                                  # you to type "adguard" first. Terminal
 #                                  # only: the launcher never passes it.
 #   (--purge and --dns-removed combine.)
+#   ./teardown.sh --check-dns      # read-only: run the preflight and the DNS
+#                                  # gate above, change nothing, exit 0 only
+#                                  # when the tailnet provably no longer uses
+#                                  # this node for DNS. The launcher and
+#                                  # ntfy-control run it before Stop (it is
+#                                  # adguard's `stop_guard` in app.json).
+#                                  # Takes no other flag.
 #
 # Reads ports and paths from .env and refuses to guess when it is missing.
 # Idempotent: re-running on a removed service changes nothing.
@@ -59,9 +66,10 @@ ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
 die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
 
-USAGE="usage: ./teardown.sh [--purge] [--dns-removed]"
+USAGE="usage: ./teardown.sh [--purge] [--dns-removed] | --check-dns"
 PURGE=0
 DNS_ACK=0
+CHECK=0
 for arg in "$@"; do
   case "$arg" in
     --purge)
@@ -70,6 +78,9 @@ for arg in "$@"; do
     --dns-removed)
       [ "$DNS_ACK" -eq 0 ] || die "--dns-removed given twice ($USAGE)"
       DNS_ACK=1 ;;
+    --check-dns)
+      [ "$#" -eq 1 ] || die "--check-dns takes no other option ($USAGE)"
+      CHECK=1 ;;
     *) die "Unknown option: $arg ($USAGE)" ;;
   esac
 done
@@ -185,8 +196,9 @@ ok "$NAME: local :$LOCAL_PORT, resolver ${DNS_IP:-(not set)}:53, conf ${CONF_DIR
 # Compose reads COMPOSE_FILE / COMPOSE_PROJECT_NAME / COMPOSE_ENV_FILES from
 # .env and the shell, and any of them would change which stack `down` (and,
 # on --purge, `down -v`) acts on. setup.sh never sets them, so refuse rather
-# than tear down something it did not start.
-for v in COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+# than tear down something it did not start. --check-dns acts on no stack,
+# so it skips this and the Serve read below: neither bears on DNS.
+[ "$CHECK" -eq 1 ] || for v in COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES; do
   [ -z "$(env_get "$v")" ] && [ -z "$(printenv "$v" 2>/dev/null || true)" ] \
     || die "$v is set (in $ENV_FILE or the shell); setup.sh never sets it, so teardown will not guess which stack or volumes it means. Unset it and re-run."
 done
@@ -194,7 +206,7 @@ done
 # Read Serve before changing anything: if it cannot be read, an empty answer
 # would look like "already off" and the mapping would come back with the
 # daemon. Stop instead.
-SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
+[ "$CHECK" -eq 1 ] || SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
   || die "Could not read Tailscale Serve status (is tailscaled running?): $SERVE_STATUS — nothing was changed."
 
 # ------------------------------------------------------- the DNS gate
@@ -386,14 +398,18 @@ VERDICT="$(dns_verdict)"
 case "$VERDICT" in
   listed*)
     where="$(printf '%s\n' "$VERDICT" | sed -n 's/^listed //p' | tr '\n' ' ' | sed 's/ $//')"
-    die "The tailnet still uses ${DNS_IP} for DNS (tailscale dns status lists it under: $where). Remove it at $DNS_ADMIN -> Nameservers (and any split DNS entry for it), confirm another device resolves, then re-run. --dns-removed does not override this: the tailnet itself still says so. Nothing was changed."
+    NO_OVERRIDE=" --dns-removed does not override this: the tailnet itself still says so."
+    [ "$CHECK" -eq 0 ] || NO_OVERRIDE=""
+    die "The tailnet still uses ${DNS_IP} for DNS (tailscale dns status lists it under: $where). Remove it at $DNS_ADMIN -> Nameservers (and any split DNS entry for it), confirm another device resolves, then re-run.$NO_OVERRIDE Nothing was changed."
     ;;
   clear)
     ok "Not a tailnet nameserver (tailscale dns status lists ${DNS_IP} nowhere)"
     ;;
   *)
     RETRY_PURGE=""; [ "$PURGE" -eq 0 ] || RETRY_PURGE=" --purge"
-    if [ "$DNS_ACK" -eq 1 ]; then
+    if [ "$CHECK" -eq 1 ]; then
+      die "Could not tell whether the tailnet still uses ${DNS_IP:-this node} for DNS (tailscale dns status --json was unreadable: tailscaled down, logged out, or an older CLI). Nothing was changed. Remove the nameserver at $DNS_ADMIN, confirm another device resolves, then stop it from a terminal: docker stop $NAME"
+    elif [ "$DNS_ACK" -eq 1 ]; then
       warn "Could not read the tailnet DNS config from this node; going ahead on your --dns-removed."
     else
       die "Could not tell whether the tailnet still uses ${DNS_IP:-this node} for DNS (tailscale dns status --json was unreadable: tailscaled down, logged out, or an older CLI). Nothing was changed. Remove the nameserver at $DNS_ADMIN, confirm another device resolves, then run: ./teardown.sh --dns-removed$RETRY_PURGE"
@@ -401,6 +417,10 @@ case "$VERDICT" in
     ;;
 esac
 warn "Any device whose DNS was set to ${DNS_IP:-this IP} by hand (not through Tailscale) stops resolving too."
+if [ "$CHECK" -eq 1 ]; then
+  ok "DNS check passed: the tailnet does not use $NAME for DNS, so stopping it is safe. Nothing was changed."
+  exit 0
+fi
 
 # Units and LaunchAgents: setup.sh installs none (Docker's restart policy
 # keeps AdGuard up), so teardown never touches one. A unit that mentions
