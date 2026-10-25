@@ -10,6 +10,16 @@ first, dated by merge.
 
 ### Fixed
 
+- **adguard teardown refused every Remove on a real box.** Its DNS safety
+  gate required all four resolver keys in `tailscale dns status --json`,
+  but the CLI omits empty ones (kai-home-server prints only `Resolvers`
+  and `SplitDNSRoutes`), so the answer always read as "cannot tell" and
+  the launcher's Remove died. An absent key now means none; all four
+  absent still counts as "cannot tell". Tested against the box's real
+  output, in both the clear and the listed case.
+
+### Fixed
+
 - **Stop and Remove now pause every Kuma monitor a service has.** A
   service's `kuma` field may now be a list of monitor names as well as one
   name. The launcher and ntfy-control pause each one on stop and remove,
