@@ -191,7 +191,7 @@ The real check is to log in. `setup.sh` finishes with:
 curl -fsS -X POST \
   -H 'Content-Type: application/json' \
   -H 'Authorization: MediaBrowser Client="setup.sh", Device="homeserver", DeviceId="setup-sh", Version="1.0"' \
-  -d '{"Username":"kai","Pw":"<from .env>"}' \
+  -d '{"Username":"admin","Pw":"<from .env>"}' \
   http://127.0.0.1:8096/Users/AuthenticateByName
 ```
 

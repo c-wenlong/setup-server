@@ -231,7 +231,7 @@ string.
   One wart worth knowing: if `setup.sh` is run as `sg docker -c ./setup.sh`
   (the usual fix for a shell that predates the docker group), `id -g` reports
   **the docker group**, not yours — so `HOMEPAGE_GID` ends up `124` and the
-  files land `kaichen:docker`. That is exactly what happened on this box. It is
+  files land `user:docker`. That is exactly what happened on this box. It is
   harmless — you still own every file and can edit it — but do not "correct"
   `HOMEPAGE_GID` to `1000` unless you intend the chown that follows.
 - **`mem_limit: 512m`.** Idle is ~112 MB; the cap is a hard stop so a leak in

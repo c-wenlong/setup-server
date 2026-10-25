@@ -226,7 +226,7 @@ probe_browser_login_origin_accepted() {
   local body
   body="$(PATH="$STUBS:$PATH" curl -s -X POST \
     -H "Origin: $FAKE_URL:$PORT" \
-    -d 'login=kai&password=x' \
+    -d 'login=admin&password=x' \
     "http://127.0.0.1:$PORT/accounts/login/")"
   printf '%s' "$body" | grep -q 'requires a CSRF cookie'
 }
@@ -370,7 +370,7 @@ test_missing_paperless_url_is_caught() {
   check "  but the browser login now 403s on the origin" \
     not probe_browser_login_origin_accepted
   check "  and a full, correct login now fails" \
-    not probe_full_login "kai" "whatever"
+    not probe_full_login "admin" "whatever"
   teardown
 }
 
@@ -438,7 +438,7 @@ test_admin_created_once_and_never_reset() {
   # An ordinary re-run — nothing changed — is a clean no-op and must succeed.
   # Measured by pl-deploy on the real image, second boot:
   #   [init-superuser] Creating superuser...
-  #   Did not create superuser, a user kai already exists
+  #   Did not create superuser, a user admin already exists
   #   [init-superuser] Superuser creation done
   : > "$CALLS_LOG"
   run_deploy

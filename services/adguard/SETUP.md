@@ -120,7 +120,8 @@ the tailnet sends it a query, because nothing has been told to.
 
 1. Open <https://login.tailscale.com/admin/dns>
 2. Under **Nameservers**, *Add nameserver* → **Custom…**
-3. Enter `100.77.77.77`
+3. Enter this node's tailnet IPv4 — the address the deploy printed (run
+   `tailscale ip -4` if you need it again)
 4. Leave **Override local DNS** as you find it; see the note below.
 5. Leave **MagicDNS** ON.
 

@@ -34,7 +34,7 @@ SERVICE_DIR="$PWD"
 PORT="${BESZEL_PORT:-8092}"
 ADMIN_EMAIL="${BESZEL_ADMIN_EMAIL:-admin@example.com}"
 AGENT_PORT=45876
-SYSTEM_NAME="homeserver"
+SYSTEM_NAME="${BESZEL_SYSTEM_NAME:-$(hostname -s 2>/dev/null || hostname)}"
 STATE="$HOME/services/beszel"
 ENV_FILE="$SERVICE_DIR/.env"
 BIN="$HOME/.local/bin/beszel-agent"
@@ -116,6 +116,7 @@ BESZEL_PORT=$PORT
 BESZEL_VOLUME=$STATE/hub
 BESZEL_ADMIN_EMAIL=$ADMIN_EMAIL
 BESZEL_ADMIN_PASSWORD=$(randhex)
+SYSTEM_NAME=$SYSTEM_NAME
 EOF
   chmod 600 "$ENV_FILE"
 fi

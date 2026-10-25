@@ -26,7 +26,7 @@ Mac browser
                 └─ RDP           <bridge-gateway>:3389   ⚠️ see the security model
                      │
                      └─ gnome-remote-desktop (host, systemd system daemon)
-                          └─ a GNOME session as kaichen — real host, real FS
+                          └─ a GNOME session as user — real host, real FS
 ```
 
 Two containers. Not four: file-based authentication removes the Postgres
@@ -327,7 +327,7 @@ than observed. Read the second table before trusting anything in it.
 |---|---|
 | `grdctl --system status` output | **never run** — needs polkit auth |
 | `/var/lib/gnome-remote-desktop/` contents | **never read** — root-only |
-| that headless `--system` Remote Login actually spawns a session as `kaichen` on *this* box | **unproven.** It is the documented purpose of those flags and the binary carries them. That is the strength of the evidence and no more. |
+| that headless `--system` Remote Login actually spawns a session as `user` on *this* box | **unproven.** It is the documented purpose of those flags and the binary carries them. That is the strength of the evidence and no more. |
 | that any RDP session was ever established | **no.** None was. |
 | RAM cost of a *connected* session | **an estimate** (~700 MB–1 GB for GNOME), not a measurement |
 | that the :3389 firewall mitigation installs cleanly | **unproven** — sudo-gated |

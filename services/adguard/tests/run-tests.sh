@@ -253,7 +253,7 @@ test_fresh_deploy() {
   check "pinned to v0.107.79, not latest" grep -qx 'ADGUARD_VERSION=v0.107.79' "$SVC/.env"
   check ".env records the local port"    grep -qx 'LOCAL_PORT=3080' "$SVC/.env"
   check ".env has a hex admin password"  grep -qE '^ADGUARD_ADMIN_PASSWORD=[a-f0-9]{32}$' "$SVC/.env"
-  check ".env names the admin user"      [ "$(env_val ADGUARD_ADMIN_USER)" = "kai" ]
+  check ".env names the admin user"      [ "$(env_val ADGUARD_ADMIN_USER)" = "admin" ]
   check ".env has ADGUARD_CONF"          grep -qE '^ADGUARD_CONF=/.+' "$SVC/.env"
   check ".env has ADGUARD_WORK"          grep -qE '^ADGUARD_WORK=/.+' "$SVC/.env"
   check ".env records the rate limit"    grep -qx 'ADGUARD_RATELIMIT=0' "$SVC/.env"
@@ -303,7 +303,7 @@ test_fresh_deploy() {
   check "no sudo needed (operator set)"  no_call "^sudo "
 
   # --- VERIFICATION: the part a socket cannot fake -----------------------
-  check "signed in with the generated password" out_has "Signed in as kai"
+  check "signed in with the generated password" out_has "Signed in as admin"
   check "  and AdGuard says DNS is running"     out_has "DNS server as running"
   check "resolved a real name"           out_has "DNS is really resolving"
   check "  queried the tailnet IP"       calls_have "^dig .*@$FAKE_TS_IP example.com"
@@ -802,16 +802,16 @@ test_admin_username_override() {
   echo "• ADGUARD_ADMIN_USERNAME: honoured on the first run, .env wins after"
   setup
   touch "$STATE_DIR/operator"
-  export ADGUARD_ADMIN_USERNAME=kaichen
+  export ADGUARD_ADMIN_USERNAME=user
   run_deploy
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check ".env records the username"   [ "$(env_val ADGUARD_ADMIN_USER)" = "kaichen" ]
-  check "install used it"             body_has install_body '"username":"kaichen"'
+  check ".env records the username"   [ "$(env_val ADGUARD_ADMIN_USER)" = "user" ]
+  check "install used it"             body_has install_body '"username":"user"'
   unset ADGUARD_ADMIN_USERNAME
   export ADGUARD_ADMIN_USERNAME=someone-else
   run_deploy
-  check "re-run: .env still wins"     [ "$(env_val ADGUARD_ADMIN_USER)" = "kaichen" ]
-  check "re-run: signed in as kaichen" out_has "Signed in as kaichen"
+  check "re-run: .env still wins"     [ "$(env_val ADGUARD_ADMIN_USER)" = "user" ]
+  check "re-run: signed in as user" out_has "Signed in as user"
   teardown
 }
 

@@ -523,7 +523,7 @@ test_config_not_clobbered() {
   check "first run succeeded"            [ "$CODE" -eq 0 ]
 
   # Edit all four the way Kai would, plus add a fifth file of his own.
-  echo "# kai's own note" >> "$CFG/services.yaml"
+  echo "# admin's own note" >> "$CFG/services.yaml"
   subst "$CFG/settings.yaml" 's/^title:.*/title: MY BOX/'
   echo "- openmeteo: {}" >> "$CFG/widgets.yaml"
   echo "# my links" >> "$CFG/bookmarks.yaml"
@@ -545,7 +545,7 @@ test_config_not_clobbered() {
   fi
   check "  said it kept them"            out_has "Kept 5 existing config file"
   check "  seeded nothing new"           out_lacks "Seeded"
-  check "kai's own extra file survived"  [ -f "$CFG/custom-of-mine.yaml" ]
+  check "admin's own extra file survived"  [ -f "$CFG/custom-of-mine.yaml" ]
   check ".env untouched"                 env_has "my-custom-marker"
   check "  says it left .env alone"      out_has "leaving untouched"
   check "never invoked sudo"             no_call "^sudo "

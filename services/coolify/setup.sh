@@ -16,7 +16,7 @@
 #   ./setup.sh
 #   LOCAL_PORT=8102 ./setup.sh            # HTTPS follows LOCAL_PORT
 #   LOCAL_PORT=8102 HTTPS_PORT=8102 ./setup.sh
-#   ROOT_USERNAME=kai ./setup.sh          # first run only; .env wins after
+#   ROOT_USERNAME=admin ./setup.sh          # first run only; .env wins after
 #
 # Version: pinned to Coolify 4.3.21 + coolify-realtime 1.0.19.
 # Coolify's in-app auto-update is off (it would rewrite compose and undo
@@ -37,7 +37,7 @@ HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 SOKETI_PORT="${SOKETI_PORT:-6001}"
 HTTPS_SOKETI_EXPLICIT="${HTTPS_SOKETI_PORT:+yes}"
 HTTPS_SOKETI_PORT="${HTTPS_SOKETI_PORT:-$SOKETI_PORT}"
-ROOT_USERNAME="${ROOT_USERNAME:-kai}"
+ROOT_USERNAME="${ROOT_USERNAME:-admin}"
 ROOT_USER_EMAIL="${ROOT_USER_EMAIL:-admin@example.com}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"

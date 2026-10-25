@@ -288,7 +288,7 @@ entire purpose is hand-edited config, that is not a nicety.
 **`HOMEPAGE_GID` is not 1000 and that is probably fine.** If `setup.sh` was run
 as `sg docker -c ./setup.sh` — the usual fix for a shell that predates the
 docker group — then `id -g` reported the **docker** group, so `HOMEPAGE_GID` is
-`124` and the files are `kaichen:docker`. That is the state on this box. You own
+`124` and the files are `user:docker`. That is the state on this box. You own
 every file and can edit every file; nothing is wrong. Do not "correct" it to
 `1000` unless you actually want the chown that follows on the next start.
 

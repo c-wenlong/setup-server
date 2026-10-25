@@ -18,7 +18,7 @@
 #   ./setup.sh                                # local 8095, HTTPS 8095
 #   LOCAL_PORT=8096 ./setup.sh                # HTTPS follows LOCAL_PORT (8096 -> 8096)
 #   LOCAL_PORT=8095 HTTPS_PORT=8095 ./setup.sh
-#   PAPERLESS_ADMIN_USER=kai ./setup.sh       # first run only; .env wins after
+#   PAPERLESS_ADMIN_USER=admin ./setup.sh       # first run only; .env wins after
 #   ./setup.sh --stop                         # stop it, keep the data
 #   ./setup.sh --down                         # remove the containers, keep the data
 #
@@ -69,7 +69,7 @@ LOCAL_PORT="${LOCAL_PORT:-8095}"
 # down re-sources it unconditionally, so there is nothing left to track past
 # the first deploy, no HTTPS_PORT_EXPLICIT flag needed here.
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-ADMIN_USERNAME="${PAPERLESS_ADMIN_USER:-kai}"
+ADMIN_USERNAME="${PAPERLESS_ADMIN_USER:-admin}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"

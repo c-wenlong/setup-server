@@ -190,7 +190,7 @@ rejected rather than reporting success over a locked-out account.
 
 ```bash
 docker exec -u git forgejo forgejo admin user create --admin \
-  --username kai --password '<generated>' --email <mail> \
+  --username admin --password '<generated>' --email <mail> \
   --must-change-password=false
 ```
 
@@ -271,7 +271,7 @@ Web UI → **+ → New Repository**. Or from the CLI:
 
 ```bash
 # Get a token first: Settings → Applications → Generate New Token (scope: repo)
-curl -u kai:<token> -X POST \
+curl -u admin:<token> -X POST \
   -H 'Content-Type: application/json' \
   -d '{"name":"my-repo","private":true,"auto_init":false}' \
   https://homeserver.tail-name.ts.net:3000/api/v1/user/repos
@@ -281,7 +281,7 @@ curl -u kai:<token> -X POST \
 
 ```bash
 cd ~/dev/my-project
-git remote add forgejo https://homeserver.tail-name.ts.net:3000/kai/my-repo.git
+git remote add forgejo https://homeserver.tail-name.ts.net:3000/admin/my-repo.git
 git push -u forgejo --all
 git push forgejo --tags        # tags are NOT included in --all
 ```
@@ -292,14 +292,14 @@ rule above. To push both at once, give `origin` a second push URL:
 
 ```bash
 git remote set-url --add --push origin git@github.com:you/my-project.git
-git remote set-url --add --push origin https://homeserver.tail-name.ts.net:3000/kai/my-repo.git
+git remote set-url --add --push origin https://homeserver.tail-name.ts.net:3000/admin/my-repo.git
 git push origin main           # goes to both
 ```
 
 ### Clone
 
 ```bash
-git clone https://homeserver.tail-name.ts.net:3000/kai/my-repo.git
+git clone https://homeserver.tail-name.ts.net:3000/admin/my-repo.git
 ```
 
 Username is your Forgejo username; **password is an access token**, not the
@@ -344,7 +344,7 @@ the risky one.
 ```bash
 git clone --mirror git@github.com:you/repo.git
 cd repo.git
-git push --mirror https://homeserver.tail-name.ts.net:3000/kai/repo.git
+git push --mirror https://homeserver.tail-name.ts.net:3000/admin/repo.git
 ```
 
 `--mirror` copies every ref including branches, tags and notes. It does not
@@ -373,7 +373,7 @@ mobile app worth installing.
 - Reset a password:
   ```bash
   docker exec -u git forgejo forgejo admin user change-password \
-    --username kai --password '<new>' --must-change-password=false
+    --username admin --password '<new>' --must-change-password=false
   ```
   …then mirror it into `.env`.
 - Official backup (consistent, includes the DB, repos and config):

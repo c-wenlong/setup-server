@@ -18,6 +18,9 @@ case "$1" in
 }
 EOF
     ;;
+  ip)
+    echo "100.77.77.77"
+    ;;
   serve)
     if [ -f "$STATE_DIR/serve_fails_left" ]; then
       left="$(cat "$STATE_DIR/serve_fails_left")"

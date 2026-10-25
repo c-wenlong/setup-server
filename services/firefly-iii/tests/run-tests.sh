@@ -654,7 +654,10 @@ test_ports_are_8097_8099_never_8098() {
   check "app publishes 8097"          compose_hasF "127.0.0.1:\${LOCAL_PORT:-8097}:8080"
   check "importer publishes 8099"     compose_hasF "127.0.0.1:\${IMPORTER_PORT:-8099}:8080"
   check "8098 appears nowhere in compose" compose_lacks '8098'
-  check "8098 appears nowhere in .env"    sh -c "! sed 's/#.*//' '$SVC/.env' | grep -q '8098'"
+  # Generated secrets (APP_KEY, passwords, the cron token) are random hex and
+  # can contain '8098' by chance — that is not a port reference, so those
+  # lines are excluded.
+  check "8098 appears nowhere in .env"    sh -c "! sed 's/#.*//' '$SVC/.env' | grep -vE '_(KEY|PASSWORD|TOKEN)=' | grep -q '8098'"
   check "8098 was never contacted"        no_call '8098'
   check "8098 was never served"           no_call 'https=8098'
   check "8080 is not published on the host (that is code-server)" \

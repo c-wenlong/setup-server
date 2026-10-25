@@ -273,7 +273,7 @@ it is a dead end for two independent reasons, both measured against this exact
 image:
 
 ```
-$ php artisan system:create-first-user kai@example.com
+$ php artisan system:create-first-user admin@example.com
   [x]  This command only works in the testing environment.
 ```
 

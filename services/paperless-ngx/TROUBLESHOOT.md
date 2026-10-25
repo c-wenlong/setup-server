@@ -410,7 +410,7 @@ It never calls `set_password`. So:
 Reset it properly:
 
 ```bash
-docker exec -it paperless-ngx python3 manage.py changepassword kai
+docker exec -it paperless-ngx python3 manage.py changepassword admin
 ```
 
 List the accounts that actually exist, if you are unsure which username you

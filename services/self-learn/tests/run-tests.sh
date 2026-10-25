@@ -777,7 +777,7 @@ EOF
   run_sync mac-setup
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
-  check "remote links blobs/local" calls_have "-d '/Users/kaichen/.self-learn/blobs/local'"
+  check "remote links blobs/local" calls_have "-d '/Users/user/.self-learn/blobs/local'"
   check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.self-learn.seafile.plist"
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"

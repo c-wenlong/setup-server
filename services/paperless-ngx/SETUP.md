@@ -265,7 +265,7 @@ start, which costs a slower first boot).
 
 ```
 URL:      https://homeserver.tail-name.ts.net:8095
-Login:    kai
+Login:    admin
 Password: PAPERLESS_ADMIN_PASSWORD in services/paperless-ngx/.env
 ```
 

@@ -131,14 +131,14 @@ serves the install page passes every other check.
 ## Login problems
 
 - **The generated password in `.env` is rejected on first login, and
-  `setup.sh` died with "Login as kai was rejected"** — this is the
+  `setup.sh` died with "Login as admin was rejected"** — this is the
   `--must-change-password` trap. The admin was created without
   `--must-change-password=false`, so Forgejo is demanding a password change
   the CLI never told you about. Fix:
 
   ```bash
   docker exec -u git forgejo forgejo admin user change-password \
-    --username kai --password "$(sed -n 's/^FORGEJO_ADMIN_PASSWORD=//p' .env)" \
+    --username admin --password "$(sed -n 's/^FORGEJO_ADMIN_PASSWORD=//p' .env)" \
     --must-change-password=false
   ```
 
@@ -165,7 +165,7 @@ serves the install page passes every other check.
   docker run --rm --entrypoint sqlite3 \
     -v ~/services/forgejo/data:/data codeberg.org/forgejo/forgejo:15 \
     /data/gitea/gitea.db \
-    "delete from two_factor where uid = (select id from user where lower_name='kai');"
+    "delete from two_factor where uid = (select id from user where lower_name='admin');"
   docker compose --project-directory . start
   ```
 
@@ -232,7 +232,7 @@ serves the install page passes every other check.
   `git/repositories` or `git/lfs`.
 - Garbage-collect the repos: Site Administration → Dashboard → maintenance
   operations → **"Run 'git gc' on all repositories"**. By hand, one repo:
-  `docker exec -u git forgejo git -C /data/git/repositories/kai/my-repo.git gc --aggressive --prune=now`
+  `docker exec -u git forgejo git -C /data/git/repositories/admin/my-repo.git gc --aggressive --prune=now`
 - LFS objects no repository references any more are only reclaimed by Site
   Administration → Dashboard → **"Garbage collect LFS meta objects"**.
 - Moving the data: stop the stack, move the directory, update `FORGEJO_DATA`

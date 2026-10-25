@@ -13,10 +13,15 @@ first, dated by merge.
 - **Scrubbed deployment identifiers ahead of open sourcing.** The docs,
   test stubs and seed defaults named the reference box's real tailnet
   hostname and tailnet IPs, and a dozen `setup.sh` files shipped the
-  owner's Gmail plus real first/last names as the seeded admin. Docs now
+  owner's Gmail plus real first/last names and a `kai` admin username as
+  the seeded admin. Docs now
   use `homeserver.tail-name.ts.net`, test fixtures keep the suites'
   `test-host.tailfake.ts.net` / `100.77.77.77`, and the admin defaults
-  are `admin@example.com` / `Admin` / `User`. Test comments that read
+  are `admin@example.com` / `Admin` / `User` / `admin`. Beszel's system
+  name derives from `hostname`, self-learn's Mac Postgres URL from the
+  ssh login, and monitoring's `adguard-dns` monitor resolves
+  `tailscale ip -4` in setup.sh (unset ⇒ the monitor is skipped, never
+  pointed at a made-up address). Test comments that read
   "not this box's real X" now read "made up", and adguard's
   ".env is not the real IP" assertion became a comments-stripped grep
   guard that setup.sh holds no tailnet-shaped literal at all.

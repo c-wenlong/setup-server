@@ -259,8 +259,8 @@ def resolve_registry_path(raw, label):
         candidate = os.path.join(REPO_ROOT, raw)
     path = os.path.realpath(candidate)
     for root in ALLOWED_ROOTS:
-        # Compare on path components, not string prefixes: /home/kai/devil
-        # must not pass a /home/kai/dev check.
+        # Compare on path components, not string prefixes: /home/admin/devil
+        # must not pass a /home/admin/dev check.
         if path == root or path.startswith(root.rstrip(os.sep) + os.sep):
             return path
     raise DeployError(403, "%s path is outside the allowed roots" % label)
