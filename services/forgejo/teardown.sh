@@ -192,6 +192,7 @@ SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was.
 PURGE_DIR=""
+PURGE_SHOW=""
 PURGE_MARKER=""
 FORGEJO_IMAGE=""
 if [ "$PURGE" -eq 1 ]; then
@@ -202,9 +203,52 @@ if [ "$PURGE" -eq 1 ]; then
     "$HOME/services/"?*) ;;
     *) die "FORGEJO_DATA=$DATA_DIR is not a folder inside $HOME/services/ — refusing to delete it. Remove it by hand if you are sure." ;;
   esac
+  # Is it there? `[ -e ]` is false both when it is gone and when a folder on
+  # the way (e.g. a root-owned 0700 storage/) cannot be searched, and only
+  # the first is "nothing to delete". So walk down from ~/services: a
+  # component that is absent under a searchable parent means gone; one that
+  # exists but cannot be searched hides the data, which then has to be
+  # cleared through that folder by the cleanup container.
+  data_state="present"
+  hidden=""
+  hidden_rest=""
+  p="$HOME/services"
+  rest="${DATA_DIR#"$HOME/services/"}"
+  { [ -d "$p" ] && [ -x "$p" ]; } \
+    || die "$p cannot be searched, so teardown cannot tell whether FORGEJO_DATA=$DATA_DIR is there. Run: sudo rm -rf $DATA_DIR   then ./teardown.sh --purge again. Nothing was changed."
+  while :; do
+    case "$rest" in */*) ;; *) break ;; esac
+    p="$p/${rest%%/*}"
+    rest="${rest#*/}"
+    if [ ! -e "$p" ] && [ ! -L "$p" ]; then
+      data_state="missing"; break
+    fi
+    [ -d "$p" ] || die "$p (on the way to FORGEJO_DATA=$DATA_DIR) is not a directory — refusing."
+    if [ ! -x "$p" ]; then
+      data_state="hidden"; hidden="$p"; hidden_rest="$rest"; break
+    fi
+  done
+  if [ "$data_state" = "present" ] && [ ! -e "$DATA_DIR" ] && [ ! -L "$DATA_DIR" ]; then
+    data_state="missing"
+  fi
+  PURGE_BASE=""
+  PURGE_REST=""
+  if [ "$data_state" = "hidden" ]; then
+    # The container mounts the unsearchable folder itself (real_dir resolves
+    # it without entering it) and deletes only the path below it. That folder
+    # must sit inside ~/services/forgejo, not be it: the marker lives there.
+    root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
+    PURGE_BASE="$(real_dir "$hidden")" \
+      || die "$hidden cannot be searched and is not a real directory inside $HOME/services/$NAME. Run: sudo rm -rf $DATA_DIR   then ./teardown.sh --purge again. Nothing was changed."
+    case "$PURGE_BASE" in
+      "$root/$NAME"/?*) ;;
+      *) die "$hidden cannot be searched, so teardown cannot reach FORGEJO_DATA=$DATA_DIR or the admin marker. Run: sudo rm -rf $DATA_DIR   then ./teardown.sh --purge again. Nothing was changed." ;;
+    esac
+    PURGE_REST="$hidden_rest"
+  fi
   # And where it really is, symlinks and all: it must be a strict child of
   # the real ~/services, never ~/services itself or anything above it.
-  if [ -e "$DATA_DIR" ]; then
+  if [ "$data_state" = "present" ]; then
     [ -d "$DATA_DIR" ] || die "FORGEJO_DATA=$DATA_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
     PURGE_DIR="$(real_dir "$DATA_DIR")" || die "DATA_DIR=$DATA_DIR is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
@@ -213,6 +257,7 @@ if [ "$PURGE" -eq 1 ]; then
       *) die "FORGEJO_DATA=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;
     esac
   fi
+  PURGE_SHOW="${PURGE_DIR:-${PURGE_BASE:+$PURGE_BASE/$PURGE_REST}}"
   # The hidden admin marker has to go too: left behind, a fresh ./setup.sh
   # skips admin creation and hands back a login page with no account. It is
   # a file, but it goes through the same real_dir check as the data dir.
@@ -231,7 +276,7 @@ if [ "$PURGE" -eq 1 ]; then
   esac
   FORGEJO_IMAGE="codeberg.org/forgejo/forgejo:${version:-15}"
 
-  warn "--purge deletes ${PURGE_DIR:-nothing (no data dir on disk)}, ${PURGE_MARKER:-no admin marker} and $ENV_FILE. This cannot be undone."
+  warn "--purge deletes ${PURGE_SHOW:-nothing (no data dir on disk)}, ${PURGE_MARKER:-no admin marker} and $ENV_FILE. This cannot be undone."
   warn "That is EVERY repository on this Forgejo, with its issues, pull requests, wikis, releases, LFS objects, and every account. Nothing else on this box has a copy."
   warn "Back it up first (Ctrl-C now, then, while the container is running):"
   warn "  docker exec -u git -w /tmp $CONTAINER forgejo dump -c /data/gitea/conf/app.ini --file /tmp/forgejo-dump.zip"
@@ -348,6 +393,22 @@ if [ "$PURGE" -eq 1 ]; then
       rm -rf -- "$PURGE_DIR" 2>/dev/null || true
       [ ! -e "$PURGE_DIR" ] || die "$PURGE_DIR is still there. Run: sudo rm -rf $PURGE_DIR   then ./teardown.sh --purge again. .env was kept."
     fi
+  elif [ -n "$PURGE_BASE" ]; then
+    # A folder on the way to the data cannot be searched by this user, so
+    # the host cannot even see the data. The pinned image mounts that folder
+    # and deletes only the path below it, refusing a symlink anywhere on that
+    # path (it would resolve inside the container, not on this box), then
+    # proves the path is gone and drops the emptied folders it went through.
+    info "$PURGE_BASE cannot be searched by this user; deleting $PURGE_SHOW with $FORGEJO_IMAGE"
+    docker run --rm --pull never -v "$PURGE_BASE:/x" --entrypoint sh "$FORGEJO_IMAGE" \
+      -c 'set -f; r=$1; p=/x; IFS=/; for c in $r; do p=$p/$c; [ ! -L "$p" ] || exit 3; done; unset IFS
+          rm -rf -- "/x/$r" && [ ! -e "/x/$r" ] || exit 1
+          d=$(dirname "/x/$r"); while [ "$d" != /x ]; do rmdir -- "$d" 2>/dev/null || break; d=$(dirname "$d"); done' \
+      sh "$PURGE_REST" >/dev/null 2>&1 \
+      || die "Could not delete $PURGE_SHOW through $PURGE_BASE. Run: sudo rm -rf $DATA_DIR   then ./teardown.sh --purge again. .env and the admin marker were kept."
+    # The emptied folder itself: removing it needs only the parent's
+    # permissions, and rmdir never removes anything that is not empty.
+    rmdir -- "$PURGE_BASE" 2>/dev/null || true
   fi
   [ -z "$PURGE_MARKER" ] || rm -f -- "$PURGE_MARKER"
   rm -f -- "$ENV_FILE"
@@ -355,7 +416,7 @@ if [ "$PURGE" -eq 1 ]; then
   # data dir was already gone, so a purged app never reads as installed;
   # rmdir only ever removes an empty directory.
   [ -L "$HOME/services/$NAME" ] || rmdir -- "$HOME/services/$NAME" 2>/dev/null || true
-  ok "Deleted ${PURGE_DIR:-(no data dir)}, ${PURGE_MARKER:-(no admin marker)} and $ENV_FILE"
+  ok "Deleted ${PURGE_SHOW:-(no data dir)}, ${PURGE_MARKER:-(no admin marker)} and $ENV_FILE"
 fi
 
 echo

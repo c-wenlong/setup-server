@@ -829,6 +829,78 @@ test_teardown_purge_missing_data_dir() {
   teardown
 }
 
+# FORGEJO_DATA under a folder this user cannot search (a root-owned 0700
+# storage/, faked with chmod 000): `[ -e ]` cannot see the data, which must
+# not read as "already gone" while .env and the marker are deleted.
+hide_data_under_storage() {
+  local st="$HOME/services/forgejo/storage"
+  mkdir -p "$st"
+  mv "$(data_dir)" "$st/data"
+  sed -i.bak "s#^FORGEJO_DATA=.*#FORGEJO_DATA=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+}
+unhide_storage() { chmod -R u+rwX "$HOME/services/forgejo" 2>/dev/null; }
+
+test_teardown_purge_unsearchable_parent() {
+  echo "• teardown --purge: data behind an unsearchable folder is deleted, not taken as gone"
+  local st
+  deployed
+  st="$HOME/services/forgejo/storage"
+  hide_data_under_storage
+  run_teardown --purge "forgejo"
+  unhide_storage
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "mounted the unsearchable folder" calls_have "-v $st:/x"
+  check "used the pinned image"       calls_have "codeberg.org/forgejo/forgejo:15"
+  check "no sudo"                     no_call "^sudo"
+  check "data gone"                   [ ! -e "$st/data" ]
+  check "emptied folder gone"         [ ! -e "$st" ]
+  check "marker gone"                 [ ! -e "$HOME/$MARKER_REL" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "state dir removed"           [ ! -e "$HOME/services/forgejo" ]
+  teardown
+  deployed
+  st="$HOME/services/forgejo/storage"
+  hide_data_under_storage
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "forgejo"
+  unhide_storage
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $st/data"
+  check "  never says done"           out_lacks "Deleted"
+  check "  repo kept"                 [ -f "$st/data/git/repositories/kai/proj.git/HEAD" ]
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  check "  marker kept for the retry" [ -f "$HOME/$MARKER_REL" ]
+  teardown
+  # A symlink below the unsearchable folder would resolve inside the
+  # container, not on this box: refused, its target untouched.
+  deployed
+  st="$HOME/services/forgejo/storage"
+  mkdir -p "$st" "$HOME/elsewhere"; echo keep > "$HOME/elsewhere/f"
+  ln -s "$HOME/elsewhere" "$st/data"
+  sed -i.bak "s#^FORGEJO_DATA=.*#FORGEJO_DATA=$st/data#" "$SVC/.env"
+  chmod 000 "$st"
+  run_teardown --purge "forgejo"
+  unhide_storage
+  check "symlink below it: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  target kept"               [ -f "$HOME/elsewhere/f" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  marker kept"               [ -f "$HOME/$MARKER_REL" ]
+  teardown
+  # ~/services/forgejo itself unsearchable: the marker is out of reach too.
+  deployed
+  chmod 000 "$HOME/services/forgejo"
+  run_teardown --purge "forgejo"
+  unhide_storage
+  check "state dir unsearchable: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf"
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  marker kept"               [ -f "$HOME/$MARKER_REL" ]
+  check "  repo kept"                 [ -f "$(repo_head)" ]
+  teardown
+}
+
 test_teardown_home_variable_in_env() {
   echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
   deployed
@@ -992,6 +1064,7 @@ test_teardown_serve_status_fails
 test_teardown_quoted_env
 test_teardown_purge_trailing_slashes
 test_teardown_purge_missing_data_dir
+test_teardown_purge_unsearchable_parent
 test_teardown_home_variable_in_env
 test_teardown_purge_own_dir_only
 test_teardown_purge_services_root_is_a_link

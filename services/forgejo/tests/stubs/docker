@@ -50,23 +50,25 @@ case "$1" in
     ;;
 
   run)
-    # teardown --purge's cleanup of container-owned files:
-    #   docker run --rm --pull never -v DIR:/x --entrypoint sh IMAGE -c 'find /x -mindepth 1 -delete'
+    # teardown --purge's cleanups of container-owned files:
+    #   docker run --rm --pull never -v DIR:/x --entrypoint sh IMAGE -c SCRIPT [sh ARGS...]
     # The real container is root, so it can delete what the host user cannot.
-    # Model that by making the tree writable first, then running the real find.
-    mount_host=""; entry=""
+    # Model that by making the mounted tree accessible first, then running the
+    # real SCRIPT on the host with /x pointing at DIR.
+    mount_host=""; entry=""; script=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
         --entrypoint) entry="$2"; shift 2 ;;
+        -c) script="$2"; shift 2; break ;;
         *) shift ;;
       esac
     done
     [ "$entry" = "sh" ] || exit 0
     [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
-    [ -n "$mount_host" ] || exit 1
+    [ -n "$mount_host" ] && [ -n "$script" ] || exit 1
     chmod -R u+rwX "$mount_host" 2>/dev/null
-    find "$mount_host" -mindepth 1 -delete
+    sh -c "${script//\/x/$mount_host}" "$@"
     exit $?
     ;;
 
