@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# rm stub — the delete side of the shadow root the `install` stub writes.
+# teardown.sh --system removes the files setup.sh put under /etc and
+# /var/lib; in the sandbox those live in $STATE_DIR/rootfs, and the REAL
+# paths on this box must never be touched by a test run. Same predicate as
+# the install and cmp stubs. Everything else (the sandbox) goes to the real rm.
+ROOTFS="$STATE_DIR/rootfs"
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    /etc/*|/usr/*|/var/*|/lib/*|/opt/*) echo "rm $a" >> "$CALLS_LOG"; ARGS+=("$ROOTFS$a") ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+# rm_keypair_interrupts: delete as asked, then kill the caller, as a Ctrl-C
+# right after the RDP keypair goes would (tests the marker ordering).
+if [ -f "$STATE_DIR/rm_keypair_interrupts" ] && [[ " $* " == *"/rdp-tls.key "* ]]; then
+  for p in /bin/rm /usr/bin/rm; do [ -x "$p" ] && { "$p" "${ARGS[@]}"; break; }; done
+  kill -TERM "$PPID"
+  exit 0
+fi
+for p in /bin/rm /usr/bin/rm; do [ -x "$p" ] && exec "$p" "${ARGS[@]}"; done
+exit 127

@@ -547,6 +547,20 @@ sg docker -c './tests/run-tests.sh --live'
 
 ```bash
 cd ~/dev/setup-server/services/remote-desktop
+./teardown.sh                    # Remove: Serve :8094 off + compose down; state, .env and the system half kept
+./teardown.sh --system           # from a terminal: ALSO RDP off, verify :3389 closed, THEN the filter + keypair (sudo)
+./teardown.sh --purge            # ALSO delete GUAC_STATE and .env (asks you to type remote-desktop)
+```
+
+The launcher's Remove runs `./teardown.sh` with no flags: no sudo, so the
+gnome-remote-desktop Remote Login config, the `inet remote_desktop` nftables
+table and the RDP keypair stay, and the script prints exactly that list
+with the commands to back it out. Nothing is exposed meanwhile: the filter
+keeps guarding the wildcard listener. `--system` is the terminal-only way
+to remove that half, and it never drops the filter while :3389 still
+answers. By hand, the equivalent of the default is:
+
+```bash
 docker compose --project-directory . down
 tailscale serve --https=8094 off      # ⚠️ NOT `tailscale serve reset`
 ```

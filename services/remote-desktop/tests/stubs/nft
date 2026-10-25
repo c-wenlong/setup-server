@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# nft stub — only what teardown.sh --system may do to the ruleset: look at
+# and delete the ONE table setup.sh created, by name. Anything broader (a
+# flush, another table) HARD-FAILS: other tables on this box belong to
+# docker, tailscale and ufw, and a teardown that touched them would open or
+# break something that is not this service's business.
+#
+# State in $STATE_DIR:
+#   fw_installed — the table `inet remote_desktop` exists (shared with the
+#                  python3/systemctl stubs: absent => the filter is gone)
+echo "nft $*" >> "$CALLS_LOG"
+case "$*" in
+  "list table inet remote_desktop")
+    [ -f "$STATE_DIR/fw_installed" ] || { echo "Error: No such file or directory" >&2; exit 1; }
+    echo "table inet remote_desktop {"; echo "}" ;;
+  "delete table inet remote_desktop")
+    [ -f "$STATE_DIR/fw_installed" ] || { echo "Error: No such file or directory" >&2; exit 1; }
+    rm -f "$STATE_DIR/fw_installed" ;;
+  *)
+    echo "STUB REFUSED: 'nft $*'. Only 'list|delete table inet remote_desktop' is allowed." >&2
+    exit 99 ;;
+esac
+exit 0
