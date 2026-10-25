@@ -261,6 +261,8 @@ $DOCKER_HOST_LINE
 </plist>
 EOF
   launchctl bootout "gui/$(id -u)/com.henrygd.beszel-agent" 2>/dev/null || true
+  # teardown.sh disables the label so it stays off across logins; undo that.
+  launchctl enable "gui/$(id -u)/com.henrygd.beszel-agent"
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
   ok "LaunchAgent loaded (port $AGENT_PORT; logs: ~/Library/Logs/beszel-agent.log)"
 fi

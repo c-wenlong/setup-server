@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/trigger-dev/setup.sh.
+# Tests for services/trigger-dev/setup.sh and teardown.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -29,7 +29,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" \
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" \
      "$SERVICE_DIR/machine-presets.json" "$SVC/"
   cp -R "$SERVICE_DIR/clickhouse" "$SVC/"
 }
@@ -375,6 +375,535 @@ test_live() {
   live_check "state dir exists"             sh -c "test -d \"\$(sed -n 's/^TRIGGER_POSTGRES=//p' '$SERVICE_DIR/.env')\""
 }
 
+# ------------------------------------------------------------- teardown
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+ST="services/trigger-dev"
+state_dir() { printf '%s/%s' "$HOME" "$ST"; }
+env_val()   { sed -n "s/^$1=//p" "$SVC/.env"; }
+# Replace one KEY=... line in the sandbox .env (BSD and GNU sed both take -i.bak).
+set_env()   { sed -i.bak "s#^$1=.*#$1=$2#" "$SVC/.env"; rm -f "$SVC/.env.bak"; }
+
+# A deployed sandbox: setup.sh has run, every data dir holds a file, Serve
+# maps this port to this service, and neighbours sit on other ports (one a
+# lookalike suffix, one the loopback registry port someone published by hand).
+deployed() {
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  local v
+  for v in TRIGGER_POSTGRES TRIGGER_CLICKHOUSE TRIGGER_REDIS TRIGGER_MINIO TRIGGER_REGISTRY TRIGGER_SHARED; do
+    mkdir -p "$(env_val "$v")"; echo keep > "$(env_val "$v")/keep"
+  done
+  # The compose project's own containers sit on its networks.
+  printf 'trigger-webapp trigger-dev\ntrigger-supervisor trigger-dev\n' > "$STATE_DIR/attached_trigger-webapp"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8030 (tailnet only)
+|-- / proxy http://127.0.0.1:8030
+
+https://test-host.tailfake.ts.net:18030 (tailnet only)
+|-- / proxy http://127.0.0.1:18030
+
+https://test-host.tailfake.ts.net:5000 (tailnet only)
+|-- / proxy http://127.0.0.1:5000
+EOF
+  : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/compose_down"
+}
+
+# Checks setup.sh's default paths, so it still means something after a test
+# has pointed a .env path somewhere odd.
+all_data_kept() {
+  local d
+  for d in postgres clickhouse redis minio registry/data shared; do
+    [ -f "$HOME/$ST/$d/keep" ] || return 1
+  done
+  [ -s "$HOME/$ST/registry/auth.htpasswd" ] && [ -f "$HOME/$ST/.magic-link-requested" ]
+}
+
+test_teardown_safe() {
+  echo "• teardown: safe remove keeps data and .env, unpublishes only its port"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8030"         calls_have "tailscale serve --https=8030 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18030 untouched"  no_call "https=18030"
+  check "registry port :5000 untouched (setup.sh never publishes it)" no_call "https=5000"
+  check "never serve reset"           no_call "serve reset"
+  check "compose down"                [ -f "$STATE_DIR/compose_down" ]
+  check "  in the service dir"        calls_have "docker compose --project-directory $SVC down"
+  check "down keeps volumes (no -v)"  no_call "down -v"
+  check "no container killed"         no_call "docker rm"
+  check "no cleanup container"        no_call "docker run"
+  check "data kept"                   all_data_kept
+  check "magic-link marker kept"      [ -f "$HOME/$ST/.magic-link-requested" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_custom_port() {
+  echo "• teardown: the port comes from .env (LOCAL_PORT=8040, HTTPS 8443)"
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=8040 HTTPS_PORT=8443
+  run_deploy
+  unset LOCAL_PORT HTTPS_PORT
+  printf 'https://test-host.tailfake.ts.net:8443 (tailnet only)\n|-- / proxy http://127.0.0.1:8040\n\nhttps://test-host.tailfake.ts.net:8030 (tailnet only)\n|-- / proxy http://127.0.0.1:8030\n' \
+    > "$STATE_DIR/serve_status"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8443"         calls_have "tailscale serve --https=8443 off"
+  check "default :8030 untouched"     no_call "https=8030"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still compose down"          [ -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: refuses to unpublish a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8030 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8030 (tailnet only)
+|-- / proxy http://127.0.0.1:8030
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8030
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /trigger proxy http://127.0.0.1:8030
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8030 off"                   calls_have "serve --https=8030 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "root: no compose down"       [ ! -f "$STATE_DIR/compose_down" ]
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "unknown flag: no compose down" [ ! -f "$STATE_DIR/compose_down" ]
+  touch "$STATE_DIR/docker_no_perm"
+  run_teardown
+  check "no docker: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "no docker: no serve off"     no_call " off"
+  teardown
+}
+
+test_teardown_task_runners_left_alone() {
+  echo "• teardown: task-runner containers outside the compose project are named, never killed"
+  deployed
+  printf 'trigger-webapp trigger-dev\nrun_cm5abc-attempt-1 \n' > "$STATE_DIR/attached_trigger-webapp"
+  printf 'run_cm5abc-attempt-1 \nother-app other\n' > "$STATE_DIR/attached_trigger-supervisor"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "names the runner"            out_has "run_cm5abc-attempt-1"
+  check "names a foreign container"   out_has "other-app"
+  check "own containers not listed as leftovers" [ "$(grep -c '^ *trigger-webapp$' <<<"$OUT")" -eq 0 ]
+  check "gives the docker rm command" out_has "docker rm -f"
+  check "killed nothing"              no_call "docker rm"
+  check "no compose down"             [ ! -f "$STATE_DIR/compose_down" ]
+  check "nothing unpublished"         no_call " off"
+  check "data and .env kept"          all_data_kept
+  run_teardown --purge "trigger-dev"
+  check "purge: also stops first"     [ "$CODE" -ne 0 ]
+  check "purge: data kept"            all_data_kept
+  check "purge: .env kept"            [ -f "$SVC/.env" ]
+  rm -f "$STATE_DIR/attached_trigger-supervisor"
+  printf 'trigger-webapp trigger-dev\n' > "$STATE_DIR/attached_trigger-webapp"
+  run_teardown
+  check "runs gone: exits zero"       [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  touch "$STATE_DIR/ps_filter_fails"
+  run_teardown
+  check "listing fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  no compose down"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  nothing unpublished"       no_call " off"
+  teardown
+}
+
+test_teardown_down_fails() {
+  echo "• teardown: a failed compose down (network still in use) stops, data kept"
+  deployed
+  touch "$STATE_DIR/compose_down_fails"
+  run_teardown --purge "trigger-dev"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "points at the attached runner" out_has "network=trigger-webapp"
+  check "data kept"                   all_data_kept
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_units_not_touched() {
+  echo "• teardown: a user unit mentioning trigger-dev is named, not touched"
+  deployed
+  mkdir -p "$HOME/.config/systemd/user"
+  printf '[Service]\nExecStart=%s/services/trigger-dev/backup.sh\n' "$HOME" > "$HOME/.config/systemd/user/trigger-backup.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$HOME/.config/systemd/user/unrelated.service"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "names the unit"              out_has "trigger-backup.service"
+  check "does not name unrelated"     out_lacks "unrelated.service"
+  check "no systemctl call"           no_call "systemctl"
+  check "unit file kept"              [ -f "$HOME/.config/systemd/user/trigger-backup.service" ]
+  run_teardown --purge "trigger-dev"
+  check "purge: unit file still kept" [ -f "$HOME/.config/systemd/user/trigger-backup.service" ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then exactly setup.sh's state and .env go"
+  deployed
+  local st; st="$(state_dir)"
+  run_teardown --purge "trigger"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: data kept"       all_data_kept
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
+  check "wrong name: serve untouched" no_call " off"
+  run_teardown --purge "trigger-dev"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8030"         calls_have "tailscale serve --https=8030 off"
+  check "compose down (no -v: no named volumes)" no_call "down -v"
+  local d
+  for d in postgres clickhouse redis minio registry/data shared; do
+    check "$d gone"                   [ ! -e "$st/$d" ]
+  done
+  check "registry htpasswd gone"      [ ! -e "$st/registry/auth.htpasswd" ]
+  check "registry dir gone"           [ ! -e "$st/registry" ]
+  check "magic-link marker gone"      [ ! -e "$st/.magic-link-requested" ]
+  check "\$HOME/services/trigger-dev marker gone" [ ! -e "$st" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "tracked compose file kept"   [ -f "$SVC/docker-compose.yml" ]
+  check "tracked machine-presets.json kept" [ -f "$SVC/machine-presets.json" ]
+  check "tracked clickhouse/*.xml kept" [ -f "$SVC/clickhouse/data-paths.xml" ] && [ -f "$SVC/clickhouse/override.xml" ] && [ -f "$SVC/clickhouse/users-override.xml" ]
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "no sudo"                     no_call "^sudo"
+  teardown
+}
+
+test_teardown_purge_keeps_other_files() {
+  echo "• teardown --purge: files setup.sh did not make under ~/services/trigger-dev stay"
+  deployed
+  local st; st="$(state_dir)"
+  echo backup > "$st/trigger-dev-2026-10-01.tgz"
+  run_teardown --purge "trigger-dev"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "user's backup kept"          [ -f "$st/trigger-dev-2026-10-01.tgz" ]
+  check "postgres gone"               [ ! -e "$st/postgres" ]
+  check "says the dir was left"       out_has "did not create; left alone"
+  teardown
+}
+
+test_teardown_purge_container_owned() {
+  echo "• teardown --purge: container-owned files are cleared by the Postgres image, not sudo"
+  deployed
+  local pg ch
+  pg="$(env_val TRIGGER_POSTGRES)"; ch="$(env_val TRIGGER_CLICKHOUSE)"
+  mkdir -p "$pg/base/locked" "$ch/store/locked"
+  echo x > "$pg/base/locked/f"; echo x > "$ch/store/locked/f"
+  chmod 500 "$pg/base/locked" "$ch/store/locked"
+  run_teardown --purge "trigger-dev"
+  chmod -R u+rwX "$SANDBOX" 2>/dev/null
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "used the compose Postgres image" calls_have "postgres:14"
+  check "never pulled for it"         calls_have "pull never"
+  check "mounted the postgres dir"    calls_have "-v $pg:/x"
+  check "mounted the clickhouse dir"  calls_have "-v $ch:/x"
+  check "no sudo"                     no_call "^sudo"
+  check "postgres gone"               [ ! -e "$pg" ]
+  check "clickhouse gone"             [ ! -e "$ch" ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  pg="$(env_val TRIGGER_POSTGRES)"
+  mkdir -p "$pg/base/locked"; echo x > "$pg/base/locked/f"
+  chmod 500 "$pg/base/locked"
+  touch "$STATE_DIR/docker_run_fails"
+  run_teardown --purge "trigger-dev"
+  chmod -R u+rwX "$SANDBOX" 2>/dev/null
+  check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the sudo command"    out_has "sudo rm -rf $pg"
+  check "  .env kept for the retry"   [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  printf 'POSTGRES_IMAGE_TAG=16;rm\n' >> "$SVC/.env"
+  run_teardown --purge "trigger-dev"
+  check "odd image tag refused"       [ "$CODE" -ne 0 ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_purge_missing_data() {
+  echo "• teardown --purge: data already gone is fine, marker still removed"
+  deployed
+  local st; st="$(state_dir)"
+  rm -rf "${st:?}"/*
+  run_teardown --purge "trigger-dev"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "empty marker dir removed"    [ ! -e "$(state_dir)" ]
+  teardown
+}
+
+test_teardown_purge_refuses_odd_paths() {
+  echo "• teardown --purge: refuses odd data paths before anything changes"
+  local var dotted
+  for var in TRIGGER_POSTGRES TRIGGER_SHARED TRIGGER_REGISTRY TRIGGER_REGISTRY_AUTH; do
+    deployed
+    mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+    set_env "$var" "$HOME"
+    run_teardown --purge "trigger-dev"
+    check "$var=\$HOME refused"        [ "$CODE" -ne 0 ]
+    check "  nothing stopped"         [ ! -f "$STATE_DIR/compose_down" ]
+    check "  data kept"               all_data_kept
+    set_env "$var" "$HOME/services/../x"
+    run_teardown --purge "trigger-dev"
+    check "$var '..' refused"         [ "$CODE" -ne 0 ]
+    set_env "$var" "$HOME/services/"
+    run_teardown --purge "trigger-dev"
+    check "$var services dir itself refused" [ "$CODE" -ne 0 ]
+    set_env "$var" "$HOME/services//"
+    run_teardown --purge "trigger-dev"
+    check "$var trailing slashes refused" [ "$CODE" -ne 0 ]
+    set_env "$var" "$HOME/services/neighbour"
+    run_teardown --purge "trigger-dev"
+    check "$var another service's dir refused" [ "$CODE" -ne 0 ]
+    for dotted in "$HOME/services/." "$HOME/services/./trigger-dev" "$HOME/services/trigger-dev/.."; do
+      set_env "$var" "$dotted"
+      run_teardown --purge "trigger-dev"
+      check "$var '.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+    done
+    mkdir -p "$HOME/services/trigger-dev/a:b"
+    set_env "$var" "$HOME/services/trigger-dev/a:b"
+    run_teardown --purge "trigger-dev"
+    check "$var colon refused"        [ "$CODE" -ne 0 ]
+    check "  neighbour never touched" [ -f "$HOME/services/neighbour/keep" ]
+    check "  .env kept"               [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  ln -s "$HOME/services" "$HOME/services/trigger-dev/alias"
+  set_env TRIGGER_REDIS "$HOME/services/trigger-dev/alias"
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "trigger-dev"
+  check "symlinked data dir refused"  [ "$CODE" -ne 0 ]
+  check "  neighbour kept"            [ -f "$HOME/services/neighbour/keep" ]
+  teardown
+  deployed
+  set_env TRIGGER_POSTGRES ""
+  run_teardown --purge "trigger-dev"
+  check "missing path refused"        [ "$CODE" -ne 0 ]
+  check "  says it will not guess"    out_has "refusing to guess"
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  mkdir -p "$HOME/real-services"
+  mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
+  rmdir "$HOME/services"
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/trigger-dev/postgres"; echo x > "$HOME/trigger-dev/postgres/keep"
+  run_teardown --purge "trigger-dev"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"    [ -f "$HOME/trigger-dev/postgres/keep" ]
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/trigger-dev survives"
+  deployed
+  local repo="$HOME/$ST/setup-server/services/trigger-dev"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/$ST/setup-server/other.env"
+  set_env TRIGGER_SHARED "$HOME/$ST"
+  cp "$SVC/.env" "$repo/.env"
+  OUT="$(printf '%s\n' "trigger-dev" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "checkout intact"             [ -f "$repo/teardown.sh" ]
+  check "other services' files kept"  [ -f "$HOME/$ST/setup-server/other.env" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8030'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8030 off"                   calls_have "serve --https=8030 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8030"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8030 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  check "  :8030 off"                 calls_have "serve --https=8030 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=80x0/' "$SVC/.env"
+  run_teardown
+  check "non-numeric port refused"    [ "$CODE" -ne 0 ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+}
+
+test_teardown_home_variable_in_env() {
+  echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
+  deployed
+  local dir; dir="$(env_val TRIGGER_POSTGRES)"
+  set_env TRIGGER_POSTGRES "\"\${HOME}${dir#"$HOME"}\""
+  run_teardown --purge "trigger-dev"
+  check "\${HOME} form: exits zero"   [ "$CODE" -eq 0 ]
+  check "  dir gone"                  [ ! -e "$dir" ]
+  teardown
+  deployed
+  dir="$(env_val TRIGGER_POSTGRES)"
+  set_env TRIGGER_POSTGRES "'\$HOME${dir#"$HOME"}'"
+  run_teardown --purge "trigger-dev"
+  check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
+  check "  dir kept"                  [ -e "$dir/keep" ]
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'TRIGGER_POSTGRES=%s/elsewhere\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "TRIGGER_POSTGRES is set more than once"
+  check "  touched nothing"           [ ! -f "$STATE_DIR/compose_down" ]
+  teardown
+  deployed
+  printf 'X="first\nTRIGGER_POSTGRES=%s/elsewhere\n"\n' "$HOME" >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+  deployed
+  printf 'just some words\n' >> "$SVC/.env"
+  run_teardown
+  check "not KEY=value: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_* in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_PROFILES; do
+    deployed
+    printf '%s=%s\n' "$v" "other" >> "$SVC/.env"
+    run_teardown --purge "trigger-dev"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  no compose call"           no_call "compose --project-directory"
+    check "  nothing unpublished"       no_call " off"
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  no compose call"           no_call "compose --project-directory"
+  teardown
+}
+
+test_teardown_purge_refuses_linked_files() {
+  echo "• teardown --purge: a symlinked auth file or a lookalike sibling dir is refused"
+  deployed
+  local auth; auth="$(env_val TRIGGER_REGISTRY_AUTH)"
+  echo secret > "$HOME/secret"
+  rm -f "$auth"; ln -s "$HOME/secret" "$auth"
+  run_teardown --purge "trigger-dev"
+  check "symlinked TRIGGER_REGISTRY_AUTH: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  link target kept"          [ -f "$HOME/secret" ]
+  check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  mkdir -p "$HOME/services/trigger-dev-old"; echo x > "$HOME/services/trigger-dev-old/keep"
+  set_env TRIGGER_MINIO "$HOME/services/trigger-dev-old"
+  run_teardown --purge "trigger-dev"
+  check "sibling ~/services/trigger-dev-old: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  its files kept"            [ -f "$HOME/services/trigger-dev-old/keep" ]
+  check "  data kept"                 all_data_kept
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 if [ ! -f "$SERVICE_DIR/setup.sh" ] || [ ! -f "$SERVICE_DIR/docker-compose.yml" ]; then
   red "services/trigger-dev/setup.sh or services/trigger-dev/docker-compose.yml is missing — nothing to test."
@@ -395,6 +924,28 @@ test_origin_drift
 test_admin_email_override
 test_operator_escalation
 test_serve_approval_prompt
+test_teardown_safe
+test_teardown_custom_port
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_preflight
+test_teardown_task_runners_left_alone
+test_teardown_down_fails
+test_teardown_units_not_touched
+test_teardown_purge
+test_teardown_purge_keeps_other_files
+test_teardown_purge_container_owned
+test_teardown_purge_missing_data
+test_teardown_purge_refuses_odd_paths
+test_teardown_purge_services_root_is_a_link
+test_teardown_purge_keeps_a_checkout_inside
+test_teardown_purge_refuses_linked_files
+test_teardown_quoted_env
+test_teardown_home_variable_in_env
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
 
 if [ "${1:-}" = "--live" ]; then
   echo

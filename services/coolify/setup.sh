@@ -351,9 +351,22 @@ if [ -f "$KEY_BASE" ]; then
   chmod 600 "$auth"
   pub_line="$(cat "${KEY_BASE}.pub" 2>/dev/null || true)"
   if [ -n "$pub_line" ]; then
-    if grep -qF "$pub_line" "$auth" 2>/dev/null; then
+    # Present = an active (uncommented) entry carrying the same key data,
+    # whatever its comment or from=/command= options, so a re-run never
+    # appends an unrestricted copy next to an entry the operator locked down.
+    key_blob="$(printf '%s\n' "$pub_line" | awk '{ print $2; exit }')"
+    if [ -n "$key_blob" ] && awk -v b="$key_blob" '
+        /^[[:space:]]*(#|$)/ { next }
+        { for (i = 1; i <= NF; i++) if ($i == b) { found = 1; exit } }
+        END { exit found ? 0 : 1 }' "$auth" 2>/dev/null; then
       ok "Coolify pubkey already in $auth"
     else
+      # A last line without a newline would get the key glued onto it,
+      # breaking both keys. $(...) strips a trailing newline, so a
+      # non-empty last byte means the file does not end in one.
+      if [ -s "$auth" ] && [ -n "$(tail -c 1 "$auth")" ]; then
+        printf '\n' >> "$auth"
+      fi
       printf '%s\n' "$pub_line" >> "$auth"
       ok "Added Coolify pubkey to $auth (SSH as $USER, not root)"
     fi

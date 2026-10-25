@@ -8,6 +8,16 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Fixed
+
+- **coolify setup.sh no longer breaks the last line of
+  `~/.ssh/authorized_keys`.** When that file did not end in a newline,
+  the Coolify key was glued onto the user's last key, breaking both. It now
+  adds the newline first, and counts the key as present when any
+  uncommented entry carries the same key data, options included (a
+  commented-out copy no longer counts, and a `from=`-restricted entry is
+  never joined by an unrestricted copy).
+
 ### Added
 
 - **teardown.sh for paperclip**, so it gets the launcher's Remove button.
@@ -19,6 +29,36 @@ first, dated by merge.
   `~/.paperclip` (instance, CLI store, `master.key`), `~/agent-workspaces`,
   `~/.claude` or `~/.codex`, and prints a backup line and the `rm` for
   each instead. It never runs `paperclipai uninstall`.
+
+- **teardown.sh for forgejo**, so it gets the launcher's Remove button.
+  The default keeps repos, `.env` and the hidden `.admin-created` marker.
+  `--purge` warns that every repository, issue, PR, wiki, LFS object and
+  account goes with no other copy, prints a `forgejo dump` command that
+  writes outside the data dir, then deletes data, the marker and `.env`.
+  An SSH TCP forward is only turned off if the compose SSH port line is
+  actually enabled.
+
+- **teardown.sh for code-server**, so it gets the launcher's Remove
+  button. On `:443` it turns off only code-server's own path (`/`), so
+  the launcher's `/home` stays up; a port that is all code-server goes
+  off whole. It disables the unit (Linux) or boots out the agent (macOS),
+  and keeps `config.yaml`, user data, extensions, the binary and every
+  workspace folder. `--purge` deletes only the unit file and the empty
+  `~/services/code-server` marker, and prints the `rm` for everything
+  else.
+
+- **teardown.sh for beszel, quiver-hub, syncthing, trigger-dev and
+  coolify**, so each gets the launcher's Remove button. Service-specific:
+  syncthing's purge deletes only its identity and index and keeps your
+  synced files unless you also pass `--delete-synced-files`; quiver-hub
+  keeps `~/.local/share/quiver-hub` and `~/.quiver`; trigger-dev refuses
+  while task-runner containers exist rather than killing them; coolify
+  never stops the apps it deployed, refuses `--purge` while any exist, and
+  removes only its own key line from `authorized_keys`. Coolify's Remove
+  also carries on when Compose cannot delete the `coolify` network because
+  deployed apps still use it, as long as its own containers are gone.
+  beszel and syncthing setup.sh now `launchctl enable` before
+  bootstrap on macOS.
 
 - **teardown.sh for the six services whose data hurts most to lose**:
   vaultwarden, immich, paperless-ngx, seafile, appflowy and plane, so each
