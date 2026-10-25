@@ -36,7 +36,7 @@ setup() {
   SVC="$SANDBOX/svc"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/pair.sh" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/pair.sh" "$SERVICE_DIR/teardown.sh" "$SVC/"
   UNIT="$HOME/.config/systemd/user/quiver-hub.service"
   PLIST="$HOME/Library/LaunchAgents/com.setup-server.quiver-hub.plist"
   INSTALL="$HOME/.local/share/quiver-hub"
@@ -601,6 +601,444 @@ test_live() {
   live_check "swe remote pair gives the https link" pair_link_is "$swe" "$url/#pair="
 }
 
+# ------------------------------------------------------------- teardown
+# run_teardown [flag] [stdin line] — runs teardown.sh under stubs; sets OUT and CODE
+run_teardown() {
+  OUT="$(printf '%s\n' "${2:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${1:+"$1"} 2>&1)"
+  CODE=$?
+}
+
+# A deployed sandbox: setup.sh has run, Serve maps :8477 to the hub, and
+# neighbours sit on other ports (one a lookalike suffix). ~/.quiver holds
+# paired devices, which belong to the user's Quiver install.
+deployed() {
+  setup
+  touch "$STATE_DIR/linger" "$STATE_DIR/operator"
+  run_deploy
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:2283 (tailnet only)
+|-- / proxy http://127.0.0.1:2283
+
+https://test-host.tailfake.ts.net:8477 (tailnet only)
+|-- / proxy http://127.0.0.1:8477
+
+https://test-host.tailfake.ts.net:18477 (tailnet only)
+|-- / proxy http://127.0.0.1:18477
+EOF
+  mkdir -p "$HOME/.quiver/data/remote"
+  echo '{"devices": []}' > "$HOME/.quiver/data/remote/devices.json"
+  : > "$CALLS_LOG"
+}
+
+# The file setup.sh wrote to supervise the hub on this platform.
+unit_file() { if [ "$OS" = "Linux" ]; then echo "$UNIT"; else echo "$PLIST"; fi; }
+stopped()   { if [ "$OS" = "Linux" ]; then calls_have "systemctl --user disable --now quiver-hub.service"; else calls_have "launchctl bootout"; fi; }
+not_stopped() { no_call "disable --now" && no_call "bootout"; }
+quiver_kept() { [ -f "$HOME/.quiver/data/remote/devices.json" ]; }
+
+test_teardown_safe() {
+  echo "• teardown: safe remove stops the hub, unpublishes only its port, keeps .env/unit/build"
+  deployed
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8477"         calls_have "tailscale serve --https=8477 off"
+  check "neighbour :2283 untouched"   no_call "https=2283"
+  check "lookalike :18477 untouched"  no_call "https=18477"
+  check "never serve reset"           no_call "serve reset"
+  check "hub stopped and disabled"    stopped
+  if [ "$OS" = "Linux" ]; then
+    check "unit file kept"            [ -f "$UNIT" ]
+    check "no daemon-reload (unit kept)" no_call "daemon-reload"
+  else
+    check "plist removed (would restart at login)" [ ! -e "$PLIST" ]
+  fi
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "hub build kept"              [ -x "$INSTALL/bin/swe" ]
+  check ".quiver kept"              quiver_kept
+  check "lingering untouched"         no_call "loginctl"
+  check "operator untouched"          no_call "tailscale set"
+  check "no sudo"                     no_call "sudo"
+  check "says how to bring it back"   out_has "./setup.sh brings it back"
+  check "its own unit is not listed as foreign" out_lacks "NOT written by setup.sh"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "re-run exits zero"           [ "$CODE" -eq 0 ]
+  check "re-run: nothing left to unpublish" out_has "already off"
+  run_deploy
+  check "./setup.sh brings it back"   [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_custom_https_port() {
+  echo "• teardown: an HTTPS port other than LOCAL_PORT is found from serve status"
+  setup
+  touch "$STATE_DIR/linger" "$STATE_DIR/operator"
+  export HTTPS_PORT=9443
+  run_deploy
+  unset HTTPS_PORT
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :9443"         calls_have "tailscale serve --https=9443 off"
+  check "no :8477 off"                no_call "https=8477"
+  teardown
+}
+
+test_teardown_not_published() {
+  echo "• teardown: nothing published is fine"
+  deployed
+  : > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says already off"            out_has "already off"
+  check "still stops the hub"         stopped
+  teardown
+}
+
+test_teardown_port_owned_by_someone_else() {
+  echo "• teardown: leaves a port that points elsewhere"
+  deployed
+  printf 'https://test-host.tailfake.ts.net:8477 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' \
+    > "$STATE_DIR/serve_status"
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "no serve off"                no_call " off"
+  check "says nothing points here"    out_has "already off"
+  teardown
+}
+
+test_teardown_every_port_pointing_here() {
+  echo "• teardown: every Serve port pointing here goes off; shared ports stay"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8478 (tailnet only)
+|-- / proxy http://127.0.0.1:8477
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8477
+
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /hub proxy http://127.0.0.1:8477
+EOF
+  run_teardown
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ":8478 off"                   calls_have "serve --https=8478 off"
+  check ":8443 off"                   calls_have "serve --https=8443 off"
+  check "shared :443 left on"         no_call "https=443 off"
+  check "warns about the shared port" out_has "HTTPS :443 also serves something else"
+  teardown
+}
+
+test_teardown_serve_status_fails() {
+  echo "• teardown: an unreadable Serve status stops before anything changes"
+  deployed
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "Could not read Tailscale Serve status"
+  check "hub not stopped"             not_stopped
+  check "nothing unpublished"         no_call " off"
+  teardown
+}
+
+test_teardown_preflight() {
+  echo "• teardown: preflight"
+  setup
+  run_teardown
+  check "no .env: exits non-zero"     [ "$CODE" -ne 0 ]
+  check "no .env: explains"           out_has "nothing to tear down"
+  check "no .env: touched nothing"    not_stopped
+  teardown
+  deployed
+  export FAKE_UID=0
+  run_teardown
+  check "root: exits non-zero"        [ "$CODE" -ne 0 ]
+  check "root: hub not stopped"       not_stopped
+  unset FAKE_UID
+  run_teardown --force
+  check "unknown flag: exits non-zero" [ "$CODE" -ne 0 ]
+  check "unknown flag: hub not stopped" not_stopped
+  OUT="$(printf '\n' | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge extra 2>&1)"; CODE=$?
+  check "too many args: exits non-zero" [ "$CODE" -ne 0 ]
+  sed -i.bak 's/^LOCAL_PORT=.*/LOCAL_PORT=84x77/' "$SVC/.env"
+  run_teardown
+  check "non-numeric LOCAL_PORT: exits non-zero" [ "$CODE" -ne 0 ]
+  sed -i.bak 's/^LOCAL_PORT=.*//' "$SVC/.env"
+  run_teardown
+  check "missing LOCAL_PORT: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  nothing unpublished or stopped" sh -c "! grep -qF -e ' off' -e 'disable --now' -e bootout '$CALLS_LOG'"
+  teardown
+}
+
+test_teardown_unit_already_gone() {
+  echo "• teardown: a unit file already removed by hand: ask systemd whether the hub still runs"
+  [ "$OS" = "Linux" ] || { echo "    (Linux only: skipped)"; return 0; }
+  deployed
+  rm -f "$UNIT"
+  check "file deleted while it ran (stub agrees)" [ -f "$STATE_DIR/active.quiver-hub" ]
+  run_teardown
+  check "still running: exits zero"   [ "$CODE" -eq 0 ]
+  check "  no disable call"           no_call "disable --now"
+  check "  stopped by name"           calls_have "systemctl --user stop quiver-hub.service"
+  check "  really stopped"            [ ! -f "$STATE_DIR/active.quiver-hub" ]
+  run_teardown
+  check "not running: exits zero"     [ "$CODE" -eq 0 ]
+  check "  says already removed"      out_has "already removed"
+  teardown
+  deployed
+  rm -f "$UNIT"
+  touch "$STATE_DIR/show_fails"
+  run_teardown
+  check "systemd cannot be asked: plain remove exits zero" [ "$CODE" -eq 0 ]
+  check "  warns how to stop it"      out_has "systemctl --user stop quiver-hub.service"
+  : > "$CALLS_LOG"
+  run_teardown --purge "quiver-hub"
+  check "  --purge: refused"          [ "$CODE" -ne 0 ]
+  check "  --purge: says why"         out_has "could not say whether"
+  check "  --purge: nothing unpublished" no_call " off"
+  check "  --purge: .env kept"        [ -f "$SVC/.env" ]
+  teardown
+  deployed
+  rm -f "$UNIT"
+  run_teardown --purge "quiver-hub"
+  check "--purge with the hub still running: exits zero" [ "$CODE" -eq 0 ]
+  check "  stopped before deleting"   calls_have "systemctl --user stop quiver-hub.service"
+  check "  .env gone"                 [ ! -f "$SVC/.env" ]
+  teardown
+  deployed
+  touch "$STATE_DIR/stop_ignored"
+  run_teardown --purge "quiver-hub"
+  check "hub will not stop: --purge refused" [ "$CODE" -ne 0 ]
+  check "  says it is still running"  out_has "still running"
+  check "  .env kept"                 [ -f "$SVC/.env" ]
+  check "  unit file kept"            [ -f "$UNIT" ]
+  check "  ~/.quiver kept"            quiver_kept
+  teardown
+}
+
+test_teardown_leaves_other_units() {
+  echo "• teardown: units mentioning the hub that setup.sh did not write are named, not touched"
+  deployed
+  local dir; dir="$(dirname "$(unit_file)")"
+  mkdir -p "$dir"
+  printf '[Service]\nExecStart=swe remote agent --hub=https://x:8477 # quiver-hub satellite\n' > "$dir/quiver-satellite.service"
+  printf '[Service]\nExecStart=/bin/true\n' > "$dir/unrelated.service"
+  run_teardown --purge "quiver-hub"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "warns, naming it"            out_has "quiver-satellite.service"
+  check "unrelated unit not named"    out_lacks "unrelated.service"
+  check "never acted on it"           no_call "quiver-satellite"
+  check "its file kept"               [ -f "$dir/quiver-satellite.service" ]
+  check "unrelated file kept"         [ -f "$dir/unrelated.service" ]
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: typed confirmation, then .env, unit file and marker go"
+  deployed
+  mkdir -p "$HOME/services/quiver-hub" "$HOME/services/neighbour"
+  echo x > "$HOME/services/neighbour/keep"
+  run_teardown --purge "quiver"
+  check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
+  check "wrong name: .env kept"       [ -f "$SVC/.env" ]
+  check "wrong name: unit file kept"  [ -f "$(unit_file)" ]
+  check "wrong name: marker kept"     [ -d "$HOME/services/quiver-hub" ]
+  check "wrong name: nothing stopped" not_stopped
+  check "wrong name: serve untouched" no_call " off"
+  check "warns that MacBooks must re-pair" out_has "every paired MacBook must re-pair"
+  check "says ~/.quiver is kept"      out_has "It keeps ~/.quiver"
+  run_teardown --purge "quiver-hub"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "serve off for :8477"         calls_have "tailscale serve --https=8477 off"
+  check "hub stopped"                 stopped
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "unit file gone"              [ ! -e "$(unit_file)" ]
+  if [ "$OS" = "Linux" ]; then
+    check "daemon-reload after removing the unit" sh -c "grep -n 'daemon-reload' '$CALLS_LOG' | tail -1 | cut -d: -f1 | { read -r r; d=\$(grep -n 'disable --now' '$CALLS_LOG' | head -1 | cut -d: -f1); [ \"\$r\" -gt \"\$d\" ]; }"
+  fi
+  check "empty marker removed"        [ ! -e "$HOME/services/quiver-hub" ]
+  check "services dir itself kept"    [ -d "$HOME/services" ]
+  check "neighbour kept"              [ -f "$HOME/services/neighbour/keep" ]
+  check ".quiver kept"              quiver_kept
+  check "hub build kept"              [ -x "$INSTALL/bin/swe" ]
+  check "says how to drop the build"  out_has "rm -rf $INSTALL"
+  check "checkout scripts kept"       [ -f "$SVC/setup.sh" ]
+  check "lingering untouched"         no_call "loginctl"
+  teardown
+}
+
+test_teardown_purge_no_marker() {
+  echo "• teardown --purge: no ~/services at all is fine"
+  deployed
+  run_teardown --purge "quiver-hub"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "services dir not created"      [ ! -e "$HOME/services" ]
+  run_teardown --purge "quiver-hub"
+  check "re-run with .env gone refuses" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_purge_marker_not_empty() {
+  echo "• teardown --purge: a non-empty marker is left alone"
+  deployed
+  mkdir -p "$HOME/services/quiver-hub"; echo mine > "$HOME/services/quiver-hub/notes.txt"
+  run_teardown --purge "quiver-hub"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "user file kept"              [ -f "$HOME/services/quiver-hub/notes.txt" ]
+  check "says it is left alone"       out_has "is not empty"
+  teardown
+}
+
+test_teardown_purge_marker_symlink() {
+  echo "• teardown --purge: a symlinked marker is skipped, its target untouched"
+  deployed
+  mkdir -p "$HOME/services" "$HOME/elsewhere"
+  ln -s "$HOME/elsewhere" "$HOME/services/quiver-hub"
+  run_teardown --purge "quiver-hub"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "link kept"                   [ -L "$HOME/services/quiver-hub" ]
+  check "target kept"                 [ -d "$HOME/elsewhere" ]
+  check "says it is left alone"       out_has "is a symlink"
+  teardown
+}
+
+test_teardown_purge_services_root_is_a_link() {
+  echo "• teardown --purge: ~/services that is really \$HOME is refused"
+  deployed
+  ln -s "$HOME" "$HOME/services"
+  mkdir -p "$HOME/quiver-hub"
+  run_teardown --purge "quiver-hub"
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "nothing in \$HOME deleted"    [ -d "$HOME/quiver-hub" ]
+  check ".env kept"                   [ -f "$SVC/.env" ]
+  check "nothing stopped"             not_stopped
+  rm -f "$HOME/services"
+  teardown
+}
+
+test_teardown_purge_odd_home() {
+  echo "• teardown --purge: '.', '..' and trailing slashes in the marker path"
+  deployed
+  mkdir -p "$HOME/services/quiver-hub" "$HOME/sub"
+  local real="$HOME" dotted
+  for dotted in "$real/." "$real/sub/.."; do
+    OUT="$(printf 'quiver-hub\n' | HOME="$dotted" PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge 2>&1)"; CODE=$?
+    check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
+    check "  by the path check"       out_has "is not a real directory inside"
+    check "  marker kept"             [ -d "$real/services/quiver-hub" ]
+    check "  .env kept"               [ -f "$SVC/.env" ]
+  done
+  check "nothing stopped"             not_stopped
+  OUT="$(printf 'quiver-hub\n' | HOME="$real//" PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "trailing slashes: exits zero" [ "$CODE" -eq 0 ]
+  check "  marker removed"            [ ! -e "$real/services/quiver-hub" ]
+  check "  ~/services and siblings kept" [ -d "$real/services" ]
+  check "  sibling dir kept"          [ -d "$real/sub" ]
+  teardown
+}
+
+test_teardown_purge_keeps_a_checkout_inside() {
+  echo "• teardown --purge: a checkout living inside ~/services/quiver-hub survives"
+  deployed
+  local repo="$HOME/services/quiver-hub/setup-server/services/quiver-hub"
+  mkdir -p "$repo"
+  cp -R "$SVC/." "$repo/"
+  echo secret > "$HOME/services/quiver-hub/setup-server/other.env"
+  OUT="$(printf '%s\n' "quiver-hub" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "checkout intact"             [ -f "$repo/teardown.sh" ]
+  check "its .env kept"               [ -f "$repo/.env" ]
+  check "other services' files kept"  [ -f "$HOME/services/quiver-hub/setup-server/other.env" ]
+  check "nothing stopped"             not_stopped
+  teardown
+}
+
+test_teardown_env_cannot_steer_purge() {
+  echo "• teardown --purge: path-like keys in .env are never deleted"
+  deployed
+  mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
+  printf 'DATA_DIR=%s\nSTATE_DIR=%s/services/neighbour\nINSTALL_DIR=%s/.quiver\n' "$HOME" "$HOME" "$HOME" >> "$SVC/.env"
+  run_teardown --purge "quiver-hub"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "neighbour kept"              [ -f "$HOME/services/neighbour/keep" ]
+  check ".quiver kept"              quiver_kept
+  check "home kept"                   [ -d "$HOME/.local" ]
+  teardown
+}
+
+test_teardown_quoted_env() {
+  echo "• teardown: quoted and exported .env values are read like Compose"
+  deployed
+  sed -i.bak -e "s/^LOCAL_PORT=.*/export LOCAL_PORT='8477'   # pinned/" "$SVC/.env"
+  run_teardown
+  check "single quotes + export"      [ "$CODE" -eq 0 ]
+  check ":8477 off"                   calls_have "serve --https=8477 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT="8477"/' "$SVC/.env"
+  run_teardown
+  check "double quotes"               [ "$CODE" -eq 0 ]
+  check ":8477 off"                   calls_have "serve --https=8477 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=8477 # inline comment/' "$SVC/.env"
+  run_teardown
+  check "inline comment"              [ "$CODE" -eq 0 ]
+  check ":8477 off"                   calls_have "serve --https=8477 off"
+  teardown
+  deployed
+  sed -i.bak -e 's/^LOCAL_PORT=.*/LOCAL_PORT=${HOME}/' "$SVC/.env"
+  run_teardown
+  check "\${HOME} as the port: refused" [ "$CODE" -ne 0 ]
+  check "  nothing stopped"           not_stopped
+  teardown
+}
+
+test_teardown_env_lint() {
+  echo "• teardown: .env that Compose could read differently is refused"
+  deployed
+  printf 'LOCAL_PORT=2283\n' >> "$SVC/.env"
+  run_teardown
+  check "duplicate key: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  names the key"             out_has "LOCAL_PORT is set more than once"
+  check "  touched nothing"           not_stopped
+  check "  neighbour port untouched"  no_call " off"
+  teardown
+  deployed
+  printf 'X="first\nLOCAL_PORT=2283\n"\n' >> "$SVC/.env"
+  run_teardown
+  check "multi-line value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says it does not close"    out_has "does not close on its line"
+  teardown
+  deployed
+  printf 'Y="a\\"b"\n' >> "$SVC/.env"
+  run_teardown
+  check "backslash escape: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_refuses_compose_overrides() {
+  echo "• teardown: COMPOSE_FILE / COMPOSE_PROJECT_NAME in .env or the shell are refused"
+  local v
+  for v in COMPOSE_FILE COMPOSE_PROJECT_NAME; do
+    deployed
+    printf '%s=%s\n' "$v" "$HOME/services/neighbour/docker-compose.yml" >> "$SVC/.env"
+    run_teardown --purge "quiver-hub"
+    check "$v in .env: exits non-zero"  [ "$CODE" -ne 0 ]
+    check "  nothing stopped"           not_stopped
+    check "  nothing unpublished"       no_call " off"
+    check "  .env kept"                 [ -f "$SVC/.env" ]
+    teardown
+  done
+  deployed
+  COMPOSE_PROJECT_NAME=other run_teardown
+  check "COMPOSE_PROJECT_NAME in the shell: exits non-zero" [ "$CODE" -ne 0 ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_tailscale_down
@@ -632,6 +1070,26 @@ test_pair_before_deploy
 test_pair_prints_https_links
 test_pair_refuses_http_link
 test_pair_custom_https_port
+test_teardown_safe
+test_teardown_custom_https_port
+test_teardown_not_published
+test_teardown_port_owned_by_someone_else
+test_teardown_every_port_pointing_here
+test_teardown_serve_status_fails
+test_teardown_preflight
+test_teardown_unit_already_gone
+test_teardown_leaves_other_units
+test_teardown_purge
+test_teardown_purge_no_marker
+test_teardown_purge_marker_not_empty
+test_teardown_purge_marker_symlink
+test_teardown_purge_services_root_is_a_link
+test_teardown_purge_odd_home
+test_teardown_purge_keeps_a_checkout_inside
+test_teardown_env_cannot_steer_purge
+test_teardown_quoted_env
+test_teardown_env_lint
+test_teardown_refuses_compose_overrides
 
 if [ "${1:-}" = "--live" ]; then
   echo

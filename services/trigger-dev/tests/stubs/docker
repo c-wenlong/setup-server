@@ -4,6 +4,12 @@
 #   compose_up         — touched by `compose ... up`
 #   docker_login       — touched by `docker login`
 #   htpasswd_count     — how many times `httpd … htpasswd` ran
+#   attached_<network> — lines `docker ps -a --filter network=<network>` prints
+#                        ("<name> <compose project label>"; teardown tests)
+#   ps_filter_fails    — exists => that filtered `docker ps` fails
+#   compose_down       — touched by `compose ... down`
+#   compose_down_fails — exists => `compose ... down` fails (network in use)
+#   docker_run_fails   — exists => `docker run --entrypoint sh` (purge cleanup) fails
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -11,6 +17,14 @@ case "$1" in
     if [ -f "$STATE_DIR/docker_no_perm" ]; then
       echo "permission denied while trying to connect to the docker API" >&2
       exit 1
+    fi
+    net=""
+    for a in "$@"; do
+      case "$a" in network=*) net="${a#network=}" ;; esac
+    done
+    if [ -n "$net" ]; then
+      [ -f "$STATE_DIR/ps_filter_fails" ] && { echo "Error response from daemon" >&2; exit 1; }
+      [ -f "$STATE_DIR/attached_$net" ] && cat "$STATE_DIR/attached_$net"
     fi
     ;;
 
@@ -37,8 +51,26 @@ case "$1" in
         [ -f "$STATE_DIR/htpasswd_count" ] && n="$(cat "$STATE_DIR/htpasswd_count")"
         echo $((n + 1)) > "$STATE_DIR/htpasswd_count"
         echo "registry-user:\$2y\$05\$stubhashfortriggerdevregistryauth"
+        exit 0
         ;;
     esac
+    # teardown --purge's cleanup of container-owned files:
+    #   docker run --rm --pull never --user 0 -v DIR:/x --entrypoint sh <image> -c 'find ...'
+    # The real container is root, so it can delete what the host user cannot.
+    # Model that by making the tree writable first, then running the real find.
+    mount_host=""; entry=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
+        --entrypoint) entry="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ "$entry" = "sh" ] && [ -n "$mount_host" ] || exit 0
+    [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+    chmod -R u+rwX "$mount_host" 2>/dev/null
+    find "$mount_host" -mindepth 1 -delete
+    exit $?
     ;;
 
   compose)
@@ -55,7 +87,13 @@ case "$1" in
               [ -s "$home_shared/worker_token" ] || echo "tr_wgt_testtoken" > "$home_shared/worker_token"
               ;;
             pull) touch "$STATE_DIR/compose_pull" ;;
-            down) touch "$STATE_DIR/compose_down" ;;
+            down)
+              if [ -f "$STATE_DIR/compose_down_fails" ]; then
+                echo "failed to remove network trigger-webapp: network has active endpoints" >&2
+                exit 1
+              fi
+              touch "$STATE_DIR/compose_down"
+              ;;
           esac
         done
         ;;
