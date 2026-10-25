@@ -16,7 +16,7 @@
 #   ./setup.sh                            # local 3000, HTTPS 3000
 #   LOCAL_PORT=3010 ./setup.sh            # HTTPS follows LOCAL_PORT
 #   LOCAL_PORT=3010 HTTPS_PORT=3010 ./setup.sh
-#   FORGEJO_ADMIN_USERNAME=kai ./setup.sh # first run only; .env wins after
+#   FORGEJO_ADMIN_USERNAME=admin ./setup.sh # first run only; .env wins after
 #
 # Version: pinned to the `15` tag — Forgejo 15 is the LTS, supported to
 # 2027-07-15. Do NOT bump this to 16: 16 is a non-LTS release whose support
@@ -40,8 +40,8 @@ LOCAL_PORT="${LOCAL_PORT:-3000}"
 # two. Whether it was explicit is remembered for the .env read-back below.
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-ADMIN_USERNAME="${FORGEJO_ADMIN_USERNAME:-kai}"
-ADMIN_EMAIL="${FORGEJO_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+ADMIN_USERNAME="${FORGEJO_ADMIN_USERNAME:-admin}"
+ADMIN_EMAIL="${FORGEJO_ADMIN_EMAIL:-admin@example.com}"
 CONTAINER="forgejo"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"

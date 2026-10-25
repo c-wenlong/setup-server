@@ -41,8 +41,8 @@ LOCAL_PORT="${LOCAL_PORT:-2283}"
 # two. Whether it was explicit is remembered for the .env read-back below.
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-ADMIN_EMAIL="${IMMICH_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
-ADMIN_NAME="${IMMICH_ADMIN_NAME:-Kai}"
+ADMIN_EMAIL="${IMMICH_ADMIN_EMAIL:-admin@example.com}"
+ADMIN_NAME="${IMMICH_ADMIN_NAME:-Admin}"
 ML_URL="http://immich-machine-learning:3003"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"

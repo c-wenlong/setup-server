@@ -8,10 +8,10 @@
 #                       (teardown tests: neighbours, lookalikes, shared ports)
 #   serve_status_fails — exists => `serve status` fails like a stopped daemon
 #
-# The fake address is deliberately NOT this box's real 100.85.87.87. A test
-# that passed only because it matched the live tailnet IP would be testing
-# nothing, and a stub emitting the real address could not distinguish a
-# resolved value from a literal hardcoded in docker-compose.yml or setup.sh.
+# The fake address is deliberately made up. A test that passed only because it
+# matched the live tailnet IP would be testing nothing, and a stub emitting a
+# real address could not distinguish a resolved value from a literal hardcoded
+# in docker-compose.yml or setup.sh.
 echo "tailscale $*" >> "$CALLS_LOG"
 
 case "$1" in

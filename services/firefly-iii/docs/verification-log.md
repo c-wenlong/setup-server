@@ -45,7 +45,7 @@ SG profile.
 **Blocks:** Phase 4 (DBS near-real-time). If emails don't exist or are
 content-free, DBS drops to Tier 3 monthly-PDF-only.
 
-**How to test:** search Gmail (`chenwenlongofficial@gmail.com`) for recent DBS
+**How to test:** search the alerts mailbox in Gmail for recent DBS
 alerts; sample 10–20 and record **each distinct template** — card spend, PayNow,
 transfers, GIRO. Note whether amount, merchant, date and a transaction reference
 are present. The reference matters most: it is the idempotency key.

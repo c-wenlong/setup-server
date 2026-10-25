@@ -31,7 +31,7 @@ set -euo pipefail
 LOCAL_PORT="${LOCAL_PORT:-8105}"
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-PLANE_ADMIN_EMAIL="${PLANE_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+PLANE_ADMIN_EMAIL="${PLANE_ADMIN_EMAIL:-admin@example.com}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
@@ -183,8 +183,8 @@ FILE_SIZE_LIMIT=5242880
 # Changing this after first boot does not rotate the live password.
 PLANE_ADMIN_EMAIL=$PLANE_ADMIN_EMAIL
 PLANE_ADMIN_PASSWORD=$admin_pass
-PLANE_ADMIN_FIRST_NAME=Kai
-PLANE_ADMIN_LAST_NAME=Chen
+PLANE_ADMIN_FIRST_NAME=Admin
+PLANE_ADMIN_LAST_NAME=User
 EOF
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
@@ -252,8 +252,8 @@ seed_admin() {
     -H "X-CSRFToken: ${csrf:-none}" \
     --data-urlencode "email=$PLANE_ADMIN_EMAIL" \
     --data-urlencode "password=$PLANE_ADMIN_PASSWORD" \
-    --data-urlencode "first_name=${PLANE_ADMIN_FIRST_NAME:-Kai}" \
-    --data-urlencode "last_name=${PLANE_ADMIN_LAST_NAME:-Chen}" \
+    --data-urlencode "first_name=${PLANE_ADMIN_FIRST_NAME:-Admin}" \
+    --data-urlencode "last_name=${PLANE_ADMIN_LAST_NAME:-User}" \
     "http://127.0.0.1:$LOCAL_PORT/api/instances/admins/sign-up/" 2>/dev/null || echo 000)"
   case "$code" in
     200|201|302)

@@ -1,7 +1,7 @@
 # Agent instructions — firefly-iii
 
 Integration layer around a self-hosted Firefly III instance on
-`kai-home-server`: per-institution pullers that feed a double-entry ledger for
+`homeserver`: per-institution pullers that feed a double-entry ledger for
 six Singapore/global accounts.
 
 **This is not a fork of Firefly III.** It is one `setup-server` service

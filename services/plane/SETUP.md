@@ -1,7 +1,7 @@
 # plane — locally hosted project management
 
 Issues, cycles and pages (Linear/Jira-shaped), on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8105`.
+`https://homeserver.tail-name.ts.net:8105`.
 
 This is **Plane Community**, not the commercial edition. Our compose,
 not a wrap of Plane's interactive `setup.sh`.
@@ -10,7 +10,7 @@ not a wrap of Plane's interactive `setup.sh`.
 
 ```
   phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8105
+            │  https://homeserver.tail-name.ts.net:8105
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8105

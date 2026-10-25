@@ -2,7 +2,7 @@
 
 Merge, split, compress, OCR, convert, rotate, watermark — 60+ PDF tools
 in the browser, on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8103`.
+`https://homeserver.tail-name.ts.net:8103`.
 
 Chosen over a SaaS PDF site (files leave the tailnet) and over a pile of
 CLI tools. Stirling PDF is the documented self-host for this job
@@ -23,7 +23,7 @@ Stirling's upstream default is 8080; this deploy uses **8103**.
 
 ```
   phone / laptop on the tailnet
-            │  https://kai-home-server.taild6a23f.ts.net:8103
+            │  https://homeserver.tail-name.ts.net:8103
             ▼
      tailscaled  (Tailscale Serve — terminates TLS, tailnet only)
             │  http://127.0.0.1:8103
@@ -93,7 +93,7 @@ Step by step:
 ## Client side
 
 Any browser on the tailnet:
-`https://kai-home-server.taild6a23f.ts.net:8103`. No account. Files stay
+`https://homeserver.tail-name.ts.net:8103`. No account. Files stay
 on this box for the conversion and are not kept afterwards unless you
 download them.
 

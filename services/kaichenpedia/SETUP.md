@@ -29,7 +29,7 @@ kaichenpedia-deploy.timer ──► bin/deploy.sh
                                 │
                                 ▼
               Tailscale Serve  HTTPS :8091 (tailnet only)
-        https://kai-home-server.taild6a23f.ts.net:8091
+        https://homeserver.tail-name.ts.net:8091
 ```
 
 ## Why polling, not a webhook
@@ -110,7 +110,7 @@ pushes never take the site down. The last good build is also kept in
 ## Client side
 
 Nothing to install. Open
-`https://kai-home-server.taild6a23f.ts.net:8091` from any tailnet device.
+`https://homeserver.tail-name.ts.net:8091` from any tailnet device.
 Editing happens wherever the kaichenpedia repo is cloned — push to `main`
 — it goes live on the next daily poll, or run
 `~/services/kaichenpedia/bin/deploy.sh` on the box to deploy now.

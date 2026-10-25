@@ -79,7 +79,7 @@ Overrides: `CONTROL_TOPIC` (default `control`), `REPLY_TOPIC` (`alerts`),
 1. Install Tailscale on the phone and log in (the ntfy server is
    tailnet-only — without this nothing connects).
 2. ntfy app → add subscription → topic `alerts` → "Use another server" →
-   `https://kai-home-server.taild6a23f.ts.net:3003`. Leave
+   `https://homeserver.tail-name.ts.net:3003`. Leave
    username/password **empty** — the server has no accounts; Tailscale is
    the auth layer.
 3. Sending commands — depends on platform:

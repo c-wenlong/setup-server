@@ -136,7 +136,7 @@ test_fresh_deploy() {
   check ".env records the local port"        grep -qx 'LOCAL_PORT=8104' "$SVC/.env"
   check "pinned to v0.63.17.3"               grep -qx 'METABASE_VERSION=v0.63.17.3' "$SVC/.env"
   check "SITE_URL is the tailnet URL"        grep -q '^MB_SITE_URL=https://test-host\.tailfake\.ts\.net:8104$' "$SVC/.env"
-  check "admin email written"                grep -qx 'MB_ADMIN_EMAIL=chenwenlongofficial@gmail.com' "$SVC/.env"
+  check "admin email written"                grep -qx 'MB_ADMIN_EMAIL=admin@example.com' "$SVC/.env"
   check "admin password written"             grep -q '^MB_ADMIN_PASSWORD=.' "$SVC/.env"
   check "compose binds loopback"             compose_hasF '127.0.0.1:${LOCAL_PORT'
   check "compose publishes no host wildcard" no_host_wildcard_port

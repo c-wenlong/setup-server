@@ -3095,7 +3095,7 @@ class ControlTestBase(SandboxTest):
         env_path = os.path.join(self.repo, "services", "monitoring", ".env")
         os.makedirs(os.path.dirname(env_path), exist_ok=True)
         with open(env_path, "w", encoding="utf-8") as fh:
-            fh.write("KUMA_PORT=3002\nKUMA_ADMIN_USER=kai\n"
+            fh.write("KUMA_PORT=3002\nKUMA_ADMIN_USER=admin\n"
                      "KUMA_ADMIN_PASSWORD=%s\n" % SECRET_VALUE)
         server._find_uv = lambda: "/opt/bin/uv"
         return toggle

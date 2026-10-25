@@ -244,8 +244,8 @@ you.
   design, and there is no fallback. Check Tailscale is connected on *that*
   device, not on the server.
 - First load after a new port can take ~60s while the cert is minted:
-  `curl -v https://kai-home-server.taild6a23f.ts.net:8222/alive`
-- MagicDNS off → the tailnet IP `100.85.87.87:8222` works, but `DOMAIN` still
+  `curl -v https://homeserver.tail-name.ts.net:8222/alive`
+- MagicDNS off → the tailnet IP `100.77.77.77:8222` works, but `DOMAIN` still
   says the DNS name, so attachment links and WebAuthn will disagree with the
   address you are on. Fix MagicDNS rather than living with it.
 - **The web vault loads but shows a crypto/"secure context" error** — you
@@ -259,7 +259,7 @@ you.
   almost certainly logging in to **bitwarden.com**, not this server. The
   server URL has to be set on the login screen *before* you log in, on every
   client, and it does not carry across from another device. Check the login
-  screen says "Logging in on: kai-home-server…".
+  screen says "Logging in on: homeserver…".
 - **Logged out of everything at once** — `rsa_key.pem` in the data dir was
   regenerated or lost; it signs the clients' tokens. Not data loss: log in
   again. If you did not touch it, find out what did.
@@ -304,7 +304,7 @@ like a server misconfiguration.
 ```bash
 docker exec vaultwarden printenv DOMAIN
 # must be exactly, scheme and port included, no trailing slash:
-#   https://kai-home-server.taild6a23f.ts.net:8222
+#   https://homeserver.tail-name.ts.net:8222
 grep VAULTWARDEN_DOMAIN ~/dev/setup-server/services/vaultwarden/.env
 ```
 

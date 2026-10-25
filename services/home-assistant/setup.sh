@@ -17,7 +17,7 @@
 #   ./setup.sh                             # local 8123, HTTPS 8123
 #   LOCAL_PORT=8124 ./setup.sh             # HTTPS follows LOCAL_PORT (8124 -> 8124)
 #   LOCAL_PORT=8124 HTTPS_PORT=8124 ./setup.sh
-#   HA_ADMIN_USER=kai ./setup.sh           # first run only; .env wins after
+#   HA_ADMIN_USER=admin ./setup.sh           # first run only; .env wins after
 #
 # Version: pinned to 2026.9.1. Not `:stable` — that tag moves every month and
 # HA ships breaking changes in point releases.
@@ -70,7 +70,7 @@ LOCAL_PORT="${LOCAL_PORT:-8123}"
 # two. .env records the resolved value below, so a re-run with no overrides
 # keeps whatever port .env already settled on.
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-ADMIN_USER="${HA_ADMIN_USER:-kai}"
+ADMIN_USER="${HA_ADMIN_USER:-admin}"
 CONTAINER="home-assistant"
 SERVICE="homeassistant"          # the compose service name
 
@@ -166,7 +166,7 @@ have_listener_tool() {
 # tailnet addresses on 8123:
 #
 #   127.0.0.1:8123                      <- Home Assistant
-#   100.85.87.87:8123                   <- tailscaled, terminating TLS
+#   100.77.77.77:8123                   <- tailscaled, terminating TLS
 #   [fd7a:115c:a1e0::a83b:5758]:8123    <- tailscaled, same
 #
 # Without this exception every correct deploy would be reported as leaking onto

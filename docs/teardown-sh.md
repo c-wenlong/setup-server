@@ -2,7 +2,7 @@
 
 Audited 2026-09-15 against this repo’s actual `setup.sh` files, per-service
 `TROUBLESHOOT.md` nuke recipes, `app/web/services.json`, and a live
-Paperclip / OpenHands split-and-redeploy on `kai-home-server`.
+Paperclip / OpenHands split-and-redeploy on `homeserver`.
 
 *Status 2026-10-25:* the contract below shipped as an optional file
 (`AGENTS.md` → "teardown.sh"), with `services/stirling-pdf/teardown.sh` as
@@ -160,7 +160,7 @@ code-server’s own nuke also deletes `~/.local/lib/code-server-*` and
 
 ## AdGuard is tailnet DNS
 
-Stopping AdGuard while `100.85.87.87` is still a nameserver in the
+Stopping AdGuard while `100.77.77.77` is still a nameserver in the
 Tailscale admin console takes DNS down for every device. Order is:
 
 1. Remove the nameserver at login.tailscale.com/admin/dns.
@@ -251,7 +251,7 @@ The GUI is loopback behind Serve on `:8384`. The sync listener is this
 node’s tailnet IP on `:22000` (tcp+quic), because peers dial it directly
 and QUIC is UDP. Relays and global discovery are off, so
 `dynamic` on a peer never finds this box — the address has to be
-`tcp://kai-home-server.taild6a23f.ts.net:22000`.
+`tcp://homeserver.tail-name.ts.net:22000`.
 
 If `.env` survives but `config.xml` does not, a stale
 `SYNCTHING_LISTEN_IP` will generate a listener that cannot bind.

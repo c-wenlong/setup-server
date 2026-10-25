@@ -12,8 +12,8 @@
 #   serve_status_fails — exists => `serve status` fails like a stopped daemon
 #   ts_ip            — override the reported v4 address (default 100.77.77.77)
 #
-# The fake tailnet name and address are deliberately NOT this box's real ones
-# (kai-home-server.taild6a23f.ts.net / 100.85.87.87). A suite that passed
+# The fake tailnet name and address are deliberately made up
+# (test-host.tailfake.ts.net / 100.77.77.77). A suite that passed
 # because a literal in setup.sh happened to match the live tailnet would be
 # testing nothing, and the allowlist assertions below are precisely about a
 # value being *resolved* rather than assumed.

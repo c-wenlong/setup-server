@@ -137,7 +137,7 @@ test_fresh_deploy() {
   check "pinned to v1.4.2"                   grep -qx 'APP_RELEASE=v1.4.2' "$SVC/.env"
   check "WEB_URL is the tailnet URL"         grep -q '^WEB_URL=https://test-host\.tailfake\.ts\.net:8105$' "$SVC/.env"
   check "CORS matches WEB_URL"               grep -q '^CORS_ALLOWED_ORIGINS=https://test-host\.tailfake\.ts\.net:8105$' "$SVC/.env"
-  check "admin email written"                grep -qx 'PLANE_ADMIN_EMAIL=chenwenlongofficial@gmail.com' "$SVC/.env"
+  check "admin email written"                grep -qx 'PLANE_ADMIN_EMAIL=admin@example.com' "$SVC/.env"
   check "admin password written"             grep -q '^PLANE_ADMIN_PASSWORD=.' "$SVC/.env"
   check "compose binds loopback"             compose_hasF '127.0.0.1:${LOCAL_PORT'
   check "compose publishes no host wildcard" no_host_wildcard_port

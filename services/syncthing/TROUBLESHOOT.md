@@ -32,7 +32,7 @@ journalctl --user -u syncthing -n 100 --no-pager
 curl -s http://127.0.0.1:8384/rest/noauth/health          # {"status":"OK"}
 KEY=$(sed -n 's/.*<apikey>\(.*\)<\/apikey>.*/\1/p' ~/services/syncthing/config/config.xml)
 curl -s -H "X-API-Key: $KEY" http://127.0.0.1:8384/rest/system/status | head -c 300
-curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: kai-home-server.taild6a23f.ts.net:8384' http://127.0.0.1:8384/
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: homeserver.tail-name.ts.net:8384' http://127.0.0.1:8384/
 ```
 
 | Symptom | Cause | Fix |
@@ -46,14 +46,14 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: kai-home-server.taild6a23f.ts
 
 ```bash
 tailscale serve status                 # expect: https://…:8384 → proxy http://127.0.0.1:8384
-curl -s https://kai-home-server.taild6a23f.ts.net:8384/rest/noauth/health
+curl -s https://homeserver.tail-name.ts.net:8384/rest/noauth/health
 ```
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | no `:8384` line in `serve status` | serve config lost (tailscale reinstall/reset) | `./setup.sh` re-publishes |
 | HTTPS hangs or fails for ~a minute right after deploy | Let's Encrypt cert being minted for this port | wait, retry |
-| HTTPS answers on one device, not another | that device is not on the tailnet, or its DNS is not MagicDNS | `tailscale status` on it; use the IP `https://100.85.87.87:8384` to distinguish DNS from connectivity |
+| HTTPS answers on one device, not another | that device is not on the tailnet, or its DNS is not MagicDNS | `tailscale status` on it; use the IP `https://100.77.77.77:8384` to distinguish DNS from connectivity |
 | `Access denied` when `setup.sh` runs serve | operator rights lost | `sudo tailscale set --operator=$USER`; `setup.sh` does this itself |
 
 ## Layer 4 — peers cannot connect (the usual one)
@@ -62,7 +62,7 @@ This box **does not dial out** and **cannot be found by `dynamic`**. Every
 connection problem starts from those two facts.
 
 ```bash
-ss -ltnup 'sport = :22000'              # expect exactly: 100.85.87.87:22000 tcp AND udp
+ss -ltnup 'sport = :22000'              # expect exactly: 100.77.77.77:22000 tcp AND udp
 tailscale ip -4                         # must match the address above
 curl -s -H "X-API-Key: $KEY" http://127.0.0.1:8384/rest/system/status \
   | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["connectionServiceStatus"], indent=1))'
@@ -71,7 +71,7 @@ curl -s -H "X-API-Key: $KEY" http://127.0.0.1:8384/rest/system/connections
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| peer shows this box as *Disconnected* forever; this box's GUI never showed a "new device" banner | the peer's entry for this box says `dynamic` | on the **peer**, edit this device → Advanced → Addresses → `tcp://kai-home-server.taild6a23f.ts.net:22000` |
+| peer shows this box as *Disconnected* forever; this box's GUI never showed a "new device" banner | the peer's entry for this box says `dynamic` | on the **peer**, edit this device → Advanced → Addresses → `tcp://homeserver.tail-name.ts.net:22000` |
 | banner appeared, you clicked Add Device, still not syncing | folder not shared to that device, or the peer has not accepted the folder | on this box, edit the device → Sharing; on the peer, accept the folder offer |
 | `connectionServiceStatus` shows `"error": "… cannot assign requested address"` | the tailnet IP changed; the listener still names the old one | set `SYNCTHING_LISTEN_IP` in `.env` to `tailscale ip -4`, then `./setup.sh` — it repoints the listener over REST |
 | `ss` shows nothing on `:22000` | same as above, or tailscaled not up | `tailscale status`; Syncthing retries the bind by itself once the address exists |
@@ -80,7 +80,7 @@ curl -s -H "X-API-Key: $KEY" http://127.0.0.1:8384/rest/system/connections
 | setup.sh dies with *"SYNCTHING_LISTEN_IP … and there is no config.xml yet"* | `.env` survived but the config directory did not, and the recorded tailnet IP is no longer this node's | set `SYNCTHING_LISTEN_IP` to `tailscale ip -4` and re-run; generating a config against the old address would produce a listener that can never bind, and the run would still report success |
 | peer connects, then drops with a TLS / certificate error | clock skew on one side, or the peer holds a stale Device ID for a rebuilt box | fix the clock; or remove and re-add the device on the peer with the new ID |
 | connects over TCP only, never QUIC (or vice versa) | one protocol blocked by the peer's network | harmless; either one syncs fully. `connections` shows which |
-| MagicDNS name does not resolve on the peer | MagicDNS off for that device, or a corporate DNS override | use `tcp://100.85.87.87:22000` instead — it is also stable unless the node re-joins the tailnet |
+| MagicDNS name does not resolve on the peer | MagicDNS off for that device, or a corporate DNS override | use `tcp://100.77.77.77:22000` instead — it is also stable unless the node re-joins the tailnet |
 | peer on the same LAN connects only slowly | local discovery is off here, so the peer cannot short-cut over the LAN | expected; traffic goes over the tailnet (which is direct WireGuard on a shared LAN anyway) |
 
 ## Folders

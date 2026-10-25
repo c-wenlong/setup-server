@@ -454,8 +454,8 @@ deployed() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  mkdir -p "$(data_dir)/git/repositories/kai/proj.git"
-  echo 'ref: refs/heads/main' > "$(data_dir)/git/repositories/kai/proj.git/HEAD"
+  mkdir -p "$(data_dir)/git/repositories/admin/proj.git"
+  echo 'ref: refs/heads/main' > "$(data_dir)/git/repositories/admin/proj.git/HEAD"
   cat > "$STATE_DIR/serve_status" <<EOF
 https://test-host.tailfake.ts.net:2283 (tailnet only)
 |-- / proxy http://127.0.0.1:2283
@@ -470,7 +470,7 @@ EOF
   rm -f "$STATE_DIR/compose_down"
 }
 
-repo_head() { echo "$(data_dir)/git/repositories/kai/proj.git/HEAD"; }
+repo_head() { echo "$(data_dir)/git/repositories/admin/proj.git/HEAD"; }
 
 # Uncomment the SSH port line, as step 1 of the recipe in docker-compose.yml.
 enable_ssh_port() {
@@ -559,7 +559,7 @@ test_teardown_purge() {
   local dir; dir="$(data_dir)"
   run_teardown --purge "forge"
   check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
-  check "wrong name: repo kept"       [ -f "$dir/git/repositories/kai/proj.git/HEAD" ]
+  check "wrong name: repo kept"       [ -f "$dir/git/repositories/admin/proj.git/HEAD" ]
   check "wrong name: marker kept"     [ -f "$HOME/$MARKER_REL" ]
   check "wrong name: .env kept"       [ -f "$SVC/.env" ]
   check "wrong name: nothing stopped" [ ! -f "$STATE_DIR/compose_down" ]
@@ -671,7 +671,7 @@ test_teardown_purge_refuses_odd_paths() {
     check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
   done
   check "neighbour data never touched" [ -f "$HOME/services/neighbour/keep" ]
-  check "repository never touched"    [ -f "$HOME/services/forgejo/data/git/repositories/kai/proj.git/HEAD" ]
+  check "repository never touched"    [ -f "$HOME/services/forgejo/data/git/repositories/admin/proj.git/HEAD" ]
   teardown
 }
 
@@ -868,7 +868,7 @@ test_teardown_purge_unsearchable_parent() {
   check "cleanup fails: exits non-zero" [ "$CODE" -ne 0 ]
   check "  names the sudo command"    out_has "sudo rm -rf $st/data"
   check "  never says done"           out_lacks "Deleted"
-  check "  repo kept"                 [ -f "$st/data/git/repositories/kai/proj.git/HEAD" ]
+  check "  repo kept"                 [ -f "$st/data/git/repositories/admin/proj.git/HEAD" ]
   check "  .env kept for the retry"   [ -f "$SVC/.env" ]
   check "  marker kept for the retry" [ -f "$HOME/$MARKER_REL" ]
   teardown
@@ -951,7 +951,7 @@ test_teardown_purge_services_root_is_a_link() {
   mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
   rmdir "$HOME/services"
   ln -s "$HOME" "$HOME/services"
-  mkdir -p "$HOME/forgejo/data"; echo x > "$HOME/forgejo/data/keep"; echo kai > "$HOME/forgejo/.admin-created"
+  mkdir -p "$HOME/forgejo/data"; echo x > "$HOME/forgejo/data/keep"; echo admin > "$HOME/forgejo/.admin-created"
   run_teardown --purge "forgejo"
   check "exits non-zero"              [ "$CODE" -ne 0 ]
   check "nothing in \$HOME deleted"   [ -f "$HOME/forgejo/data/keep" ]

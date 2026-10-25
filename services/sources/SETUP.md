@@ -38,7 +38,7 @@ weekly fetch timer ──┐                     push from any device
                                                 │
                                                 ▼
                               Tailscale Serve  HTTPS :8098 (tailnet only)
-                     https://kai-home-server.taild6a23f.ts.net:8098
+                     https://homeserver.tail-name.ts.net:8098
 ```
 
 ## Why the fetch clone, not a deploy clone
@@ -138,7 +138,7 @@ then skips to the next tick.
 ## Client side
 
 Nothing to install. Open
-`https://kai-home-server.taild6a23f.ts.net:8098` from any tailnet device
+`https://homeserver.tail-name.ts.net:8098` from any tailnet device
 and unlock with the site passphrase (the same one the GitHub Pages site
 uses — changing it anywhere logs everyone out everywhere, since the salt
 is fixed).

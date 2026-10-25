@@ -77,7 +77,7 @@ IMPORTER_PORT="${IMPORTER_PORT:-8099}"
 # it lands back on whatever .env already settled on.
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 IMPORTER_HTTPS_PORT="${IMPORTER_HTTPS_PORT:-$IMPORTER_PORT}"
-ADMIN_EMAIL="${FIREFLY_ADMIN_EMAIL:-chenwenlongofficial@gmail.com}"
+ADMIN_EMAIL="${FIREFLY_ADMIN_EMAIL:-admin@example.com}"
 
 APP_CONTAINER="firefly-iii"
 DB_CONTAINER="firefly-iii-db"

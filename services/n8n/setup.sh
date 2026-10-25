@@ -119,7 +119,7 @@ owner_pw="$(sed -n 's/^OWNER_PASSWORD=\(.*\)$/\1/p' "$ENV_FILE")"
 # browser-id header: n8n 2.x rejects browserless POSTs without it.
 resp="$(curl -s -X POST "http://127.0.0.1:$LOCAL_PORT/rest/owner/setup" \
   -H 'Content-Type: application/json' -H 'browser-id: setup-script' \
-  -d "{\"email\":\"$owner_email\",\"firstName\":\"Kai\",\"lastName\":\"Chen\",\"password\":\"$owner_pw\"}" || true)"
+  -d "{\"email\":\"$owner_email\",\"firstName\":\"Admin\",\"lastName\":\"User\",\"password\":\"$owner_pw\"}" || true)"
 if grep -q '"email"' <<<"$resp"; then
   ok "Owner account created: $owner_email"
 elif grep -qi 'already' <<<"$resp"; then
