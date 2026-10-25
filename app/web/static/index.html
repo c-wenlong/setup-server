@@ -16,14 +16,16 @@
 if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
   location.replace(location.pathname + '/' + location.search + location.hash);
 }
-/* Pinned dark while the theme is redesigned; the attribute stays so
-   icon -dark pairs keep resolving. */
+/* Paint the chosen theme before CSS so the first frame is not the wrong
+   one. view.js owns the control and the same localStorage key. */
 (function () {
-  /* Dark-only while the light theme is redesigned; the attribute stays so
-     icon -dark pairs keep resolving. */
-  document.documentElement.setAttribute('data-theme', 'dark');
+  var t = 'system';
+  try { t = localStorage.getItem('launcher.theme') || 'system'; } catch (e) {}
+  var dark = t === 'dark' || (t !== 'light' && window.matchMedia &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
   var meta = document.getElementById('theme-color');
-  if (meta) meta.setAttribute('content', '#000000');
+  if (meta) meta.setAttribute('content', dark ? '#000000' : '#f5f5f6');
 })();
 </script>
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -87,7 +89,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 
       <a class="iconbtn cat-link" id="cat-link" href="#/catalogue">Catalogue</a>
 
-      <button class="iconbtn theme-btn" id="theme-btn" type="button" aria-label="Theme: System" hidden>
+      <button class="iconbtn theme-btn" id="theme-btn" type="button" aria-label="Theme: System">
       </button>
     </div>
   </header>
