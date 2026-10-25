@@ -291,7 +291,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
   }
   port != "" && /\|-- / { n++; if (/ proxy / && ($NF == t || index($NF, t "/") == 1)) mine++ }
   END { flush() }')"
-unpublished=0
+unpublished=0; kept=0
 while read -r verdict port; do
   [ -n "${verdict:-}" ] || continue
   if [ "$verdict" = "off" ]; then
@@ -300,11 +300,16 @@ while read -r verdict port; do
     unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
+    kept=$((kept + 1))
   fi
 done <<EOF
 $SERVE_PLAN
 EOF
-[ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+if [ "$kept" -gt 0 ]; then
+  warn "$kept shared HTTPS port(s) still route to $TARGET (left on, see above); $unpublished port(s) unpublished."
+elif [ "$unpublished" -eq 0 ]; then
+  ok "Nothing on Tailscale Serve points at $TARGET (already off)"
+fi
 
 # ---------------------------------------------------------------- stop
 # No named volumes in this compose file, and no -v either way: GUAC_HOME is a
@@ -398,10 +403,13 @@ PYEOF_7c1d
   ok "Removed $FW_UNIT and $FW_RULES"
 
   # 3. The keypair setup.sh generated, and the markers that claim it exists.
-  sudo rm -f -- "$CERT_PATH" "$KEY_PATH"
+  #    Markers FIRST: setup.sh's cert_ok() trusts them without sudo, so if this
+  #    stops between the two deletes, a keypair with no markers just gets
+  #    regenerated, while markers with no keypair would leave RDP unrestorable.
   if [ -n "$STATE_REAL" ]; then
     rm -f -- "$STATE_REAL/rdp-tls.crt" "$STATE_REAL/.applied/rdp-cert" "$STATE_REAL/.applied/rdp-config"
   fi
+  sudo rm -f -- "$CERT_PATH" "$KEY_PATH"
   ok "Removed the RDP TLS keypair; the next ./setup.sh generates a new one"
 fi
 

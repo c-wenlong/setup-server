@@ -1322,6 +1322,22 @@ EOF
   teardown
 }
 
+test_teardown_only_shared_ports() {
+  echo "• teardown: when every match is on a shared port, it does not claim 'already off'"
+  deployed
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /desktop proxy http://127.0.0.1:8094/guacamole/
+EOF
+  run_teardown
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "shared :443 left on"           no_call " off"
+  check "does not say already off"      out_lacks "already off"
+  check "says a shared port still routes here" out_hasF "1 shared HTTPS port(s) still route to http://127.0.0.1:8094"
+  teardown
+}
+
 test_teardown_serve_status_fails() {
   echo "• teardown: an unreadable Serve status stops before anything changes"
   deployed
@@ -1709,6 +1725,24 @@ test_teardown_system_listener_survives() {
   run_teardown_tty --system
   check "restart fails: exits non-zero" [ "$CODE" -ne 0 ]
   check "  filter never disabled"       no_call "disable --now remote-desktop-firewall"
+  teardown
+}
+
+test_teardown_system_interrupted_after_keypair() {
+  echo "• teardown --system: interrupted right after the keypair goes, setup.sh still regenerates it"
+  if ! have_pty; then note "    (skipped: no python3 pty module for a terminal)"; return 0; fi
+  deployed
+  touch "$STATE_DIR/rm_keypair_interrupts"
+  run_teardown_tty --system
+  rm -f "$STATE_DIR/rm_keypair_interrupts"
+  check "interrupted: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "TLS key removed"               [ ! -e "$(rootfs /var/lib/gnome-remote-desktop/certificates/rdp-tls.key)" ]
+  check "cert marker already cleared"   [ ! -e "$(state_dir)/.applied/rdp-cert" ]
+  check "cert copy already cleared"     [ ! -e "$(state_dir)/rdp-tls.crt" ]
+  rm -f "$STATE_DIR/install_owners"; : > "$CALLS_LOG"
+  run_deploy
+  check "./setup.sh rebuilds it"        [ "$CODE" -eq 0 ]
+  check "  with a NEW keypair"          grep -q 'rdp-tls.key' "$STATE_DIR/install_owners"
   teardown
 }
 
@@ -2211,6 +2245,7 @@ test_teardown_safe
 test_teardown_not_published
 test_teardown_port_owned_by_someone_else
 test_teardown_every_port_pointing_here
+test_teardown_only_shared_ports
 test_teardown_serve_status_fails
 test_teardown_preflight
 test_teardown_purge
@@ -2229,6 +2264,7 @@ test_teardown_foreign_user_units
 test_teardown_system_needs_a_terminal
 test_teardown_system
 test_teardown_system_listener_survives
+test_teardown_system_interrupted_after_keypair
 test_teardown_system_table_outlives_unit
 test_teardown_system_and_purge
 test_sandbox_was_hermetic
