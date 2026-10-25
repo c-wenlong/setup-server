@@ -1,3 +1,17 @@
 #!/usr/bin/env bash
+# launchctl stub. The job counts as loaded while $STATE_DIR/launchd_loaded
+# exists (`print` succeeds); a successful bootout removes it. Failure
+# switches: launchd_bootout_fails (bootout fails, job stays loaded),
+# launchd_bootout_fails_gone (bootout fails but the job is gone),
+# launchd_disable_fails.
 echo "launchctl $*" >> "$CALLS_LOG"
+case "${1:-}" in
+  print) [ -f "$STATE_DIR/launchd_loaded" ] || exit 113 ;;
+  bootout)
+    [ -f "$STATE_DIR/launchd_loaded" ] || exit 3
+    if [ -f "$STATE_DIR/launchd_bootout_fails" ]; then exit 5; fi
+    rm -f "$STATE_DIR/launchd_loaded"
+    if [ -f "$STATE_DIR/launchd_bootout_fails_gone" ]; then exit 5; fi ;;
+  disable) [ ! -f "$STATE_DIR/launchd_disable_fails" ] || exit 1 ;;
+esac
 exit 0

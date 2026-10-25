@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# ps stub — teardown asks `ps -p PID -o args=` whether the pid in Paperclip's
+# runtime-info.json is still a running `paperclipai run`.
+#   ps_pid  — the one pid that is "alive"
+#   ps_args — the command line printed for it
+echo "ps $*" >> "$CALLS_LOG"
+pid=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p) pid="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$pid" ] && [ -f "$STATE_DIR/ps_pid" ] && [ "$(cat "$STATE_DIR/ps_pid")" = "$pid" ]; then
+  cat "$STATE_DIR/ps_args" 2>/dev/null
+  exit 0
+fi
+exit 1
