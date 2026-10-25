@@ -62,9 +62,36 @@
   --tight: -.03em;   /* display tracking, à la Cursor. Never on small text. */
 }
 
-/* Pinned dark: the Umbrel-style light theme is a separate pass. The
-   data-theme attribute still flips icon -dark pairs and stays 'dark'. */
+/* Light: the same Umbrel structure flipped — fog canvas, paper cards,
+   graphite text. Violet keeps its role as the only action colour; the
+   attention/ok/bad hues deepen so text stays readable on white.
+   data-theme holds the resolved scheme (view.js maps 'system' to the
+   OS value), so this one block is the whole override. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg:            #f5f5f6;
+  --surface:       #ffffff;
+  --surface-2:     #ececef;
+  --border:        #e3e3e8;
+  --border-strong: #cfcfd7;
+  --text:          #191a1e;
+  --muted:         #5f6068;
+  --faint:         #8b8c95;
+  --accent-soft:   rgba(83, 81, 243, .12);
+  --peach:         #b0562b;
+  --ok:            #128a42;
+  --warn:          #b0562b;
+  --warn-soft:     rgba(176, 86, 43, .12);
+  --bad:           #d92d20;
+  --log-bg:        #191a1e;
+  --log-fg:        #e8e8ec;
+  --shadow:        0 1px 2px rgba(20, 20, 30, .07);
+  --shadow-up:     0 10px 28px rgba(20, 20, 30, .12),
+                   0 1px 3px rgba(20, 20, 30, .08);
+}
+
 html { color-scheme: dark; }
+html[data-theme="light"] { color-scheme: light; }
 
 /* ---------- base ---------- */
 

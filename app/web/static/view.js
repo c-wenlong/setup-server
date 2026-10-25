@@ -220,10 +220,17 @@
   }
 
   function paintTheme() {
-    try { document.documentElement.setAttribute('data-theme', themeMode); }
-    catch (e) { /* nothing to paint onto */ }
+    /* The attribute carries the resolved scheme, never 'system', so CSS
+       needs no media query: [data-theme="light"] is the whole override.
+       System mode keeps following the OS because the mq listener below
+       re-runs this on a scheme flip. */
+    var dark = resolvedDark();
+    try {
+      document.documentElement.setAttribute('data-theme',
+        dark ? 'dark' : 'light');
+    } catch (e) { /* nothing to paint onto */ }
     var meta = document.getElementById('theme-color');
-    if (meta) meta.setAttribute('content', resolvedDark() ? '#000000' : '#f5f5f6');
+    if (meta) meta.setAttribute('content', dark ? '#000000' : '#f5f5f6');
     paintThemeButton();
     if (window.ICONS && typeof window.ICONS.repaint === 'function') {
       try { window.ICONS.repaint(); } catch (e) { /* icons stay as they are */ }
@@ -1340,7 +1347,7 @@
   sortMode = stored(SORT_STORE, SORTS, 'used');
   groupByMode = stored(GROUPBY_STORE, GROUP_BYS, 'state');
   loadStars();
-  themeMode = 'dark';   /* pinned while the light theme is redesigned */
+  themeMode = stored(THEME_STORE, THEMES, 'system');
   paintTheme();
   bindThemeButton();
   buildBar();

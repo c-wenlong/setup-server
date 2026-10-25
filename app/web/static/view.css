@@ -14,7 +14,7 @@
  * `/` and `/home/`, and the box may have no route out.
  *
  * Colours come only from the tokens, which already flip under
- * prefers-color-scheme, so there is not a single media query for dark here —
+ * data-theme, so there is not a single media query for dark here —
  * the same rules are correct in both themes.
  */
 
