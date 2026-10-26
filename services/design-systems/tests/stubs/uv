@@ -18,6 +18,10 @@ if [ "$1" = "tools/site.py" ]; then
   mkdir -p site/gallery
   echo "stub index" > site/index.html
   echo "stub gallery" > site/gallery/index.html
+  # Real generators can leave mkstemp-mode (0600) files and 0700 dirs in
+  # site/ — the release must normalise them or nginx answers 403.
+  echo "stub data" > site/data0600.json && chmod 600 site/data0600.json
+  mkdir -p site/closed-dir && chmod 700 site/closed-dir
 fi
 exit 0
 Z

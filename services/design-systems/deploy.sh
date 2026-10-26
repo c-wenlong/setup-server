@@ -118,6 +118,11 @@ mkdir -p "$WWW_DIR"
   && python3 tools/scorecard.py \
   && .venv/bin/python tools/site.py )
 cp -a "$REPO_DIR/site" "$WWW_DIR/next"
+# cp -a keeps the build's modes, and a generator writing 0600 (e.g. through
+# tempfile.mkstemp) ships files the container's nginx uid cannot read —
+# every request then answers 403. The release is meant to be served, so
+# normalise: files readable, directories traversable, by any user.
+chmod -R u+rwX,go+rX "$WWW_DIR/next"
 
 # --------------------------------------------------------------------- swap
 # nginx serves the `current` symlink inside the parent mount. Repoint it with
