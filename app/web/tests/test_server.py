@@ -5724,5 +5724,233 @@ class DeploydHttpTest(HttpTest):
         self.assertEqual(status2, 200)
 
 
+class DeploydPollersTest(SandboxTest):
+    """Poller CRUD writes state/pollers.json — never the checkout — and the
+    payload shows the merged view deployd itself computes."""
+
+    def manifest(self, folder, doc):
+        path = os.path.join(server.REPO_ROOT, "services", folder)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "app.json"), "w") as fh:
+            json.dump(doc, fh)
+
+    def setUp(self):
+        super().setUp()
+        self.manifest("alpha", {"key": "alpha", "deploy": {
+            "repo": "https://example/a.git", "ref": "main",
+            "cmd": "run alpha"}})
+        self.manifest("beta", {"key": "beta", "deploy": {
+            "repo": "https://example/b.git", "cmd": "run beta"}})
+        self.manifest("off", {"key": "off", "deploy": {
+            "repo": "https://example/o.git", "cmd": "x",
+            "enabled": False}})
+        self.state = os.path.join(server.DEPLOYD_HOME, "state")
+        os.makedirs(self.state, exist_ok=True)
+
+    def pollers_file(self):
+        with open(os.path.join(self.state, "pollers.json")) as fh:
+            return json.load(fh)["pollers"]
+
+    def rows(self):
+        payload = server.deployd_payload()
+        return ({w["key"]: w for w in payload["watched"]},
+                {s["key"]: s for s in payload["suppressed"]},
+                payload["orphans"])
+
+    def test_upsert_custom_and_override(self):
+        server.deployd_upsert_poller("custom", {
+            "repo": "https://example/c.git", "ref": "dev",
+            "cmd": "run custom"})
+        server.deployd_upsert_poller("alpha", {
+            "repo": "https://example/a2.git", "cmd": "run alpha2"})
+        rows, sup, _ = self.rows()
+        self.assertEqual(rows["custom"]["source"], "custom")
+        self.assertEqual(rows["custom"]["ref"], "dev")
+        self.assertEqual(rows["alpha"]["source"], "override")
+        self.assertEqual(rows["alpha"]["cmd"], "run alpha2")
+        self.assertEqual(rows["alpha"]["ref"], "main")  # ref defaulted
+        self.assertEqual(rows["beta"]["source"], "manifest")
+        self.assertEqual(sup["off"]["by"], "manifest")
+        # And the file on disk is the documented shape.
+        spec = self.pollers_file()
+        self.assertEqual(spec["alpha"]["cmd"], "run alpha2")
+        self.assertEqual(spec["custom"]["ref"], "dev")
+        # The checkout was not touched.
+        with open(os.path.join(server.REPO_ROOT, "services", "alpha",
+                               "app.json")) as fh:
+            self.assertEqual(json.load(fh)["deploy"]["cmd"], "run alpha")
+
+    def test_remove_and_restore(self):
+        server.deployd_remove_poller("alpha")
+        rows, sup, _ = self.rows()
+        self.assertNotIn("alpha", rows)
+        self.assertEqual(sup["alpha"]["by"], "override")
+        self.assertEqual(sup["alpha"]["repo"], "https://example/a.git")
+        self.assertEqual(self.pollers_file()["alpha"], {"enabled": False})
+        # Its leftover state is suppressed, not orphaned.
+        with open(os.path.join(self.state, "alpha.sha"), "w") as fh:
+            fh.write("x\n")
+        self.assertEqual(self.rows()[2], [])
+        # Restore drops the tombstone; the manifest def resurfaces.
+        server.deployd_restore_poller("alpha")
+        rows, sup, _ = self.rows()
+        self.assertEqual(rows["alpha"]["source"], "manifest")
+        self.assertEqual(rows["alpha"]["cmd"], "run alpha")
+        self.assertNotIn("alpha", self.pollers_file())
+
+    def test_remove_custom_deletes(self):
+        server.deployd_upsert_poller("custom", {
+            "repo": "https://example/c.git", "cmd": "run c"})
+        server.deployd_remove_poller("custom")
+        rows, sup, _ = self.rows()
+        self.assertNotIn("custom", rows)
+        self.assertNotIn("custom", sup)
+        self.assertNotIn("custom", self.pollers_file())
+
+    def test_manifest_enabled_false_is_authoritative(self):
+        with self.assertRaises(server.DeployError) as ctx:
+            server.deployd_upsert_poller("off", {
+                "repo": "https://example/x.git", "cmd": "x"})
+        self.assertEqual(ctx.exception.status, 409)
+        with self.assertRaises(server.DeployError) as ctx:
+            server.deployd_remove_poller("off")
+        self.assertEqual(ctx.exception.status, 409)
+        _, sup, _ = self.rows()
+        self.assertEqual(sup["off"]["by"], "manifest")
+
+    def test_validation(self):
+        for key in ("../evil", "A bad", "", "UPPER", "-x"):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.deployd_upsert_poller(key, {"repo": "r", "cmd": "c"})
+            self.assertEqual(ctx.exception.status, 400, key)
+        with self.assertRaises(server.DeployError):
+            server.deployd_upsert_poller("x", {"cmd": "c"})      # no repo
+        with self.assertRaises(server.DeployError):
+            server.deployd_upsert_poller("x", {"repo": "r"})     # no cmd
+        with self.assertRaises(server.DeployError):
+            server.deployd_upsert_poller("x", "not a dict")
+        with self.assertRaises(server.DeployError) as ctx:
+            server.deployd_remove_poller("ghost")
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_pause_resume(self):
+        server.deployd_pause_poller("alpha", True)
+        flag = os.path.join(self.state, "alpha.disabled")
+        self.assertTrue(os.path.exists(flag))
+        rows, _, _ = self.rows()
+        self.assertEqual(rows["alpha"]["state"], "disabled")
+        server.deployd_pause_poller("alpha", False)
+        self.assertFalse(os.path.exists(flag))
+        rows, _, _ = self.rows()
+        self.assertEqual(rows["alpha"]["state"], "pending")
+        with self.assertRaises(server.DeployError) as ctx:
+            server.deployd_pause_poller("ghost", True)
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_force_deploy_runs_installed_bin(self):
+        bindir = os.path.join(server.DEPLOYD_HOME, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        bin_path = os.path.join(bindir, "deployd")
+        with open(bin_path, "w") as fh:
+            fh.write("# fake installed poller\n")
+        spawned = []
+        subprocess.Popen = lambda argv, **kw: (
+            spawned.append(list(argv)), RecordedProc(0))[1]
+        job_id = server.start_deployd_force("alpha")
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            with server._jobs_lock:
+                status = server._jobs[job_id]["status"]
+            if status != "running":
+                break
+            time.sleep(0.02)
+        self.assertEqual(status, "done")
+        self.assertEqual(spawned, [[bin_path, "--force", "alpha"]])
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_deployd_force("ghost")
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_force_deploy_needs_installed_bin(self):
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_deployd_force("alpha")
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_malformed_pollers_file_is_ignored(self):
+        with open(os.path.join(self.state, "pollers.json"), "w") as fh:
+            fh.write("not json")
+        rows, _, _ = self.rows()
+        self.assertIn("alpha", rows)   # manifests still scanned
+
+    def test_scan_parity_with_real_deployd(self):
+        """server._deployd_scan must stay in lockstep with the poller's own
+        scan_entries — the UI shows what deployd runs. This loads the real
+        file out of the checkout and compares on identical fixtures."""
+        import importlib.machinery
+        import importlib.util
+        path = os.path.join(os.path.dirname(server.__file__), os.pardir,
+                            os.pardir, "services", "deployd", "deployd")
+        loader = importlib.machinery.SourceFileLoader("deployd_impl", path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        # Fixtures: one override, one tombstone, one custom, one manifest-off.
+        server.deployd_upsert_poller("alpha", {
+            "repo": "https://example/a2.git", "cmd": "run alpha2"})
+        server.deployd_remove_poller("beta")
+        server.deployd_upsert_poller("custom", {
+            "repo": "https://example/c.git", "ref": "v9", "cmd": "run c"})
+        m_entries, m_sup = mod.scan_entries(server.REPO_ROOT, self.state)
+        s_entries, s_sup = server._deployd_scan(server.REPO_ROOT, self.state)
+        self.assertEqual(m_entries, s_entries)
+        self.assertEqual(m_sup, s_sup)
+
+
+class DeploydPollersHttpTest(HttpTest):
+
+    def setUp(self):
+        super().setUp()
+        path = os.path.join(server.REPO_ROOT, "services", "alpha")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "app.json"), "w") as fh:
+            json.dump({"key": "alpha", "deploy": {
+                "repo": "https://example/a.git", "cmd": "run a"}}, fh)
+
+    def doc(self, status, body):
+        self.assertEqual(status, 200)
+        return json.loads(body)
+
+    def test_poller_crud_routes(self):
+        # Create a custom poller.
+        status, body = self.get("/api/deployd/pollers/custom", "POST",
+                                body=json.dumps({
+                                    "repo": "https://example/c.git",
+                                    "cmd": "run c"}))
+        doc = self.doc(status, body)
+        self.assertIn("custom", {w["key"] for w in doc["watched"]})
+        # Pause it, resume it.
+        doc = self.doc(*self.get("/api/deployd/pollers/custom/pause",
+                                 "POST"))
+        self.assertTrue({w["key"]: w for w in doc["watched"]}
+                        ["custom"]["disabled"])
+        doc = self.doc(*self.get("/api/deployd/pollers/custom/resume",
+                                 "POST"))
+        self.assertFalse({w["key"]: w for w in doc["watched"]}
+                         ["custom"]["disabled"])
+        # Remove a manifest poller: tombstone, restorable.
+        doc = self.doc(*self.get("/api/deployd/pollers/alpha", "DELETE"))
+        self.assertNotIn("alpha", {w["key"] for w in doc["watched"]})
+        self.assertIn("alpha", {s["key"] for s in doc["suppressed"]})
+        doc = self.doc(*self.get("/api/deployd/pollers/alpha/restore",
+                                 "POST"))
+        self.assertIn("alpha", {w["key"] for w in doc["watched"]})
+        # Errors.
+        self.assertEqual(self.get("/api/deployd/pollers/ghost",
+                                  "DELETE")[0], 404)
+        self.assertEqual(self.get("/api/deployd/pollers/UPPER",
+                                  "POST", body="{}")[0], 400)
+        self.assertEqual(self.get("/api/deployd/pollers/alpha/pause/../x",
+                                  "POST")[0], 404)
+
+
 if __name__ == "__main__":
     unittest.main()

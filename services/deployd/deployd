@@ -18,6 +18,9 @@
 #   state    $SERVICE_HOME/state/<key>.sha       last deployed remote sha
 #            $SERVICE_HOME/state/<key>.fail      {"sha":..,"at":..} backoff
 #            $SERVICE_HOME/state/<key>.log       tail of the last cmd output
+#            $SERVICE_HOME/state/pollers.json    launcher-written overrides:
+#                                                {"pollers": {key: {repo,ref,
+#                                                 cmd} | {"enabled": false}}}
 #   lock     $SERVICE_HOME/.poll.lock            mkdir lock, stale at 60 min
 #
 # Trust model: a "deploy" block runs its `cmd` as this user, so it carries
@@ -34,6 +37,7 @@
 
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -146,17 +150,65 @@ def resolve_ref(repo_url, ref):
     return None
 
 
-def scan_entries(setup_repo):
-    """Every services/*/app.json 'deploy' block -> {key, repo, ref, cmd}.
-    A block needs repo and cmd; ref defaults to main. Anything malformed
-    warns and is skipped so one bad manifest cannot break the cycle."""
+POLLER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def _valid_deploy(repo, cmd):
+    return isinstance(repo, str) and bool(repo) \
+        and isinstance(cmd, str) and bool(cmd)
+
+
+def load_overrides(state_dir):
+    """state/pollers.json — the launcher UI's edit layer, merged over the
+    manifest scan so the UI never writes inside the (ff-pulled) checkout.
+    Values are either a definition {repo, ref?, cmd} that upserts the
+    entry, or a tombstone {"enabled": false} that suppresses it. A
+    malformed file or entry warns and is ignored — a bad write must not
+    wedge the poll."""
+    path = os.path.join(state_dir, "pollers.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        warn("cannot parse %s: %s — ignoring overrides" % (path, e))
+        return {}
+    pollers = data.get("pollers") if isinstance(data, dict) else None
+    if not isinstance(pollers, dict):
+        warn("%s: expected {\"pollers\": {...}} — ignoring overrides" % path)
+        return {}
+    out = {}
+    for key, spec in pollers.items():
+        # Keys name state files; a key with "/" or ".." would walk paths.
+        if not isinstance(key, str) or not POLLER_KEY_RE.match(key) \
+                or not isinstance(spec, dict):
+            warn("%s: bad poller entry %r — skipping" % (path, key))
+            continue
+        out[key] = spec
+    return out
+
+
+def scan_entries(setup_repo, state_dir=None):
+    """Effective poller list -> ([{key, repo, ref, cmd, source}], suppressed).
+
+    The manifest scan is the base layer: every services/*/app.json 'deploy'
+    block needs repo and cmd (ref defaults to main); a manifest
+    "enabled": false is a hard off — recorded in suppressed and never
+    overridden. When state_dir is given, state/pollers.json merges on top:
+    definitions upsert (source 'override' over a manifest, 'custom' for a
+    new key) and tombstones suppress a manifest entry. Anything malformed
+    warns and is skipped so one bad file cannot break the cycle."""
     entries = []
+    suppressed = []
+    seen = {}
+    hard_off = set()
     svc_root = os.path.join(setup_repo, "services")
     try:
         names = sorted(os.listdir(svc_root))
     except OSError:
         warn("no services dir at %s" % svc_root)
-        return entries
+        names = []
     for name in names:
         manifest = os.path.join(svc_root, name, "app.json")
         if not os.path.isfile(manifest):
@@ -172,25 +224,59 @@ def scan_entries(setup_repo):
         if not isinstance(deploy, dict):
             warn("%s: deploy must be an object" % manifest)
             continue
+        key = data.get("key")
+        key = key if isinstance(key, str) and key else name
         if deploy.get("enabled") is False:
+            hard_off.add(key)
+            suppressed.append({
+                "key": key, "by": "manifest",
+                "repo": deploy.get("repo"),
+                "ref": deploy.get("ref") or "main",
+                "cmd": deploy.get("cmd"),
+            })
             continue
         repo, cmd = deploy.get("repo"), deploy.get("cmd")
-        if not isinstance(repo, str) or not isinstance(cmd, str) \
-                or not repo or not cmd:
+        ref = deploy.get("ref") or "main"
+        if not _valid_deploy(repo, cmd):
             warn("%s: deploy needs string \"repo\" and \"cmd\"" % manifest)
             continue
-        ref = deploy.get("ref") or "main"
-        key = data.get("key")
         if not isinstance(ref, str):
             warn("%s: deploy \"ref\" must be a string" % manifest)
             continue
-        entries.append({
-            "key": key if isinstance(key, str) and key else name,
-            "repo": repo,
-            "ref": ref,
-            "cmd": cmd,
-        })
-    return entries
+        seen[key] = len(entries)
+        entries.append({"key": key, "repo": repo, "ref": ref, "cmd": cmd,
+                        "source": "manifest"})
+    if state_dir:
+        for key, spec in load_overrides(state_dir).items():
+            if key in hard_off:
+                warn("state/pollers.json: %r is disabled in app.json — "
+                     "manifest wins" % key)
+                continue
+            if spec.get("enabled") is False:
+                if key in seen:
+                    old = entries.pop(seen[key])
+                    suppressed.append({"key": key, "by": "override",
+                                       "repo": old["repo"],
+                                       "ref": old["ref"], "cmd": old["cmd"]})
+                    seen = {e["key"]: i for i, e in enumerate(entries)}
+                continue
+            repo, cmd = spec.get("repo"), spec.get("cmd")
+            ref = spec.get("ref") or "main"
+            if not _valid_deploy(repo, cmd):
+                warn("state/pollers.json: %r needs string \"repo\" and "
+                     "\"cmd\"" % key)
+                continue
+            if not isinstance(ref, str):
+                warn("state/pollers.json: %r \"ref\" must be a string" % key)
+                continue
+            entry = {"key": key, "repo": repo, "ref": ref, "cmd": cmd,
+                     "source": "override" if key in seen else "custom"}
+            if key in seen:
+                entries[seen[key]] = entry
+            else:
+                seen[key] = len(entries)
+                entries.append(entry)
+    return entries, suppressed
 
 
 def state_paths(state_dir, key):
@@ -366,7 +452,7 @@ def tick(env):
         return 0
     try:
         refresh_checkout(setup_repo, state_dir)
-        entries = scan_entries(setup_repo)
+        entries, _ = scan_entries(setup_repo, state_dir)
         if not entries:
             log("no deploy entries in %s/services/*/app.json" % setup_repo)
         failures = 0
@@ -388,10 +474,17 @@ def tick(env):
                     % (entry["key"], sha[:12], left))
                 continue
             # Re-check just before running: a teardown during the ref lookup
-            # would otherwise see the flag cleared by the cmd's own setup.sh.
+            # would otherwise see the flag cleared by the cmd's own
+            # setup.sh, and a launcher "Remove" mid-lookup only writes
+            # pollers.json — rescan so this tick cannot fire a cmd the UI
+            # believes is gone.
             if os.path.exists(disabled_path(state_dir, entry["key"])):
                 log("%s: disabled mid-tick (state/%s.disabled) — skipping"
                     % (entry["key"], entry["key"]))
+                continue
+            if not any(e["key"] == entry["key"]
+                       for e in scan_entries(setup_repo, state_dir)[0]):
+                log("%s: removed mid-tick — skipping" % entry["key"])
                 continue
             ok, _ = deploy(entry, sha, setup_repo, state_dir, timeout)
             if not ok:
@@ -429,12 +522,12 @@ def force(key, env):
         warn("a poll is running — retry --force when it finishes")
         return 1
     try:
-        for entry in scan_entries(setup_repo):
+        for entry in scan_entries(setup_repo, state_dir)[0]:
             if entry["key"] == key:
                 if os.path.exists(disabled_path(state_dir, key)):
-                    warn("%s: disabled (state/%s.disabled) — run its "
-                         "setup.sh to re-enable, or remove the flag"
-                         % (key, key))
+                    warn("%s: disabled (state/%s.disabled) — resume it in "
+                         "the launcher, run its setup.sh to re-enable, or "
+                         "remove the flag" % (key, key))
                     return 1
                 sha = resolve_ref(entry["repo"], entry["ref"]) or "forced"
                 ok, rc = deploy(entry, sha, setup_repo, state_dir,
@@ -457,8 +550,8 @@ def status(env):
     service_home = env.get("SERVICE_HOME") or os.path.expanduser(
         "~/services/deployd")
     state_dir = os.path.join(service_home, "state")
-    entries = scan_entries(setup_repo)
-    if not entries:
+    entries, suppressed = scan_entries(setup_repo, state_dir)
+    if not entries and not suppressed:
         print("no deploy entries in %s/services/*/app.json" % setup_repo)
         return 0
     print("%-18s %-8s %-12s %s" % ("SERVICE", "REF", "DEPLOYED", "STATE"))
@@ -466,6 +559,8 @@ def status(env):
         sha_file, fail_file, _ = state_paths(state_dir, e["key"])
         seen = read_sha(sha_file)
         notes = []
+        if e["source"] != "manifest":
+            notes.append("%s via state/pollers.json" % e["source"])
         if os.path.exists(disabled_path(state_dir, e["key"])):
             notes.append("disabled")
         try:
@@ -477,6 +572,11 @@ def status(env):
         note = "; ".join(notes)
         print("%-18s %-8s %-12s %s"
               % (e["key"], e["ref"], (seen or "never")[:12], note))
+    for s in suppressed:
+        print("%-18s %-8s %-12s %s" % (
+            s["key"], s["ref"], "-",
+            "disabled in app.json" if s["by"] == "manifest"
+            else "removed via launcher"))
     return 0
 
 
