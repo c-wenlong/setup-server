@@ -69,8 +69,8 @@ no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
 env_lacks()  { ! grep -q "$1" "$SVC/.env"; }
 
-# The low ("other") octal permission digit: >=4 means any uid can read the
-# file, >=5 also traverse the dir — what the container's nginx uid needs.
+# The low ("other") octal permission digit — what the container's nginx uid
+# gets. A file needs the read bit (4) set; a dir needs read+execute (5).
 other_bits() {
   local m
   m="$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1")"
@@ -302,7 +302,7 @@ test_release_perms_normalised() {
   check "0600 file in the release"  [ -f "$HOME/services/design-systems/www/current/data0600.json" ]
   check "  readable by any uid"     [ "$(other_bits "$HOME/services/design-systems/www/current/data0600.json")" -ge 4 ]
   check "0700 dir in the release"   [ -d "$HOME/services/design-systems/www/current/closed-dir" ]
-  check "  traversable by any uid"  [ "$(other_bits "$HOME/services/design-systems/www/current/closed-dir")" -ge 5 ]
+  check "  traversable by any uid"  [ "$(( $(other_bits "$HOME/services/design-systems/www/current/closed-dir") & 5 ))" -eq 5 ]
   teardown
 }
 

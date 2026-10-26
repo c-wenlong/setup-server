@@ -101,8 +101,10 @@ the allowlist in `~/services/design-systems/nginx.conf`.
   `www/current` is populated → file modes: a generator that writes 0600
   (e.g. via `tempfile.mkstemp` + `os.replace`) ships files the container's
   nginx uid cannot read. `find -L ~/services/design-systems/www/current
-  ! -perm -o=r` lists them; `chmod -R a+r` fixes the live release, and a
-  `bin/deploy.sh --force` rebuild normalises modes itself.
+  ! -perm -o=r` lists the files (`! -perm -o=x` for the dirs);
+  `chmod -R u+rwX,go+rX ~/services/design-systems/www/releases` fixes the
+  live release, and a `bin/deploy.sh --force` rebuild normalises modes
+  itself.
 - Gallery loads but `data.json` 404s or shows `{}` → `catalog.py build`
   didn't run in that deploy; redeploy with `bin/deploy.sh --force`.
 
