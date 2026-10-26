@@ -383,6 +383,60 @@ test_poll_disabled() {
   teardown
 }
 
+test_poll_overrides() {
+  echo "• poll: state/pollers.json overrides, suppresses and adds pollers"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  # Override svc-a's ref; suppress svc-b; add a custom poller; a tombstone
+  # for the manifest-disabled svc-off must lose to the manifest.
+  cat > "$DSTATE/pollers.json" <<EOF
+{"pollers": {
+  "svc-a": {"repo": "https://c.invalid/repo.git", "ref": "beta",
+            "cmd": "echo custom-a >> '$CALLS_LOG' && echo OVERRIDE-A >> '$CALLS_LOG'"},
+  "svc-b": {"enabled": false},
+  "svc-off": {"enabled": false},
+  "svc-new": {"repo": "https://n.invalid/r.git", "ref": "main",
+              "cmd": "echo DEPLOY svc-new sha=\$DEPLOY_SHA >> '$CALLS_LOG'"},
+  "../evil": {"repo": "https://e.invalid/r.git", "cmd": "echo PWNED >> '$CALLS_LOG'"},
+  "svc-empty": {"repo": "https://e.invalid/r.git"}
+}}
+EOF
+  printf '%s\t%s\n' "cccc1111111111111111111111111111111111111111" "refs/heads/beta" \
+    > "$STATE_DIR/remote_https___c_invalid_repo_git"
+  printf '%s\t%s\n' "dddd1111111111111111111111111111111111111111" "refs/heads/main" \
+    > "$STATE_DIR/remote_https___n_invalid_r_git"
+  run_poll
+  check "tick clean"                [ "$CODE" -eq 0 ]
+  check "override ref resolved"     out_has "svc-a: beta -> cccc"
+  check "override cmd ran"          calls_have "OVERRIDE-A"
+  check "tombstoned svc skipped"    no_call "DEPLOY svc-b"
+  check "custom poller deployed"    calls_have "DEPLOY svc-new"
+  check "svc-new sha recorded"      sha_is svc-new "dddd1111111111111111111111111111111111111111"
+  check "bad key rejected"          out_has "bad poller entry"
+  check "bad key never ran"         no_call "PWNED"
+  check "incomplete rejected"       out_has "svc-empty"
+  check "manifest off wins"         out_has "manifest wins"
+  run_poll --status
+  check "status marks custom"       out_has "custom via state/pollers.json"
+  check "status marks override"     out_has "override via state/pollers.json"
+  check "status lists suppressed"   out_has "removed via launcher"
+  check "status lists manifest-off" out_has "disabled in app.json"
+  # Restoring removes the override: svc-a polls its manifest ref again.
+  : > "$CALLS_LOG"
+  cat > "$DSTATE/pollers.json" <<EOF
+{"pollers": {}}
+EOF
+  run_poll --force svc-a
+  check "restored manifest def"     calls_have "DEPLOY svc-a sha=$SHA_A1"
+  # A malformed file is ignored wholesale, never wedges the poll.
+  echo 'not json' > "$DSTATE/pollers.json"
+  run_poll
+  check "bad file warned"           out_has "cannot parse"
+  check "poll still ran"            calls_have "ls-remote"
+  teardown
+}
+
 test_teardown() {
   echo "• teardown stops the poller and keeps state + unit files"
   setup
@@ -448,6 +502,7 @@ for t in \
   test_poll_lock \
   test_poll_force_and_status \
   test_poll_disabled \
+  test_poll_overrides \
   test_teardown \
   test_teardown_lock_refusal \
   test_teardown_purge; do

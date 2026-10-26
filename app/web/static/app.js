@@ -2439,6 +2439,15 @@
       if (job) { openSheet(svc, opener, job, jobAction(svc)); return true; }
       openActionSheet(svc, 'remove', opener);
       return true;
+    },
+    /* Open the job sheet on an already-started job id — deployd.js hands a
+       `deployd --force` job here so its log streams like a deploy's. The
+       key need not be a registry service (custom pollers aren't), so the
+       sheet gets a display-only stand-in. */
+    watchJob: function (key, jobId, action, opener) {
+      var svc = find(key) || { key: key, name: key };
+      openSheet(svc, opener, jobId, action || 'deploy');
+      return true;
     }
   };
 

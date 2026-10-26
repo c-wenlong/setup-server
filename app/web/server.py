@@ -20,6 +20,12 @@ Serves static/ as static files and a small JSON API:
     POST   api/services/{key}/notes            {title?, body} -> 201
     PATCH  api/services/{key}/notes/{id}       {title?, body?}
     DELETE api/services/{key}/notes/{id}       204
+    GET    api/deployd           poller list + state (what deployd polls)
+    POST   api/deployd/pollers/{key}           {repo, ref?, cmd} -> upsert
+    DELETE api/deployd/pollers/{key}           suppress/delete the poller
+    POST   api/deployd/pollers/{key}/restore   drop its overrides row
+    POST   api/deployd/pollers/{key}/pause|resume   <key>.disabled marker
+    POST   api/deployd/pollers/{key}/deploy    202 -> `deployd --force` job
     GET    api/jobs/{id}
     GET    healthz
 
@@ -1185,17 +1191,48 @@ def _deployd_state_dir(env):
     return os.path.join(env.get("SERVICE_HOME") or DEPLOYD_HOME, "state")
 
 
-def _deployd_watched(setup_repo):
-    """The same entries deployd's own scan_entries() picks: a `deploy`
-    block in every services/<dir>/app.json under the *configured* checkout
-    (which need not be the one the launcher serves), skipping anything
-    malformed or marked enabled:false."""
-    watched = []
+_POLLER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def _deployd_overrides(state_dir):
+    """Raw {key: spec} from state/pollers.json — the UI's edit layer.
+    Anything unreadable or malformed comes back empty: deployd applies the
+    same fail-closed rule, so what this returns is what it would run."""
+    path = os.path.join(state_dir, "pollers.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    pollers = data.get("pollers") if isinstance(data, dict) else None
+    if not isinstance(pollers, dict):
+        return {}
+    return {k: v for k, v in pollers.items()
+            if isinstance(k, str) and _POLLER_KEY_RE.match(k)
+            and isinstance(v, dict)}
+
+
+def _deployd_scan(setup_repo, state_dir):
+    """Mirror of deployd's scan_entries(): ([entries], [suppressed]).
+
+    Kept as a line-faithful copy rather than an import — server.py must not
+    exec the poller for a read, and this repo ships both so they cannot
+    drift in a deploy. test_server.py's parity check compares the two
+    implementations on the same fixtures.
+
+    Each entry carries `source`: 'manifest', 'override' (a pollers.json
+    definition over a manifest key) or 'custom' (no manifest). A manifest
+    enabled:false is a hard off: the key lands in `suppressed` with
+    by='manifest' and overrides for it lose."""
+    entries = []
+    suppressed = []
+    seen = {}
+    hard_off = set()
     svc_root = os.path.join(setup_repo, "services")
     try:
         names = sorted(os.listdir(svc_root))
     except OSError:
-        return watched
+        names = []
     for name in names:
         path = os.path.join(svc_root, name, "app.json")
         try:
@@ -1204,20 +1241,53 @@ def _deployd_watched(setup_repo):
         except (OSError, ValueError):
             continue
         deploy = data.get("deploy") if isinstance(data, dict) else None
-        if not isinstance(deploy, dict) or deploy.get("enabled") is False:
+        if not isinstance(deploy, dict):
+            continue
+        key = data.get("key")
+        key = key if isinstance(key, str) and key else name
+        if deploy.get("enabled") is False:
+            hard_off.add(key)
+            suppressed.append({
+                "key": key, "by": "manifest",
+                "repo": deploy.get("repo"),
+                "ref": deploy.get("ref") or "main",
+                "cmd": deploy.get("cmd"),
+            })
             continue
         repo, cmd = deploy.get("repo"), deploy.get("cmd")
-        if not isinstance(repo, str) or not isinstance(cmd, str) \
-                or not repo or not cmd:
-            continue
         ref = deploy.get("ref") or "main"
-        key = data.get("key")
-        watched.append({
-            "key": key if isinstance(key, str) and key else name,
-            "repo": repo,
-            "ref": ref if isinstance(ref, str) else "main",
-        })
-    return watched
+        if not isinstance(repo, str) or not repo \
+                or not isinstance(cmd, str) or not cmd \
+                or not isinstance(ref, str):
+            continue
+        seen[key] = len(entries)
+        entries.append({"key": key, "repo": repo, "ref": ref, "cmd": cmd,
+                        "source": "manifest"})
+    for key, spec in _deployd_overrides(state_dir).items():
+        if key in hard_off:
+            continue
+        if spec.get("enabled") is False:
+            if key in seen:
+                old = entries.pop(seen[key])
+                suppressed.append({"key": key, "by": "override",
+                                   "repo": old["repo"], "ref": old["ref"],
+                                   "cmd": old["cmd"]})
+                seen = {e["key"]: i for i, e in enumerate(entries)}
+            continue
+        repo, cmd = spec.get("repo"), spec.get("cmd")
+        ref = spec.get("ref") or "main"
+        if not isinstance(repo, str) or not repo \
+                or not isinstance(cmd, str) or not cmd \
+                or not isinstance(ref, str):
+            continue
+        entry = {"key": key, "repo": repo, "ref": ref, "cmd": cmd,
+                 "source": "override" if key in seen else "custom"}
+        if key in seen:
+            entries[seen[key]] = entry
+        else:
+            seen[key] = len(entries)
+            entries.append(entry)
+    return entries, suppressed
 
 
 def deployd_timer():
@@ -1293,6 +1363,8 @@ def _deployd_entry(state_dir, watched):
         "key": key,
         "repo": watched["repo"],
         "ref": watched["ref"],
+        "cmd": watched.get("cmd"),
+        "source": watched.get("source") or "manifest",
         "sha": sha,
         "fail": fail,
         "disabled": disabled,
@@ -1312,8 +1384,9 @@ def deployd_payload():
     up."""
     env = _deployd_env()
     state_dir = _deployd_state_dir(env)
-    watched = _deployd_watched(env.get("SETUP_REPO") or REPO_ROOT)
-    known = {w["key"] for w in watched}
+    watched, suppressed = _deployd_scan(
+        env.get("SETUP_REPO") or REPO_ROOT, state_dir)
+    known = {w["key"] for w in watched} | {s["key"] for s in suppressed}
     orphans = []
     try:
         for name in sorted(os.listdir(state_dir)):
@@ -1329,8 +1402,157 @@ def deployd_payload():
             os.path.join(state_dir, "self-update.pending")),
         "state_dir": state_dir,
         "watched": [_deployd_entry(state_dir, w) for w in watched],
+        "suppressed": suppressed,
         "orphans": orphans,
     }
+
+
+# ---- deployd poller management
+#
+# CRUD never writes services/*/app.json: that checkout is ff-pulled by
+# deployd every tick, so an uncommitted edit would wedge the pull and the
+# UI would break the thing it manages. Everything lands in
+# state/pollers.json, which deployd's own scan_entries() merges over the
+# manifests (manifest enabled:false always wins). `cmd` is arbitrary shell
+# run as this user — same trust as the deploy blocks already in the repo,
+# which is why this is tailnet-only with no narrower auth.
+
+_deployd_pollers_lock = threading.Lock()
+
+
+def _deployd_check_key(key):
+    if not isinstance(key, str) or not _POLLER_KEY_RE.match(key):
+        raise DeployError(400, "bad poller key")
+
+
+def _deployd_lookup(key):
+    """(env, state_dir, entry|None, suppressed|None) for one key."""
+    env = _deployd_env()
+    state_dir = _deployd_state_dir(env)
+    entries, suppressed = _deployd_scan(
+        env.get("SETUP_REPO") or REPO_ROOT, state_dir)
+    entry = next((e for e in entries if e["key"] == key), None)
+    sup = next((s for s in suppressed if s["key"] == key), None)
+    return env, state_dir, entry, sup
+
+
+def _deployd_write_overrides(state_dir, pollers):
+    _write_json_atomically(os.path.join(state_dir, "pollers.json"),
+                           {"version": 1, "pollers": pollers},
+                           ".pollers.")
+
+
+def deployd_upsert_poller(key, body):
+    """Create a custom poller or lay an override over a manifest one."""
+    _deployd_check_key(key)
+    if not isinstance(body, dict):
+        raise DeployError(400, "body must be a JSON object")
+    env, state_dir, entry, sup = _deployd_lookup(key)
+    if sup and sup["by"] == "manifest":
+        raise DeployError(409, "%s is disabled in app.json" % key)
+    repo = clean_field("repo", body.get("repo"), 512, False)
+    ref = clean_field("ref", body.get("ref") or "main", 128, False)
+    cmd = clean_field("cmd", body.get("cmd"), 2048, True)
+    if not repo or not cmd:
+        raise DeployError(400, "repo and cmd are required")
+    with _deployd_pollers_lock:
+        pollers = _deployd_overrides(state_dir)
+        pollers[key] = {"repo": repo, "ref": ref, "cmd": cmd}
+        _deployd_write_overrides(state_dir, pollers)
+    return deployd_payload()
+
+
+def deployd_remove_poller(key):
+    """Take a poller off the watch list: a tombstone over a manifest-backed
+    one (the repo stays the source of truth and can be restored to), or a
+    plain row-delete for a custom one, which has nothing to fall back to."""
+    _deployd_check_key(key)
+    env, state_dir, entry, sup = _deployd_lookup(key)
+    if sup and sup["by"] == "manifest":
+        raise DeployError(409, "%s is disabled in app.json" % key)
+    if entry is None:
+        raise DeployError(404, "unknown poller")
+    with _deployd_pollers_lock:
+        pollers = _deployd_overrides(state_dir)
+        if entry["source"] == "custom":
+            pollers.pop(key, None)
+        else:
+            pollers[key] = {"enabled": False}
+        _deployd_write_overrides(state_dir, pollers)
+    return deployd_payload()
+
+
+def deployd_restore_poller(key):
+    """Drop the pollers.json row entirely: a manifest definition resurfaces,
+    a custom poller simply disappears."""
+    _deployd_check_key(key)
+    _, state_dir, _, _ = _deployd_lookup(key)
+    with _deployd_pollers_lock:
+        pollers = _deployd_overrides(state_dir)
+        pollers.pop(key, None)
+        _deployd_write_overrides(state_dir, pollers)
+    return deployd_payload()
+
+
+def deployd_pause_poller(key, paused):
+    """The <key>.disabled marker — teardown.sh's knob, now also the UI's."""
+    _deployd_check_key(key)
+    _, state_dir, entry, _ = _deployd_lookup(key)
+    if entry is None:
+        raise DeployError(404, "unknown poller")
+    path = os.path.join(
+        state_dir, re.sub(r"[^A-Za-z0-9._-]", "_", key) + ".disabled")
+    if paused:
+        try:
+            os.makedirs(state_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("paused via launcher\n")
+        except OSError as exc:
+            raise DeployError(500, "could not pause: %s" % exc)
+    else:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise DeployError(500, "could not resume: %s" % exc)
+    return deployd_payload()
+
+
+def start_deployd_force(key):
+    """`deployd --force <key>` as a tracked job — the poller's own code
+    path, so the same lock serialises it against a running tick."""
+    _deployd_check_key(key)
+    env = _deployd_env()
+    service_home = env.get("SERVICE_HOME") or DEPLOYD_HOME
+    state_dir = os.path.join(service_home, "state")
+    entries, _ = _deployd_scan(env.get("SETUP_REPO") or REPO_ROOT, state_dir)
+    if not any(e["key"] == key for e in entries):
+        raise DeployError(404, "unknown poller")
+    bin_path = os.path.join(service_home, "bin", "deployd")
+    if not os.path.isfile(bin_path):
+        raise DeployError(404, "deployd is not installed on this box")
+    job = register_job(key, "deploy")
+    job_id, log_path = job["id"], job["log_path"]
+    job["source"] = {"via": "deployd --force"}
+    argv = [bin_path, "--force", key]
+    try:
+        logfile = open(log_path, "wb", buffering=0)
+        logfile.write(("$ %s\n" % " ".join(argv)).encode())
+        proc = subprocess.Popen(
+            argv, stdout=logfile, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, shell=False)
+    except Exception as exc:
+        with _jobs_lock:
+            job["status"] = "failed"
+            job["exit_code"] = -1
+            job["finished"] = time.time()
+        log("deployd force %s (%s) failed to start: %s" % (job_id, key, exc))
+        raise DeployError(500, "could not start deployd")
+    log("deployd force %s started: %s" % (job_id, key))
+    threading.Thread(target=_reap, args=(job, proc, logfile),
+                     daemon=True).start()
+    return job_id
 
 
 # ---- editing
@@ -2958,6 +3180,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 and parts[3] == "env" and parts[5] == "reveal":
             self._json(200, reveal_env_var(parts[2], parts[4]))
             return
+        # deployd poller CRUD + ops. Writes land in state/pollers.json —
+        # never in the checkout, which the poller ff-pulls.
+        if len(parts) >= 4 and parts[0] == "api" and parts[1] == "deployd" \
+                and parts[2] == "pollers":
+            if len(parts) == 4:
+                self._json(200, deployd_upsert_poller(parts[3], body))
+                return
+            if len(parts) == 5:
+                op = parts[4]
+                if op == "restore":
+                    self._json(200, deployd_restore_poller(parts[3]))
+                elif op == "pause":
+                    self._json(200, deployd_pause_poller(parts[3], True))
+                elif op == "resume":
+                    self._json(200, deployd_pause_poller(parts[3], False))
+                elif op == "deploy":
+                    self._json(202,
+                               {"job_id": start_deployd_force(parts[3])})
+                else:
+                    self._error(404, "unknown endpoint")
+                return
         self._error(404, "unknown endpoint")
 
     def _route_patch(self, path):
@@ -2987,6 +3230,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 and parts[3] == "notes":
             delete_note(parts[2], parts[4])
             self._no_content()
+            return
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "deployd" \
+                and parts[2] == "pollers":
+            self._json(200, deployd_remove_poller(parts[3]))
             return
         self._error(404, "unknown endpoint")
 
