@@ -69,6 +69,14 @@ no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
 env_lacks()  { ! grep -q "$1" "$SVC/.env"; }
 
+# The low ("other") octal permission digit: >=4 means any uid can read the
+# file, >=5 also traverse the dir — what the container's nginx uid needs.
+other_bits() {
+  local m
+  m="$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1")"
+  echo $(( 0$m % 8 ))
+}
+
 # ----------------------------------------------------------------- tests
 test_preflight_docker_perms() {
   echo "• preflight fails when user cannot reach the docker daemon"
@@ -282,6 +290,19 @@ test_path_restored_from_env() {
   OUT="$(printf '\n' | PATH="$nouv:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
   check "exits zero without stub uv" [ "$CODE" -eq 0 ]
   check "found uv via .env"          out_has "Preflight checks"
+  teardown
+}
+
+test_release_perms_normalised() {
+  echo "• a 0600 file or 0700 dir in site/ ships readable, or nginx 403s it"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "0600 file in the release"  [ -f "$HOME/services/design-systems/www/current/data0600.json" ]
+  check "  readable by any uid"     [ "$(other_bits "$HOME/services/design-systems/www/current/data0600.json")" -ge 4 ]
+  check "0700 dir in the release"   [ -d "$HOME/services/design-systems/www/current/closed-dir" ]
+  check "  traversable by any uid"  [ "$(other_bits "$HOME/services/design-systems/www/current/closed-dir")" -ge 5 ]
   teardown
 }
 
@@ -1218,6 +1239,7 @@ test_legacy_poller_kept_without_deployd
 test_deployd_disabled_flag
 test_deploy_sha_mismatch
 test_path_restored_from_env
+test_release_perms_normalised
 test_idempotent_rerun
 test_nginx_conf_stale_warns
 test_push_triggers_redeploy

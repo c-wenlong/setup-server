@@ -97,6 +97,12 @@ the allowlist in `~/services/design-systems/nginx.conf`.
   (delete it and re-run setup.sh to regenerate the default).
 - 403/404 on `/` or `/gallery/` → `www/current` missing or an empty
   release: the initial build never completed; run `bin/deploy.sh --force`.
+- 403 on pages that exist (`/`, `data.json`, `/scorecard/`) while
+  `www/current` is populated → file modes: a generator that writes 0600
+  (e.g. via `tempfile.mkstemp` + `os.replace`) ships files the container's
+  nginx uid cannot read. `find -L ~/services/design-systems/www/current
+  ! -perm -o=r` lists them; `chmod -R a+r` fixes the live release, and a
+  `bin/deploy.sh --force` rebuild normalises modes itself.
 - Gallery loads but `data.json` 404s or shows `{}` → `catalog.py build`
   didn't run in that deploy; redeploy with `bin/deploy.sh --force`.
 
