@@ -171,6 +171,12 @@
   .dep-act-danger:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
 }
 
+.dep-err {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--bad);
+}
+
 .dep-src {
   flex: none;
   padding: 2px 9px;

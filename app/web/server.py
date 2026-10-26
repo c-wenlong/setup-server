@@ -1534,7 +1534,9 @@ def start_deployd_force(key):
         raise DeployError(404, "deployd is not installed on this box")
     job = register_job(key, "deploy")
     job_id, log_path = job["id"], job["log_path"]
-    job["source"] = {"via": "deployd --force"}
+    # No frozen job["source"]: _reap's receipt write must take the real
+    # source (repo, revision, setup) itself or a successful force would
+    # overwrite the service's receipt with nulls.
     argv = [bin_path, "--force", key]
     try:
         logfile = open(log_path, "wb", buffering=0)

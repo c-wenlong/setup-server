@@ -474,10 +474,17 @@ def tick(env):
                     % (entry["key"], sha[:12], left))
                 continue
             # Re-check just before running: a teardown during the ref lookup
-            # would otherwise see the flag cleared by the cmd's own setup.sh.
+            # would otherwise see the flag cleared by the cmd's own
+            # setup.sh, and a launcher "Remove" mid-lookup only writes
+            # pollers.json — rescan so this tick cannot fire a cmd the UI
+            # believes is gone.
             if os.path.exists(disabled_path(state_dir, entry["key"])):
                 log("%s: disabled mid-tick (state/%s.disabled) — skipping"
                     % (entry["key"], entry["key"]))
+                continue
+            if not any(e["key"] == entry["key"]
+                       for e in scan_entries(setup_repo, state_dir)[0]):
+                log("%s: removed mid-tick — skipping" % entry["key"])
                 continue
             ok, _ = deploy(entry, sha, setup_repo, state_dir, timeout)
             if not ok:

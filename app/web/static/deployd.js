@@ -152,8 +152,28 @@
     }
   }
 
-  function post(path, body) {
-    callDeployd('POST', path, body, function (data) { repaint(data); });
+  /* Show an action's failure inline, next to the buttons that raised it —
+     a swallowed 409 looks identical to success otherwise. */
+  function rowError(host, msg) {
+    var e = host.querySelector('.dep-err');
+    if (!e) { e = make('span', 'dep-err'); host.appendChild(e); }
+    text(e, msg);
+  }
+  function clearRowError(host) {
+    var e = host.querySelector('.dep-err');
+    if (e) e.remove();
+  }
+
+  function post(path, body, errHost) {
+    callDeployd('POST', path, body, function (data, status) {
+      if (data && data.watched) { repaint(data); return; }
+      if (errHost) {
+        rowError(errHost, (data && data.error) ||
+                 'Request failed (HTTP ' + status + ')');
+      } else {
+        repaint(data);
+      }
+    });
   }
 
   function openEditor(pollerKey, seed) {
@@ -221,6 +241,9 @@
       pendingData = null;
       if (d) paint(d); else refresh();
     });
+    /* Captured so a slow save of THIS editor can never clear a newer one:
+       save A, cancel it, open B — A's late response must not close B. */
+    var mine = editing;
     save.addEventListener('click', function () {
       var body = { repo: repoIn.value.trim(),
                    ref: refIn.value.trim() || 'main',
@@ -239,15 +262,21 @@
                   body, function (data, status) {
         save.disabled = false;
         text(save, pollerKey ? 'Save override' : 'Add poller');
-        if (status === 200 && data) {
-          editing = null;
-          pendingData = null;
-          paint(data);
+        if (status === 200 && data && data.watched) {
+          if (editing === mine) {
+            editing = null;
+            pendingData = null;
+            paint(data);
+          } else {
+            repaint(data);
+          }
           return;
         }
-        text(err, (data && data.error) ||
-                  'Save failed (HTTP ' + status + ').');
-        err.hidden = false;
+        if (editing === mine) {
+          text(err, (data && data.error) ||
+                    'Save failed (HTTP ' + status + ').');
+          err.hidden = false;
+        }
       });
     });
     return form;
@@ -259,24 +288,29 @@
 
     acts.appendChild(act('Deploy now', 'Run its deploy cmd immediately',
       function () {
+        clearRowError(acts);
         callDeployd('POST', 'api/deployd/pollers/' +
                     encodeURIComponent(k) + '/deploy', null,
           function (data, status) {
             if (status === 202 && data && data.job_id &&
                 window.LauncherApp && LauncherApp.watchJob) {
               LauncherApp.watchJob(k, data.job_id, 'deploy');
+            } else if (data && data.error) {
+              rowError(acts, data.error);
             } else {
-              refresh();
+              rowError(acts, 'Deploy failed to start (HTTP ' + status + ')');
             }
           });
       }));
     acts.appendChild(entry.disabled
       ? act('Resume', 'Clear the .disabled marker — deployd polls it again',
-            function () { post('api/deployd/pollers/' +
-                               encodeURIComponent(k) + '/resume'); })
+            function () { clearRowError(acts);
+                          post('api/deployd/pollers/' +
+                               encodeURIComponent(k) + '/resume', null, acts); })
       : act('Pause', 'Drop a .disabled marker — deployd skips it',
-            function () { post('api/deployd/pollers/' +
-                               encodeURIComponent(k) + '/pause'); }));
+            function () { clearRowError(acts);
+                          post('api/deployd/pollers/' +
+                               encodeURIComponent(k) + '/pause', null, acts); }));
     acts.appendChild(act(entry.source === 'manifest' ? 'Override' : 'Edit',
       entry.source === 'manifest'
         ? 'Repo, ref and cmd come from app.json — this writes an override row'
@@ -291,8 +325,13 @@
       }));
     acts.appendChild(confirmAct('Remove', 'Remove?',
       function () {
+        clearRowError(acts);
         callDeployd('DELETE', 'api/deployd/pollers/' + encodeURIComponent(k),
-                    null, function (data) { repaint(data); });
+                    null, function (data, status) {
+          if (data && data.watched) { repaint(data); return; }
+          rowError(acts, (data && data.error) ||
+                   'Remove failed (HTTP ' + status + ')');
+        });
       }));
     return acts;
   }
@@ -387,7 +426,9 @@
       acts.appendChild(act('Restore',
         'Drop the tombstone — the repo manifest definition applies again',
         function () {
-          post('api/deployd/pollers/' + encodeURIComponent(s.key) + '/restore');
+          clearRowError(acts);
+          post('api/deployd/pollers/' + encodeURIComponent(s.key) +
+               '/restore', null, acts);
         }));
       wrap.appendChild(acts);
     }
