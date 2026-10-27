@@ -1400,6 +1400,8 @@ def deployd_payload():
         "timer": deployd_timer(),
         "self_update_pending": os.path.exists(
             os.path.join(state_dir, "self-update.pending")),
+        "launcher_restart_pending": os.path.exists(
+            os.path.join(state_dir, "launcher-restart.pending")),
         "state_dir": state_dir,
         "watched": [_deployd_entry(state_dir, w) for w in watched],
         "suppressed": suppressed,

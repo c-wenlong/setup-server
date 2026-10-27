@@ -29,7 +29,13 @@ Each tick:
    leaves `state/self-update.pending` behind and is retried every tick
    until it succeeds — on macOS that child run skips re-loading the
    LaunchAgent (bootout would kill the tick itself), so plist changes land
-   on the next manual `setup.sh` or login.
+   on the next manual `setup.sh` or login. The launcher gets the same
+   treatment: a pull touching `app/web/` (except `static/` and
+   `services.json`, which it re-reads live) restarts its unit so the new
+   `server.py` loads — a stopped or absent launcher just drops the
+   `state/launcher-restart.pending` marker, a failed restart keeps it.
+   Changes to `app/web/setup.sh` only log a hint: unit/plist changes need
+   a manual re-run.
 2. Scan `services/*/app.json` for `deploy` blocks.
 3. Per entry: `git ls-remote <repo> <ref>` → sha. Same as
    `state/<key>.sha` → done. Different → run `cmd`. Success → record the

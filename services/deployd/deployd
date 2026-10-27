@@ -21,6 +21,10 @@
 #            $SERVICE_HOME/state/pollers.json    launcher-written overrides:
 #                                                {"pollers": {key: {repo,ref,
 #                                                 cmd} | {"enabled": false}}}
+#            $SERVICE_HOME/state/*.pending       a checkout-reaction that
+#                                                failed (self-update or
+#                                                launcher restart), retried
+#                                                every tick until it works
 #   lock     $SERVICE_HOME/.poll.lock            mkdir lock, stale at 60 min
 #
 # Trust model: a "deploy" block runs its `cmd` as this user, so it carries
@@ -359,15 +363,83 @@ def deploy(entry, sha, setup_repo, state_dir, timeout):
     return False, rc
 
 
+def write_marker(path, sha):
+    try:
+        with open(path, "w") as fh:
+            fh.write(sha + "\n")
+    except OSError as e:
+        warn("cannot write %s: %s" % (path, e))
+
+
+def launcher_code_path(path):
+    """A pull-diff path the running launcher cannot pick up live. static/
+    is served from disk per request and services.json re-read on mtime, so
+    the restart trigger is everything else under app/web/ — server.py
+    today, whatever it grows later."""
+    return path.startswith("app/web/") and not (
+        path.startswith("app/web/static/")
+        or path == "app/web/services.json")
+
+
+LAUNCHER_UNIT = "launcher.service"      # app/web/setup.sh's systemd unit,
+LAUNCHER_LABEL = "com.launcher.server"  # launchd label
+
+
+def restart_launcher(pending):
+    """Re-exec the launcher so it loads the new server.py — it runs
+    straight from the checkout, and the running process holds the old code
+    forever otherwise. A launcher that is stopped or absent has nothing
+    stale to fix: the marker is dropped (its next start loads new code
+    anyway). `restart` signals the unit's whole cgroup, so a launcher job
+    in flight dies with it — tolerated because every deploy cmd is built
+    to re-run. The marker stays on failure and retries next tick."""
+    if sys.platform == "darwin":
+        domain = "gui/%d/%s" % (os.getuid(), LAUNCHER_LABEL)
+        probe = ["launchctl", "print", domain]
+        restart = ["launchctl", "kickstart", "-k", domain]
+        env = None
+    else:
+        # A user unit inherits the manager env, but a hand-run poller can
+        # lack the bus address.
+        env = {"XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR")
+               or "/run/user/%d" % os.getuid()}
+        probe = ["systemctl", "--user", "is-active", "--quiet",
+                 LAUNCHER_UNIT]
+        restart = ["systemctl", "--user", "restart", LAUNCHER_UNIT]
+    rc, _ = run(probe, env=env)
+    if rc != 0:
+        log("app/web/ changed but no launcher is running — nothing to "
+            "restart")
+        try:
+            os.remove(pending)
+        except OSError:
+            pass
+        return
+    log("app/web/ changed — restarting the launcher")
+    rc, out = run(restart, env=env)
+    if rc == 0:
+        try:
+            os.remove(pending)
+        except OSError:
+            pass
+        log("launcher restarted")
+    else:
+        warn("launcher restart failed (rc=%s); retrying next tick: %s"
+             % (rc, out.strip().splitlines()[-1]
+                if out.strip() else "rc only"))
+
+
 def refresh_checkout(setup_repo, state_dir):
     """ff-only pull of the setup-server checkout; config lives in it, so a
-    stale checkout means stale config. Self-update: if the pull touched
-    services/deployd/, re-run its setup.sh so the installed bin and units
-    pick up the change (we keep running this copy for the rest of the tick).
-    A pending marker makes a failed self-update retry next tick — the
-    checkout has already moved by then, so sha comparison alone would never
-    run setup.sh again. Pull failures warn; pending retries still run."""
+    stale checkout means stale config. Two consumers run code the pull can
+    replace: services/deployd/ re-runs its setup.sh (self-update — this
+    tick keeps running the old build), and app/web/ restarts the launcher
+    unit, which execs server.py from this tree. A pending marker makes a
+    failed reaction retry next tick — the checkout has already moved by
+    then, so sha comparison alone would never fire again. Pull failures
+    warn; pending retries still run."""
     pending = os.path.join(state_dir, "self-update.pending")
+    launcher_pending = os.path.join(state_dir, "launcher-restart.pending")
     rc, old = git(setup_repo, "rev-parse", "HEAD")
     if rc != 0:
         warn("%s is not a git checkout — scanning it as-is" % setup_repo)
@@ -380,13 +452,16 @@ def refresh_checkout(setup_repo, state_dir):
         if new != old:
             log("checkout moved %s -> %s" % (old[:8], new[:8]))
             rc, diff = git(setup_repo, "diff", "--name-only", old, new)
-            if rc == 0 and any(p.startswith("services/deployd/")
-                               for p in diff.splitlines()):
-                try:
-                    with open(pending, "w") as fh:
-                        fh.write(new + "\n")
-                except OSError as e:
-                    warn("cannot write %s: %s" % (pending, e))
+            if rc == 0:
+                changed = diff.splitlines()
+                if any(p.startswith("services/deployd/")
+                       for p in changed):
+                    write_marker(pending, new)
+                if any(launcher_code_path(p) for p in changed):
+                    write_marker(launcher_pending, new)
+                if "app/web/setup.sh" in changed:
+                    log("app/web/setup.sh changed — re-run it by hand to "
+                        "pick up unit/plist changes")
     else:
         warn("setup-server pull did not apply (dirty tree, offline, or "
              "diverged): %s" % out.strip().splitlines()[-1]
@@ -404,6 +479,8 @@ def refresh_checkout(setup_repo, state_dir):
         else:
             warn("deployd self-update failed (rc=%s); retrying next tick:\n%s"
                  % (rc, "\n".join(out.splitlines()[-40:])))
+    if os.path.exists(launcher_pending):
+        restart_launcher(launcher_pending)
 
 
 def acquire_lock(service_home):
