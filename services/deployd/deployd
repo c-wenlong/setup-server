@@ -385,6 +385,35 @@ LAUNCHER_UNIT = "launcher.service"      # app/web/setup.sh's systemd unit,
 LAUNCHER_LABEL = "com.launcher.server"  # launchd label
 
 
+def _launcher_running(env):
+    """True = a launcher process is up (running stale code). False =
+    definitely not — stopped, disabled, or never installed, so its next
+    start loads the new code anyway. None = the probe could not answer; an
+    unanswered probe must never be read as 'not running'."""
+    if sys.platform == "darwin":
+        domain = "gui/%d/%s" % (os.getuid(), LAUNCHER_LABEL)
+        rc, _ = run(["launchctl", "print", domain], env=env)
+        if rc == 0:
+            return True
+        plist = os.path.expanduser(
+            "~/Library/LaunchAgents/%s.plist" % LAUNCHER_LABEL)
+        if not os.path.isfile(plist):
+            return False
+        # Plist on disk but the job is not loaded: disabled deliberately or
+        # bootout'd — either way nothing is running. Only a failed
+        # print-disabled leaves the question unanswered.
+        rc, _ = run(["launchctl", "print-disabled",
+                     "gui/%d" % os.getuid()], env=env)
+        return None if rc != 0 else False
+    rc, out = run(["systemctl", "--user", "show", LAUNCHER_UNIT], env=env)
+    if rc != 0:
+        return None
+    props = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+    # failed counts as running: restart is also what revives a dead unit.
+    return props.get("ActiveState") in (
+        "active", "activating", "reloading", "failed", "deactivating")
+
+
 def restart_launcher(pending):
     """Re-exec the launcher so it loads the new server.py — it runs
     straight from the checkout, and the running process holds the old code
@@ -392,28 +421,30 @@ def restart_launcher(pending):
     stale to fix: the marker is dropped (its next start loads new code
     anyway). `restart` signals the unit's whole cgroup, so a launcher job
     in flight dies with it — tolerated because every deploy cmd is built
-    to re-run. The marker stays on failure and retries next tick."""
+    to re-run. The marker stays on failure or an unanswered probe and
+    retries next tick."""
     if sys.platform == "darwin":
-        domain = "gui/%d/%s" % (os.getuid(), LAUNCHER_LABEL)
-        probe = ["launchctl", "print", domain]
-        restart = ["launchctl", "kickstart", "-k", domain]
+        restart = ["launchctl", "kickstart", "-k",
+                   "gui/%d/%s" % (os.getuid(), LAUNCHER_LABEL)]
         env = None
     else:
         # A user unit inherits the manager env, but a hand-run poller can
         # lack the bus address.
         env = {"XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR")
                or "/run/user/%d" % os.getuid()}
-        probe = ["systemctl", "--user", "is-active", "--quiet",
-                 LAUNCHER_UNIT]
         restart = ["systemctl", "--user", "restart", LAUNCHER_UNIT]
-    rc, _ = run(probe, env=env)
-    if rc != 0:
+    running = _launcher_running(env)
+    if running is False:
         log("app/web/ changed but no launcher is running — nothing to "
             "restart")
         try:
             os.remove(pending)
         except OSError:
             pass
+        return
+    if running is None:
+        warn("cannot tell whether the launcher is running — keeping the "
+             "restart pending")
         return
     log("app/web/ changed — restarting the launcher")
     rc, out = run(restart, env=env)

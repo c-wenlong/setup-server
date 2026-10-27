@@ -386,6 +386,35 @@ test_poll_launcher_absent() {
   teardown
 }
 
+test_poll_launcher_probe_unknown() {
+  echo "• poll: an unanswerable launcher probe keeps the restart pending"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  launcher_running
+  echo "ccc9999999999999999999999999999999999999" > "$STATE_DIR/head_next"
+  echo "app/web/server.py" > "$STATE_DIR/pull_diff"
+  if [ "$OS" != "Linux" ]; then
+    # print fails without the loaded marker, so the macOS probe falls
+    # through to print-disabled — which show_fails then breaks too.
+    mkdir -p "$HOME/Library/LaunchAgents"
+    touch "$HOME/Library/LaunchAgents/com.launcher.server.plist"
+    rm "$STATE_DIR/loaded.com.launcher.server"
+  fi
+  touch "$STATE_DIR/show_fails"
+  run_poll
+  check "warns it cannot tell"  out_has "cannot tell"
+  check "marker kept"           [ -f "$DSTATE/launcher-restart.pending" ]
+  check "no restart yet"        no_call "$RESTART_CALL"
+  rm "$STATE_DIR/show_fails"
+  launcher_running   # macOS: re-mark the job loaded so print succeeds again
+  : > "$CALLS_LOG"
+  run_poll   # probe answers again — marker alone fires the retry
+  check "retried next tick"     calls_have "$RESTART_CALL"
+  check "marker cleared"        [ ! -f "$DSTATE/launcher-restart.pending" ]
+  teardown
+}
+
 test_poll_pull_failure_keeps_going() {
   echo "• poll: a failed checkout pull still polls remotes on stale config"
   setup
@@ -569,6 +598,7 @@ for t in \
   test_poll_launcher_restart \
   test_poll_launcher_restart_retry \
   test_poll_launcher_absent \
+  test_poll_launcher_probe_unknown \
   test_poll_pull_failure_keeps_going \
   test_poll_lock \
   test_poll_force_and_status \
