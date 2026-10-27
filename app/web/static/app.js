@@ -354,8 +354,11 @@
       note = make('span', 'tile-note-run');
       text(note, jobNote(svc));
     } else if (svc.state === 'stopped') {
-      note = make('span', 'tile-note');
-      text(note, 'down');
+      /* 'down' is a verdict — only a degraded service (probe fails while
+         parts still run) earns it. An installed service that is simply off
+         is 'paused', and muted. */
+      note = make('span', svc.degraded ? 'tile-note' : 'tile-note-muted');
+      text(note, svc.degraded ? 'down' : 'paused');
     } else if (svc.state === 'active' && !svc.url) {
       note = make('span', 'tile-note-muted');
       text(note, 'no web UI');
@@ -400,7 +403,9 @@
     var state = svc.state || 'planned';
     if (job)                  return cornerDot('dot-job', jobLabel(svc));
     if (state === 'active')   return cornerDot('dot-ok', 'Running');
-    if (state === 'stopped')  return cornerDot('dot-warn', 'Installed but not responding');
+    if (state === 'stopped')  return svc.degraded
+      ? cornerDot('dot-warn', 'Installed but not responding')
+      : cornerDot('dot-off', 'Installed, paused');
     if (state === 'available') {
       var slot = make('span', 'tile-corner');
       slot.appendChild(downloadGlyph());
@@ -435,7 +440,8 @@
     var job = liveJob(svc);
     var openable = (state === 'active' || state === 'stopped') && !!svc.url && !job;
 
-    var tile = make('div', 'tile tile-' + state);
+    var tile = make('div', 'tile tile-' + state +
+                  (svc.degraded ? ' tile-degraded' : ''));
     tile.setAttribute('role', 'listitem');
     tile.setAttribute('data-key', svc.key);
 
@@ -492,7 +498,9 @@
                              ', activate to watch the log';
     switch (svc.state) {
       case 'active':    return svc.url ? 'running, opens in a new tab' : 'running, no web interface, opens details';
-      case 'stopped':   return svc.url ? 'installed but not responding' : 'installed but not responding, opens details';
+      case 'stopped':   return (svc.degraded ? 'running but not responding'
+                                             : 'installed, paused')
+                             + (svc.url ? '' : ', opens details');
       case 'available': return 'not deployed, activate to install';
       default:          return 'planned, not built yet, opens details';
     }
@@ -946,6 +954,7 @@
         var fresh = find(detailKey);
         if (fresh) {
           detailSvc.state = fresh.state;
+          detailSvc.degraded = fresh.degraded;
           detailSvc.job = fresh.job;
           if (fresh.control !== undefined) detailSvc.control = fresh.control;
           if (fresh.removable !== undefined) detailSvc.removable = fresh.removable;
@@ -1456,7 +1465,9 @@
     if (liveJob(svc)) return { cls: 'dot-job', label: jobLabel(svc) };
     switch (svc && svc.state) {
       case 'active':    return { cls: 'dot-ok',   label: 'Running' };
-      case 'stopped':   return { cls: 'dot-warn', label: 'Not responding' };
+      case 'stopped':   return svc.degraded
+        ? { cls: 'dot-warn', label: 'Not responding' }
+        : { cls: 'dot-off',  label: 'Paused' };
       case 'available': return { cls: 'dot-off',  label: 'Not deployed' };
       default:          return { cls: 'dot-off',  label: 'Planned' };
     }
@@ -2284,6 +2295,7 @@
       icon:    d.icon || known.icon,
       url:     d.url !== undefined ? d.url : known.url,
       state:   d.state || known.state,
+      degraded: d.degraded !== undefined ? d.degraded : known.degraded,
       job:     d.job !== undefined ? d.job : known.job,
       /* {controllable, reason} — whether this service gets start/stop buttons
          at all. Undefined on a backend that has no lifecycle endpoint. */

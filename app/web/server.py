@@ -946,6 +946,7 @@ def _measure_resources(svc, now, docker_map=None):
         if cpu is not None:
             total_cpu = cpu if total_cpu is None else total_cpu + cpu
         measured.append({"name": part["name"], "kind": part["kind"],
+                         "running": cgroup is not None,
                          "rss_bytes": rss, "cpu_pct": cpu})
     if total_cpu is not None:
         total_cpu = max(0.0, min(100.0, total_cpu))
@@ -996,6 +997,68 @@ def service_resources(svc):
         return _null_resources(now)
 
 
+def _timer_active(name):
+    """systemctl is-active for a .timer control part: True/False/None.
+
+    A timer owns no cgroup while it is armed, so the resources pass can
+    never see one; ActiveState is the only honest signal, and 'active' for
+    a polling service IS 'running'. None is 'unknowable' (macOS, no
+    systemd, a dead user bus) — the same contract as deployd_timer()."""
+    if sys.platform == "darwin":
+        return None
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "is-active", name],
+            capture_output=True, text=True, timeout=5, check=False)
+        state = out.stdout.strip()
+        if state == "active":
+            return True
+        if state in ("inactive", "failed"):
+            return False
+        return None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def control_running(svc, resources):
+    """True/False/None — is any of the service's control parts alive?
+
+    Services and containers answer through the resources pass: a cgroup
+    exists only while its part runs. A .timer owns no cgroup while armed,
+    so timers ask systemctl directly. A container part that is absent from
+    `docker ps -a` is NOT 'stopped' — stopped containers still appear
+    there — it means docker could not answer, which is unknowable, same
+    as a timer systemctl cannot read. None means nothing could say, so a
+    caller can keep a warning it cannot disprove rather than declaring
+    'paused'."""
+    parts = control_parts(control_block(svc))
+    measured = {p["name"]: p for p in resources.get("parts") or []}
+    if parts and not measured:
+        return None
+    docker_map = None
+    unknowable = False
+    for part in parts:
+        if part["kind"] == "unit" and part["name"].endswith(".timer"):
+            state = _timer_active(part["name"])
+            if state:
+                return True
+            if state is None:
+                unknowable = True
+            continue
+        if part["kind"] == "container":
+            if docker_map is None:
+                docker_map = docker_name_map()
+            if part["name"] not in docker_map:
+                unknowable = True
+                continue
+        entry = measured.get(part["name"])
+        if entry and entry.get("running"):
+            return True
+    if unknowable or not parts:
+        return None
+    return False
+
+
 def deployed_at(marker):
     """mtime of the service's marker path, epoch float, or None.
 
@@ -1036,7 +1099,21 @@ def services_payload():
     services = []
     for svc in registry:
         health = svc.get("health")
-        active = bool(health) and probes.get(health, False)
+        resources = service_resources(svc)
+        if health:
+            active = bool(probes.get(health, False))
+            # A failed probe is only alarming while the thing still runs:
+            # live parts mean "up but not answering". None (nothing to
+            # check with — ntfy, ollama) keeps the warning it cannot
+            # disprove rather than muting a real outage.
+            degraded = (not active
+                        and control_running(svc, resources) is not False)
+        else:
+            # No probe at all: a live control part is the only "alive"
+            # signal. An armed timer counts, so deployd stops reading as
+            # down for doing its job.
+            active = control_running(svc, resources) is True
+            degraded = False
         receipt = load_receipt(svc.get("key"))
         installed = ((active or marker_exists(svc.get("marker")))
                      and not is_removed(receipt, active))
@@ -1062,6 +1139,11 @@ def services_payload():
             "state": derive_state(svc.get("setup"), installed, active),
             "installed": installed,
             "active": active,
+            # Whether a stopped-looking tile is actually in trouble — a
+            # health probe failed while parts are provably (or unknowably)
+            # alive. The UI paints "down" only for this; an installed but
+            # stopped service is a muted "paused" instead.
+            "degraded": degraded,
             # Lets a reopened tile reattach to a deploy it started earlier
             # instead of POSTing a fresh one and getting a 409 it can do
             # nothing with. null when there is nothing to reattach to.
@@ -1074,7 +1156,7 @@ def services_payload():
             # missing key is harder to be null-safe about than a null.
             "usage": usage_entry(usage, svc.get("key")),
             "deployed_at": deployed_at(svc.get("marker")),
-            "resources": service_resources(svc),
+            "resources": resources,
             # The install receipt (see write_receipt), for the catalogue
             # page's "installed on" line. null when there is none, which is
             # normal for anything deployed from a terminal.
@@ -1110,7 +1192,17 @@ def service_detail(key):
     host = magicdns_host()
     health = svc.get("health")
     probes = probe_all([health]) if health else {}
-    active = bool(health) and probes.get(health, False)
+    resources = service_resources(svc)
+    # Same derivation as the grid: a probe decides when one exists, a live
+    # control part decides when it does not, and `degraded` tells a stopped
+    # service that is still running from one that is just off.
+    if health:
+        active = bool(probes.get(health, False))
+        degraded = (not active
+                    and control_running(svc, resources) is not False)
+    else:
+        active = control_running(svc, resources) is True
+        degraded = False
     receipt = load_receipt(key)
     installed = ((active or marker_exists(svc.get("marker")))
                  and not is_removed(receipt, active))
@@ -1129,11 +1221,12 @@ def service_detail(key):
         "state": derive_state(svc.get("setup"), installed, active),
         "installed": installed,
         "active": active,
+        "degraded": degraded,
         "job": jobs_by_key().get(key),
         "control": control_status(svc),
         "usage": usage_entry(load_usage(), key),
         "deployed_at": deployed_at(svc.get("marker")),
-        "resources": service_resources(svc),
+        "resources": resources,
         "description": description,
         "meta": {
             # Registry facts, verbatim: paths as written, so what is shown is

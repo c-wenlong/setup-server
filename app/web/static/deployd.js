@@ -115,16 +115,55 @@
     return b;
   }
 
-  /* A click that must be tapped twice: the button turns into its own
-     confirm ("Really remove?") for a few seconds, then disarms. */
-  function confirmAct(label, confirmLabel, fn) {
-    var b = act(label, null, null, true);
+  /* ---------- row actions: one ⋯ button, a menu on tap ----------
+   *
+   * Four pills per row read as chrome, not information, so the actions live
+   * in an overflow menu. One menu is open at a time; tap-outside or Esc
+   * closes it, and the next repaint drops whatever was open anyway. */
+  var openMenu = null;
+
+  /* Esc returns focus to the row's ⋯ button — removing the focused item
+     would otherwise dump a keyboard user at document top. */
+  function closeMenu(restoreFocus) {
+    if (!openMenu) return;
+    var btn = openMenu._btn;
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    openMenu.remove();
+    openMenu = null;
+    if (restoreFocus && btn) btn.focus();
+  }
+
+  document.addEventListener('click', function (ev) {
+    if (openMenu && !openMenu.contains(ev.target)) closeMenu();
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') closeMenu(true);
+  });
+
+  function menuItem(label, title, fn) {
+    var b = make('button', 'dep-menu-item');
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    text(b, label);
+    if (title) b.title = title;
+    b.addEventListener('click', function () { closeMenu(); fn(); });
+    return b;
+  }
+
+  /* The two-tap arm/disarm the inline Remove had, inside the menu: first
+     tap relabels, second runs, closing the menu disarms. */
+  function confirmItem(label, fn) {
+    var b = make('button', 'dep-menu-item dep-menu-danger');
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    text(b, label);
     var armed = false;
     var timer = null;
-    b.addEventListener('click', function () {
+    b.addEventListener('click', function (ev) {
+      ev.stopPropagation();
       if (!armed) {
         armed = true;
-        text(b, confirmLabel);
+        text(b, 'Really ' + label.toLowerCase() + '?');
         timer = setTimeout(function () {
           armed = false;
           text(b, label);
@@ -132,12 +171,93 @@
         return;
       }
       clearTimeout(timer);
-      armed = false;
       b.disabled = true;
-      text(b, label);
+      closeMenu();
       fn();
     });
     return b;
+  }
+
+  function buildMenu(entry, errHost) {
+    var k = entry.key;
+    var menu = make('span', 'dep-menu');
+    menu.setAttribute('role', 'menu');
+
+    menu.appendChild(menuItem('Deploy now', 'Run its deploy cmd immediately',
+      function () {
+        clearRowError(errHost);
+        callDeployd('POST', 'api/deployd/pollers/' +
+                    encodeURIComponent(k) + '/deploy', null,
+          function (data, status) {
+            if (status === 202 && data && data.job_id &&
+                window.LauncherApp && LauncherApp.watchJob) {
+              LauncherApp.watchJob(k, data.job_id, 'deploy');
+            } else if (data && data.error) {
+              rowError(errHost, data.error);
+            } else {
+              rowError(errHost, 'Deploy failed to start (HTTP ' + status + ')');
+            }
+          });
+      }));
+    menu.appendChild(entry.disabled
+      ? menuItem('Resume', 'Clear the .disabled marker — deployd polls it again',
+                 function () { clearRowError(errHost);
+                               post('api/deployd/pollers/' +
+                                    encodeURIComponent(k) + '/resume', null, errHost); })
+      : menuItem('Pause', 'Drop a .disabled marker — deployd skips it',
+                 function () { clearRowError(errHost);
+                               post('api/deployd/pollers/' +
+                                    encodeURIComponent(k) + '/pause', null, errHost); }));
+    menu.appendChild(menuItem(entry.source === 'manifest' ? 'Override…' : 'Edit…',
+      entry.source === 'manifest'
+        ? 'Repo, ref and cmd come from app.json — this writes an override row'
+        : 'Edit the state/pollers.json entry',
+      function () {
+        if (editing) return;
+        var form = openEditor(k, entry);
+        /* errHost sits inside the row — the menu itself is already
+           detached here, so it cannot find the row to anchor the form. */
+        var rowEl = errHost.closest('.dep-row');
+        if (rowEl && rowEl.parentNode) rowEl.parentNode.insertBefore(form, rowEl.nextSibling);
+        var first = form.querySelector('.dep-input');
+        if (first) first.focus();
+      }));
+    menu.appendChild(make('span', 'dep-menu-sep'));
+    menu.appendChild(confirmItem('Remove', function () {
+      clearRowError(errHost);
+      callDeployd('DELETE', 'api/deployd/pollers/' + encodeURIComponent(k),
+                  null, function (data, status) {
+        if (data && data.watched) { repaint(data); return; }
+        rowError(errHost, (data && data.error) ||
+                 'Remove failed (HTTP ' + status + ')');
+      });
+    }));
+    return menu;
+  }
+
+  /* The ⋯ toggle: a second tap on the same button closes, a tap on another
+     row's closes that one and opens this one. `errHost` is the row's top
+     line — the place action failures land. */
+  function rowActions(entry, errHost) {
+    var wrap = make('span', 'dep-menu-wrap');
+    var btn = make('button', 'dep-menu-btn');
+    btn.type = 'button';
+    btn.setAttribute('aria-haspopup', 'menu');
+    btn.setAttribute('aria-expanded', 'false');
+    btn.setAttribute('aria-label', 'Actions for ' + entry.key);
+    text(btn, '…');
+    wrap.appendChild(btn);
+    btn.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (openMenu && openMenu.parentNode === wrap) { closeMenu(); return; }
+      closeMenu();
+      var menu = buildMenu(entry, errHost);
+      menu._btn = btn;
+      wrap.appendChild(menu);
+      openMenu = menu;
+      btn.setAttribute('aria-expanded', 'true');
+    });
+    return wrap;
   }
 
   function repaint(data) {
@@ -282,63 +402,9 @@
     return form;
   }
 
-  function rowActions(entry) {
-    var acts = make('div', 'dep-actions');
-    var k = entry.key;
-
-    acts.appendChild(act('Deploy now', 'Run its deploy cmd immediately',
-      function () {
-        clearRowError(acts);
-        callDeployd('POST', 'api/deployd/pollers/' +
-                    encodeURIComponent(k) + '/deploy', null,
-          function (data, status) {
-            if (status === 202 && data && data.job_id &&
-                window.LauncherApp && LauncherApp.watchJob) {
-              LauncherApp.watchJob(k, data.job_id, 'deploy');
-            } else if (data && data.error) {
-              rowError(acts, data.error);
-            } else {
-              rowError(acts, 'Deploy failed to start (HTTP ' + status + ')');
-            }
-          });
-      }));
-    acts.appendChild(entry.disabled
-      ? act('Resume', 'Clear the .disabled marker — deployd polls it again',
-            function () { clearRowError(acts);
-                          post('api/deployd/pollers/' +
-                               encodeURIComponent(k) + '/resume', null, acts); })
-      : act('Pause', 'Drop a .disabled marker — deployd skips it',
-            function () { clearRowError(acts);
-                          post('api/deployd/pollers/' +
-                               encodeURIComponent(k) + '/pause', null, acts); }));
-    acts.appendChild(act(entry.source === 'manifest' ? 'Override' : 'Edit',
-      entry.source === 'manifest'
-        ? 'Repo, ref and cmd come from app.json — this writes an override row'
-        : 'Edit the state/pollers.json entry',
-      function (ev) {
-        if (editing) return;
-        var form = openEditor(k, entry);
-        var row = ev.target.closest('.dep-row');
-        if (row && row.parentNode) row.parentNode.insertBefore(form, row.nextSibling);
-        var first = form.querySelector('.dep-input');
-        if (first) first.focus();
-      }));
-    acts.appendChild(confirmAct('Remove', 'Remove?',
-      function () {
-        clearRowError(acts);
-        callDeployd('DELETE', 'api/deployd/pollers/' + encodeURIComponent(k),
-                    null, function (data, status) {
-          if (data && data.watched) { repaint(data); return; }
-          rowError(acts, (data && data.error) ||
-                   'Remove failed (HTTP ' + status + ')');
-        });
-      }));
-    return acts;
-  }
-
   /* One watched service: key, ref -> sha, state chip, and its log tail in a
      disclosure when there is one. `full` adds repo, the cmd, failure record,
-     and the action buttons. */
+     and the actions menu. */
   function row(entry, full) {
     var wrap = make('div', 'dep-row dep-' + entry.state);
     var top = make('div', 'dep-row-top');
@@ -350,7 +416,8 @@
     var track = make('span', 'dep-track');
     var bits = [];
     if (full && entry.repo) {
-      bits.push(entry.repo.replace(/^https?:\/\//, ''));
+      bits.push(entry.repo.replace(/^https?:\/\//, '').replace(/\.git$/, '')
+                          .replace(/^github\.com\//, ''));
     }
     bits.push(entry.ref || 'main');
     bits.push('→');
@@ -379,6 +446,9 @@
       text(w, ago(entry.log_mtime));
       top.appendChild(w);
     }
+    /* The menu is last in the top line; `top` is also the error host, so a
+       failed action lands a .dep-err under it on the next wrapped line. */
+    if (full) top.appendChild(rowActions(entry, top));
     wrap.appendChild(top);
 
     if (full && entry.cmd) {
@@ -387,8 +457,6 @@
       cmd.title = entry.cmd;
       wrap.appendChild(cmd);
     }
-
-    if (full) wrap.appendChild(rowActions(entry));
 
     if (entry.log) {
       var det = make('details', 'dep-log');
@@ -413,7 +481,9 @@
     top.appendChild(name);
     var track = make('span', 'dep-track');
     var bits = [];
-    if (s.repo) bits.push(String(s.repo).replace(/^https?:\/\//, ''));
+    if (s.repo) bits.push(String(s.repo).replace(/^https?:\/\//, '')
+                                   .replace(/\.git$/, '')
+                                   .replace(/^github\.com\//, ''));
     bits.push(s.ref || 'main');
     text(track, bits.join(' '));
     top.appendChild(track);
