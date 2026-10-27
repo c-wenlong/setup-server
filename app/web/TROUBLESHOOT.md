@@ -270,6 +270,28 @@ changes both.
   at the end of the next section; the same `sg docker` workaround covers both
   deploys and lifecycle actions.
 
+## Update badges and the Update button
+
+- **No badge although upstream released** — the check compares digests of
+  the *same tag*. A service pinned to a version in `.env` (`VAULTWARDEN_VERSION=1.37.2`)
+  only moves when you bump that value, so it never shows one. Floating tags
+  (`latest`, `release`, `v3`) are the ones that do.
+- **"Not checked yet"** — the first sweep runs two minutes after the launcher
+  starts, then every six hours. **Check now** runs it for one service.
+- **`check failed: registry answered HTTP 401/404`** — a private image (the
+  check only has an anonymous token), or a ref the registry no longer has.
+  `docker pull <ref>` in a terminal says which.
+- **`registry unreachable`** — the box has no outbound HTTPS right now. The
+  next sweep retries; nothing else depends on it.
+- **The badge is stale or wrong** — delete `~/services/launcher/updates.json`
+  and press **Check now** (or wait for the sweep). It holds nothing else.
+- **Update failed in `docker pull`** — nothing was recreated; the service
+  still runs the old image. **Update failed in `setup.sh`** — the new image
+  is pulled but the containers may be part way through recreation, exactly
+  as a failed manual re-run would leave them. The job log has the reason;
+  re-run `./setup.sh` from a terminal once it is fixed. Nothing is rolled
+  back.
+
 ## Deploy from the UI fails
 
 - **The button does nothing / `404`** — the `key` is not in the registry, or its

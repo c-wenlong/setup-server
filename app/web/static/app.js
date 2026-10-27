@@ -34,8 +34,17 @@
     start:   { label: 'Start',   busy: 'Starting…',    gerund: 'Starting'    },
     stop:    { label: 'Stop',    busy: 'Stopping…',    gerund: 'Stopping'    },
     restart: { label: 'Restart', busy: 'Restarting…',  gerund: 'Restarting'  },
-    remove:  { label: 'Remove',  busy: 'Removing…',    gerund: 'Removing'    }
+    remove:  { label: 'Remove',  busy: 'Removing…',    gerund: 'Removing'    },
+    update:  { label: 'Update',  busy: 'Updating…',    gerund: 'Updating'    }
   };
+
+  /* The last image check found a newer digest behind one of this service's
+     tags. `updates` is null when it has not been checked or is not
+     installed, and absent on a backend that predates the check. */
+  function hasUpdate(svc) {
+    var u = svc && svc.updates;
+    return !!(u && typeof u === 'object' && u.available === true);
+  }
 
   function actionDef(name) {
     return Object.prototype.hasOwnProperty.call(ACTIONS, name) ? ACTIONS[name] : null;
@@ -51,6 +60,9 @@
     { id: 'paused', label: 'Paused',
       match: function (s) { return s.state === 'stopped'; },
       empty: 'Nothing is down — every deployed service is answering.' },
+    { id: 'updates', label: 'Updates',
+      match: function (s) { return hasUpdate(s); },
+      empty: 'Every installed service is on the newest image for its tag.' },
     { id: 'uninstalled', label: 'Uninstalled',
       match: function (s) { return s.state === 'available' || s.state === 'planned'; },
       empty: 'Everything in the repo is deployed.' },
@@ -176,6 +188,11 @@
   var elEnv     = $('d-env');
   var elEnvEmpty = $('d-env-empty');
   var elMetaSec = $('d-meta-sec');
+  var elUpdSec   = $('d-upd-sec');
+  var elUpdWhen  = $('d-upd-when');
+  var elUpdList  = $('d-upd-list');
+  var elUpdErr   = $('d-upd-err');
+  var elUpdCheck = $('d-upd-check');
   var elMeta    = $('d-meta');
 
   var elScrim   = $('scrim');
@@ -287,7 +304,7 @@
     if (typeof AbortController === 'function') {
       controller = new AbortController();
       opts.signal = controller.signal;
-      timer = setTimeout(function () { controller.abort(); }, FETCH_TIMEOUT);
+      timer = setTimeout(function () { controller.abort(); }, opts.timeout || FETCH_TIMEOUT);
     }
     opts.cache = 'no-store';
     opts.credentials = 'same-origin';
@@ -421,10 +438,21 @@
 
   /* Fills a target with the tile's contents: icon, name, tagline. */
   function fillTile(node, svc) {
-    node.appendChild(icon(svc));
+    var ic = icon(svc);
+    /* An update waiting is a badge on the icon, the way a phone shows one.
+       Not a tagline note: a running tile already has its RAM figure in the
+       corner, and a second note there runs into it. */
+    if (hasUpdate(svc)) {
+      var badge = make('span', 'tile-upd');
+      badge.setAttribute('aria-hidden', 'true');
+      badge.title = 'Update available';
+      ic.appendChild(badge);
+    }
+    node.appendChild(ic);
     node.appendChild(text(make('span', 'tile-name'), svc.name || svc.key));
     node.appendChild(tagline(svc));
-    var label = (svc.name || svc.key) + ', ' + (svc.tagline || '') + ', ' + describe(svc);
+    var label = (svc.name || svc.key) + ', ' + (svc.tagline || '') + ', ' + describe(svc) +
+                (hasUpdate(svc) ? ', update available' : '');
     node.setAttribute('aria-label', label.replace(/, ,/g, ','));
     return node;
   }
@@ -688,7 +716,7 @@
   /* Reuse the existing node when nothing about the service changed, so the
      30s refresh does not blow away focus, hover, or the scroll position. */
   function tileFor(svc) {
-    var sig = [svc.state, svc.url, svc.name, svc.tagline, svc.icon, liveJob(svc), jobAction(svc)].join('');
+    var sig = [svc.state, svc.url, svc.name, svc.tagline, svc.icon, liveJob(svc), jobAction(svc), hasUpdate(svc)].join('');
     var hit = tileCache[svc.key];
     var node = (hit && hit.sig === sig) ? hit.node : null;
     if (!node) {
@@ -958,6 +986,15 @@
           detailSvc.job = fresh.job;
           if (fresh.control !== undefined) detailSvc.control = fresh.control;
           if (fresh.removable !== undefined) detailSvc.removable = fresh.removable;
+          if (fresh.updates !== undefined) {
+            /* The grid carries {available, checked_at} only; keep the
+               detail's `updatable` verdict alongside it. */
+            var keep = detailSvc.updates && detailSvc.updates.updatable;
+            detailSvc.updates = fresh.updates
+              ? { available: fresh.updates.available,
+                  checked_at: fresh.updates.checked_at, updatable: keep }
+              : null;
+          }
           if (detailSvc.url == null) detailSvc.url = fresh.url;
           detailSvc.receipt = fresh.receipt;
           detailSvc.deployed_at = fresh.deployed_at;
@@ -1166,6 +1203,13 @@
              'the seconds in between, and anything mid-request is dropped. ' +
              'Nothing happens until you confirm.';
     }
+    if (action === 'update') {
+      return 'This pulls the newer image for ' + name + ', then re-runs its ' +
+             'setup.sh, which recreates its containers on it. It is offline ' +
+             'for the seconds that takes, with its uptime monitor paused. Data ' +
+             'and .env are kept, and nothing is rolled back if it fails. ' +
+             'Nothing happens until you confirm.';
+    }
     if (action === 'remove') {
       return 'This takes ' + name + ' off the box: its uptime monitor is paused, ' +
              'then its teardown.sh stops it and takes its address off the tailnet. ' +
@@ -1289,10 +1333,13 @@
     text(elConfirm, def.busy);
     if (detailSvc) paintControls(detailSvc);
 
-    request('api/services/' + encodeURIComponent(key) + '/action', {
+    /* Update has its own endpoint: it takes no body, the key is the whole
+       request. Everything after the POST is the same job flow. */
+    request('api/services/' + encodeURIComponent(key) +
+            (action === 'update' ? '/update' : '/action'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: action })
+      body: action === 'update' ? '' : JSON.stringify({ action: action })
     }).then(function (res) {
       /* The sheet can be dismissed while this is in flight (scrim, Escape).
          The job is the server's now; leave it alone and let the grid pick it
@@ -1421,6 +1468,9 @@
          refresh above can still be looking at the world as it was before the
          action. One late refetch settles the dot and the buttons. */
       if (sheetAction !== 'deploy') settle();
+      if (sheetAction === 'update' && sheetService && sheetService.key === detailKey) {
+        refreshUpdates(detailKey);
+      }
     }, function () {
       if (jobId !== id) return;
       jobFails++;
@@ -1592,10 +1642,18 @@
     return b;
   }
 
+  /* The detail payload says `updatable: false` when an update could not run
+     here (locked, no setup.sh); the grid's summary does not carry it, so
+     absent means offer it and let the server's refusal explain. */
+  function updateOffered(svc) {
+    return hasUpdate(svc) && svc.updates.updatable !== false;
+  }
+
   function actionButton(svc, action) {
     var def = ACTIONS[action];
     var b = ctlButton(def.label,
       action === 'start' ? 'is-primary'
+        : action === 'update' ? 'is-update'
         : (action === 'stop' || action === 'remove' ? 'is-danger' : ''),
       function (node) { openActionSheet(svc, action, node); });
     b.setAttribute('aria-label', def.label + ' ' + nameOf(svc));
@@ -1636,7 +1694,7 @@
     var ctl = controlState(svc);
     var job = liveJob(svc);
     var sig = [state, svc && svc.url, ctl.on, ctl.reason, job, jobAction(svc),
-               actionBusy, svc && svc.removable === true].join('|');
+               actionBusy, svc && svc.removable === true, updateOffered(svc)].join('|');
     if (sig === ctlSig) return;
     ctlSig = sig;
 
@@ -1694,6 +1752,7 @@
     var buttons = state === 'active'
       ? [actionButton(svc, 'restart'), actionButton(svc, 'stop')]
       : [actionButton(svc, 'start')];
+    if (updateOffered(svc)) buttons.unshift(actionButton(svc, 'update'));
     /* Only when the service ships a teardown.sh: the server says so. */
     if (svc.removable === true) buttons.push(actionButton(svc, 'remove'));
 
@@ -2243,6 +2302,11 @@
     elEnvPath.hidden = true;
     elMeta.textContent = '';
     elMetaSec.hidden = true;
+    if (elUpdSec) {
+      elUpdSec.hidden = true;
+      elUpdList.textContent = '';
+      elUpdErr.hidden = true;
+    }
     savedName = '';
     savedDesc = '';
     elDName.value = '';
@@ -2301,6 +2365,7 @@
          at all. Undefined on a backend that has no lifecycle endpoint. */
       control: d.control !== undefined ? d.control : known.control,
       removable: d.removable !== undefined ? d.removable : known.removable,
+      updates: d.updates !== undefined ? d.updates : known.updates,
       /* Strip cells — the detail payload carries none of author/receipt, so
          they fall back to what the grid already knew. */
       group: d.group || known.group,
@@ -2320,8 +2385,106 @@
     autoGrow(elDDesc);
 
     paintEnv(d.env, view.key);
+    paintUpdates(d.updates, view.key);
     paintMeta(withReceipt(d.meta, d.receipt));
     VIEW.detail(view.key, d);
+  }
+
+  /* --- image updates --- */
+
+  var UPDATE_STATUS = {
+    update:  ['newer image available', 'is-update'],
+    current: ['up to date', ''],
+    pinned:  ['pinned by digest', ''],
+    local:   ['built on this box', ''],
+    error:   ['check failed', 'is-error']
+  };
+
+  function checkedLine(iso) {
+    if (typeof iso !== 'string' || !iso) {
+      return 'Not checked yet. The launcher checks every 6 hours.';
+    }
+    var when = new Date(iso);
+    if (isNaN(when.getTime())) return 'Checked ' + iso + '.';
+    return 'Checked ' + when.toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    }) + '. The launcher checks every 6 hours.';
+  }
+
+  /* `u` is the detail payload's block: {checkable, updatable, checked_at,
+     available, images}. Absent on an older backend, and then the section
+     simply stays hidden. */
+  function paintUpdates(u, key) {
+    if (!elUpdSec) return;
+    if (!u || typeof u !== 'object' || !u.checkable) {
+      elUpdSec.hidden = true;
+      return;
+    }
+    elUpdSec.hidden = false;
+    text(elUpdWhen, checkedLine(u.checked_at));
+    elUpdList.textContent = '';
+    var images = Array.isArray(u.images) ? u.images : [];
+    for (var i = 0; i < images.length; i++) {
+      var img = images[i] || {};
+      var st = UPDATE_STATUS[img.status] || ['unknown', ''];
+      var li = make('li');
+      li.appendChild(text(make('span', 'upd-ref'), img.image || '?'));
+      var label = st[0] + (img.status === 'error' && img.error ? ': ' + img.error : '');
+      li.appendChild(text(make('span', 'upd-st' + (st[1] ? ' ' + st[1] : '')), label));
+      elUpdList.appendChild(li);
+    }
+    elUpdList.hidden = images.length === 0;
+  }
+
+  function applyUpdates(key, u) {
+    if (key !== detailKey) return;
+    paintUpdates(u, key);
+    if (detailSvc) {
+      detailSvc.updates = u;
+      paintControls(detailSvc);
+    }
+  }
+
+  /* After an update job: only this block is refetched, so nothing being
+     typed into the name or description gets painted over. */
+  function refreshUpdates(key) {
+    request('api/services/' + encodeURIComponent(key)).then(function (res) {
+      if (res.ok && res.data && res.data.updates !== undefined) {
+        applyUpdates(key, res.data.updates);
+      }
+    }, function () {});
+  }
+
+  if (elUpdCheck) {
+    elUpdCheck.addEventListener('click', function () {
+      var key = detailKey;
+      if (!key || elUpdCheck.disabled) return;
+      elUpdCheck.disabled = true;
+      elUpdErr.hidden = true;
+      text(elUpdCheck, 'Checking…');
+      /* One registry round trip per image, each allowed 10s server-side, so
+         this waits longer than an ordinary call before giving up. */
+      request('api/services/' + encodeURIComponent(key) + '/updates/check', {
+        method: 'POST', timeout: 60000
+      }).then(function (res) {
+        elUpdCheck.disabled = false;
+        text(elUpdCheck, 'Check now');
+        if (res.ok && res.data) {
+          applyUpdates(key, res.data);
+          load(true);
+          return;
+        }
+        if (key !== detailKey) return;
+        text(elUpdErr, 'The check did not run: ' + msgFrom(res, 'HTTP ' + res.status) + '.');
+        elUpdErr.hidden = false;
+      }, function () {
+        elUpdCheck.disabled = false;
+        text(elUpdCheck, 'Check now');
+        if (key !== detailKey) return;
+        text(elUpdErr, 'Could not reach the launcher to check.');
+        elUpdErr.hidden = false;
+      });
+    });
   }
 
   /* --- routing --- */

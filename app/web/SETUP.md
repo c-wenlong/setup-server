@@ -24,6 +24,8 @@ Tailscale Serve ─┤                              ├─▶ 127.0.0.1:8093
                                                       ├── GET  api/services
                                                       ├── POST api/services/{key}/deploy  ──▶ <repo>/services/<service>/setup.sh
                                                       ├── PATCH api/services/{key}/env/{var} ──▶ rewrites one line of services/<service>/.env
+                                                      ├── POST api/services/{key}/update ──▶ docker pull <moved refs> + setup.sh
+                                                      ├── POST api/services/{key}/updates/check ──▶ registry manifest HEADs
                                                       ├── GET  api/jobs/{id}
                                                       └── GET  healthz
 ```
@@ -42,6 +44,7 @@ State lives under `~/services/launcher`:
 ```
 ~/services/launcher/
   jobs/<id>.log     # tee'd output of each deploy the UI has run
+  updates.json      # last image-update check per service (safe to delete)
 ```
 
 That directory is also launcher's own `marker` in the registry, so the
@@ -111,6 +114,30 @@ it never adds); the value is single-line, capped at 4 KB, and quoted so that a
 shell `source`, Docker Compose and the launcher all read it back identically
 (see SPEC.md v4 for the measured rules); the file is replaced atomically with
 its mode copied over; the log line carries the variable name, never the value.
+
+**Image updates.** A background thread (first run two minutes after start,
+then every six hours) looks at each service's `control` containers: the ref
+each was created from (`docker inspect` → `.Config.Image`) is looked up on its
+registry with one manifest `HEAD` (anonymous token, the same one `docker pull`
+gets), and the digest is compared with the running image's `RepoDigests`. A
+different digest means the tag has moved, so the tile gets an accent badge,
+the **Updates** tab counts it, and the detail page offers **Update** and a
+**Check now**. This catches floating tags (`latest`, `release`, `v3`) and a
+pinned tag that upstream rebuilt. It does not look for newer version tags: a
+version pinned in `.env` is bumped by hand (the env editor) and a redeploy.
+Digest-pinned refs (`…@sha256:`) and images built on the box are listed but
+never checked.
+
+**Update** is a job like any other (one per key, same global cap): pause the
+Kuma monitor, `docker pull` each ref the last check marked as moved, re-run
+the service's `setup.sh` (whose own `docker compose up -d` recreates the
+containers), resume the monitor. That is the upgrade recipe every service's
+SETUP.md already gives, run from the browser. The request carries the key
+only; the refs come from `updates.json` and are shape-checked again before
+they reach an argv. A failed pull stops before `setup.sh`, so nothing is
+recreated. Success writes the install receipt and re-checks, which clears
+the badge. Hard-locked and `locked` services are checked but never offered
+the button.
 
 ⚠️ Anyone on the tailnet can deploy any service in the registry. That is the
 intended blast radius (it is your tailnet), but it is the reason to keep the

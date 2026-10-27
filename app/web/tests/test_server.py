@@ -44,6 +44,11 @@ def _forbidden_popen(argv, **kwargs):
 subprocess.Popen = _forbidden_popen
 
 
+def _forbidden_remote_digest(host, repo, tag):
+    raise AssertionError("a registry lookup escaped the sandbox: %s/%s:%s"
+                         % (host, repo, tag))
+
+
 class FakeProc:
     """A subprocess that never exits: the reaper thread parks on the event,
     so every started job stays 'running' for the duration of the test."""
@@ -108,6 +113,8 @@ class SandboxTest(unittest.TestCase):
             "NOTES_PATH": server.NOTES_PATH,
             "USAGE_PATH": server.USAGE_PATH,
             "INSTANCES_DIR": server.INSTANCES_DIR,
+            "UPDATES_PATH": server.UPDATES_PATH,
+            "remote_digest": server.remote_digest,
             "DEPLOYD_HOME": server.DEPLOYD_HOME,
             "deployd_timer": server.deployd_timer,
             "_timer_active": server._timer_active,
@@ -135,6 +142,10 @@ class SandboxTest(unittest.TestCase):
         server.NOTES_PATH = os.path.join(self.tmp, "state", "notes.json")
         server.USAGE_PATH = os.path.join(self.tmp, "state", "usage.json")
         server.INSTANCES_DIR = os.path.join(self.tmp, "state", "instances")
+        server.UPDATES_PATH = os.path.join(self.tmp, "state", "updates.json")
+        # No test may reach a real registry: the check's one network call is
+        # stubbed to fail loudly unless a test installs its own answer.
+        server.remote_digest = _forbidden_remote_digest
         # deployd's service home under the sandbox too; and its timer probe
         # defaults to "unknowable" so no test can reach a real systemctl
         # (which subprocess.run would route into the unstubbed-Popen guard).
@@ -633,7 +644,7 @@ class ServiceJobFieldTest(SandboxTest):
         for tile in self.tiles().values():
             self.assertEqual(list(tile), self.EIGHT + [
                 "degraded", "job", "control", "usage", "deployed_at",
-                "resources", "receipt", "removable"])
+                "resources", "receipt", "removable", "updates"])
 
     # ---- restart
 
@@ -770,7 +781,7 @@ class HttpTest(SandboxTest):
                                        "description", "group",
                                        "icon", "installed", "job", "key",
                                        "name", "receipt", "removable", "resources",
-                                       "state", "tagline", "url", "usage"])
+                                       "state", "tagline", "updates", "url", "usage"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
         self.assertEqual(svc["author"], "c-wenlong")
         self.assertIsNone(svc["job"])
@@ -785,7 +796,7 @@ class HttpTest(SandboxTest):
                           "author", "icon", "url", "state", "installed",
                           "active", "degraded", "job", "control", "usage",
                           "deployed_at",
-                          "resources", "receipt", "removable"])
+                          "resources", "receipt", "removable", "updates"])
 
     def test_groups_empty_when_the_registry_has_none(self):
         # An older services.json without a catalog still paints a flat grid.
@@ -1109,7 +1120,7 @@ class DetailTest(SandboxTest):
             "active", "control", "degraded", "deployed_at", "description",
             "env", "group",
             "icon", "installed", "job", "key", "meta", "name", "receipt",
-            "removable", "resources", "state", "tagline", "url", "usage"])
+            "removable", "resources", "state", "tagline", "updates", "url", "usage"])
         self.assertEqual(detail["key"], "alpha")
         self.assertEqual(detail["name"], "Alpha")
         self.assertEqual(detail["description"], "Shipped description.")
@@ -6110,6 +6121,372 @@ class DeploydPollersHttpTest(HttpTest):
                                   "POST", body="{}")[0], 400)
         self.assertEqual(self.get("/api/deployd/pollers/alpha/pause/../x",
                                   "POST")[0], 404)
+
+
+# ---------------------------------------------------------------- updates
+
+OLD = "sha256:" + "a" * 64
+NEW = "sha256:" + "b" * 64
+IMG = "sha256:" + "c" * 64
+
+
+class ParseImageRefTest(unittest.TestCase):
+
+    def test_table(self):
+        table = {
+            "ghcr.io/openhands/agent-canvas:latest":
+                ("ghcr.io", "openhands/agent-canvas", "latest"),
+            "n8nio/n8n": ("registry-1.docker.io", "n8nio/n8n", "latest"),
+            "redis:7-alpine": ("registry-1.docker.io", "library/redis", "7-alpine"),
+            "registry:2": ("registry-1.docker.io", "library/registry", "2"),
+            "docker.io/valkey/valkey:9":
+                ("registry-1.docker.io", "valkey/valkey", "9"),
+            "localhost:5000/mine": ("localhost:5000", "mine", "latest"),
+            "codeberg.org/forgejo/forgejo:15":
+                ("codeberg.org", "forgejo/forgejo", "15"),
+        }
+        for ref, want in table.items():
+            self.assertEqual(server.parse_image_ref(ref), want, ref)
+
+    def test_refs_that_cannot_move_or_are_not_safe(self):
+        for ref in ("docker.io/valkey/valkey:9@" + OLD, "-rm", "a b",
+                    "x;id", "", None, 42, "x:", "$(id)"):
+            self.assertIsNone(server.parse_image_ref(ref), ref)
+
+
+class UpdateTestBase(ControlTestBase):
+    """A registry with one updatable service (`oh`) and a fake docker."""
+
+    def setUp(self):
+        super().setUp()
+        self.marker = os.path.join(self.tmp, "installed-oh")
+        os.makedirs(self.marker)
+        self.make_script("services/oh/setup.sh")
+        self.write_registry({"services": [
+            {"key": "oh", "name": "OpenHands", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": self.marker,
+             "setup": "services/oh/setup.sh", "env": None,
+             "control": {"parts": [{"container": "oh-app"},
+                                   {"container": "oh-db"},
+                                   {"container": "oh-cache"},
+                                   {"container": "oh-built"}],
+                         "kuma": "oh"}},
+            {"key": "launcher", "name": "launcher", "tagline": "t",
+             "icon": "code", "url": None, "health": None, "marker": None,
+             "setup": "services/oh/setup.sh", "env": None,
+             "control": {"parts": [{"container": "launcher"}]}},
+            {"key": "native", "name": "native", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "env": None, "control": {"parts": [{"unit": "x.service"}]}},
+        ]})
+        self.lookups = []
+
+    def stub_docker(self, containers, images):
+        """containers: name -> (ref, image id); images: id -> RepoDigests."""
+        self.docker_calls = []
+
+        def fake(argv, **kwargs):
+            self.docker_calls.append(list(argv))
+            if argv[:2] == ["docker", "inspect"]:
+                names = argv[5:]
+                out = "".join("/%s\t%s\t%s\n" % (n, *containers[n])
+                              for n in names if n in containers)
+                return CapturedProc(out, 1 if len(out.splitlines()) < len(names) else 0)
+            if argv[:3] == ["docker", "image", "inspect"]:
+                out = "".join("%s\t%s\n" % (i, json.dumps(images[i]))
+                              for i in argv[5:] if i in images)
+                return CapturedProc(out)
+            raise AssertionError("unexpected docker call %s" % argv)
+
+        subprocess.Popen = fake
+
+    def answer(self, digests):
+        def fake(host, repo, tag):
+            self.lookups.append((host, repo, tag))
+            value = digests[(host, repo, tag)]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        server.remote_digest = fake
+
+    def standard_box(self):
+        self.stub_docker(
+            {"oh-app": ("ghcr.io/openhands/agent-canvas:latest", IMG),
+             "oh-db": ("postgres:16@" + OLD, IMG),
+             "oh-cache": ("ghcr.io/openhands/agent-canvas:latest", IMG),
+             "oh-built": ("oh-local:dev", "sha256:" + "d" * 64)},
+            {IMG: ["ghcr.io/openhands/agent-canvas@" + OLD],
+             "sha256:" + "d" * 64: []})
+        self.answer({("ghcr.io", "openhands/agent-canvas", "latest"): NEW})
+
+
+class UpdateCheckTest(UpdateTestBase):
+
+    def test_statuses_and_one_lookup_per_ref(self):
+        self.standard_box()
+        entry = server.check_service_updates(server.find_service("oh"))
+        self.assertTrue(entry["available"])
+        self.assertEqual(
+            {i["container"]: i["status"] for i in entry["images"]},
+            {"oh-app": "update", "oh-db": "pinned", "oh-cache": "update",
+             "oh-built": "local"})
+        self.assertEqual(self.lookups,
+                         [("ghcr.io", "openhands/agent-canvas", "latest")])
+
+    def test_same_digest_is_current(self):
+        self.standard_box()
+        self.answer({("ghcr.io", "openhands/agent-canvas", "latest"): OLD})
+        entry = server.check_service_updates(server.find_service("oh"))
+        self.assertFalse(entry["available"])
+        self.assertEqual(entry["images"][0]["status"], "current")
+
+    def test_registry_failure_is_an_error_not_an_update(self):
+        import urllib.error
+        self.standard_box()
+        self.answer({("ghcr.io", "openhands/agent-canvas", "latest"):
+                     urllib.error.URLError("down")})
+        entry = server.check_service_updates(server.find_service("oh"))
+        self.assertFalse(entry["available"])
+        self.assertEqual(entry["images"][0]["status"], "error")
+        self.assertEqual(entry["images"][0]["error"], "registry unreachable")
+
+    def test_nothing_running_is_none(self):
+        self.stub_docker({}, {})
+        self.assertIsNone(server.check_service_updates(server.find_service("oh")))
+        self.assertEqual(self.lookups, [])
+
+    def test_unit_only_service_never_calls_docker(self):
+        self.stub_docker({}, {})
+        self.assertIsNone(server.check_service_updates(server.find_service("native")))
+        self.assertEqual(self.docker_calls, [])
+
+    def test_store_round_trip_and_drop(self):
+        self.standard_box()
+        server.check_all_updates()
+        stored = server.load_updates()
+        self.assertTrue(stored["oh"]["available"])
+        self.stub_docker({}, {})
+        server.record_updates("oh", None)
+        self.assertNotIn("oh", server.load_updates())
+
+    def test_corrupt_store_reads_as_unchecked(self):
+        os.makedirs(os.path.dirname(server.UPDATES_PATH), exist_ok=True)
+        for junk in ("{not json", "[]", '{"oh": {"images": "x"}}',
+                     '{"oh": {"images": [{"image": "x", "status": "weird"}]}}'):
+            with open(server.UPDATES_PATH, "w") as fh:
+                fh.write(junk)
+            self.assertFalse(server.load_updates().get("oh", {}).get("available"))
+
+    def test_payloads(self):
+        self.standard_box()
+        server.check_all_updates()
+        tiles = {t["key"]: t for t in server.services_payload()["services"]}
+        self.assertTrue(tiles["oh"]["updates"]["available"])
+        self.assertIsNone(tiles["native"]["updates"])
+        detail = server.service_detail("oh")["updates"]
+        self.assertTrue(detail["checkable"])
+        self.assertTrue(detail["updatable"])
+        self.assertEqual(len(detail["images"]), 4)
+        # Hard-locked: checked, but never offered.
+        self.assertFalse(server.update_detail(server.find_service("launcher"),
+                                              True)["updatable"])
+
+    def test_not_installed_shows_nothing(self):
+        self.standard_box()
+        server.check_all_updates()
+        shutil.rmtree(self.marker)
+        tile = {t["key"]: t for t in server.services_payload()["services"]}["oh"]
+        self.assertIsNone(tile["updates"])
+        self.assertFalse(server.service_detail("oh")["updates"]["checkable"])
+
+
+class FakeResponse:
+    def __init__(self, headers=None, body=b""):
+        self.headers = headers or {}
+        self.body = body
+
+    def read(self, n=-1):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class RemoteDigestTest(unittest.TestCase):
+
+    def setUp(self):
+        import urllib.request
+        self.saved = urllib.request.urlopen
+        self.requests = []
+
+    def tearDown(self):
+        import urllib.request
+        urllib.request.urlopen = self.saved
+
+    def install(self, realm):
+        import urllib.error
+        import urllib.request
+        import email.message
+
+        def fake(req, timeout=None):
+            self.requests.append(req)
+            if isinstance(req, str):
+                return FakeResponse(body=json.dumps({"token": "tok"}).encode())
+            if req.get_header("Authorization") != "Bearer tok":
+                hdrs = email.message.Message()
+                hdrs["WWW-Authenticate"] = (
+                    'Bearer realm="%s",service="ghcr.io",'
+                    'scope="repository:o/a:pull"' % realm)
+                raise urllib.error.HTTPError(req.full_url, 401, "no", hdrs, None)
+            return FakeResponse({"Docker-Content-Digest": NEW})
+        urllib.request.urlopen = fake
+
+    def test_anonymous_token_then_head(self):
+        self.install("https://ghcr.io/token")
+        self.assertEqual(server.remote_digest("ghcr.io", "o/a", "latest"), NEW)
+        heads = [r for r in self.requests if not isinstance(r, str)]
+        self.assertEqual([r.get_method() for r in heads], ["HEAD", "HEAD"])
+        self.assertEqual(heads[0].full_url,
+                         "https://ghcr.io/v2/o/a/manifests/latest")
+        token_url = [r for r in self.requests if isinstance(r, str)][0]
+        self.assertTrue(token_url.startswith("https://ghcr.io/token?"))
+        self.assertIn("scope=repository%3Ao%2Fa%3Apull", token_url)
+
+    def test_plain_http_realm_is_not_followed(self):
+        import urllib.error
+        self.install("http://127.0.0.1/steal")
+        with self.assertRaises(urllib.error.HTTPError):
+            server.remote_digest("ghcr.io", "o/a", "latest")
+        self.assertFalse(any(isinstance(r, str) for r in self.requests))
+
+
+class UpdateJobTest(UpdateTestBase):
+
+    def run_update(self, failures=None):
+        self.record_popen(failures)
+        job_id = server.start_update("oh")
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            with server._jobs_lock:
+                status = server._jobs[job_id]["status"]
+            if status != "running":
+                return server.job_payload(job_id)
+            time.sleep(0.01)
+        self.fail("update never finished")
+
+    def seed(self, images):
+        os.makedirs(os.path.dirname(server.UPDATES_PATH), exist_ok=True)
+        with open(server.UPDATES_PATH, "w") as fh:
+            json.dump({"oh": {"checked_at": "2026-01-01T00:00:00.000Z",
+                              "available": True, "images": images}}, fh)
+
+    def test_refused_without_a_pending_update(self):
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_update("oh")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.spawned, [])
+
+    def test_refused_for_locked_and_unknown(self):
+        for key, status in (("launcher", 403), ("nope", 404),
+                            ("oh; rm -rf ~", 404)):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.start_update(key)
+            self.assertEqual(ctx.exception.status, status)
+        self.assertEqual(self.spawned, [])
+
+    def test_a_tampered_ref_is_never_pulled(self):
+        self.seed([{"image": "x; rm -rf ~", "status": "update"},
+                   {"image": "-flag", "status": "update"}])
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_update("oh")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.spawned, [])
+
+    def test_plan_pause_pull_setup_resume(self):
+        self.enable_kuma()
+        self.seed([{"image": "ghcr.io/o/a:latest", "status": "update"},
+                   {"image": "ghcr.io/o/a:latest", "status": "update"},
+                   {"image": "redis:7", "status": "current"}])
+        # The re-check after success finds nothing running in the sandbox.
+        payload = self.run_update()
+        self.assertEqual(payload["status"], "done", payload["log"])
+        self.assertEqual(payload["action"], "update")
+        argvs = self.argvs()
+        self.assertEqual(argvs[0][-2:], ["pause", "oh"])
+        self.assertEqual(argvs[1], ["docker", "pull", "ghcr.io/o/a:latest"])
+        script = os.path.realpath(os.path.join(self.repo, "services/oh/setup.sh"))
+        self.assertEqual(argvs[2], [script])
+        self.assertEqual(self.spawned[2][1]["cwd"], os.path.dirname(script))
+        self.assertEqual(argvs[3][-2:], ["resume", "oh"])
+        # Then the re-check that clears the badge: a docker inspect, and no
+        # further step of the update itself.
+        self.assertEqual([a[:2] for a in argvs[4:]], [["docker", "inspect"]])
+        self.assertEqual(server.load_receipt("oh")["last_job"],
+                         [j for j in server._jobs][0])
+
+    def test_failed_pull_skips_setup_but_resumes_kuma(self):
+        self.enable_kuma()
+        self.seed([{"image": "ghcr.io/o/a:latest", "status": "update"}])
+        payload = self.run_update({"docker pull": 1})
+        self.assertEqual(payload["status"], "failed")
+        argvs = self.argvs()
+        self.assertFalse(any(a[0].endswith("setup.sh") for a in argvs))
+        self.assertEqual(argvs[-1][-2:], ["resume", "oh"])
+        self.assertIsNone(server.load_receipt("oh"))
+
+    def test_one_job_slot_shared_with_deploys(self):
+        self.seed([{"image": "ghcr.io/o/a:latest", "status": "update"}])
+        self.record_popen(parked=True)
+        server.start_update("oh")
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_update("oh")
+        self.assertEqual(ctx.exception.status, 409)
+
+
+class UpdateHttpTest(UpdateTestBase):
+
+    def setUp(self):
+        super().setUp()
+        import threading
+        self.srv = server.Server(("127.0.0.1", 0), server.Handler)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        super().tearDown()
+
+    def call(self, path):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("POST", path)
+        resp = conn.getresponse()
+        body = json.loads(resp.read().decode() or "null")
+        conn.close()
+        return resp.status, body
+
+    def test_check_then_update(self):
+        self.standard_box()
+        status, body = self.call("/api/services/oh/updates/check")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["available"])
+        self.assertTrue(body["updatable"])
+        self.record_popen(parked=True)
+        status, body = self.call("/api/services/oh/update")
+        self.assertEqual(status, 202)
+        self.assertTrue(body["job_id"])
+        self.wait_for_spawn(1)
+        self.assertEqual(self.argvs()[0],
+                         ["docker", "pull", "ghcr.io/openhands/agent-canvas:latest"])
+
+    def test_errors(self):
+        self.assertEqual(self.call("/api/services/nope/updates/check")[0], 404)
+        self.assertEqual(self.call("/api/services/native/updates/check")[0], 400)
+        self.assertEqual(self.call("/api/services/oh/update")[0], 409)
 
 
 if __name__ == "__main__":

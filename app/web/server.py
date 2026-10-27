@@ -11,6 +11,8 @@ Serves static/ as static files and a small JSON API:
     GET    api/services            registry + derived state
     POST   api/services/{key}/deploy
     POST   api/services/{key}/action   {"action": start|stop|restart}
+    POST   api/services/{key}/update   202 -> pull newer images + setup.sh job
+    POST   api/services/{key}/updates/check   re-check its images now
     GET    api/services/{key}      detail: identity, meta, env var NAMES
     PATCH  api/services/{key}      {name?, description?} -> overrides.json
     POST   api/services/{key}/env/{var}/reveal   one value, deliberately POST
@@ -108,6 +110,16 @@ INSTANCES_DIR = os.path.expanduser("~/services/launcher/instances")
 # services/deployd/.env can move it, so the payload resolves the env file
 # first and only falls back here.
 DEPLOYD_HOME = os.path.expanduser("~/services/deployd")
+
+# Last image-update check per service (see the "updates" section): which
+# container images have a newer digest behind the same tag on their registry.
+# Per-box state, rewritten by the background check every UPDATE_INTERVAL and
+# by "Check now"; deleting it only means "not checked yet".
+UPDATES_PATH = os.path.expanduser("~/services/launcher/updates.json")
+UPDATE_INTERVAL = 6 * 3600.0   # seconds between background sweeps
+UPDATE_FIRST_DELAY = 120.0     # let the box settle after a boot first
+REGISTRY_TIMEOUT = 10.0        # one manifest HEAD or token GET
+DOCKER_INSPECT_TIMEOUT = 15.0
 
 # Deploy scripts may only live under one of these roots. The repo is the
 # normal case; ~/dev is needed because some services keep their code in
@@ -1139,6 +1151,7 @@ def services_payload():
     # Likewise one read for the usage stamps the grid's default sort needs,
     # rather than one open() per tile.
     usage = load_usage()
+    updates = load_updates()
 
     services = []
     for svc in registry:
@@ -1208,6 +1221,10 @@ def services_payload():
             # Whether the Remove action is on offer (a teardown.sh exists and
             # the service is controllable). Never offers --purge.
             "removable": removable(svc),
+            # {available, checked_at} from the last image check, or null
+            # when it has not been checked (or is not installed).
+            "updates": (update_summary(updates.get(svc.get("key")))
+                        if installed else None),
         })
     return {"host": host, "groups": load_groups(), "services": services}
 
@@ -1288,6 +1305,7 @@ def service_detail(key):
         "env": env_payload(svc),
         "receipt": receipt,
         "removable": removable(svc),
+        "updates": update_detail(svc, installed),
     }
 
 
@@ -2999,6 +3017,7 @@ def _run_steps(job, steps):
             proc = subprocess.Popen(
                 step["argv"], stdout=logfile, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, shell=False, env=step.get("env"),
+                cwd=step.get("cwd"),
                 **({"start_new_session": True} if guard else {}),
             )
             if not guard:
@@ -3051,6 +3070,8 @@ def _run_steps(job, steps):
             mark_removed(job["key"])
         except Exception as exc:
             log("removal of %s not recorded: %s" % (job["key"], exc))
+    if code == 0 and job.get("action") == "update":
+        _after_update(job)
     _finish(job, code)
 
 
@@ -3090,6 +3111,432 @@ def start_action(key, action):
     threading.Thread(target=_run_steps, args=(job, steps),
                      daemon=True).start()
     return job["id"]
+
+
+# ------------------------------------------------------------------ updates
+#
+# "Is there a newer image for what this service runs?" For each container
+# part, the ref the container was created from (`.Config.Image`, such as
+# ghcr.io/openhands/agent-canvas:latest) is looked up on its registry with one
+# manifest HEAD, and the digest that comes back is compared with the
+# RepoDigests of the image the container is actually running. A different
+# digest means the tag has moved since this container was made: exactly what
+# `docker pull <ref>` plus a re-run of setup.sh (the upgrade recipe in every
+# service's SETUP.md) picks up.
+#
+# That covers floating tags (latest, release, main, 13.0-latest) and a pinned
+# tag upstream rebuilt. It deliberately does not go looking for newer version
+# tags: a version pinned in .env is a choice, bumped by hand with the .env
+# editor and a redeploy.
+#
+#   {"openhands": {"checked_at": "...Z", "available": true,
+#                  "images": [{"container": "openhands-agent-canvas",
+#                              "image": "ghcr.io/openhands/agent-canvas:latest",
+#                              "status": "update", "error": null}]}}
+#
+# status: current | update | pinned (by digest, cannot move) | local (built on
+# this box, nothing to pull) | error (the registry did not answer).
+
+_updates_lock = threading.Lock()
+
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# What an image ref may look like before any word of it reaches an argv.
+# Leading alphanumeric, so nothing can pass for a docker flag.
+_IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$")
+_MANIFEST_ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+))
+_CHALLENGE_RE = re.compile(r'(\w+)="([^"]*)"')
+UPDATE_STATUSES = ("current", "update", "pinned", "local", "error")
+
+
+def parse_image_ref(ref):
+    """'ghcr.io/x/y:tag' -> (registry host, repository, tag), or None.
+
+    None for anything that cannot move or that this does not understand,
+    including a ref pinned by digest. Docker's own rule picks the registry:
+    the first path component is a host only when it has a '.' or ':' or is
+    'localhost'; anything else is on Docker Hub, where one-word names live
+    under library/.
+    """
+    if not isinstance(ref, str) or not _IMAGE_REF_RE.match(ref) or "@" in ref:
+        return None
+    name, tag = ref, "latest"
+    colon = ref.rfind(":")
+    if colon > ref.rfind("/"):
+        name, tag = ref[:colon], ref[colon + 1:]
+    if not name or not tag:
+        return None
+    first, _, rest = name.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        host, repo = first, rest
+    else:
+        host, repo = "docker.io", name
+    if host in ("docker.io", "index.docker.io", "registry-1.docker.io"):
+        host = "registry-1.docker.io"
+        if "/" not in repo:
+            repo = "library/" + repo
+    return host, repo, tag
+
+
+def _registry_token(challenge, repo):
+    """An anonymous pull token for the Bearer challenge a registry sent.
+
+    Docker Hub, ghcr.io and quay.io all answer an unauthenticated manifest
+    request with 401 plus a realm to fetch a token from; public images get
+    one for free. The realm comes from the registry, so it must at least be
+    HTTPS before this follows it.
+    """
+    if not challenge.lower().startswith("bearer "):
+        return None
+    params = dict(_CHALLENGE_RE.findall(challenge))
+    realm = params.get("realm") or ""
+    if not realm.startswith("https://"):
+        return None
+    query = {"scope": params.get("scope") or "repository:%s:pull" % repo}
+    if params.get("service"):
+        query["service"] = params["service"]
+    url = realm + ("&" if "?" in realm else "?") + urllib.parse.urlencode(query)
+    with urllib.request.urlopen(url, timeout=REGISTRY_TIMEOUT) as resp:
+        doc = json.loads(resp.read(65536).decode("utf-8"))
+    token = doc.get("token") or doc.get("access_token")
+    return token if isinstance(token, str) and token else None
+
+
+def remote_digest(host, repo, tag):
+    """The digest host/repo:tag points at right now. Raises on any failure.
+
+    A HEAD, never a GET: Docker Hub does not count a HEAD against its
+    anonymous pull limit, and the digest is in a header anyway.
+    """
+    url = "https://%s/v2/%s/manifests/%s" % (
+        host, urllib.parse.quote(repo), urllib.parse.quote(tag))
+    headers = {"Accept": _MANIFEST_ACCEPT}
+    for attempt in (0, 1):
+        req = urllib.request.Request(url, headers=headers, method="HEAD")
+        try:
+            with urllib.request.urlopen(req, timeout=REGISTRY_TIMEOUT) as resp:
+                digest = resp.headers.get("Docker-Content-Digest")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and attempt == 0:
+                token = _registry_token(
+                    exc.headers.get("WWW-Authenticate") or "", repo)
+                if token:
+                    headers["Authorization"] = "Bearer " + token
+                    continue
+            raise
+        if isinstance(digest, str) and _DIGEST_RE.match(digest.strip()):
+            return digest.strip()
+        raise ValueError("the registry sent no digest")
+    raise ValueError("the registry refused an anonymous token")
+
+
+def _registry_error(exc):
+    """A short, safe sentence for the UI. Never a URL or a token."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return "registry answered HTTP %d" % exc.code
+    if isinstance(exc, urllib.error.URLError):
+        return "registry unreachable"
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "registry timed out"
+    if isinstance(exc, ValueError):
+        return str(exc)[:120]
+    return "check failed"
+
+
+def _docker_lines(args):
+    """stdout lines of one docker call; [] when docker cannot answer.
+
+    `docker inspect` exits 1 when ANY name is missing and still prints the
+    rest, so the exit code is not the verdict here: whatever parsed is.
+    """
+    argv = sg_docker(["docker"] + list(args))
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+    except Exception as exc:
+        log("docker unusable for the update check (%s)" % exc)
+        return []
+    try:
+        out, _ = proc.communicate(timeout=DOCKER_INSPECT_TIMEOUT)
+    except Exception as exc:
+        log("docker unusable for the update check (%s)" % exc)
+        try:
+            proc.kill()
+            proc.communicate(timeout=1)
+        except Exception:
+            pass
+        return []
+    return (out or "").splitlines()
+
+
+def _container_names(svc):
+    return [p["name"] for p in control_parts(control_block(svc))
+            if p["kind"] == "container"]
+
+
+def running_images(svc):
+    """[{container, image, digests}] for each of the service's containers.
+
+    Two docker calls for the whole service, whatever its size: one inspect of
+    the containers for the ref and image id they run, one inspect of those
+    images for the digests they were pulled as. A container that does not
+    exist (an optional part, or a service that is not installed) is simply
+    absent from the answer.
+    """
+    names = _container_names(svc)
+    if not names:
+        return []
+    rows = []
+    for line in _docker_lines(
+            ["inspect", "--type", "container", "--format",
+             "{{.Name}}\t{{.Config.Image}}\t{{.Image}}"] + names):
+        fields = line.split("\t")
+        if len(fields) != 3:
+            continue
+        name, ref, image_id = (f.strip() for f in fields)
+        rows.append({"container": name.lstrip("/"), "image": ref,
+                     "image_id": image_id if _DIGEST_RE.match(image_id) else None})
+    ids = sorted({r["image_id"] for r in rows if r["image_id"]})
+    digests = {}
+    if ids:
+        for line in _docker_lines(
+                ["image", "inspect", "--format",
+                 "{{.Id}}\t{{json .RepoDigests}}"] + ids):
+            image_id, _, raw = line.partition("\t")
+            try:
+                values = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(values, list):
+                digests[image_id.strip()] = [
+                    v.rpartition("@")[2] for v in values
+                    if isinstance(v, str) and "@" in v]
+    return [{"container": r["container"], "image": r["image"],
+             "digests": digests.get(r["image_id"], [])} for r in rows]
+
+
+def check_service_updates(svc):
+    """A fresh updates entry for one service, or None with nothing to check.
+
+    One registry call per distinct ref, not per container: Plane runs six
+    containers off one release tag.
+    """
+    rows = running_images(svc)
+    if not rows:
+        return None
+    answers = {}
+    images = []
+    for row in rows:
+        entry = {"container": row["container"], "image": row["image"],
+                 "status": "current", "error": None}
+        parsed = parse_image_ref(row["image"])
+        if parsed is None:
+            entry["status"] = "pinned"
+        elif not row["digests"]:
+            entry["status"] = "local"
+        else:
+            if row["image"] not in answers:
+                try:
+                    answers[row["image"]] = (remote_digest(*parsed), None)
+                except Exception as exc:
+                    answers[row["image"]] = (None, _registry_error(exc))
+            digest, error = answers[row["image"]]
+            if digest is None:
+                entry["status"], entry["error"] = "error", error
+            elif digest not in row["digests"]:
+                entry["status"] = "update"
+        images.append(entry)
+    return {"checked_at": _now_iso(),
+            "available": any(i["status"] == "update" for i in images),
+            "images": images}
+
+
+def _valid_update_entry(entry):
+    if not isinstance(entry, dict) or not isinstance(entry.get("images"), list):
+        return None
+    images = []
+    for image in entry["images"]:
+        if (isinstance(image, dict) and isinstance(image.get("image"), str)
+                and image.get("status") in UPDATE_STATUSES):
+            images.append({
+                "container": image.get("container")
+                if isinstance(image.get("container"), str) else None,
+                "image": image["image"],
+                "status": image["status"],
+                "error": image.get("error")
+                if isinstance(image.get("error"), str) else None,
+            })
+    checked = entry.get("checked_at")
+    return {"checked_at": checked if isinstance(checked, str) else None,
+            "available": any(i["status"] == "update" for i in images),
+            "images": images}
+
+
+def load_updates():
+    """key -> updates entry. Never raises; a bad file reads as "not checked"."""
+    try:
+        with open(UPDATES_PATH, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log("updates.json unusable (%s); treating as unchecked" % exc)
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    clean = {}
+    for key, entry in doc.items():
+        valid = _valid_update_entry(entry)
+        if isinstance(key, str) and valid is not None:
+            clean[key] = valid
+    return clean
+
+
+def record_updates(key, entry):
+    """Store one service's result; None drops it (nothing left to check)."""
+    with _updates_lock:
+        data = load_updates()
+        if entry is None:
+            if key not in data:
+                return
+            data.pop(key, None)
+        else:
+            data[key] = entry
+        _write_json_atomically(UPDATES_PATH, data, ".updates.")
+
+
+def update_summary(entry):
+    """The grid's slice of an entry: enough for a badge, nothing more."""
+    if not isinstance(entry, dict):
+        return None
+    return {"available": bool(entry.get("available")),
+            "checked_at": entry.get("checked_at")}
+
+
+def updatable(svc):
+    """Whether an Update could run for this service at all: it is
+    controllable from here, has containers, and has a setup.sh to re-run."""
+    if not control_status(svc)["controllable"] or not _container_names(svc):
+        return False
+    try:
+        resolve_script(svc)
+    except DeployError:
+        return False
+    return True
+
+
+def update_detail(svc, installed):
+    """The detail page's block: the stored entry plus whether to offer one."""
+    entry = load_updates().get(svc.get("key")) if installed else None
+    out = {"checkable": bool(installed and _container_names(svc)),
+           "updatable": bool(installed and updatable(svc)),
+           "checked_at": None, "available": False, "images": []}
+    if entry:
+        out.update(entry)
+    return out
+
+
+def check_updates_now(key):
+    """POST .../updates/check: re-check one service and return its block."""
+    svc = find_service(key)
+    if svc is None:
+        raise DeployError(404, "unknown service")
+    if not _container_names(svc):
+        raise DeployError(400, "this service runs no containers to check")
+    record_updates(key, check_service_updates(svc))
+    return update_detail(svc, True)
+
+
+def check_all_updates():
+    """One sweep over every service with containers. Never raises."""
+    for svc in load_registry():
+        key = svc.get("key")
+        if not isinstance(key, str) or not _container_names(svc):
+            continue
+        try:
+            record_updates(key, check_service_updates(svc))
+        except Exception as exc:
+            log("update check for %s failed: %s" % (key, exc))
+
+
+def _update_loop():
+    time.sleep(UPDATE_FIRST_DELAY)
+    while True:
+        check_all_updates()
+        time.sleep(UPDATE_INTERVAL)
+
+
+def plan_update(svc, script, refs):
+    """Pause Kuma, pull each moved ref, re-run setup.sh, resume Kuma.
+
+    setup.sh's own `docker compose up -d` is what recreates the containers
+    on the freshly pulled images, so the update goes through the same path a
+    first install does and cannot drift from it. A pull that fails stops the
+    job before anything was recreated; the resume still runs (it is
+    `always`), so the monitor never stays paused.
+    """
+    monitors = control_monitors(control_block(svc))
+    steps = _kuma_steps("pause", monitors)
+    for ref in refs:
+        steps.append({"argv": sg_docker(["docker", "pull", ref]),
+                      "optional": False, "always": False, "env": None})
+    steps.append({"argv": build_command(script), "optional": False,
+                  "always": False, "env": None,
+                  "cwd": os.path.dirname(script)})
+    steps.extend(_kuma_steps("resume", monitors))
+    return steps
+
+
+def start_update(key):
+    """POST .../update: queue pull-and-redeploy for the refs that moved.
+
+    Only refs the last check marked `update` are pulled, and each is
+    re-validated before it goes near an argv: the request carries the key and
+    nothing else.
+    """
+    svc = find_service(key)
+    if svc is None:
+        raise DeployError(404, "unknown service")
+    status = control_status(svc)
+    if not status["controllable"]:
+        raise DeployError(403, status["reason"])
+    script = resolve_script(svc)
+    entry = load_updates().get(key) or {}
+    refs = []
+    for image in entry.get("images") or []:
+        ref = image.get("image")
+        if (image.get("status") == "update" and parse_image_ref(ref)
+                and ref not in refs):
+            refs.append(ref)
+    if not refs:
+        raise DeployError(409, "no update is waiting for this service; "
+                               "check again first")
+    steps = plan_update(svc, script, refs)
+    job = register_job(key, "update")
+    job["source"] = deploy_source(svc, script)
+    log("update %s started: %s (%s)" % (key, job["id"], ", ".join(refs)))
+    threading.Thread(target=_run_steps, args=(job, steps),
+                     daemon=True).start()
+    return job["id"]
+
+
+def _after_update(job):
+    """A successful update is a deploy: receipt, then a re-check so the
+    badge clears. Both best effort; neither can fail the job."""
+    try:
+        write_receipt(job["key"], job["id"], job.get("source"))
+    except Exception as exc:
+        log("receipt for %s not written: %s" % (job["key"], exc))
+    svc = find_service(job["key"])
+    if svc is not None:
+        try:
+            record_updates(job["key"], check_service_updates(svc))
+        except Exception as exc:
+            log("post-update check for %s failed: %s" % (job["key"], exc))
 
 
 def job_payload(job_id):
@@ -3306,6 +3753,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(202, {"job_id": start_action(parts[2], action)})
             return
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "services" \
+                and parts[3] == "update":
+            self._json(202, {"job_id": start_update(parts[2])})
+            return
+        if len(parts) == 5 and parts[0] == "api" and parts[1] == "services" \
+                and parts[3] == "updates" and parts[4] == "check":
+            self._json(200, check_updates_now(parts[2]))
+            return
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "services" \
                 and parts[3] == "notes":
             self._json(201, create_note(parts[2], body))
             return
@@ -3429,6 +3884,7 @@ def main():
     mimetypes.add_type("application/javascript", ".js")
     mimetypes.add_type("application/manifest+json", ".webmanifest")
     srv = Server((BIND, PORT), Handler)
+    threading.Thread(target=_update_loop, daemon=True).start()
     log("listening on http://%s:%d (repo %s, web %s)"
         % (BIND, PORT, REPO_ROOT, WEB_DIR if os.path.isdir(WEB_DIR) else "MISSING"))
     try:

@@ -120,6 +120,10 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
               aria-controls="panel" aria-selected="false" tabindex="-1">
         <span class="tab-label">Paused</span><span class="tab-n" id="tab-n-paused"></span>
       </button>
+      <button class="tab" type="button" role="tab" id="tab-updates" data-tab="updates"
+              aria-controls="panel" aria-selected="false" tabindex="-1">
+        <span class="tab-label">Updates</span><span class="tab-n" id="tab-n-updates"></span>
+      </button>
       <button class="tab" type="button" role="tab" id="tab-uninstalled" data-tab="uninstalled"
               aria-controls="panel" aria-selected="false" tabindex="-1">
         <span class="tab-label">Uninstalled</span><span class="tab-n" id="tab-n-uninstalled"></span>
@@ -212,6 +216,17 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
           watched table on deployd's own page, just this service's row on any
           other. Renders nothing when /api/deployd has nothing to say. -->
      <div id="deployd-mount"></div>
+
+     <!-- Image updates: what the last registry check found for each of the
+          service's containers, and a Check now. app.js fills it; hidden for
+          anything that runs no containers or is not installed. -->
+     <section class="d-sec" id="d-upd-sec" hidden>
+       <h3 class="d-sec-h">Updates</h3>
+       <p class="d-sec-sub" id="d-upd-when"></p>
+       <ul class="upd" id="d-upd-list"></ul>
+       <p class="upd-err" id="d-upd-err" role="status" hidden></p>
+       <button class="d-ctl-btn upd-check" id="d-upd-check" type="button">Check now</button>
+     </section>
 
      <section class="d-sec" id="d-env-sec" hidden>
        <h3 class="d-sec-h">Environment</h3>
