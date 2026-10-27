@@ -918,13 +918,15 @@ def _has_container_part(svc):
                for p in control_parts(control_block(svc)))
 
 
-def _measure_resources(svc, now, docker_map=None):
+def _measure_resources(svc, now, docker_map=None, timer_states=None):
     """One sysfs pass over a service's control parts. Caller holds the lock.
 
-    `docker_map` is the name -> id map, fetched by the caller OUTSIDE the
-    resources lock (see service_resources). Left None, it is fetched here on
-    first use, which is what the tests do and what a unit-only service
-    never triggers.
+    `docker_map` is the name -> id map and `timer_states` the
+    name -> armed map, both fetched by the caller OUTSIDE the resources
+    lock (see service_resources) because each can block on a wedged
+    subprocess. Left None, they are fetched here on first use, which is
+    what the tests do and what a service without such parts never
+    triggers.
     """
     measured = []
     total_rss = None
@@ -936,8 +938,23 @@ def _measure_resources(svc, now, docker_map=None):
             if docker_map is None:
                 docker_map = docker_name_map()
             cgroup = _container_cgroup(part["name"], docker_map)
+            # A name absent from `docker ps -a` means docker could not answer
+            # at all (stopped containers still list) — 'unknowable', the same
+            # shrug control_running makes, never 'stopped'.
+            running = None if part["name"] not in docker_map \
+                else cgroup is not None
+        elif part["name"].endswith(".timer"):
+            cgroup = _unit_cgroup(part["name"])
+            # A timer owns no cgroup while it is armed; systemd holds the
+            # truth. Fetched outside the lock by the caller — fetched here
+            # only when a test calls this directly, the same lazy contract
+            # docker_map has.
+            if timer_states is None:
+                timer_states = _timer_states(svc)
+            running = timer_states.get(part["name"])
         else:
             cgroup = _unit_cgroup(part["name"])
+            running = cgroup is not None
         rss = _read_rss(cgroup) if cgroup else None
         cpu = _cpu_percent(cgroup, _read_usage_usec(cgroup), now) \
             if cgroup else None
@@ -945,14 +962,6 @@ def _measure_resources(svc, now, docker_map=None):
             total_rss = rss if total_rss is None else total_rss + rss
         if cpu is not None:
             total_cpu = cpu if total_cpu is None else total_cpu + cpu
-        # A .timer owns no cgroup while it is armed, so the sysfs pass can
-        # never see it running; ask systemd the way control_running does.
-        # is-active may itself be unknowable (dead bus, macOS) — the field
-        # stays null rather than falsely reading 'stopped'.
-        if part["kind"] == "unit" and part["name"].endswith(".timer"):
-            running = _timer_active(part["name"])
-        else:
-            running = cgroup is not None
         measured.append({"name": part["name"], "kind": part["kind"],
                          "running": running,
                          "rss_bytes": rss, "cpu_pct": cpu})
@@ -982,6 +991,11 @@ def service_resources(svc):
             if hit and now - hit[0] < RESOURCE_TTL:
                 return hit[1]
         docker_map = docker_name_map() if _has_container_part(svc) else {}
+        # Timer probes share the lock-free side of the door with docker:
+        # each is-active is a subprocess that can sit on its timeout against
+        # a stalled user bus, which must not stall every other service's
+        # sample behind _resources_lock.
+        timer_states = _timer_states(svc)
         # That call may have blocked for seconds against a wedged daemon. The
         # sample's clock is the moment the cgroups are actually read, never
         # the moment the request arrived: a stale stamp shrinks the wall delta
@@ -995,7 +1009,7 @@ def service_resources(svc):
             hit = _resources_cache.get(key)
             if hit and now - hit[0] < RESOURCE_TTL:
                 return hit[1]
-            payload = _measure_resources(svc, now, docker_map)
+            payload = _measure_resources(svc, now, docker_map, timer_states)
             _resources_cache[key] = (now, payload)
             return payload
     except Exception as exc:
@@ -1026,6 +1040,18 @@ def _timer_active(name):
         return None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _timer_states(svc):
+    """{timer_name: True/False/None} for a service's .timer control parts.
+
+    One is-active subprocess per timer — a service with none costs a dict
+    scan and returns {}. Meant to run outside the resources lock, like
+    docker_name_map.
+    """
+    return {p["name"]: _timer_active(p["name"])
+            for p in control_parts(control_block(svc))
+            if p["kind"] == "unit" and p["name"].endswith(".timer")}
 
 
 def control_running(svc, resources):
