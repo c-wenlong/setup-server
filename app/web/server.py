@@ -938,11 +938,15 @@ def _measure_resources(svc, now, docker_map=None, timer_states=None):
             if docker_map is None:
                 docker_map = docker_name_map()
             cgroup = _container_cgroup(part["name"], docker_map)
-            # A name absent from `docker ps -a` means docker could not answer
-            # at all (stopped containers still list) — 'unknowable', the same
-            # shrug control_running makes, never 'stopped'.
-            running = None if part["name"] not in docker_map \
-                else cgroup is not None
+            # `docker ps -a` is authoritative when it answers: a missing
+            # name in a non-empty map means the container genuinely does
+            # not exist (removed, or an optional part never created) —
+            # provably absent. Only an EMPTY map is unknowable, because
+            # that is also how 'docker could not answer' comes back.
+            if part["name"] in docker_map:
+                running = cgroup is not None
+            else:
+                running = False if docker_map else None
         elif part["name"].endswith(".timer"):
             cgroup = _unit_cgroup(part["name"])
             # A timer owns no cgroup while it is armed; systemd holds the
@@ -1083,7 +1087,13 @@ def control_running(svc, resources):
             if docker_map is None:
                 docker_map = docker_name_map()
             if part["name"] not in docker_map:
-                unknowable = True
+                # Absent from an ANSWERED ps -a means the container truly
+                # does not exist (an optional part never created, or one
+                # docker rm'd) — provably absent, same as a missing
+                # cgroup. Absent from an EMPTY map means docker never
+                # answered at all, which is unknowable.
+                if not docker_map:
+                    unknowable = True
                 continue
         entry = measured.get(part["name"])
         if entry and entry.get("running"):

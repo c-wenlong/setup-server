@@ -4786,6 +4786,17 @@ class DegradedStateTest(ResourceTestBase):
         self.assertEqual(tile["state"], "stopped")
         self.assertTrue(tile["degraded"])
 
+    def test_absent_container_in_an_answered_map_is_paused(self):
+        # The empty-map caveat has a boundary: when ps -a DOES list other
+        # containers, an absent name means this one genuinely does not
+        # exist (immich's optional ml container). Paused, not a warning.
+        server.docker_name_map = lambda: {"other": "f" * 64}
+        self.registry_with({"parts": [{"container": "c1"}]}, key="a",
+                           health="http://127.0.0.1:1/h", marker=self.tmp)
+        tile = self.tile("a")
+        self.assertEqual(tile["state"], "stopped")
+        self.assertFalse(tile["degraded"])
+
     def test_container_present_in_docker_ps_but_stopped_is_paused(self):
         # Name IS in the map (docker answered) but the cgroup is gone:
         # provably stopped → muted.
@@ -4823,11 +4834,16 @@ class ResourceReadingTest(ResourceTestBase):
 
     def test_container_absent_from_the_docker_map_is_unknown_not_stopped(self):
         # `docker ps -a` still lists stopped containers, so a name missing
-        # from the map means docker could not answer at all — 'unknowable'
-        # (null), the same call control_running makes, not 'stopped'.
+        # from an EMPTY map means docker could not answer at all —
+        # 'unknowable' (null), the same call control_running makes.
         server.docker_name_map = lambda: {}
         svc = self.registry_with({"parts": [{"container": "gone"}]})
         self.assertIsNone(self.measure(svc, 100.0)["parts"][0]["running"])
+        # A NON-empty map means docker answered: the container genuinely
+        # does not exist (an optional part never created, like immich's ml
+        # profile) — provably absent, which reads as stopped.
+        server.docker_name_map = lambda: {"other": OTHER_CID}
+        self.assertIs(self.measure(svc, 100.0)["parts"][0]["running"], False)
 
     def test_container_part_reports_rss_through_the_docker_map(self):
         self.write_cgroup(self.container_dir(), rss=512000000)
