@@ -989,11 +989,17 @@
           if (fresh.updates !== undefined) {
             /* The grid carries {available, checked_at} only; keep the
                detail's `updatable` verdict alongside it. */
-            var keep = detailSvc.updates && detailSvc.updates.updatable;
+            var prev = detailSvc.updates;
+            var keep = prev && prev.updatable;
+            var moved = (prev && prev.checked_at) !== (fresh.updates && fresh.updates.checked_at) ||
+                        hasUpdate(detailSvc) !== hasUpdate(fresh);
             detailSvc.updates = fresh.updates
               ? { available: fresh.updates.available,
                   checked_at: fresh.updates.checked_at, updatable: keep }
               : null;
+            /* A background check landed: the summary above is all the grid
+               has, so fetch the per-image list for this block alone. */
+            if (moved) refreshUpdates(detailKey);
           }
           if (detailSvc.url == null) detailSvc.url = fresh.url;
           detailSvc.receipt = fresh.receipt;

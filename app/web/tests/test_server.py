@@ -146,6 +146,7 @@ class SandboxTest(unittest.TestCase):
         # No test may reach a real registry: the check's one network call is
         # stubbed to fail loudly unless a test installs its own answer.
         server.remote_digest = _forbidden_remote_digest
+        server._update_started.clear()
         # deployd's service home under the sandbox too; and its timer probe
         # defaults to "unknowable" so no test can reach a real systemctl
         # (which subprocess.run would route into the unstubbed-Popen guard).
@@ -6267,6 +6268,74 @@ class UpdateCheckTest(UpdateTestBase):
         self.assertTrue(stored["oh"]["available"])
         self.stub_docker({}, {})
         server.record_updates("oh", None)
+        self.assertNotIn("oh", server.load_updates())
+
+    def test_a_check_older_than_the_stored_one_is_dropped(self):
+        self.standard_box()
+        entry = server.check_service_updates(server.find_service("oh"))
+        self.assertTrue(server.record_updates("oh", None, started=10.0) or True)
+        self.assertTrue(server.record_updates("oh", {"images": [],
+                        "available": False, "checked_at": "x"}, started=20.0))
+        # The slow sweep that began at 15 must not restore the badge.
+        self.assertFalse(server.record_updates("oh", entry, started=15.0))
+        self.assertFalse(server.load_updates()["oh"]["available"])
+
+    def test_docker_down_keeps_the_stored_result(self):
+        self.standard_box()
+        server.check_all_updates()
+        self.assertTrue(server.load_updates()["oh"]["available"])
+
+        def down(argv, **kwargs):
+            proc = CapturedProc("", 1)
+            proc.communicate = lambda timeout=None: (
+                "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+            return proc
+        subprocess.Popen = down
+        server.check_all_updates()
+        self.assertTrue(server.load_updates()["oh"]["available"])
+        with self.assertRaises(server.DeployError) as ctx:
+            server.check_updates_now("oh")
+        self.assertEqual(ctx.exception.status, 503)
+        self.assertTrue(server.load_updates()["oh"]["available"])
+
+    def test_image_inspect_failure_is_not_built_locally(self):
+        self.standard_box()
+        inner = subprocess.Popen
+
+        def half(argv, **kwargs):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                raise OSError("docker went away")
+            return inner(argv, **kwargs)
+        subprocess.Popen = half
+        with self.assertRaises(server.DockerUnavailable):
+            server.check_service_updates(server.find_service("oh"))
+
+    def test_missing_names_alone_are_not_a_failure(self):
+        self.standard_box()
+        inner = subprocess.Popen
+
+        def partial(argv, **kwargs):
+            proc = inner(argv, **kwargs)
+            if argv[:2] == ["docker", "inspect"]:
+                out = proc.stdout_text
+                proc.communicate = lambda timeout=None: (
+                    out, "Error: No such object: oh-gone")
+                proc.returncode = 1
+            return proc
+        subprocess.Popen = partial
+        entry = server.check_service_updates(server.find_service("oh"))
+        self.assertTrue(entry["available"])
+
+    def test_sweep_survives_a_broken_registry_file(self):
+        with open(server.REGISTRY_PATH, "w") as fh:
+            fh.write("{broken")
+        server._registry_cache["mtime"] = None
+        server.check_all_updates()          # logs, never raises
+
+    def test_sweep_skips_a_service_with_a_running_job(self):
+        self.standard_box()
+        server.register_job("oh", "update")
+        server.check_all_updates()
         self.assertNotIn("oh", server.load_updates())
 
     def test_corrupt_store_reads_as_unchecked(self):

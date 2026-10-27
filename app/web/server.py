@@ -3138,6 +3138,8 @@ def start_action(key, action):
 # this box, nothing to pull) | error (the registry did not answer).
 
 _updates_lock = threading.Lock()
+# key -> monotonic start of the check whose result is stored (record_updates).
+_update_started = {}
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # What an image ref may look like before any word of it reaches an argv.
@@ -3247,29 +3249,39 @@ def _registry_error(exc):
     return "check failed"
 
 
+class DockerUnavailable(Exception):
+    """docker did not answer, which is not the same as "nothing running"."""
+
+
 def _docker_lines(args):
-    """stdout lines of one docker call; [] when docker cannot answer.
+    """stdout lines of one docker call. Raises DockerUnavailable.
 
     `docker inspect` exits 1 when ANY name is missing and still prints the
-    rest, so the exit code is not the verdict here: whatever parsed is.
+    rest, so a non-zero exit is only a failure when stderr says something
+    other than "No such ...". A daemon that is down, a missing binary or a
+    hung call raise instead of reading as an empty answer: an empty answer
+    would drop a stored result, or call every image "built on this box".
     """
     argv = sg_docker(["docker"] + list(args))
     try:
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True)
+                                stderr=subprocess.PIPE, text=True)
     except Exception as exc:
-        log("docker unusable for the update check (%s)" % exc)
-        return []
+        raise DockerUnavailable(str(exc))
     try:
-        out, _ = proc.communicate(timeout=DOCKER_INSPECT_TIMEOUT)
+        out, err = proc.communicate(timeout=DOCKER_INSPECT_TIMEOUT)
     except Exception as exc:
-        log("docker unusable for the update check (%s)" % exc)
         try:
             proc.kill()
             proc.communicate(timeout=1)
         except Exception:
             pass
-        return []
+        raise DockerUnavailable(str(exc) or "docker timed out")
+    if proc.returncode:
+        other = [line for line in (err or "").splitlines()
+                 if line.strip() and "No such" not in line]
+        if other:
+            raise DockerUnavailable(other[0][:200])
     return (out or "").splitlines()
 
 
@@ -3280,6 +3292,8 @@ def _container_names(svc):
 
 def running_images(svc):
     """[{container, image, digests}] for each of the service's containers.
+
+    Raises DockerUnavailable when docker cannot answer either question.
 
     Two docker calls for the whole service, whatever its size: one inspect of
     the containers for the ref and image id they run, one inspect of those
@@ -3321,6 +3335,9 @@ def running_images(svc):
 
 def check_service_updates(svc):
     """A fresh updates entry for one service, or None with nothing to check.
+
+    Raises DockerUnavailable rather than guessing; callers keep whatever was
+    stored before.
 
     One registry call per distinct ref, not per container: Plane runs six
     containers off one release tag.
@@ -3396,17 +3413,35 @@ def load_updates():
     return clean
 
 
-def record_updates(key, entry):
-    """Store one service's result; None drops it (nothing left to check)."""
+def record_updates(key, entry, started=None):
+    """Store one service's result; None drops it (nothing left to check).
+
+    `started` is the time.monotonic() its check began. A result from a check
+    that began before the stored one is discarded: a sweep that read the old
+    containers and then waited on a registry must not land after an update's
+    own re-check and put the badge back.
+    """
     with _updates_lock:
+        if started is not None:
+            if started < _update_started.get(key, float("-inf")):
+                log("update check for %s superseded; result dropped" % key)
+                return False
+            _update_started[key] = started
         data = load_updates()
         if entry is None:
             if key not in data:
-                return
+                return True
             data.pop(key, None)
         else:
             data[key] = entry
         _write_json_atomically(UPDATES_PATH, data, ".updates.")
+        return True
+
+
+def check_and_record(svc):
+    """Check one service and store the result, unless a newer check won."""
+    started = time.monotonic()
+    return record_updates(svc["key"], check_service_updates(svc), started)
 
 
 def update_summary(entry):
@@ -3447,18 +3482,34 @@ def check_updates_now(key):
         raise DeployError(404, "unknown service")
     if not _container_names(svc):
         raise DeployError(400, "this service runs no containers to check")
-    record_updates(key, check_service_updates(svc))
+    try:
+        check_and_record(svc)
+    except DockerUnavailable as exc:
+        log("update check for %s: docker unavailable (%s)" % (key, exc))
+        raise DeployError(503, "docker did not answer, so nothing was "
+                               "checked; the last result is kept")
     return update_detail(svc, True)
 
 
 def check_all_updates():
-    """One sweep over every service with containers. Never raises."""
-    for svc in load_registry():
+    """One sweep over every service with containers. Never raises.
+
+    A service with a job running is skipped: its containers may be half way
+    through being recreated, and an update re-checks on its own when done.
+    """
+    try:
+        registry = load_registry()
+        busy = {k for k, j in jobs_by_key().items()
+                if j.get("status") == "running"}
+    except Exception as exc:
+        log("update sweep skipped: %s" % exc)
+        return
+    for svc in registry:
         key = svc.get("key")
-        if not isinstance(key, str) or not _container_names(svc):
+        if not isinstance(key, str) or not _container_names(svc) or key in busy:
             continue
         try:
-            record_updates(key, check_service_updates(svc))
+            check_and_record(svc)
         except Exception as exc:
             log("update check for %s failed: %s" % (key, exc))
 
@@ -3466,7 +3517,12 @@ def check_all_updates():
 def _update_loop():
     time.sleep(UPDATE_FIRST_DELAY)
     while True:
-        check_all_updates()
+        # The only thread that runs the sweep: nothing may end it, or the
+        # badges silently stop until the launcher restarts.
+        try:
+            check_all_updates()
+        except Exception as exc:
+            log("update sweep failed: %s" % exc)
         time.sleep(UPDATE_INTERVAL)
 
 
@@ -3534,7 +3590,7 @@ def _after_update(job):
     svc = find_service(job["key"])
     if svc is not None:
         try:
-            record_updates(job["key"], check_service_updates(svc))
+            check_and_record(svc)
         except Exception as exc:
             log("post-update check for %s failed: %s" % (job["key"], exc))
 
