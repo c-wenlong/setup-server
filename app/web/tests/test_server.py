@@ -110,6 +110,7 @@ class SandboxTest(unittest.TestCase):
             "INSTANCES_DIR": server.INSTANCES_DIR,
             "DEPLOYD_HOME": server.DEPLOYD_HOME,
             "deployd_timer": server.deployd_timer,
+            "_timer_active": server._timer_active,
             "CGROUP_ROOT": server.CGROUP_ROOT,
             "RESOURCE_TTL": server.RESOURCE_TTL,
             "DOCKER_MAP_TTL": server.DOCKER_MAP_TTL,
@@ -139,6 +140,10 @@ class SandboxTest(unittest.TestCase):
         # (which subprocess.run would route into the unstubbed-Popen guard).
         server.DEPLOYD_HOME = os.path.join(self.tmp, "deployd-home")
         server.deployd_timer = lambda: None
+        # Timers are probed via `systemctl --user is-active` — subprocess.run
+        # would trip the unstubbed-Popen guard, so the default answer is
+        # "unknowable"; tests that care patch in True/False.
+        server._timer_active = lambda name: None
         # Never the real /sys/fs/cgroup either: a tree under the sandbox that
         # a test builds if it cares, and that otherwise simply does not
         # exist, so resources measure nothing rather than this box.
@@ -627,8 +632,8 @@ class ServiceJobFieldTest(SandboxTest):
         server.start_deploy("alpha")
         for tile in self.tiles().values():
             self.assertEqual(list(tile), self.EIGHT + [
-                "job", "control", "usage", "deployed_at", "resources", "receipt",
-                "removable"])
+                "degraded", "job", "control", "usage", "deployed_at",
+                "resources", "receipt", "removable"])
 
     # ---- restart
 
@@ -761,7 +766,8 @@ class HttpTest(SandboxTest):
         self.assertEqual(doc["host"], "box.ts.net")
         svc = doc["services"][0]
         self.assertEqual(sorted(svc), ["active", "author", "control",
-                                       "deployed_at", "description", "group",
+                                       "degraded", "deployed_at",
+                                       "description", "group",
                                        "icon", "installed", "job", "key",
                                        "name", "receipt", "removable", "resources",
                                        "state", "tagline", "url", "usage"])
@@ -777,7 +783,8 @@ class HttpTest(SandboxTest):
         self.assertEqual(list(doc["services"][0]),
                          ["key", "name", "tagline", "group", "description",
                           "author", "icon", "url", "state", "installed",
-                          "active", "job", "control", "usage", "deployed_at",
+                          "active", "degraded", "job", "control", "usage",
+                          "deployed_at",
                           "resources", "receipt", "removable"])
 
     def test_groups_empty_when_the_registry_has_none(self):
@@ -1099,7 +1106,8 @@ class DetailTest(SandboxTest):
     def test_shape(self):
         detail = server.service_detail("alpha")
         self.assertEqual(sorted(detail), [
-            "active", "control", "deployed_at", "description", "env", "group",
+            "active", "control", "degraded", "deployed_at", "description",
+            "env", "group",
             "icon", "installed", "job", "key", "meta", "name", "receipt",
             "removable", "resources", "state", "tagline", "url", "usage"])
         self.assertEqual(detail["key"], "alpha")
@@ -1112,7 +1120,8 @@ class DetailTest(SandboxTest):
         detail = server.service_detail("alpha")
         tile = {s["key"]: s for s in server.services_payload()["services"]}["alpha"]
         for field in ("key", "name", "tagline", "group", "icon", "url",
-                      "state", "installed", "active", "job", "control",
+                      "state", "installed", "active", "degraded", "job",
+                      "control",
                       "usage", "deployed_at", "resources"):
             self.assertEqual(detail[field], tile[field], field)
 
@@ -4674,6 +4683,99 @@ class ResourceTestBase(SandboxTest):
         return server._measure_resources(svc, now)
 
 
+class DegradedStateTest(ResourceTestBase):
+    """`degraded` — which stopped tiles earn the warning.
+
+    "down"/"Not responding" is a verdict, not a description: the UI only
+    paints it while a failed probe meets a service that is still running —
+    or one nothing can call either way. A service that is simply off reads
+    as paused, and a no-probe service (deployd) is alive while its timer is
+    armed.
+    """
+
+    def tile(self, key):
+        for s in server.services_payload()["services"]:
+            if s["key"] == key:
+                return s
+        self.fail("no tile for %s" % key)
+
+    def test_failed_probe_with_parts_running_is_degraded(self):
+        self.write_cgroup(self.unit_dir("a.service"), rss=1024)
+        self.registry_with({"parts": [{"unit": "a.service"}]}, key="a",
+                           health="http://127.0.0.1:1/h", marker=self.tmp)
+        tile = self.tile("a")
+        self.assertEqual(tile["state"], "stopped")
+        self.assertTrue(tile["degraded"])
+
+    def test_failed_probe_with_nothing_running_is_paused(self):
+        # A configured part with no cgroup: provably stopped.
+        self.registry_with({"parts": [{"unit": "gone.service"}]}, key="a",
+                           health="http://127.0.0.1:1/h", marker=self.tmp)
+        tile = self.tile("a")
+        self.assertEqual(tile["state"], "stopped")
+        self.assertFalse(tile["degraded"])
+
+    def test_failed_probe_without_parts_keeps_the_warning(self):
+        # ntfy/ollama have no control parts — nothing can disprove it.
+        self.registry_with({"parts": []}, key="a",
+                           health="http://127.0.0.1:1/h", marker=self.tmp)
+        tile = self.tile("a")
+        self.assertEqual(tile["state"], "stopped")
+        self.assertTrue(tile["degraded"])
+
+    def test_an_answering_probe_is_never_degraded(self):
+        self.write_cgroup(self.unit_dir("a.service"), rss=1024)
+        self.registry_with({"parts": [{"unit": "a.service"}]}, key="a",
+                           health="http://127.0.0.1:1/h", marker=self.tmp)
+        server.probe_all = lambda urls: {u: True for u in urls}
+        tile = self.tile("a")
+        self.assertEqual(tile["state"], "active")
+        self.assertFalse(tile["degraded"])
+
+    def test_armed_timer_is_active_without_a_probe(self):
+        # deployd's shape: no health endpoint, one .timer part.
+        self.registry_with({"parts": [{"unit": "x.timer"}]}, key="d",
+                           marker=self.tmp)
+        server._timer_active = lambda name: True
+        tile = self.tile("d")
+        self.assertEqual(tile["state"], "active")
+        self.assertTrue(tile["active"])
+        self.assertFalse(tile["degraded"])
+
+    def test_stopped_timer_is_paused_not_down(self):
+        self.registry_with({"parts": [{"unit": "x.timer"}]}, key="d",
+                           marker=self.tmp)
+        server._timer_active = lambda name: False
+        tile = self.tile("d")
+        self.assertEqual(tile["state"], "stopped")
+        self.assertFalse(tile["degraded"])
+
+    def test_unknowable_timer_reads_paused_not_down(self):
+        # macOS, no systemd, dead bus: muted, not a warning.
+        self.registry_with({"parts": [{"unit": "x.timer"}]}, key="d",
+                           marker=self.tmp)
+        server._timer_active = lambda name: None
+        tile = self.tile("d")
+        self.assertEqual(tile["state"], "stopped")
+        self.assertFalse(tile["degraded"])
+
+    def test_a_running_service_part_is_active_without_a_probe(self):
+        # A health-less .service is alive whenever its cgroup is.
+        self.write_cgroup(self.unit_dir("svc.service"), rss=1024)
+        self.registry_with({"parts": [{"unit": "svc.service"}]}, key="s",
+                           marker=self.tmp)
+        tile = self.tile("s")
+        self.assertEqual(tile["state"], "active")
+
+    def test_no_probe_and_no_parts_stays_neutral(self):
+        # Nothing to probe and nothing to check with: never "active", and
+        # the registry facts decide state as before.
+        self.registry_with({"parts": []}, key="n",
+                           setup=None, marker=self.tmp)
+        self.assertEqual(self.tile("n")["state"], "stopped")
+        self.assertFalse(self.tile("n")["degraded"])
+
+
 class ResourceReadingTest(ResourceTestBase):
     """What comes out of the fake sysfs tree."""
 
@@ -4684,7 +4786,7 @@ class ResourceReadingTest(ResourceTestBase):
         self.assertEqual(out["rss_bytes"], 4096)
         self.assertEqual(out["parts"], [
             {"name": "beszel-agent.service", "kind": "unit",
-             "rss_bytes": 4096, "cpu_pct": None}])
+             "running": True, "rss_bytes": 4096, "cpu_pct": None}])
 
     def test_container_part_reports_rss_through_the_docker_map(self):
         self.write_cgroup(self.container_dir(), rss=512000000)
@@ -4714,6 +4816,7 @@ class ResourceReadingTest(ResourceTestBase):
         self.assertIsNone(out["cpu_pct"])
         self.assertEqual(out["parts"],
                          [{"name": "gone.service", "kind": "unit",
+                           "running": False,
                            "rss_bytes": None, "cpu_pct": None}])
 
     def test_garbage_in_a_cgroup_file_is_null_not_an_error(self):
@@ -4748,7 +4851,7 @@ class ResourceReadingTest(ResourceTestBase):
         self.assertEqual(sorted(out),
                          ["cpu_pct", "parts", "rss_bytes", "sampled_at"])
         self.assertEqual(sorted(out["parts"][0]),
-                         ["cpu_pct", "kind", "name", "rss_bytes"])
+                         ["cpu_pct", "kind", "name", "rss_bytes", "running"])
 
     def test_a_container_id_that_is_not_a_container_id_is_ignored(self):
         # Nothing shaped unlike a docker id may be pasted into a path this

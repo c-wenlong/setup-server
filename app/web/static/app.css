@@ -750,6 +750,11 @@ body.is-board #view-board {
 /* --- state: stopped --- */
 .tile-stopped { border-color: var(--border); }
 
+/* A stopped service is just off — dim it so the (rare) degraded tile, a
+   running thing that will not answer, is the one that reads as a warning. */
+.tile-stopped:not(.tile-degraded) .tile-icon { opacity: .4; }
+.tile-stopped:not(.tile-degraded) .tile-name { color: var(--muted); }
+
 /* skeletons while the first fetch is in flight */
 .tile-skel {
   border-style: solid;
