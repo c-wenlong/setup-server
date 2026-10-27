@@ -502,3 +502,56 @@ same job, sheet, log and 403/409/429 handling as start/stop/restart.
   and a Remove link on installed catalogue cards; the confirm sheet says the
   data and `.env` stay and that `teardown.sh --purge` is the terminal-only
   way to delete them.
+
+## v8 — ops home and sidebar shell (2026-10-28)
+
+The tile grid answered "what exists" well and "what is running, and is the
+box OK" badly: 36 tiles of equal weight, state in a 6px dot, and every
+start or stop one page away. The home page is now built for running the box.
+
+**Diverges from the first draft** on one rule: "explicitly not a stats
+dashboard". The page now opens on a four-cell health strip (apps running,
+memory, disk, CPU load). It stays four numbers with no history or graphs;
+the reason is that a full disk took deploys down and nothing on the page
+said so. Above 95% disk a sentence says it before anything else.
+
+**Also replaced:** the Grid / Table / Board views, sort select, star
+pinning, the tab strip (All / Active / Paused / Updates / Uninstalled /
+c-wenlong) and the Categories multi-select. In their place:
+
+- Rows grouped **Running / Stopped / Not installed**. A degraded service
+  (probe failing, parts alive) sits under Running with a red X glyph and
+  "Not responding", where it will be seen.
+- State in the glyph's **shape** (solid check, half ring, X, empty ring,
+  dotted ring, dashed ring), colour only on top.
+- One visible button per row (Open / Start / Install / Restart for a
+  degraded one / View log while a job runs); everything else in a ⋯ action
+  menu with a letter per item. Every verb still goes through app.js's
+  confirm-then-log sheet (`LauncherApp.action`).
+- Category pills, plus **Updates** while any tag has moved. Author is
+  searchable rather than a tab.
+- Keyboard: `/` search, ↑/↓ select, ↵ primary, ⌘K / Ctrl-K menu.
+- A sidebar (collapsible to icons; a drawer below 900px) with Apps,
+  Catalogue, Deploys (deployd's page) and shortcuts to the running
+  monitoring apps (Uptime Kuma, beszel, ntfy).
+
+view.js keeps only the theme control, the detail page's Resources block and
+the usage beacons; its table, board, toolbar, star and tile-RAM code is
+deleted along with the grid, tab and category code in app.js and app.css.
+
+### Payload
+
+`GET /api/services` gains a top-level `system` object. Every key is always
+present and null when the platform cannot say (macOS has no `/proc`):
+
+| key | value |
+|---|---|
+| `memory` | `{total, available}` bytes from `/proc/meminfo` (`MemAvailable`); `{total, available: null}` from `sysconf` elsewhere |
+| `disk` | `{mount, total, used, free}` bytes for the filesystem holding `~` |
+| `load` | `[1, 5, 15]` minute load averages |
+| `cpus` | `os.cpu_count()` |
+| `uptime_s` | seconds, from `/proc/uptime` |
+
+Thresholds live in home.js: disk warns at 85% and is critical at 95%
+(df's arithmetic, `used / (used + free)`); memory is tight below 10%
+available.

@@ -1,16 +1,20 @@
 # launcher — the home screen for this box
 
-Every service on homeserver as a tile; tap to open. Tiles for services
-that exist in this repo but are **not deployed yet** are dimmed with a ↓ and
-carry a Deploy action that runs that service's `setup.sh` on the box. So it is
-both the index of what exists and the place you install from.
+Every service on homeserver in one list, grouped Running / Stopped / Not
+installed, with the box's own health above it. Each row has one button for
+the obvious thing (Open a running app, Start a stopped one, Install one that
+is in this repo but **not deployed yet**, which runs its `setup.sh` on the
+box) and a ⋯ menu for the rest. So it is the index of what exists, the place
+you start and stop things, and the place you install from.
 
 Bookmark: **`https://homeserver.tail-name.ts.net/home/`**
 Also on its own port: `https://homeserver.tail-name.ts.net:8093/`
 
-Explicitly not a stats dashboard — no graphs, no widgets, no per-service
-metrics. Uptime Kuma and beszel already do that and are one tile away. See
-[SPEC.md](SPEC.md) for the design rules and the tile-state table.
+Still not a stats dashboard: the health strip is four numbers (apps running,
+memory, the disk `~/services` lives on, CPU load) read from `/proc` and
+`statvfs` on each poll, so a full disk is the first thing on the page. No
+graphs or history; Uptime Kuma and beszel do that and are linked from the
+sidebar. See [SPEC.md](SPEC.md) for the design rules.
 
 ## Architecture
 
@@ -228,18 +232,24 @@ Step by step:
 The icon then opens the launcher full-screen, like a native app. Tailscale must
 be connected on the phone — the URL does not resolve off-tailnet, by design.
 
-**Desktop.** Same URL. The filter box is focused on load, so you can type two
-letters and hit Enter. It is deliberately *not* autofocused on touch devices,
-because that pops the keyboard over the grid. Categories (to the right of
-the filter) is a multi-select of Daily / AI & automation / Knowledge &
-media / Infrastructure. The theme button next to it cycles System → Light
-→ Dark; System follows the OS. Both are remembered on that device.
+**Desktop.** Same URL. `/` jumps to search, ↑/↓ moves the selected row, ↵
+runs its button (Open, Start, Install) and ⌘K / Ctrl-K opens its action
+menu (Restart, Stop, Update, Copy address, Details, Remove), each item with
+its own letter. The bar along the bottom shows what is selected. The pills
+under the search filter by category, plus **Updates** when any image tag
+has moved; sort the Running group by clicking its column headers. The
+sidebar collapses to icons (button at its foot) and holds the theme button,
+which cycles System → Light → Dark. All of it is remembered on that device.
 
-**Deploying from the phone.** A dimmed tile with a ↓ is a service in the repo
-that is not installed here. Tap it, confirm, and the job runs on the box with
-its log polled about once a second — polling, not streaming, so locking the
-phone mid-deploy does not kill anything. The log survives in
-`~/services/launcher/jobs/<id>.log`.
+**Phone.** The sidebar is a drawer behind the ☰ in the top bar; the ⋯ menu
+opens as a sheet from the bottom.
+
+**Deploying from the phone.** A row under **Not installed** is a service in
+the repo that is not on this box. Tap **Install**, confirm, and the job runs
+on the box with its log polled about once a second — polling, not streaming,
+so locking the phone mid-deploy does not kill anything. The log survives in
+`~/services/launcher/jobs/<id>.log`. Stop, Restart and Update ask for the
+same confirm; Start does not, since it is the recovery action.
 
 ## Ops
 

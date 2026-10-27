@@ -72,9 +72,11 @@ mark (`apps/web/public/brand/mark.png`) from the gnosia repo, and
 each service's own artwork, the repo owner's in each case.
 `design-systems.svg` is drawn for this launcher (three swatch cards on a
 slate plate) — the repo is private and has no brand of its own.
-`favicon.png`, `apple-touch-icon.png`
-and `launcher.png` are raster forms of the launcher's own icon, also original
-to this repo. The launcher tile itself has no registry entry and so falls
+`launcher.svg` is the launcher's own mark (three app tiles and a dot on the
+accent), original to this repo and a placeholder until a final one is drawn.
+`favicon.png`, `apple-touch-icon.png` (full-bleed, no corner radius: iOS
+masks it) and `launcher.png` are rendered from it; regenerate all three
+together when it changes. The launcher tile itself has no registry entry and so falls
 back to the hand-drawn glyphs in `../icons.js`.
 
 `homepage.png` is also outside the collection above: dashboard-icons has no

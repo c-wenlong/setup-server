@@ -89,7 +89,7 @@ one-shot deploy.
 
 | Service | What it gives you | Deploy |
 |---|---|---|
-| <a href="app/web/"><img src="app/web/static/icons/launcher.png" width="20" alt="launcher"></a> [launcher](app/web/) | One-tap app launcher for every service on the box — tile grid with live status, and a Deploy button for services not installed yet (Python stdlib, systemd user unit) | `cd app/web && ./setup.sh` |
+| <a href="app/web/"><img src="app/web/static/icons/launcher.svg" width="20" alt="launcher"></a> [launcher](app/web/) | One-tap app launcher for every service on the box: box health (memory, disk, load) above a Running / Stopped / Not installed list with start, stop and install on each row (Python stdlib, systemd user unit) | `cd app/web && ./setup.sh` |
 | <a href="https://gethomepage.dev/"><img src="app/web/static/icons/homepage.png" width="20" alt="Homepage"></a> [homepage](services/homepage/) | YAML-configured dashboard of every service, with live status dots and widgets — a read-only front door alongside the launcher (Docker) | `cd services/homepage && ./setup.sh` |
 | <a href="https://coolify.io/docs/get-started/installation"><img src="app/web/static/icons/coolify.svg" width="20" alt="Coolify"></a> [coolify](services/coolify/) | Self-hosted PaaS (Heroku/Vercel-style deploys) — dashboard + Postgres + Redis + Soketi; loopback-only, Traefik proxy off | `cd services/coolify && ./setup.sh` |
 | <a href="https://docs.umami.is/docs/install"><img src="app/web/static/icons/umami.svg" width="20" alt="Umami"></a> [umami](services/umami/) | Web analytics — privacy-respecting pageviews; Postgres, default admin/umami password rotated on first boot | `cd services/umami && ./setup.sh` |

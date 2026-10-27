@@ -16,15 +16,7 @@
   var JOB_POLL_MS   = 1000;    // deploy log polling
   var FETCH_TIMEOUT = 8000;
   var MAX_POLL_FAILS = 6;
-  var TAB_STORE     = 'launcher.tab';
-  var GROUP_STORE   = 'launcher.groups';
 
-  /* Tabs. `state` comes straight from the API:
-       active   -> running
-       stopped  -> deployed, health probe fails  (shown as "Paused")
-       available/planned -> not on the box       (shown as "Uninstalled")
-     `empty` is what we say when the tab legitimately has nothing in it —
-     never a blank void. */
   /* Every job the server can run for a service, in one table. `deploy` is the
      original one (POST .../deploy); start/stop/restart are lifecycle actions
      (POST .../action) and go through the SAME job machinery — one job id, one
@@ -50,53 +42,14 @@
     return Object.prototype.hasOwnProperty.call(ACTIONS, name) ? ACTIONS[name] : null;
   }
 
-  var TABS = [
-    { id: 'all', label: 'All',
-      match: function () { return true; },
-      empty: 'Nothing in the registry yet.' },
-    { id: 'active', label: 'Active',
-      match: function (s) { return s.state === 'active'; },
-      empty: 'Nothing is running right now.' },
-    { id: 'paused', label: 'Paused',
-      match: function (s) { return s.state === 'stopped'; },
-      empty: 'Nothing is down — every deployed service is answering.' },
-    { id: 'updates', label: 'Updates',
-      match: function (s) { return hasUpdate(s); },
-      empty: 'Every installed service is on the newest image for its tag.' },
-    { id: 'uninstalled', label: 'Uninstalled',
-      match: function (s) { return s.state === 'available' || s.state === 'planned'; },
-      empty: 'Everything in the repo is deployed.' },
-    { id: 'c-wenlong', label: 'c-wenlong',
-      match: function (s) { return s.author === 'c-wenlong'; },
-      empty: 'No services here are authored by c-wenlong.' }
-  ];
 
-  /* v3 view/sort/usage module (view.js), loaded just before this file. Every
-     call into it goes through here. It is optional on purpose: if that script
-     is missing or threw, the grid is exactly what it was in v2 — registry
-     order, tiles, no beacons — rather than a blank page. */
+
+  /* view.js, loaded just before this file: the theme control, the detail
+     page's Resources block and the usage beacons. Optional on purpose: if
+     it is missing or threw, the detail page simply goes without those. */
   var VIEW = window.LauncherView || {
-    mode:     function () { return 'grid'; },
-    arrange:  function (list) { return list; },
-    grouped:  function (list) {
-      var out = [];
-      for (var i = 0; i < (list || []).length; i++) {
-        out.push({ type: 's', svc: list[i] });
-      }
-      return out;
-    },
-    table:    function () {},
-    board:    function () {},
-    groupBy:  function () { return 'state'; },
-    isStarred: function () { return false; },
-    starButton: function () { return document.createElement('button'); },
-    paintStar: function () {},
-    ram:      function () { return ''; },
-    ramTag:   function () {},
     detail:   function () {},
-    touch:    function () {},
-    toolbar:  function () {},
-    onChange: function () {}
+    touch:    function () {}
   };
 
   /* ---------- state ---------- */
@@ -114,13 +67,7 @@
   var services = [];
   var groups = DEFAULT_GROUPS.slice();
   var host = '';
-  var filterText = '';
-  /* null = no category restriction (every box checked). An array is the
-     ids that are on; empty array means the user unchecked everything. */
-  var groupFilter = null;
-  var headingCache = {};   // group id -> h2, so a refresh does not rebuild headings
-  var activeTab = 'all';
-  var tileCache = {};   // key -> {sig, node}, so a refresh reuses unchanged tiles
+  var system = null;    // the payload's box-health block, for home.js
   var loaded = false;
   var lastFetchAt = 0;
   var inflight = false;
@@ -150,28 +97,13 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
-  var elGrid    = $('grid');
-  var elPanel   = $('panel');
-  var elTabs    = $('tabs');
-  var elEmpty   = $('empty');
   var elHost    = $('host');
   var elNotice  = $('notice');
   var elNoticeTitle = $('notice-title');
   var elNoticeText  = $('notice-text');
   var elRetry   = $('notice-retry');
-  var elFilter  = $('filter');
   var elLive    = $('live');
 
-  var elSearch    = $('search');
-  var elSearchRow = $('searchrow');
-  var elGFilter   = $('gfilter');
-  var elGBtn      = $('gfilter-btn');
-  var elGLabel    = $('gfilter-label');
-  var elGMenu     = $('gfilter-menu');
-  /* The whole site header (brand mark, title, hostname, filter) belongs to
-     the grid only. On a detail page the breadcrumb is the top of the page —
-     repeating the brand above it just pushes the content down. */
-  var elHead    = $('head');
   var elVGrid   = $('view-grid');
   var elVDetail = $('view-detail');
   var elDBack   = $('d-back');
@@ -241,11 +173,6 @@
     return node;
   }
 
-  function icon(svc) {
-    var span = make('span', 'tile-icon');
-    span.appendChild(iconNode(svc));
-    return span;
-  }
 
   var SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -270,8 +197,6 @@
   }
 
   var GLYPHS = {
-    download: ['M12 4.4v10.4', 'm7.8 10.8 4.2 4.2 4.2-4.2', 'M4.6 19.3h14.8'],
-    chevron:  ['m9.5 5.5 6.5 6.5-6.5 6.5'],
     eye:      ['M2.4 12S6 5.8 12 5.8 21.6 12 21.6 12 18 18.2 12 18.2 2.4 12 2.4 12Z',
                'M14.9 12a2.9 2.9 0 1 1-5.8 0 2.9 2.9 0 0 1 5.8 0Z'],
     eyeOff:   ['M4.2 4.2 19.8 19.8',
@@ -287,11 +212,6 @@
                'M6.4 10.6h11.2a1.4 1.4 0 0 1 1.4 1.4v6.2a1.4 1.4 0 0 1-1.4 1.4H6.4A1.4 1.4 0 0 1 5 18.2V12a1.4 1.4 0 0 1 1.4-1.4Z']
   };
 
-  function downloadGlyph() {
-    var span = make('span', 'tile-dl');
-    span.appendChild(glyph(GLYPHS.download));
-    return span;
-  }
 
   /* fetch with a timeout, so a hung box shows an error instead of a spinner
      that never resolves. AbortController is available in every Safari that
@@ -322,16 +242,6 @@
     });
   }
 
-  /* ---------- tiles ---------- */
-
-  function cornerDot(cls, label) {
-    var slot = make('span', 'tile-corner');
-    var dot = make('i', 'dot ' + cls);
-    dot.setAttribute('role', 'img');
-    dot.setAttribute('aria-label', label);
-    slot.appendChild(dot);
-    return slot;
-  }
 
   /* `job` is optional — older backends do not send it. Returns the id of a
      job that is running for this service right now, or null. */
@@ -351,10 +261,6 @@
     return actionDef(name) ? name : 'deploy';
   }
 
-  /* "deploying…", "stopping…" — the tile's live note. */
-  function jobNote(svc) {
-    return ACTIONS[jobAction(svc)].gerund.toLowerCase() + '…';
-  }
 
   /* The same thing as a status label: "Deploy running", "Stopping…". */
   function jobLabel(svc) {
@@ -362,186 +268,13 @@
     return name === 'deploy' ? 'Deploy running' : ACTIONS[name].gerund + '…';
   }
 
-  function tagline(svc) {
-    var p = make('span', 'tile-tag');
-    if (svc.tagline) p.appendChild(document.createTextNode(svc.tagline));
 
-    var note = null;
-    if (liveJob(svc)) {
-      note = make('span', 'tile-note-run');
-      text(note, jobNote(svc));
-    } else if (svc.state === 'stopped') {
-      /* 'down' is a verdict — only a degraded service (probe fails while
-         parts still run) earns it. An installed service that is simply off
-         is 'paused', and muted. */
-      note = make('span', svc.degraded ? 'tile-note' : 'tile-note-muted');
-      text(note, svc.degraded ? 'down' : 'paused');
-    } else if (svc.state === 'active' && !svc.url) {
-      note = make('span', 'tile-note-muted');
-      text(note, 'no web UI');
-    } else if (svc.state === 'available') {
-      note = make('span', 'tile-note-muted');
-      text(note, 'not deployed');
-    }
 
-    if (note) {
-      /* The separator travels with the note, so a narrow tile wraps as
-         "Automation / · down" rather than leaving a dangling "·". */
-      if (svc.tagline) {
-        p.appendChild(document.createTextNode(' '));
-        var tail = make('span', 'tile-tail');
-        tail.appendChild(text(make('span', 'tile-sep'), '· '));
-        tail.appendChild(note);
-        p.appendChild(tail);
-      } else {
-        p.appendChild(note);
-      }
-    }
-    return p;
-  }
 
-  function detailHref(key) {
-    /* Fragment-only, so it resolves against whichever mount point the page is
-       served from. Never an absolute path. */
-    return '#/service/' + encodeURIComponent(key);
-  }
 
-  /* The corner slot is absolutely positioned and inert, which makes it the
-     one place a RAM figure can go without moving a single pixel of the tile's
-     own layout — the condition for putting it on the grid at all. view.js
-     fills it; with no resources in the payload it stays empty. */
-  function cornerFor(svc, job) {
-    var slot = cornerSlot(svc, job);
-    VIEW.ramTag(slot, svc);
-    return slot;
-  }
 
-  function cornerSlot(svc, job) {
-    var state = svc.state || 'planned';
-    if (job)                  return cornerDot('dot-job', jobLabel(svc));
-    if (state === 'active')   return cornerDot('dot-ok', 'Running');
-    if (state === 'stopped')  return svc.degraded
-      ? cornerDot('dot-warn', 'Installed but not responding')
-      : cornerDot('dot-off', 'Installed, paused');
-    if (state === 'available') {
-      var slot = make('span', 'tile-corner');
-      slot.appendChild(downloadGlyph());
-      /* No "tap to install" any more: this corner is inert now, and the
-         install target is the icon+name link. */
-      slot.setAttribute('title', 'Not deployed yet');
-      return slot;
-    }
-    var pslot = make('span', 'tile-corner');
-    pslot.appendChild(text(make('span', 'badge'), 'planned'));
-    return pslot;
-  }
 
-  /* Fills a target with the tile's contents: icon, name, tagline. */
-  function fillTile(node, svc) {
-    var ic = icon(svc);
-    /* An update waiting is a badge on the icon, the way a phone shows one.
-       Not a tagline note: a running tile already has its RAM figure in the
-       corner, and a second note there runs into it. */
-    if (hasUpdate(svc)) {
-      var badge = make('span', 'tile-upd');
-      badge.setAttribute('aria-hidden', 'true');
-      badge.title = 'Update available';
-      ic.appendChild(badge);
-    }
-    node.appendChild(ic);
-    node.appendChild(text(make('span', 'tile-name'), svc.name || svc.key));
-    node.appendChild(tagline(svc));
-    var label = (svc.name || svc.key) + ', ' + (svc.tagline || '') + ', ' + describe(svc) +
-                (hasUpdate(svc) ? ', update available' : '');
-    node.setAttribute('aria-label', label.replace(/, ,/g, ','));
-    return node;
-  }
 
-  /* A tile is a container holding two SIBLING targets — an <a> cannot be
-     nested inside a <button>:
-       left  .tile-open : opens the service (or the deploy sheet / running job)
-       right .tile-more : blank strip, opens the detail page
-     When there is nothing to open (no URL, or planned) the whole tile becomes
-     the detail link instead, so no tap lands on dead space. */
-  function buildTile(svc) {
-    var state = svc.state || 'planned';
-    var job = liveJob(svc);
-    var openable = (state === 'active' || state === 'stopped') && !!svc.url && !job;
-
-    var tile = make('div', 'tile tile-' + state +
-                  (svc.degraded ? ' tile-degraded' : ''));
-    tile.setAttribute('role', 'listitem');
-    tile.setAttribute('data-key', svc.key);
-
-    var left = null;
-    if (job) {
-      /* A job is already running server-side — a deploy, or a start/stop from
-         the detail page. Tapping reattaches to it instead of POSTing a second
-         one the backend would 409. */
-      left = make('button', 'tile-open');
-      left.type = 'button';
-      left.addEventListener('click', function () {
-        openSheet(svc, left, job, jobAction(svc));
-      });
-    } else if (openable) {
-      left = make('a', 'tile-open');
-      left.href = svc.url;
-      left.target = '_blank';
-      left.rel = 'noopener noreferrer';
-      /* Fire and forget: this click is navigating a tab away, so the beacon
-         uses keepalive and can never block it or fail loudly. */
-      left.addEventListener('click', function () { VIEW.touch(svc.key, 'launched'); });
-    } else if (state === 'available') {
-      left = make('button', 'tile-open');
-      left.type = 'button';
-      left.addEventListener('click', function () { openSheet(svc, left); });
-    }
-
-    if (left) {
-      tile.appendChild(fillTile(left, svc));
-      tile.appendChild(cornerFor(svc, job));
-      if (typeof VIEW.starButton === 'function') tile.appendChild(VIEW.starButton(svc.key));
-
-      var more = make('a', 'tile-more');
-      more.href = detailHref(svc.key);
-      more.setAttribute('data-more', svc.key);
-      more.setAttribute('aria-label', 'Details for ' + (svc.name || svc.key));
-      more.appendChild(glyph(GLYPHS.chevron, '1.8'));
-      tile.appendChild(more);
-    } else {
-      /* nothing to launch — the whole tile is the detail link */
-      var solo = make('a', 'tile-solo');
-      solo.href = detailHref(svc.key);
-      solo.setAttribute('data-more', svc.key);
-      tile.appendChild(fillTile(solo, svc));
-      tile.appendChild(cornerFor(svc, job));
-      if (typeof VIEW.starButton === 'function') tile.appendChild(VIEW.starButton(svc.key));
-    }
-
-    return tile;
-  }
-
-  function describe(svc) {
-    if (liveJob(svc)) return jobLabel(svc).toLowerCase().replace(/…$/, '') +
-                             ', activate to watch the log';
-    switch (svc.state) {
-      case 'active':    return svc.url ? 'running, opens in a new tab' : 'running, no web interface, opens details';
-      case 'stopped':   return (svc.degraded ? 'running but not responding'
-                                             : 'installed, paused')
-                             + (svc.url ? '' : ', opens details');
-      case 'available': return 'not deployed, activate to install';
-      default:          return 'planned, not built yet, opens details';
-    }
-  }
-
-  function skeleton() {
-    var node = make('div', 'tile tile-skel');
-    node.setAttribute('aria-hidden', 'true');
-    node.appendChild(make('span', 'sk sk-i'));
-    node.appendChild(make('span', 'sk sk-a'));
-    node.appendChild(make('span', 'sk sk-b'));
-    return node;
-  }
 
   /* ---------- rendering ---------- */
 
@@ -579,116 +312,15 @@
     return groupsFromServices(data && data.services);
   }
 
-  function loadGroupFilter() {
-    var raw = null;
-    try { raw = window.localStorage.getItem(GROUP_STORE); } catch (e) { raw = null; }
-    if (raw == null || raw === '') { groupFilter = null; return; }
-    try {
-      var parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) { groupFilter = null; return; }
-      var out = [];
-      for (var i = 0; i < parsed.length; i++) {
-        if (typeof parsed[i] === 'string' && parsed[i]) out.push(parsed[i]);
-      }
-      groupFilter = out;
-    } catch (e) { groupFilter = null; }
-  }
 
-  function rememberGroups() {
-    try {
-      if (groupFilter === null) window.localStorage.removeItem(GROUP_STORE);
-      else window.localStorage.setItem(GROUP_STORE, JSON.stringify(groupFilter));
-    } catch (e) { /* private mode */ }
-  }
 
-  function groupIsOn(id) {
-    if (groupFilter === null) return true;
-    for (var i = 0; i < groupFilter.length; i++) {
-      if (groupFilter[i] === id) return true;
-    }
-    return false;
-  }
 
-  function inSelectedGroup(svc) {
-    if (groupFilter === null) return true;
-    return groupIsOn(svc.group);
-  }
 
-  function groupFilterActive() {
-    if (groupFilter === null || !groups.length) return false;
-    var on = 0;
-    for (var i = 0; i < groups.length; i++) {
-      if (groupIsOn(groups[i].id)) on++;
-    }
-    return on !== groups.length;
-  }
 
-  function paintGroupBtn() {
-    if (!elGBtn || !elGLabel) return;
-    var active = groupFilterActive();
-    elGBtn.className = active ? 'iconbtn gfilter-btn is-on' : 'iconbtn gfilter-btn';
-    if (!active) {
-      text(elGLabel, 'Categories');
-      return;
-    }
-    if (groupFilter && groupFilter.length === 1) {
-      text(elGLabel, groupLabel(groupFilter[0]) || groupFilter[0]);
-      return;
-    }
-    text(elGLabel, (groupFilter ? groupFilter.length : 0) + ' categories');
-  }
 
-  function pruneGroupFilter() {
-    if (groupFilter === null || !groups.length) return;
-    var keep = [];
-    for (var i = 0; i < groupFilter.length; i++) {
-      if (groupLabel(groupFilter[i])) keep.push(groupFilter[i]);
-    }
-    groupFilter = (keep.length === groups.length) ? null : keep;
-  }
 
-  function paintGroupMenu() {
-    if (!elGMenu) return;
-    pruneGroupFilter();
-    elGMenu.textContent = '';
-    if (!groups.length) {
-      paintGroupBtn();
-      return;
-    }
-    for (var i = 0; i < groups.length; i++) {
-      var g = groups[i];
-      var lab = document.createElement('label');
-      lab.className = 'gfilter-opt';
-      var box = document.createElement('input');
-      box.type = 'checkbox';
-      box.value = g.id;
-      box.checked = groupIsOn(g.id);
-      lab.appendChild(box);
-      lab.appendChild(document.createTextNode(g.label));
-      elGMenu.appendChild(lab);
-    }
-    paintGroupBtn();
-  }
 
-  function setGroupOpen(open) {
-    if (!elGBtn || !elGMenu) return;
-    elGMenu.hidden = !open;
-    elGBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-  }
 
-  function applyGroupChecks() {
-    if (!elGMenu) return;
-    var boxes = elGMenu.querySelectorAll('input[type="checkbox"]');
-    var on = [];
-    for (var i = 0; i < boxes.length; i++) {
-      if (boxes[i].checked) on.push(boxes[i].value);
-    }
-    if (on.length === boxes.length) groupFilter = null;
-    else groupFilter = on;
-    rememberGroups();
-    paintGroupBtn();
-    if (loaded) render();
-  }
 
   function find(key) {
     for (var i = 0; i < services.length; i++) {
@@ -697,168 +329,12 @@
     return null;
   }
 
-  function matches(svc, q) {
-    if (!q) return true;
-    var hay = [svc.name, svc.tagline, svc.key, svc.group, svc.author,
-               groupLabel(svc.group)].join(' ').toLowerCase();
-    var words = q.split(/\s+/);
-    for (var i = 0; i < words.length; i++) {
-      if (words[i] && hay.indexOf(words[i]) === -1) return false;
-    }
-    return true;
-  }
 
-  function tabDef(id) {
-    for (var i = 0; i < TABS.length; i++) if (TABS[i].id === id) return TABS[i];
-    return TABS[0];
-  }
 
-  /* Reuse the existing node when nothing about the service changed, so the
-     30s refresh does not blow away focus, hover, or the scroll position. */
-  function tileFor(svc) {
-    var sig = [svc.state, svc.url, svc.name, svc.tagline, svc.icon, liveJob(svc), jobAction(svc), hasUpdate(svc)].join('');
-    var hit = tileCache[svc.key];
-    var node = (hit && hit.sig === sig) ? hit.node : null;
-    if (!node) {
-      node = buildTile(svc);
-      tileCache[svc.key] = { sig: sig, node: node };
-    }
-    /* RAM moves on every poll, so it is deliberately NOT part of the
-       signature: it is rewritten in place instead, and a 30s refresh still
-       never rebuilds the tile you happen to be hovering. */
-    VIEW.ramTag(node.querySelector('.tile-corner'), svc);
-    if (typeof VIEW.paintStar === 'function') {
-      VIEW.paintStar(node.querySelector('.vw-star'), svc.key);
-    }
-    return node;
-  }
 
-  function headingFor(id, label) {
-    var node = headingCache[id];
-    if (!node) {
-      node = document.createElement('h2');
-      node.className = 'grid-h';
-      headingCache[id] = node;
-    }
-    if (node.textContent !== label) node.textContent = label;
-    return node;
-  }
 
-  /* Minimal keyed reconcile: only touch the DOM where it actually differs. */
-  function syncGrid(nodes) {
-    for (var i = 0; i < nodes.length; i++) {
-      var current = elGrid.childNodes[i];
-      if (current !== nodes[i]) elGrid.insertBefore(nodes[i], current || null);
-    }
-    while (elGrid.childNodes.length > nodes.length) {
-      elGrid.removeChild(elGrid.lastChild);
-    }
-  }
 
-  function render() {
-    if (!loaded) {
-      /* Skeleton tiles are the grid's loading state. Table and board would
-         be a flash of the wrong thing, so those views simply wait. */
-      var pending = VIEW.mode() === 'table' || VIEW.mode() === 'board';
-      elGrid.textContent = '';
-      elGrid.hidden = pending;
-      VIEW.table(VIEW.mode() === 'table' ? [] : null);
-      if (typeof VIEW.board === 'function') {
-        VIEW.board(VIEW.mode() === 'board' ? [] : null, groups);
-      }
-      if (!pending) {
-        var frag = document.createDocumentFragment();
-        for (var s = 0; s < 8; s++) frag.appendChild(skeleton());
-        elGrid.appendChild(frag);
-      }
-      elGrid.setAttribute('aria-busy', 'true');
-      elEmpty.hidden = true;
-      setBoardChrome(VIEW.mode() === 'board');
-      elTabs.hidden = VIEW.mode() === 'board' &&
-                      typeof VIEW.groupBy === 'function' &&
-                      VIEW.groupBy() === 'state';
-      VIEW.toolbar(true);
-      paintTabs(null);
-      return;
-    }
 
-    var q = filterText.trim().toLowerCase();
-    /* Board grouped by Status already has a column per state, so the tab
-       strip would collapse the board to a single column. Treat that as All. */
-    var boardByState = VIEW.mode() === 'board' &&
-                       typeof VIEW.groupBy === 'function' &&
-                       VIEW.groupBy() === 'state';
-    var tab = tabDef(boardByState ? 'all' : activeTab);
-
-    /* Counts are per tab and honour the type-to-filter, so the tab strip
-       tells you where a search term lives. */
-    var counts = {};
-    for (var t = 0; t < TABS.length; t++) counts[TABS[t].id] = 0;
-
-    var shown = [];
-    for (var i = 0; i < services.length; i++) {
-      var svc = services[i];
-      if (!matches(svc, q) || !inSelectedGroup(svc)) continue;
-      for (var c = 0; c < TABS.length; c++) {
-        if (TABS[c].match(svc)) counts[TABS[c].id]++;
-      }
-      if (tab.match(svc)) shown.push(svc);
-    }
-
-    /* Sort (and starring) live in view.js. Grouping is board-only — grid
-       and table stay a flat list so a heading never appears in those views. */
-    var ordered = VIEW.arrange(shown);
-
-    if (VIEW.mode() === 'table') {
-      elGrid.hidden = true;
-      syncGrid([]);
-      VIEW.table(ordered);
-      if (typeof VIEW.board === 'function') VIEW.board(null);
-    } else if (VIEW.mode() === 'board') {
-      elGrid.hidden = true;
-      syncGrid([]);
-      VIEW.table(null);
-      if (typeof VIEW.board === 'function') VIEW.board(shown, groups);
-    } else {
-      VIEW.table(null);
-      if (typeof VIEW.board === 'function') VIEW.board(null);
-      elGrid.hidden = false;
-      var nodes = [];
-      for (var n = 0; n < ordered.length; n++) nodes.push(tileFor(ordered[n]));
-      syncGrid(nodes);
-    }
-    elGrid.setAttribute('aria-busy', 'false');
-    setBoardChrome(VIEW.mode() === 'board' && detailKey === null);
-
-    elTabs.hidden = services.length === 0 || boardByState;
-    VIEW.toolbar(services.length !== 0);
-    paintTabs(counts);
-
-    if (shown.length || services.length === 0) {
-      elEmpty.hidden = true;
-      elPanel.removeAttribute('tabindex');
-    } else {
-      text(elEmpty, q
-        ? (tab.id === 'all'
-            ? 'No service matches “' + filterText.trim() + '”.'
-            : 'Nothing in ' + tab.label + ' matches “' + filterText.trim() + '”.')
-        : (groupFilterActive()
-            ? (tab.id === 'all'
-                ? 'No service in those categories.'
-                : 'Nothing in ' + tab.label + ' is in those categories.')
-            : tab.empty));
-      elEmpty.hidden = false;
-      elPanel.setAttribute('tabindex', '0');   // the panel has no focusable child
-    }
-  }
-
-  function setBoardChrome(on) {
-    /* Board chrome locks page scrolling. Never on the catalogue: render()
-       re-applies it after every poll, and that page has to scroll. */
-    if (isCatalogueRoute()) on = false;
-    try { document.body.classList.toggle('is-board', !!on); }
-    catch (e) { /* nothing to paint onto */ }
-  }
 
   function showNotice(title, message) {
     text(elNoticeTitle, title);
@@ -868,79 +344,17 @@
 
   function hideNotice() { elNotice.hidden = true; }
 
-  /* ---------- tabs ---------- */
 
-  function tabEl(id) { return $('tab-' + id); }
 
-  function paintTabs(counts) {
-    for (var i = 0; i < TABS.length; i++) {
-      var def = TABS[i];
-      var el = tabEl(def.id);
-      if (!el) continue;
 
-      var selected = def.id === activeTab;
-      el.setAttribute('aria-selected', selected ? 'true' : 'false');
-      el.tabIndex = selected ? 0 : -1;   // roving tabindex: one stop for the strip
-      if (selected) elPanel.setAttribute('aria-labelledby', el.id);
 
-      var n = counts ? counts[def.id] : null;
-      text($('tab-n-' + def.id), n === null ? '' : n);
-      /* Zero stays clickable, just quieter — "Paused 0" is information. */
-      el.className = (n === 0) ? 'tab tab-zero' : 'tab';
-    }
-  }
 
-  function storedTab() {
-    var raw = null;
-    try { raw = window.localStorage.getItem(TAB_STORE); } catch (e) { raw = null; }
-    for (var i = 0; i < TABS.length; i++) if (TABS[i].id === raw) return raw;
-    return 'all';
-  }
 
-  function rememberTab(id) {
-    try { window.localStorage.setItem(TAB_STORE, id); } catch (e) { /* private mode */ }
-  }
-
-  function selectTab(id, moveFocus) {
-    var el = tabEl(id);
-    if (!el) return;
-    if (id !== activeTab) {
-      activeTab = id;
-      rememberTab(id);
-      render();
-      say(tabDef(id).label + ', ' + ($('tab-n-' + id).textContent || '0') + ' services');
-    }
-    if (moveFocus) el.focus();
-  }
-
-  elTabs.addEventListener('click', function (e) {
-    var node = e.target;
-    while (node && node !== elTabs && !node.getAttribute('data-tab')) node = node.parentNode;
-    if (node && node !== elTabs) selectTab(node.getAttribute('data-tab'), false);
-  });
-
-  elTabs.addEventListener('keydown', function (e) {
-    var index = -1;
-    for (var i = 0; i < TABS.length; i++) if (TABS[i].id === activeTab) index = i;
-    if (index < 0) return;
-
-    var next = null;
-    if (e.key === 'ArrowRight' || e.key === 'Right')     next = (index + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft' || e.key === 'Left')  next = (index - 1 + TABS.length) % TABS.length;
-    else if (e.key === 'Home')                           next = 0;
-    else if (e.key === 'End')                            next = TABS.length - 1;
-    else return;
-
-    e.preventDefault();
-    selectTab(TABS[next].id, true);
-    var el = tabEl(TABS[next].id);
-    if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  });
 
   /* ---------- loading ---------- */
 
-  /* catalogue.js paints from this same list rather than polling twice, so it
-     hears about every poll: a fresh list, or a failure (LauncherApp.error). */
+  /* home.js and catalogue.js paint from this same list rather than polling
+     again, so they hear about every poll: a fresh list, or a failure (LauncherApp.error). */
   var lastError = null;
   function notifyServices() {
     try {
@@ -968,11 +382,10 @@
       host = res.data.host || '';
       services = res.data.services;
       groups = resolveGroups(res.data);
-      paintGroupMenu();
+      system = (res.data.system && typeof res.data.system === 'object') ? res.data.system : null;
       loaded = true;
       hideNotice();
       text(elHost, host || ' ');
-      render();
       lastError = null;
       notifyServices();
 
@@ -1020,15 +433,15 @@
   function failed(message) {
     lastError = message;
     showNotice("Can't reach the launcher API", message);
-    /* The notice lives in the grid, which the catalogue route hides. */
-    notifyServices();
     if (!loaded) {
       loaded = true;      // stop the skeletons; the notice explains why
       services = [];
       groups = DEFAULT_GROUPS.slice();
-      paintGroupMenu();
-      render();
     }
+    /* After the state above, so listeners repaint a finished (empty) list
+       rather than the loading placeholders. The notice lives in the grid,
+       which the catalogue route hides, so the catalogue needs this too. */
+    notifyServices();
   }
 
   /* ---------- deploy sheet ---------- */
@@ -2255,7 +1668,7 @@
       var listed = find(key);
       if (listed && savedName) { listed.name = savedName; }
       if (listed && typeof d.description === 'string') listed.description = savedDesc;
-      if (loaded) render();
+      if (loaded) notifyServices();
 
       if (!live) return;
 
@@ -2512,11 +1925,7 @@
     revealed = {};
     var token = ++detailReq;
 
-    setBoardChrome(false);
     elVGrid.hidden = true;
-    elSearch.hidden = true;
-    if (elSearchRow) elSearchRow.hidden = true;
-    elHead.hidden = true;
     elVDetail.hidden = false;
     resetDetail();
 
@@ -2556,17 +1965,14 @@
     document.title = 'Launcher';
 
     elVDetail.hidden = true;
-    elVGrid.hidden = false;
-    setBoardChrome(VIEW.mode() === 'board');
-    elSearch.hidden = false;
-    if (elSearchRow) elSearchRow.hidden = false;
-    elHead.hidden = false;
+    elVGrid.hidden = isCatalogueRoute();
 
+    /* Back on the home list: focus returns to the row's name link. */
     var target = null;
-    for (var i = 0; i < elGrid.childNodes.length; i++) {
-      var tile = elGrid.childNodes[i];
-      if (tile.getAttribute && tile.getAttribute('data-key') === key) {
-        target = tile.querySelector ? tile.querySelector('[data-more]') : null;
+    var rows = document.querySelectorAll('#home [data-key]');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-key') === key) {
+        target = rows[i].querySelector('[data-detail]');
       }
     }
     if (target) {
@@ -2583,9 +1989,6 @@
 
   function showGrid(on) {
     elVGrid.hidden = !on;
-    elSearch.hidden = !on;
-    if (elSearchRow) elSearchRow.hidden = !on;
-    setBoardChrome(on && VIEW.mode() === 'board');
   }
 
   function route() {
@@ -2595,15 +1998,40 @@
     showGrid(!isCatalogueRoute());
   }
 
-  /* The small surface catalogue.js needs: the list the grid already polls,
-     and the grid's own deploy sheet, so an install from the catalogue is the
-     same confirm-then-log flow as a tap on a dimmed tile. */
+  /* The small surface home.js and catalogue.js need: the list this file
+     already polls, and its sheets, so a Start from the home list or an
+     install from the catalogue is the same confirm-then-log flow as the
+     buttons on a detail page. Nothing here bypasses a confirm. */
   window.LauncherApp = {
     loaded: function () { return loaded; },
     error: function () { return lastError; },
     services: function () { return services.slice(); },
     groups: function () { return groups.slice(); },
+    host: function () { return host; },
+    system: function () { return system; },
     refresh: function () { return load(true); },
+    /* One entry point for every verb a home row offers. A job already
+       running reattaches to its log instead (the server would 409 a second
+       one); anything the payload says is not on offer returns false, and the
+       caller leaves its button alone. */
+    action: function (key, verb, opener) {
+      var svc = find(key);
+      if (!svc) return false;
+      var job = liveJob(svc);
+      if (job) { openSheet(svc, opener, job, jobAction(svc)); return true; }
+      if (verb === 'deploy') {
+        if (svc.state !== 'available') return false;
+        openSheet(svc, opener);
+        return true;
+      }
+      if (!actionDef(verb) || actionBusy) return false;
+      if (verb === 'remove' && svc.removable !== true) return false;
+      if (verb === 'update' && !updateOffered(svc)) return false;
+      if (!controlState(svc).on) return false;
+      openActionSheet(svc, verb, opener);
+      return true;
+    },
+    touch: function (key) { VIEW.touch(key, 'launched'); },
     deploy: function (key, opener) {
       var svc = find(key);
       if (!svc) return false;
@@ -2650,45 +2078,9 @@
 
   /* ---------- wiring ---------- */
 
-  elFilter.addEventListener('input', function () {
-    filterText = elFilter.value;
-    if (loaded) render();
-  });
 
-  if (elGBtn && elGMenu) {
-    elGBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      setGroupOpen(elGMenu.hidden);
-    });
-    elGMenu.addEventListener('click', function (e) { e.stopPropagation(); });
-    elGMenu.addEventListener('change', applyGroupChecks);
-    document.addEventListener('click', function () { setGroupOpen(false); });
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' || e.key === 'Esc') setGroupOpen(false);
-    });
-  }
 
-  elFilter.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' || e.key === 'Esc') {
-      elFilter.value = '';
-      filterText = '';
-      render();
-    }
-  });
 
-  /* ⌘K / Ctrl-K jumps to the search pill from anywhere on the page — the
-     browser's own find is left alone (it lives on ⌘F). */
-  document.addEventListener('keydown', function (e) {
-    if ((e.key === 'k' || e.key === 'K') && (e.metaKey || e.ctrlKey)) {
-      /* Not while a sheet owns the modal layer (focus would land behind
-         it), and not on routes where the field is hidden — the detail page
-         has no search at all, and the catalogue focuses its own. */
-      if (!elSheet.hidden || elSearch.hidden) return;
-      e.preventDefault();
-      elFilter.focus();
-      elFilter.select();
-    }
-  });
 
   elRetry.addEventListener('click', function () {
     text(elRetry, 'Retrying…');
@@ -2747,23 +2139,8 @@
     if (!document.hidden && !jobId) load(false);
   });
 
-  /* Desktop only: autofocusing the filter on a phone pops the keyboard. */
-  function isPointerDevice() {
-    return !!(window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches);
-  }
 
-  activeTab = storedTab();   // survives a reload
-  loadGroupFilter();
-  paintGroupMenu();
-  VIEW.onChange(render);     // the View/Sort selects repaint through here
-  render();
   route();                   // a deep link to #/service/<key> opens straight there
-  load(true).then(function () {
-    /* Desktop only, and never while a detail page is open — stealing focus
-       out of a page you linked to is rude. */
-    if (isPointerDevice() && detailKey === null) {
-      try { elFilter.focus({ preventScroll: true }); } catch (e) { elFilter.focus(); }
-    }
-  });
+  load(true);
   scheduleRefresh();
 }());
