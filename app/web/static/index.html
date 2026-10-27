@@ -75,7 +75,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H19v15H7.5A2.5 2.5 0 0 0 5 20.5z"/><path d="M5 20.5V5.5M9 7.5h6"/></svg>
         <span class="nav-label">Catalogue</span><span class="nav-ct" id="nav-ct-cat"></span>
       </a>
-      <a class="nav-link" href="#/service/deployd" data-nav="deployd" id="nav-deployd" title="Deploys" hidden>
+      <a class="nav-link" href="#/deploys" data-nav="deploys" id="nav-deployd" title="Deploys" hidden>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="6.5" cy="6" r="2.2"/><circle cx="6.5" cy="18" r="2.2"/><circle cx="17.5" cy="9" r="2.2"/><path d="M6.5 8.2v7.6M17.5 11.2c0 3-3 4-7 4.6"/></svg>
         <span class="nav-label">Deploys</span>
       </a>
@@ -224,6 +224,10 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
         the list app.js already polls; installs go through app.js's own
         deploy sheet. -->
    <section class="cat" id="view-catalogue" aria-labelledby="cat-title" hidden></section>
+
+   <!-- Deploys page (#/deploys). Painted entirely by deployd.js: the engine's
+        state, the watched repos and the poller add/edit/delete controls. -->
+   <section class="dps" id="view-deploys" aria-labelledby="dps-title" hidden></section>
   </main>
   </div><!-- /.wrap -->
   </div><!-- /.main-col -->

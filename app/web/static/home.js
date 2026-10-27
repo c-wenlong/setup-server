@@ -73,9 +73,16 @@
 
   function app() { return window.LauncherApp || null; }
 
-  function list() {
+  /* Everything the launcher knows about, machinery included. */
+  function everything() {
     var a = app();
     return (a && typeof a.services === 'function') ? a.services() : [];
+  }
+
+  /* The apps: everything except services marked hidden (deployd, which is
+     the Deploys page rather than a row). */
+  function list() {
+    return everything().filter(function (s) { return s.hidden !== true; });
   }
 
   function stored(key, fallback) {
@@ -415,7 +422,7 @@
   }
 
   function find(key) {
-    var all = list();
+    var all = everything();
     for (var i = 0; i < all.length; i++) if (all[i].key === key) return all[i];
     return null;
   }
@@ -927,6 +934,7 @@
       return { page: 'service', key: key };
     }
     if (h === '#/catalogue') return { page: 'catalogue' };
+    if (h === '#/deploys') return { page: 'deploys' };
     return { page: 'home' };
   }
 
@@ -941,7 +949,7 @@
       var nav = links[i].getAttribute('data-nav');
       var on = (nav === 'home' && r.page === 'home') ||
                (nav === 'catalogue' && r.page === 'catalogue') ||
-               (nav === 'deployd' && r.page === 'service' && r.key === 'deployd');
+               (nav === 'deploys' && r.page === 'deploys');
       if (on) links[i].setAttribute('aria-current', 'page');
       else links[i].removeAttribute('aria-current');
     }
@@ -987,6 +995,7 @@
     var now = $('crumb-now');
     if (now) {
       if (r.page === 'catalogue') now.textContent = 'Catalogue';
+      else if (r.page === 'deploys') now.textContent = 'Deploys';
       else if (r.page === 'service') {
         var sv = find(r.key);
         now.textContent = sv ? (sv.name || sv.key) : r.key;

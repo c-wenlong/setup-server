@@ -382,6 +382,25 @@ class SystemStatsTest(unittest.TestCase):
 
 class SystemPayloadTest(SandboxTest):
 
+    def test_hidden_flag_is_always_present_and_strict(self):
+        self.write_registry({"services": [
+            {"key": "engine", "name": "Engine", "tagline": "t", "icon": "workflow",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "hidden": True},
+            {"key": "app", "name": "App", "tagline": "t", "icon": "camera",
+             "url": None, "health": None, "marker": None, "setup": None},
+            # only a JSON true hides; a truthy string does not
+            {"key": "odd", "name": "Odd", "tagline": "t", "icon": "camera",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "hidden": "yes"},
+        ]})
+        server.probe_all = lambda urls: {}
+        server.magicdns_host = lambda: "box.ts.net"
+        tiles = {s["key"]: s for s in server.services_payload()["services"]}
+        self.assertIs(tiles["engine"]["hidden"], True)
+        self.assertIs(tiles["app"]["hidden"], False)
+        self.assertIs(tiles["odd"]["hidden"], False)
+
     def test_payload_carries_system_block(self):
         self.write_registry({"services": []})
         server.probe_all = lambda urls: {}
@@ -717,14 +736,15 @@ class ServiceJobFieldTest(SandboxTest):
 
     def test_no_field_beyond_the_contract_was_added(self):
         # The whole list contract in one assertion: the original eight, then
-        # job and control, then the three v3 keys, then the v5 receipt.
+        # job and control, then the three v3 keys, then the v5 receipt, then
+        # v9's hidden.
         # Anything else appearing here is a key the frontend was never told
         # about.
         server.start_deploy("alpha")
         for tile in self.tiles().values():
             self.assertEqual(list(tile), self.EIGHT + [
                 "degraded", "job", "control", "usage", "deployed_at",
-                "resources", "receipt", "removable", "updates"])
+                "resources", "receipt", "removable", "updates", "hidden"])
 
     # ---- restart
 
@@ -858,7 +878,7 @@ class HttpTest(SandboxTest):
         svc = doc["services"][0]
         self.assertEqual(sorted(svc), ["active", "author", "control",
                                        "degraded", "deployed_at",
-                                       "description", "group",
+                                       "description", "group", "hidden",
                                        "icon", "installed", "job", "key",
                                        "name", "receipt", "removable", "resources",
                                        "state", "tagline", "updates", "url", "usage"])
@@ -876,7 +896,8 @@ class HttpTest(SandboxTest):
                           "author", "icon", "url", "state", "installed",
                           "active", "degraded", "job", "control", "usage",
                           "deployed_at",
-                          "resources", "receipt", "removable", "updates"])
+                          "resources", "receipt", "removable", "updates",
+                          "hidden"])
 
     def test_groups_empty_when_the_registry_has_none(self):
         # An older services.json without a catalog still paints a flat grid.

@@ -359,7 +359,7 @@
       focusKey = active.getAttribute('data-act');
     }
 
-    var list = a.services();
+    var list = a.services().filter(function (s) { return s.hidden !== true; });
     var counts = { installed: 0, available: 0, planned: 0 };
     list.forEach(function (s) { counts[bucket(s)]++; });
     elSummary.textContent = list.length + ' apps · ' + counts.installed + ' installed · ' +

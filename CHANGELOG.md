@@ -10,6 +10,12 @@ first, dated by merge.
 
 ### Added
 
+- **Launcher: Deploys page.** deployd leaves the app list and becomes a
+  top-level page in the sidebar (`#/deploys`): the timer as Polling or
+  Paused with Pause / Resume, every watched repo with its last deploy, and
+  add / edit / delete for pollers. `app.json` gains `"hidden": true` for
+  machinery with a page of its own; `#/service/deployd` redirects there.
+
 - **Launcher: ops home page and sidebar.** The tile grid is replaced by a
   list grouped Running / Stopped / Not installed, under a health strip for
   the box (apps running, memory, disk, CPU load) and a disk-full alert past

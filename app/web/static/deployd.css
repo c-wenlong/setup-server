@@ -1,7 +1,9 @@
-/* deployd.css — the deployment-activity panel (deployd.js, #deployd-mount)
+/* deployd.css — the Deploys page (#view-deploys) and the per-service
+ * deployment row on detail pages (#deployd-mount), both from deployd.js.
  *
- * Shares the detail page's .d-sec/.d-sec-h chrome; this file owns everything
- * inside the section. Tokens come from app.css, so it stays in step with the
+ * The page header reuses home.css's .h-head/.h-title/.h-btn; the detail
+ * section shares the detail page's .d-sec/.d-sec-h chrome. This file owns
+ * everything inside. Tokens come from app.css, so it stays in step with the
  * shell on its own.
  */
 
@@ -349,4 +351,34 @@ textarea.dep-input {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* ---------- the Deploys page ---------- */
+
+.dps { display: flex; flex-direction: column; gap: 16px; padding-bottom: 48px; }
+.dps .h-head { flex-wrap: wrap; }
+.dep-engine { display: flex; align-items: center; gap: 8px; flex: none; }
+.dep-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+  background: var(--fg-06, var(--surface-2));
+}
+.dep-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.dep-pill.is-ok { color: var(--ok); }
+.dep-pill.is-warn { color: var(--warn); }
+/* The rows are cards already; the page section is only a column. */
+.dep-page { display: flex; flex-direction: column; }
+.dep-page > .dep-note:first-child { margin-top: 10px; }
+.dep-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center;
+  margin: 10px 0; padding: 36px 20px;
+  border: 1px dashed var(--fg-20, var(--border-strong)); border-radius: 12px;
+  color: var(--muted); font-size: 13.5px;
+}
+.dep-empty strong { color: var(--text); font-size: 15px; font-weight: 600; }
+
+@media (max-width: 560px) {
+  .dps .h-head { align-items: flex-start; }
+  .dep-engine { order: 3; width: 100%; }
 }

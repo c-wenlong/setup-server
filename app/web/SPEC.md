@@ -555,3 +555,25 @@ present and null when the platform cannot say (macOS has no `/proc`):
 Thresholds live in home.js: disk warns at 85% and is critical at 95%
 (df's arithmetic, `used / (used + free)`); memory is tight below 10%
 available.
+
+## v9 — Deploys page (2026-10-28)
+
+deployd stops being a row in the app list and becomes the launcher's
+**Deploys** page (`#/deploys`, linked from the sidebar). The engine is
+unchanged: the same systemd timer, the same `app.json` `deploy` blocks and
+`state/pollers.json` edit layer. What moved is where you manage it.
+
+- `app.json` gains an optional `"hidden": true`: machinery with a page of
+  its own rather than a row. `GET /api/services` always carries `hidden`
+  (only a JSON `true` hides); the home list and the catalogue skip it, the
+  payload keeps it so the page can drive its controls.
+- The page header shows the timer as **Polling** or **Paused** with
+  Pause / Resume (deployd's stop / start, through the confirm sheet) and
+  **+ Add poller**; below it every watched repo, the not-polled list and the
+  notes deployd leaves (failed self-update, pending launcher restart).
+- `#/service/deployd` redirects to `#/deploys`. Other detail pages keep
+  their own one-row Deploys section.
+
+Next (v10): new apps straight from a GitHub repo (Dockerfile builds,
+repo picker on the box's `gh` login, config on the box with Export to
+repo).

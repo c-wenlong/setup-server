@@ -241,6 +241,12 @@ has moved; sort the Running group by clicking its column headers. The
 sidebar collapses to icons (button at its foot) and holds the theme button,
 which cycles System → Light → Dark. All of it is remembered on that device.
 
+**Deploys.** The sidebar's Deploys page is deployd's UI: whether the
+timer is polling (with Pause / Resume), each watched repo and the sha it
+last deployed, and **+ Add poller** for a repo, branch and command stored
+in `~/services/deployd/state/pollers.json`. See
+[services/deployd/SETUP.md](../../services/deployd/SETUP.md).
+
 **Phone.** The sidebar is a drawer behind the ☰ in the top bar; the ⋯ menu
 opens as a sheet from the bottom.
 
