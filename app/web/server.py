@@ -52,6 +52,7 @@ import mimetypes
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import socketserver
@@ -1135,6 +1136,97 @@ def deployed_at(marker):
         return None
 
 
+
+# ------------------------------------------------------------------ box health
+
+# The home page's health strip: memory, the disk ~/services lives on, load
+# and uptime. Every reader answers None rather than raising, because the
+# strip is the least important thing on the page and must never 500 the
+# payload the app list depends on. /proc is Linux-only; macOS gets total
+# memory (sysconf works there), disk, load and CPU count, and nulls for the
+# rest, which the page shows as "not available".
+MEMINFO_PATH = "/proc/meminfo"
+UPTIME_PATH = "/proc/uptime"
+SYSTEM_DISK_PATH = os.path.expanduser("~")
+
+
+def _meminfo():
+    """{"total", "available"} in bytes from /proc/meminfo, or None.
+
+    MemAvailable is the kernel's own estimate of what can be handed out
+    without swapping, which is what "how full is this box" means; MemFree
+    leaves out reclaimable cache and makes every Linux box look full."""
+    try:
+        fields = {}
+        with open(MEMINFO_PATH, encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                name, _, rest = line.partition(":")
+                parts = rest.split()
+                if parts and parts[0].isdigit():
+                    fields[name.strip()] = int(parts[0]) * 1024
+        total, avail = fields.get("MemTotal"), fields.get("MemAvailable")
+        if total and avail is not None:
+            return {"total": total, "available": min(avail, total)}
+    except OSError:
+        pass
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        if total > 0:
+            return {"total": total, "available": None}
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def _mount_of(path):
+    """The mount point holding `path` (walked up, never entered)."""
+    path = os.path.realpath(path)
+    while not os.path.ismount(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return path
+
+
+def _disk(path):
+    """{"mount", "total", "used", "free"} for the filesystem under `path`."""
+    try:
+        usage = shutil.disk_usage(path)
+    except (OSError, ValueError):
+        return None
+    if usage.total <= 0:
+        return None
+    return {"mount": _mount_of(path), "total": usage.total,
+            "used": usage.used, "free": usage.free}
+
+
+def _loadavg():
+    try:
+        return [round(v, 2) for v in os.getloadavg()]
+    except (AttributeError, OSError):
+        return None
+
+
+def _uptime():
+    try:
+        with open(UPTIME_PATH, encoding="ascii") as fh:
+            return float(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def system_stats():
+    """The health strip's numbers. Keys are always present, null when the
+    platform cannot say, the same contract as the per-service v3 keys."""
+    return {
+        "memory": _meminfo(),
+        "disk": _disk(SYSTEM_DISK_PATH),
+        "load": _loadavg(),
+        "cpus": os.cpu_count(),
+        "uptime_s": _uptime(),
+    }
+
 # ------------------------------------------------------------------ payload
 
 def services_payload():
@@ -1226,7 +1318,8 @@ def services_payload():
             "updates": (update_summary(updates.get(svc.get("key")))
                         if installed else None),
         })
-    return {"host": host, "groups": load_groups(), "services": services}
+    return {"host": host, "groups": load_groups(), "services": services,
+            "system": system_stats()}
 
 
 # ------------------------------------------------------------------ detail

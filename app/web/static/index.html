@@ -33,7 +33,8 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <meta name="robots" content="noindex">
 <title>Launcher</title>
 <!-- Relative on purpose: the page is served at both `/` and `/home/`. -->
-<link rel="icon" href="icons/favicon.png">
+<link rel="icon" type="image/svg+xml" href="icons/launcher.svg">
+<link rel="icon" type="image/png" href="icons/favicon.png">
 <!-- Full-bleed square, deliberately not pre-rounded: iOS applies its own
      squircle mask and a pre-rounded icon comes out double-rounded. -->
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -43,17 +44,20 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <link rel="stylesheet" href="view.css">
 <link rel="stylesheet" href="catalogue.css">
 <link rel="stylesheet" href="deployd.css">
+<link rel="stylesheet" href="home.css">
 </head>
 <body>
 
-<a class="skip" href="#grid">Skip to services</a>
+<a class="skip" href="#main">Skip to content</a>
 
-<div class="wrap">
+<!-- Shell: sidebar + main column. home.js owns the sidebar's behaviour
+     (active link, collapse, phone drawer) and everything inside #home. -->
+<div class="shell" id="shell">
 
-  <header class="head" id="head">
+  <aside class="side" id="side" aria-label="Launcher">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">
-        <img src="icons/launcher.png" alt="" width="32" height="32" decoding="async">
+        <img src="icons/launcher.svg" alt="" width="30" height="30" decoding="async">
       </span>
       <span class="brand-text">
         <h1>Launcher</h1>
@@ -61,40 +65,47 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
       </span>
     </div>
 
-    <div class="searchrow" id="searchrow">
-      <div class="search" id="search">
-        <span class="search-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
-            <circle cx="11" cy="11" r="6.4"/><path d="m15.7 15.7 4.3 4.3"/>
-          </svg>
-        </span>
-        <label class="sr-only" for="filter">Filter services</label>
-        <input id="filter" type="search" placeholder="Search" enterkeyhint="search" inputmode="search"
-               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-        <kbd class="search-kbd" aria-hidden="true">⌘K</kbd>
-      </div>
+    <nav class="nav" aria-label="This box">
+      <p class="nav-sec">This box</p>
+      <a class="nav-link" href="#/" data-nav="home" title="Apps">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6"/></svg>
+        <span class="nav-label">Apps</span><span class="nav-ct" id="nav-ct-apps"></span>
+      </a>
+      <a class="nav-link" href="#/catalogue" data-nav="catalogue" title="Catalogue">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H19v15H7.5A2.5 2.5 0 0 0 5 20.5z"/><path d="M5 20.5V5.5M9 7.5h6"/></svg>
+        <span class="nav-label">Catalogue</span><span class="nav-ct" id="nav-ct-cat"></span>
+      </a>
+      <a class="nav-link" href="#/service/deployd" data-nav="deployd" id="nav-deployd" title="Deploys" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="6.5" cy="6" r="2.2"/><circle cx="6.5" cy="18" r="2.2"/><circle cx="17.5" cy="9" r="2.2"/><path d="M6.5 8.2v7.6M17.5 11.2c0 3-3 4-7 4.6"/></svg>
+        <span class="nav-label">Deploys</span>
+      </a>
+    </nav>
 
-      <div class="gfilter" id="gfilter">
-        <button class="iconbtn gfilter-btn" id="gfilter-btn" type="button"
-                aria-haspopup="true" aria-expanded="false" aria-controls="gfilter-menu">
-          <span class="gfilter-label" id="gfilter-label">Categories</span>
-          <svg class="gfilter-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
-               aria-hidden="true" focusable="false">
-            <path d="m6 9.5 6 6 6-6"/>
-          </svg>
-        </button>
-        <div class="gfilter-menu" id="gfilter-menu" hidden role="group" aria-label="Categories"></div>
-      </div>
+    <!-- Shortcuts to the monitoring apps, filled by home.js from the live
+         list: only the ones installed and running here get a link. -->
+    <nav class="nav" id="nav-watch" aria-label="Monitoring" hidden>
+      <p class="nav-sec">Monitoring</p>
+    </nav>
 
-      <a class="iconbtn cat-link" id="cat-link" href="#/catalogue">Catalogue</a>
-
-      <button class="iconbtn theme-btn" id="theme-btn" type="button" aria-label="Theme: System">
+    <div class="side-foot">
+      <button class="iconbtn theme-btn" id="theme-btn" type="button" aria-label="Theme: System"></button>
+      <button class="iconbtn rail-btn" id="rail-btn" type="button" aria-label="Collapse sidebar" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></svg>
       </button>
     </div>
-  </header>
+  </aside>
 
-  <main>
+  <div class="main-col">
+    <div class="topbar" id="topbar">
+      <button class="iconbtn menu-btn" id="menu-btn" type="button" aria-label="Open navigation"
+              aria-expanded="false" aria-controls="side">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <span class="crumb" id="crumb-host"></span><span class="crumb-sep" aria-hidden="true">/</span><span class="crumb-now" id="crumb-now">Apps</span>
+    </div>
+
+  <div class="wrap">
+  <main id="main">
    <div id="view-grid">
     <div class="notice" id="notice" hidden>
       <div class="notice-body">
@@ -104,52 +115,9 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
       <button class="btn" id="notice-retry" type="button">Retry</button>
     </div>
 
-    <!-- The tab strip and the v3 view/sort toolbar share one hairline rule,
-         and wrap onto two lines when they cannot sit side by side. -->
-    <div class="toolrow" id="toolrow">
-    <div class="tabs" id="tabs" role="tablist" aria-label="Filter by state">
-      <button class="tab" type="button" role="tab" id="tab-all" data-tab="all"
-              aria-controls="panel" aria-selected="true" tabindex="0">
-        <span class="tab-label">All</span><span class="tab-n" id="tab-n-all"></span>
-      </button>
-      <button class="tab" type="button" role="tab" id="tab-active" data-tab="active"
-              aria-controls="panel" aria-selected="false" tabindex="-1">
-        <span class="tab-label">Active</span><span class="tab-n" id="tab-n-active"></span>
-      </button>
-      <button class="tab" type="button" role="tab" id="tab-paused" data-tab="paused"
-              aria-controls="panel" aria-selected="false" tabindex="-1">
-        <span class="tab-label">Paused</span><span class="tab-n" id="tab-n-paused"></span>
-      </button>
-      <button class="tab" type="button" role="tab" id="tab-updates" data-tab="updates"
-              aria-controls="panel" aria-selected="false" tabindex="-1">
-        <span class="tab-label">Updates</span><span class="tab-n" id="tab-n-updates"></span>
-      </button>
-      <button class="tab" type="button" role="tab" id="tab-uninstalled" data-tab="uninstalled"
-              aria-controls="panel" aria-selected="false" tabindex="-1">
-        <span class="tab-label">Uninstalled</span><span class="tab-n" id="tab-n-uninstalled"></span>
-      </button>
-      <button class="tab" type="button" role="tab" id="tab-c-wenlong" data-tab="c-wenlong"
-              aria-controls="panel" aria-selected="false" tabindex="-1">
-        <span class="tab-label">c-wenlong</span><span class="tab-n" id="tab-n-c-wenlong"></span>
-      </button>
-    </div>
-
-    <!-- Mount point for view.js's View/Sort/Group-by controls. Empty until
-         it loads; if it never does, the grid below is exactly what it always
-         was. -->
-    <div id="view-toolbar"></div>
-    </div><!-- /.toolrow -->
-
-    <div class="panel" id="panel" role="tabpanel" aria-labelledby="tab-all">
-      <div class="grid" id="grid" role="list" aria-busy="true"></div>
-
-      <!-- Table and board. view.js renders into these; app.js hides #grid
-           when the toolbar says Table or Board. -->
-      <div id="view-table"></div>
-      <div id="view-board"></div>
-
-      <p class="empty" id="empty" hidden>No service matches that.</p>
-    </div>
+    <!-- The ops home: page header, box health, and the app list grouped
+         Running / Stopped / Not installed. Painted by home.js. -->
+    <div id="home"></div>
    </div>
 
    <!-- Detail view. Same page, hash-routed (#/service/<key>), so Back works
@@ -257,8 +225,22 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
         deploy sheet. -->
    <section class="cat" id="view-catalogue" aria-labelledby="cat-title" hidden></section>
   </main>
+  </div><!-- /.wrap -->
+  </div><!-- /.main-col -->
+</div><!-- /.shell -->
 
+<div class="drawer-scrim" id="drawer-scrim" hidden></div>
+
+<!-- Desktop action bar for the selected app (Raycast-style). home.js fills it. -->
+<div class="abar" id="abar" aria-hidden="true" hidden>
+  <div class="abar-in">
+    <div class="abar-who" id="abar-who"></div>
+    <div class="abar-hint"><kbd>↑</kbd><kbd>↓</kbd> move</div>
+    <div class="abar-grp" id="abar-grp"></div>
+  </div>
 </div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <div class="scrim" id="scrim" hidden></div>
 
@@ -296,6 +278,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <script src="icons.js"></script>
 <script src="view.js"></script>
 <script src="app.js"></script>
+<script src="home.js"></script>
 <script src="notes.js"></script>
 <script src="deployd.js"></script>
 <script src="catalogue.js"></script>
