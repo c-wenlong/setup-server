@@ -732,6 +732,8 @@ body.is-board #view-board {
 
 /* --- state: available --- */
 .tile-available .tile-icon { opacity: .35; }
+/* keep the 2-line tagline clear of the corner glyph */
+.tile-available .tile-tag { padding-right: 36px; }
 
 /* --- state: planned --- */
 .tile-planned {
@@ -740,7 +742,8 @@ body.is-board #view-board {
   box-shadow: none;
 }
 .tile-planned .tile-icon { opacity: .35; }
-.tile-planned .tile-tag  { color: var(--faint); }
+.tile-planned .tile-tag  { color: var(--faint);
+                           padding-right: 78px; /* clear the PLANNED badge */ }
 
 @media (hover: hover) and (pointer: fine) {
   /* keep the dashed "not here yet" look on hover: lift, don't fill */

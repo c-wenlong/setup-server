@@ -4810,6 +4810,25 @@ class ResourceReadingTest(ResourceTestBase):
             {"name": "beszel-agent.service", "kind": "unit",
              "running": True, "rss_bytes": 4096, "cpu_pct": None}])
 
+    def test_timer_part_running_comes_from_systemd_not_sysfs(self):
+        # A timer owns no cgroup while it is armed, so the sysfs pass can
+        # never see it: `running` mirrors _timer_active, including the
+        # 'unknowable' null, where a plain cgroup lookup would read
+        # 'stopped' on a perfectly armed timer.
+        svc = self.registry_with({"parts": [{"unit": "x.timer"}]})
+        for state in (True, False, None):
+            server._timer_active = lambda name, s=state: s
+            self.assertIs(self.measure(svc, 100.0)["parts"][0]["running"],
+                          state)
+
+    def test_container_absent_from_the_docker_map_is_unknown_not_stopped(self):
+        # `docker ps -a` still lists stopped containers, so a name missing
+        # from the map means docker could not answer at all — 'unknowable'
+        # (null), the same call control_running makes, not 'stopped'.
+        server.docker_name_map = lambda: {}
+        svc = self.registry_with({"parts": [{"container": "gone"}]})
+        self.assertIsNone(self.measure(svc, 100.0)["parts"][0]["running"])
+
     def test_container_part_reports_rss_through_the_docker_map(self):
         self.write_cgroup(self.container_dir(), rss=512000000)
         server.docker_name_map = lambda: {"n8n": CID}

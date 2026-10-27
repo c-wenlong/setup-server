@@ -1191,10 +1191,11 @@
   ];
 
   var PART_COLS = [
-    { label: 'Part', cls: 'vw-c-part' },
-    { label: 'Kind', cls: 'vw-c-kind' },
-    { label: 'RAM',  cls: 'vw-c-num' },
-    { label: 'CPU',  cls: 'vw-c-num' }
+    { label: 'Part',  cls: 'vw-c-part' },
+    { label: 'Kind',  cls: 'vw-c-kind' },
+    { label: 'State', cls: 'vw-c-state' },
+    { label: 'RAM',   cls: 'vw-c-num' },
+    { label: 'CPU',   cls: 'vw-c-num' }
   ];
 
   function buildRes() {
@@ -1271,6 +1272,8 @@
       var tr = make('tr');
       tr.appendChild(text(make('td', 'vw-c-part'), p.name == null ? DASH : String(p.name)));
       tr.appendChild(text(make('td', 'vw-c-kind'), p.kind == null ? DASH : String(p.kind)));
+      tr.appendChild(text(make('td', 'vw-c-state'),
+        p.running === true ? 'running' : p.running === false ? 'stopped' : DASH));
       tr.appendChild(text(make('td', 'vw-c-num'), fmtBytes(p.rss_bytes)));
       tr.appendChild(text(make('td', 'vw-c-num'), fmtPct(p.cpu_pct)));
       resRefs.parts.appendChild(tr);
