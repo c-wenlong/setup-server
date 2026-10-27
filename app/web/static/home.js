@@ -589,7 +589,7 @@
       var used = mt - ma;
       var tight = ma / mt < MEM_WARN;
       els.health.appendChild(cell('Memory', tight ? 'Tight' : null,
-        fmtBytes(used).replace(/ [A-Z]+$/, ''), 'of ' + fmtBytes(mt),
+        fmtBytes(used), 'of ' + fmtBytes(mt),
         meter([{ cls: tight ? 'warn' : 'n', pct: used / mt * 100 }]),
         seen ? 'Apps use ' + fmtBytes(appMem) : fmtBytes(ma) + ' available',
         tight ? 'warn' : null));
@@ -894,6 +894,9 @@
       var anchor = els.list.querySelector('[data-menu="' + state.menu + '"]');
       if (anchor) anchor.setAttribute('aria-expanded', 'true');
     }
+    /* A search or filter can move the selection; the bar must name the same
+       app the highlight does, or its button acts on the wrong one. */
+    paintBar();
   }
 
   function emptyState() {
@@ -956,7 +959,7 @@
 
     var watch = $('nav-watch');
     if (watch) {
-      while (watch.childNodes.length > 1) watch.removeChild(watch.lastChild);
+      while (watch.children.length > 1) watch.removeChild(watch.lastElementChild);
       var n = 0;
       for (var w = 0; w < WATCH.length; w++) {
         var svc = find(WATCH[w]);
@@ -1009,6 +1012,7 @@
     bar.hidden = false;
     var who = $('abar-who');
     var grp = $('abar-grp');
+    var had = grp.contains(document.activeElement) ? document.activeElement.getAttribute('data-bar') : null;
     who.textContent = '';
     who.appendChild(glyph(glyphKind(svc)));
     who.appendChild(make('span', 'abar-name', svc.name || svc.key));
@@ -1032,6 +1036,10 @@
       m.appendChild(make('kbd', null, isMac() ? '⌘' : 'Ctrl'));
       m.appendChild(make('kbd', null, 'K'));
       grp.appendChild(m);
+    }
+    if (had) {
+      var back = grp.querySelector('[data-bar="' + had + '"]');
+      if (back) { try { back.focus({ preventScroll: true }); } catch (e) { back.focus(); } }
     }
   }
 
@@ -1149,8 +1157,9 @@
       var b = e.target.closest ? e.target.closest('[data-mi]') : null;
       if (!b || b.disabled) return;
       var id = b.getAttribute('data-mi');
+      var opener = menuOpener;
       closeMenu(false);
-      run(id, key, menuOpener);
+      run(id, key, opener);
     });
     document.body.appendChild(menuScrim);
     document.body.appendChild(menuEl);
@@ -1325,6 +1334,14 @@
       var at = keys.indexOf(state.sel);
       var next = at === -1 ? 0 : Math.max(0, Math.min(keys.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)));
       select(keys[next], true);
+      /* If a row's own control has focus, focus follows the highlight, so
+         Enter can never fire a button on a row that is no longer selected. */
+      var owner = document.activeElement;
+      if (owner && owner !== els.q && els.list.contains(owner)) {
+        var to = els.list.querySelector('[data-fid="act:' + keys[next] + '"]') ||
+                 els.list.querySelector('[data-fid="detail:' + keys[next] + '"]');
+        if (to) { try { to.focus({ preventScroll: true }); } catch (err) { to.focus(); } }
+      }
       return;
     }
     if (e.key === 'Enter' && state.sel &&
@@ -1363,9 +1380,13 @@
     if (s) s.hidden = !on;
     var m = $('menu-btn');
     if (m) m.setAttribute('aria-expanded', on ? 'true' : 'false');
+    var side = $('side');
     if (on) {
       var first = document.querySelector('.side .nav-link');
       if (first) first.focus();
+    } else if (m && side && side.contains(document.activeElement) &&
+               window.matchMedia && window.matchMedia('(max-width: 899px)').matches) {
+      m.focus();
     }
   }
 

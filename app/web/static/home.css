@@ -259,7 +259,7 @@ body.is-rail .side-foot { justify-content: center; }
 .h-pill .h-n { color: var(--faint); font-variant-numeric: tabular-nums; }
 .h-pill.is-upd .h-n { color: var(--accent); }
 
-.h-list { display: flex; flex-direction: column; gap: 1px; padding: 6px; }
+.h-list { display: flex; flex-direction: column; gap: 1px; padding: 6px; container-type: inline-size; }
 
 .h-group {
   -webkit-appearance: none; appearance: none;
@@ -312,8 +312,10 @@ button.h-group { cursor: pointer; }
 .h-names { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .h-name {
   color: var(--text); text-decoration: none; font-weight: 550; font-size: 14px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; max-width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 0 1 auto; min-width: 6ch; max-width: 100%;
 }
+.h-names { flex: 1 1 auto; }
 .h-name:hover { text-decoration: underline; text-underline-offset: 3px; }
 .h-tag { color: var(--faint); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .h-flag {
@@ -470,9 +472,16 @@ body.is-rail .abar { left: var(--rail-w); }
   #home { padding-bottom: 24px; }
 }
 
-@media (max-width: 1000px) {
+/* Columns drop on the list's own width, not the viewport's: the sidebar
+   (expanded or collapsed) changes how much room the rows actually get. */
+@container (max-width: 860px) {
   .h-cols, .h-row { grid-template-columns: minmax(0, 1fr) 150px 56px 124px; }
   .h-c-parts, .h-c-last { display: none; }
+}
+@container (max-width: 640px) {
+  .h-cols, .h-row { grid-template-columns: minmax(0, 1fr) 110px 124px; }
+  .h-c-cpu { display: none; }
+  .h-bar { display: none; }
 }
 
 /* Below this the sidebar becomes a drawer behind the topbar's menu button. */
@@ -482,11 +491,14 @@ body.is-rail .abar { left: var(--rail-w); }
     position: fixed; top: 0; bottom: 0; left: 0;
     width: min(280px, 86vw); height: auto;
     transform: translateX(-102%);
-    transition: transform .2s ease;
+    /* visibility (delayed until the slide finishes) takes the closed drawer
+       out of the tab order; an off-screen transform alone does not. */
+    visibility: hidden;
+    transition: transform .2s ease, visibility 0s linear .2s;
     box-shadow: var(--menu-shadow);
     z-index: 40;
   }
-  body.is-drawer .side { transform: none; }
+  body.is-drawer .side { transform: none; visibility: visible; transition: transform .2s ease; }
   body.is-drawer .drawer-scrim { z-index: 35; }
   /* the rail is a desktop idea; the drawer always shows labels */
   body.is-rail .side .brand-text, body.is-rail .nav-sec, body.is-rail .nav-label,
@@ -532,6 +544,7 @@ body.is-rail .abar { left: var(--rail-w); }
   /* No room for the word on a phone: an accent dot on the icon instead,
      the way a phone badges an app with something waiting. */
   .h-flag.is-upd { display: none; }
+  .h-flag.is-bad { padding: 2px 5px; font-size: 10.5px; }
   .h-row.has-upd .h-ic { position: relative; overflow: visible; }
   .h-row.has-upd .h-ic::after {
     content: ""; position: absolute; top: -2px; right: -2px;

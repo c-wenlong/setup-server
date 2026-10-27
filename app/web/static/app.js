@@ -433,13 +433,15 @@
   function failed(message) {
     lastError = message;
     showNotice("Can't reach the launcher API", message);
-    /* The notice lives in the grid, which the catalogue route hides. */
-    notifyServices();
     if (!loaded) {
       loaded = true;      // stop the skeletons; the notice explains why
       services = [];
       groups = DEFAULT_GROUPS.slice();
     }
+    /* After the state above, so listeners repaint a finished (empty) list
+       rather than the loading placeholders. The notice lives in the grid,
+       which the catalogue route hides, so the catalogue needs this too. */
+    notifyServices();
   }
 
   /* ---------- deploy sheet ---------- */
