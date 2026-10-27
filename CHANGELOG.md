@@ -8,6 +8,18 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Added
+
+- **Launcher: image update notices and a one-tap Update.** Every six hours
+  (and on **Check now**) the launcher compares the digest each service's
+  running containers were pulled at with what the same tag points at on its
+  registry now. A moved tag puts an accent badge on the tile, counts in a new
+  **Updates** tab, and offers **Update** on the detail page: a job that pauses
+  the Kuma monitor, `docker pull`s the moved refs, re-runs the service's
+  `setup.sh` and resumes the monitor. Floating tags only (`latest`,
+  `release`, `v3`); versions pinned in `.env` stay a manual bump. State in
+  `~/services/launcher/updates.json`.
+
 ### Changed
 
 - **self-learn renamed to gnosia-learn**, matching upstream's rename of
