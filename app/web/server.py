@@ -945,8 +945,16 @@ def _measure_resources(svc, now, docker_map=None):
             total_rss = rss if total_rss is None else total_rss + rss
         if cpu is not None:
             total_cpu = cpu if total_cpu is None else total_cpu + cpu
+        # A .timer owns no cgroup while it is armed, so the sysfs pass can
+        # never see it running; ask systemd the way control_running does.
+        # is-active may itself be unknowable (dead bus, macOS) — the field
+        # stays null rather than falsely reading 'stopped'.
+        if part["kind"] == "unit" and part["name"].endswith(".timer"):
+            running = _timer_active(part["name"])
+        else:
+            running = cgroup is not None
         measured.append({"name": part["name"], "kind": part["kind"],
-                         "running": cgroup is not None,
+                         "running": running,
                          "rss_bytes": rss, "cpu_pct": cpu})
     if total_cpu is not None:
         total_cpu = max(0.0, min(100.0, total_cpu))
