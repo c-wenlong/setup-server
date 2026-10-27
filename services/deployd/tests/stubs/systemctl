@@ -7,6 +7,7 @@
 #                   file when it is on disk, else empty)
 #   show_fails      exists => `show` fails, like a session with no user bus
 #   stop_ignored    exists => `stop` / `disable --now` leave the unit running
+#   restart_fails   exists => `restart` exits 1, like a dead bus mid-call
 echo "systemctl $*" >> "$CALLS_LOG"
 [ -n "${STATE_DIR:-}" ] && [ -d "$STATE_DIR" ] || exit 0
 verb=""; now=0; units=()
@@ -22,7 +23,9 @@ while [ "$#" -gt 0 ]; do
 done
 for u in ${units[@]+"${units[@]}"}; do
   case "$verb" in
-    start|restart) touch "$STATE_DIR/active.$u" ;;
+    start) touch "$STATE_DIR/active.$u" ;;
+    restart) [ ! -f "$STATE_DIR/restart_fails" ] || exit 1; touch "$STATE_DIR/active.$u" ;;
+    is-active) [ -f "$STATE_DIR/active.$u" ] || exit 3 ;;
     stop) [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
     disable) [ "$now" -eq 0 ] || [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
     show)

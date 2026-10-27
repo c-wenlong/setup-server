@@ -513,6 +513,11 @@
         text(su, 'A deployd self-update failed last tick and will be retried.');
         sec.appendChild(su);
       }
+      if (data.launcher_restart_pending) {
+        var lr = make('p', 'dep-note');
+        text(lr, 'A launcher restart failed last tick and will be retried.');
+        sec.appendChild(lr);
+      }
       if (!data.installed) {
         var ni = make('p', 'dep-note');
         text(ni, 'No state yet — deployd has not run on this box.');

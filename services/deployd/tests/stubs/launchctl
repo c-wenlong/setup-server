@@ -3,11 +3,15 @@
 # logs every call and succeeds. $STATE_DIR/loaded.<label> exists while a
 # label is loaded: `bootstrap` creates it (label = the plist's basename),
 # `bootout` removes it, and `print` succeeds only while it exists.
+# `kickstart` fails while $STATE_DIR/restart_fails exists, `print-disabled`
+# while $STATE_DIR/show_fails exists (a dead gui domain).
 echo "launchctl $*" >> "$CALLS_LOG"
 [ -n "${STATE_DIR:-}" ] && [ -d "$STATE_DIR" ] || exit 0
 case "${1:-}" in
   bootstrap) l="$(basename "${3:-}" .plist)"; [ -z "$l" ] || touch "$STATE_DIR/loaded.$l" ;;
   bootout)   rm -f "$STATE_DIR/loaded.${2##*/}" ;;
   print)     [ -f "$STATE_DIR/loaded.${2##*/}" ] || { echo "Could not find service" >&2; exit 113; } ;;
+  kickstart) [ ! -f "$STATE_DIR/restart_fails" ] || exit 1 ;;
+  print-disabled) [ ! -f "$STATE_DIR/show_fails" ] || exit 1 ;;
 esac
 exit 0

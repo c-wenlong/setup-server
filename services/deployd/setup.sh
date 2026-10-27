@@ -8,7 +8,8 @@
 # on Linux, launchd on macOS) that:
 #   1. pulls this setup-server checkout ff-only (deploy config lives here,
 #      so the config self-updates; if the pull touched services/deployd/
-#      it re-runs this setup.sh — deployd updates itself)
+#      it re-runs this setup.sh — deployd updates itself — and an app/web/
+#      change restarts the launcher so it loads the new server.py)
 #   2. scans services/*/app.json for a "deploy" block:
 #        "deploy": { "repo": "<git url>", "ref": "main",
 #                    "cmd": "shell run from the repo root" }

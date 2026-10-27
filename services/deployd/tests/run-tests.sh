@@ -318,6 +318,103 @@ test_poll_self_update_retry() {
   teardown
 }
 
+# A launcher the poller can restart: running systemd unit on Linux, loaded
+# LaunchAgent on macOS. Sets $RESTART_CALL to the call fragment to grep for.
+launcher_running() {
+  if [ "$OS" = "Linux" ]; then
+    touch "$STATE_DIR/active.launcher"
+    RESTART_CALL="restart launcher.service"
+  else
+    touch "$STATE_DIR/loaded.com.launcher.server"
+    RESTART_CALL="kickstart -k"
+  fi
+}
+
+test_poll_launcher_restart() {
+  echo "• poll: an app/web/ code change restarts the launcher, live files don't"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  launcher_running
+  echo "ccc9999999999999999999999999999999999999" > "$STATE_DIR/head_next"
+  echo "app/web/server.py" > "$STATE_DIR/pull_diff"
+  run_poll
+  check "restart ran"          calls_have "$RESTART_CALL"
+  check "tick clean"           [ "$CODE" -eq 0 ]
+  check "no marker left"       [ ! -f "$DSTATE/launcher-restart.pending" ]
+  : > "$CALLS_LOG"
+  echo "ddd9999999999999999999999999999999999999" > "$STATE_DIR/head_next"
+  printf 'app/web/static/app.js\napp/web/services.json\n' > "$STATE_DIR/pull_diff"
+  run_poll
+  check "live files skipped"   no_call "$RESTART_CALL"
+  check "no marker"            [ ! -f "$DSTATE/launcher-restart.pending" ]
+  teardown
+}
+
+test_poll_launcher_restart_retry() {
+  echo "• poll: a failed launcher restart keeps a pending marker and retries"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  launcher_running
+  echo "ccc9999999999999999999999999999999999999" > "$STATE_DIR/head_next"
+  echo "app/web/server.py" > "$STATE_DIR/pull_diff"
+  touch "$STATE_DIR/restart_fails"
+  run_poll
+  check "warns"                    out_has "launcher restart failed"
+  check "marker kept for retry"    [ -f "$DSTATE/launcher-restart.pending" ]
+  rm "$STATE_DIR/restart_fails"
+  : > "$CALLS_LOG"
+  run_poll   # checkout already moved: only the marker triggers the retry
+  check "retried next tick"        calls_have "$RESTART_CALL"
+  check "marker cleared"           [ ! -f "$DSTATE/launcher-restart.pending" ]
+  teardown
+}
+
+test_poll_launcher_absent() {
+  echo "• poll: no running launcher — nothing to restart, marker dropped"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  echo "ccc9999999999999999999999999999999999999" > "$STATE_DIR/head_next"
+  echo "app/web/server.py" > "$STATE_DIR/pull_diff"
+  run_poll
+  check "no restart attempted"  no_call "restart launcher.service"
+  check "no kickstart"          no_call "kickstart"
+  check "marker dropped"        [ ! -f "$DSTATE/launcher-restart.pending" ]
+  check "says why"              out_has "nothing to restart"
+  teardown
+}
+
+test_poll_launcher_probe_unknown() {
+  echo "• poll: an unanswerable launcher probe keeps the restart pending"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  launcher_running
+  echo "ccc9999999999999999999999999999999999999" > "$STATE_DIR/head_next"
+  echo "app/web/server.py" > "$STATE_DIR/pull_diff"
+  if [ "$OS" != "Linux" ]; then
+    # print fails without the loaded marker, so the macOS probe falls
+    # through to print-disabled — which show_fails then breaks too.
+    mkdir -p "$HOME/Library/LaunchAgents"
+    touch "$HOME/Library/LaunchAgents/com.launcher.server.plist"
+    rm "$STATE_DIR/loaded.com.launcher.server"
+  fi
+  touch "$STATE_DIR/show_fails"
+  run_poll
+  check "warns it cannot tell"  out_has "cannot tell"
+  check "marker kept"           [ -f "$DSTATE/launcher-restart.pending" ]
+  check "no restart yet"        no_call "$RESTART_CALL"
+  rm "$STATE_DIR/show_fails"
+  launcher_running   # macOS: re-mark the job loaded so print succeeds again
+  : > "$CALLS_LOG"
+  run_poll   # probe answers again — marker alone fires the retry
+  check "retried next tick"     calls_have "$RESTART_CALL"
+  check "marker cleared"        [ ! -f "$DSTATE/launcher-restart.pending" ]
+  teardown
+}
+
 test_poll_pull_failure_keeps_going() {
   echo "• poll: a failed checkout pull still polls remotes on stale config"
   setup
@@ -498,6 +595,10 @@ for t in \
   test_poll_remote_down \
   test_poll_checkout_pull_and_self_update \
   test_poll_self_update_retry \
+  test_poll_launcher_restart \
+  test_poll_launcher_restart_retry \
+  test_poll_launcher_absent \
+  test_poll_launcher_probe_unknown \
   test_poll_pull_failure_keeps_going \
   test_poll_lock \
   test_poll_force_and_status \
