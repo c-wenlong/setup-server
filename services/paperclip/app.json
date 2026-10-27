@@ -6,7 +6,7 @@
   "icon": "workflow",
   "author": "paperclipai",
   "url": "https://HOST:3100/",
-  "health": "http://127.0.0.1:3100/api/health",
+  "health": "http://127.0.0.1:3101/api/health",
   "marker": "~/services/paperclip",
   "env": ".env",
   "control": {
