@@ -555,3 +555,57 @@ present and null when the platform cannot say (macOS has no `/proc`):
 Thresholds live in home.js: disk warns at 85% and is critical at 95%
 (df's arithmetic, `used / (used + free)`); memory is tight below 10%
 available.
+
+## v10 — apps from GitHub: the runner and API (2026-10-28)
+
+The second half of "deploys in the dashboard": a repo with a Dockerfile
+becomes an app on this box without a `setup.sh` folder in this repo.
+Decided with the owner on 2026-10-28: the engine stays deployd's hidden
+timer, Dockerfile builds first, private repos through the box's existing
+`gh` login (git's credential helper; no token in the launcher), config on
+the box with an Export to repo button later. This version is the backend;
+the New app screens on the Deploys page follow in v11.
+
+**One app = one definition + one runtime dir.**
+`~/services/launcher/apps/<key>.json` (repo, ref, Dockerfile path, context,
+container port, allocated port, health path, optional volume) and
+`~/services/apps/<key>/` (`src/` at the deployed commit, `.env` 0600,
+`data/`, `deployed.json`, `.lock`).
+
+**`app/web/ghapp.py deploy|remove <key>`** (stdlib). Deploy: resolve the
+ref (or `$DEPLOY_SHA` from deployd) → fetch that exact commit → `docker
+build` tagged `launcher-app/<key>:<sha12>` → swap the `app-<key>` container
+(`127.0.0.1:<port>`, `--restart unless-stopped`, `--env-file`, optional
+volume) → health-check `127.0.0.1:<port><health_path>` for 90 s → on
+failure, put the previous image back and fail the job → `tailscale serve
+--https=<port>` unless already mapped → write `deployed.json` → keep one
+older image for rollback. Remove: drop the container and this port's Serve
+handler (only when it proxies to this app), keep `src/`, `.env`, `data/`
+and the definition. A per-app flock serialises deployd and the launcher;
+without the docker group (a user unit) it re-enters under `sg docker` once.
+
+**Registry merge.** `load_registry()` appends the definitions as entries
+with `runner: "ghapp"`, group `github` ("From GitHub", added to the groups
+list only when an app exists), container control part `app-<key>`, marker
+`deployed.json`. A registry key always wins over a definition with the
+same key. Everything downstream (state, Open, Start/Stop, Remove, the .env
+editor, image-update checks) goes through the existing paths, with
+`runner_args()` adding `deploy|remove <key>` to the argv and `env_path()`
+deriving the `.env` from the key instead of the allowed-roots gate.
+
+**Auto-deploy** is a custom `state/pollers.json` entry written on create:
+`{repo: https://github.com/<repo>.git, ref, cmd: "app/web/ghapp.py deploy
+<key>"}`. deployd is unchanged; the Deploys page lists it like any poller.
+
+**API.**
+
+| Route | Does |
+|---|---|
+| `GET api/github/repos` | the login's repos, pushed-recently first (`gh api user/repos`, cached 2 min) |
+| `POST api/github/inspect` `{repo, ref?}` | branches, default branch, whether `Dockerfile` exists at the ref, the first `EXPOSE` port, a free key |
+| `POST api/apps` `{repo, ref, key, name?, tagline?, container_port, health_path?, volume?, dockerfile?, context?, env?}` | validate, allocate a port, write definition + `.env` + poller, start the first deploy; 202 `{key, port, auto_deploy, job_id}` |
+| `DELETE api/apps/{key}` | forget a GitHub app (409 while installed: Remove it first); keeps `~/services/apps/<key>` |
+
+**Ports.** 8300–8399, local == HTTPS, first free: not in any registry URL
+or health probe, not a Serve port, not listening. Recorded in DIRECTORY.md.
+

@@ -6639,3 +6639,171 @@ class UpdateHttpTest(UpdateTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- github apps
+
+import ghapp  # noqa: E402
+
+
+class GithubAppsTest(SandboxTest):
+    """Apps built from a GitHub repo: definitions in a temp apps dir, merged
+    into the registry; gh, Serve, deployd and the deploy job are all fakes."""
+
+    def setUp(self):
+        super().setUp()
+        self._gh_saved = (ghapp.DEFS_DIR, ghapp.APPS_HOME, ghapp.serve_ports,
+                          server.deployd_upsert_poller, server.deployd_remove_poller,
+                          server.start_deploy, server.gh_api, server._port_free)
+        ghapp.DEFS_DIR = os.path.join(self.tmp, "launcher-apps")
+        ghapp.APPS_HOME = os.path.join(self.tmp, "apps")
+        ghapp.serve_ports = lambda: {"8300": "http://127.0.0.1:8300"}
+        self.pollers = {}
+        self.deploys = []
+        server.deployd_upsert_poller = lambda k, b: self.pollers.__setitem__(k, b)
+        server.deployd_remove_poller = lambda k: self.pollers.pop(k, None)
+        server.start_deploy = lambda k: (self.deploys.append(k), "job-1")[1]
+        server._port_free = lambda p: True
+        server._gh_cache.clear()
+        self.write_registry({"groups": [{"id": "infra", "label": "Infrastructure"}],
+                             "services": [
+            {"key": "forgejo", "name": "Forgejo", "tagline": "Git", "icon": "git",
+             "url": "https://HOST:8301/", "health": None, "marker": None,
+             "setup": None}]})
+        server.probe_all = lambda urls: {}
+        server.magicdns_host = lambda: "box.ts.net"
+
+    def tearDown(self):
+        (ghapp.DEFS_DIR, ghapp.APPS_HOME, ghapp.serve_ports,
+         server.deployd_upsert_poller, server.deployd_remove_poller,
+         server.start_deploy, server.gh_api, server._port_free) = self._gh_saved
+        super().tearDown()
+
+    def create(self, **over):
+        body = {"repo": "c-wenlong/hello", "ref": "main", "key": "hello-app",
+                "name": "Hello", "container_port": 3000, "env": "A=1\n# note\nB = two words"}
+        body.update(over)
+        return server.create_app(body)
+
+    def test_create_writes_definition_env_and_poller_then_deploys(self):
+        out = self.create()
+        self.assertEqual(out["job_id"], "job-1")
+        # 8300 is Serve-taken, 8301 a registry URL: the first free is 8302
+        self.assertEqual(out["port"], 8302)
+        d = json.load(open(ghapp.def_path("hello-app")))
+        self.assertEqual((d["repo"], d["ref"], d["container_port"], d["port"]),
+                         ("c-wenlong/hello", "main", 3000, 8302))
+        env = os.path.join(ghapp.app_dir("hello-app"), ".env")
+        self.assertEqual(open(env).read(), "A=1\nB=two words\n")
+        self.assertEqual(os.stat(env).st_mode & 0o777, 0o600)
+        self.assertEqual(self.pollers["hello-app"]["cmd"], "app/web/ghapp.py deploy hello-app")
+        self.assertEqual(self.pollers["hello-app"]["repo"], "https://github.com/c-wenlong/hello.git")
+        self.assertEqual(self.deploys, ["hello-app"])
+
+    def test_create_refuses_bad_input(self):
+        for over, status in (({"repo": "nope"}, 400), ({"repo": "../x"}, 400),
+                             ({"key": "Bad Key"}, 400), ({"key": "forgejo"}, 409),
+                             ({"ref": "-x"}, 400), ({"container_port": 0}, 400),
+                             ({"env": "not a pair"}, 400), ({"health_path": "x"}, 400),
+                             ({"dockerfile": "../Dockerfile"}, 400)):
+            with self.assertRaises(server.DeployError, msg=over) as ctx:
+                self.create(**over)
+            self.assertEqual(ctx.exception.status, status, over)
+        self.assertFalse(os.path.exists(ghapp.def_path("hello-app")))
+
+    def test_merged_into_registry_and_payload(self):
+        self.create()
+        svc = server.find_service("hello-app")
+        self.assertEqual(svc["runner"], "ghapp")
+        self.assertEqual(server.resolve_script(svc), server.GHAPP_SCRIPT)
+        self.assertEqual(server.runner_args(svc, "deploy"), ["deploy", "hello-app"])
+        self.assertEqual(server.teardown_script(svc), server.GHAPP_SCRIPT)
+        self.assertEqual(server.env_path(svc),
+                         os.path.join(ghapp.app_dir("hello-app"), ".env"))
+        server.read_env(svc)            # the .env editor can read it
+        tile = {s["key"]: s for s in server.services_payload()["services"]}["hello-app"]
+        self.assertEqual(tile["url"], "https://box.ts.net:8302/")
+        self.assertEqual(tile["group"], "github")
+        self.assertEqual(tile["state"], "available")     # nothing deployed yet
+        self.assertTrue(tile["control"]["controllable"])
+        self.assertIn({"id": "github", "label": "From GitHub"}, server.load_groups())
+
+    def test_remove_runs_the_runner_with_remove(self):
+        self.create()
+        svc = server.find_service("hello-app")
+        steps = server.plan_action(svc, "remove")
+        argvs = [s["argv"] for s in steps]
+        self.assertTrue(any(a[-2:] == ["remove", "hello-app"] for a in argvs), argvs)
+
+    def test_registry_key_wins_over_a_clashing_definition(self):
+        os.makedirs(ghapp.DEFS_DIR)
+        with open(ghapp.def_path("forgejo"), "w") as fh:
+            json.dump({"key": "forgejo", "repo": "a/b", "ref": "main",
+                       "dockerfile": "Dockerfile", "context": ".",
+                       "container_port": 1, "port": 8399, "health_path": "/"}, fh)
+        self.assertIsNone(server.find_service("forgejo").get("runner"))
+
+    def test_a_broken_definition_is_skipped_not_fatal(self):
+        os.makedirs(ghapp.DEFS_DIR)
+        with open(os.path.join(ghapp.DEFS_DIR, "junk-app.json"), "w") as fh:
+            fh.write("{not json")
+        self.create()
+        self.assertEqual([e["key"] for e in server.ghapp_entries()], ["hello-app"])
+
+    def test_delete_refuses_while_installed_then_forgets(self):
+        self.create()
+        marker = os.path.join(ghapp.app_dir("hello-app"), "deployed.json")
+        open(marker, "w").close()
+        with self.assertRaises(server.DeployError) as ctx:
+            server.delete_app("hello-app")
+        self.assertEqual(ctx.exception.status, 409)
+        os.remove(marker)
+        out = server.delete_app("hello-app")
+        self.assertFalse(os.path.exists(ghapp.def_path("hello-app")))
+        self.assertTrue(os.path.isdir(out["kept"]))
+        self.assertNotIn("hello-app", self.pollers)
+        with self.assertRaises(server.DeployError):
+            server.delete_app("forgejo")        # not a GitHub app
+
+    def test_port_block_full_is_409(self):
+        server._port_free = lambda p: False
+        with self.assertRaises(server.DeployError) as ctx:
+            server.allocate_port()
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_inspect_reads_dockerfile_expose_and_suggests_a_free_key(self):
+        import base64
+        docker = base64.b64encode(b"FROM node\nEXPOSE 5173\nCMD x").decode()
+
+        def fake(path, cache=True):
+            if path == "repos/c-wenlong/forgejo":
+                return {"default_branch": "main", "private": True}
+            if path.startswith("repos/c-wenlong/forgejo/branches"):
+                return [{"name": "main"}, {"name": "dev"}]
+            if path.startswith("repos/c-wenlong/forgejo/contents/Dockerfile"):
+                return {"type": "file", "encoding": "base64", "content": docker}
+            raise AssertionError(path)
+        server.gh_api = fake
+        out = server.github_inspect({"repo": "c-wenlong/forgejo"})
+        self.assertEqual((out["dockerfile"], out["container_port"]), (True, 5173))
+        self.assertEqual(out["branches"], ["main", "dev"])
+        self.assertEqual(out["key"], "forgejo-2")       # forgejo is taken
+
+    def test_inspect_without_a_dockerfile(self):
+        def fake(path, cache=True):
+            if "contents" in path:
+                raise server.DeployError(404, "not found")
+            return [] if "branches" in path else {"default_branch": "trunk"}
+        server.gh_api = fake
+        out = server.github_inspect({"repo": "c-wenlong/thing", "ref": "trunk"})
+        self.assertEqual((out["dockerfile"], out["container_port"], out["ref"]),
+                         (False, None, "trunk"))
+        with self.assertRaises(server.DeployError):
+            server.github_inspect({"repo": "x"})
+
+    def test_env_text_parsing(self):
+        self.assertEqual(server._env_text(""), "")
+        self.assertEqual(server._env_text("A=1\n\n# c\nB=x=y"), "A=1\nB=x=y\n")
+        for bad in ("A", "1A=2", "A B=1", 5):
+            with self.assertRaises(server.DeployError):
+                server._env_text(bad)
