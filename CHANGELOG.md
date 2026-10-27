@@ -10,6 +10,19 @@ first, dated by merge.
 
 ### Added
 
+- **Launcher: ops home page and sidebar.** The tile grid is replaced by a
+  list grouped Running / Stopped / Not installed, under a health strip for
+  the box (apps running, memory, disk, CPU load) and a disk-full alert past
+  95%. Each row has one button (Open, Start, Install) and a ⋯ / ⌘K action
+  menu for Restart, Stop, Update, Copy address, Details and Remove, all
+  through the existing confirm sheets. Status is shown by glyph shape, real
+  app icons on every row, keyboard control (`/`, ↑/↓, ↵, ⌘K), category and
+  Updates pills. A sidebar (collapsible; a drawer on phones) links Apps,
+  Catalogue, Deploys and the running monitoring apps. `GET /api/services`
+  gains a `system` block. New minimal launcher icon (`icons/launcher.svg`,
+  rasters regenerated). Replaces the Grid / Table / Board views, stars,
+  the tab strip and the Categories menu.
+
 - **Launcher: image update notices and a one-tap Update.** Every six hours
   (and on **Check now**) the launcher compares the digest each service's
   running containers were pulled at with what the same tag points at on its

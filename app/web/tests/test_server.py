@@ -312,6 +312,85 @@ class StateDerivationTest(SandboxTest):
         self.assertFalse(payload["services"][2]["installed"])
 
 
+
+# ---------------------------------------------------------------- box health
+
+class SystemStatsTest(unittest.TestCase):
+    """The home page's health strip. Every reader is pointed at fixture files
+    in a temp dir; nothing here reads the real /proc."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="launcher-sys-")
+        self._saved = (server.MEMINFO_PATH, server.UPTIME_PATH,
+                       server.SYSTEM_DISK_PATH)
+        server.MEMINFO_PATH = os.path.join(self.tmp, "meminfo")
+        server.UPTIME_PATH = os.path.join(self.tmp, "uptime")
+        server.SYSTEM_DISK_PATH = self.tmp
+
+    def tearDown(self):
+        (server.MEMINFO_PATH, server.UPTIME_PATH,
+         server.SYSTEM_DISK_PATH) = self._saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, name, body):
+        with open(os.path.join(self.tmp, name), "w", encoding="ascii") as fh:
+            fh.write(body)
+
+    def test_meminfo_uses_mem_available_in_bytes(self):
+        self.write("meminfo", "MemTotal:        8053720 kB\n"
+                              "MemFree:          612000 kB\n"
+                              "MemAvailable:    4456990 kB\n")
+        self.assertEqual(server._meminfo(),
+                         {"total": 8053720 * 1024, "available": 4456990 * 1024})
+
+    def test_meminfo_without_proc_falls_back_to_total_only(self):
+        mem = server._meminfo()   # no fixture file: the /proc read fails
+        if mem is not None:       # sysconf answered (Linux and macOS both do)
+            self.assertGreater(mem["total"], 0)
+            self.assertIsNone(mem["available"])
+
+    def test_meminfo_caps_available_at_total(self):
+        self.write("meminfo", "MemTotal: 100 kB\nMemAvailable: 900 kB\n")
+        self.assertEqual(server._meminfo()["available"], 100 * 1024)
+
+    def test_uptime_reads_first_field(self):
+        self.write("uptime", "1583193.48 18000000.00\n")
+        self.assertEqual(server._uptime(), 1583193.48)
+
+    def test_uptime_garbage_is_none(self):
+        self.write("uptime", "not a number\n")
+        self.assertIsNone(server._uptime())
+
+    def test_disk_reports_mount_and_sizes(self):
+        disk = server._disk(self.tmp)
+        self.assertEqual(set(disk), {"mount", "total", "used", "free"})
+        self.assertTrue(os.path.ismount(disk["mount"]))
+        self.assertGreater(disk["total"], 0)
+
+    def test_disk_on_missing_path_is_none(self):
+        self.assertIsNone(server._disk(os.path.join(self.tmp, "gone")))
+
+    def test_system_stats_shape_is_stable(self):
+        self.write("meminfo", "MemTotal: 1000 kB\nMemAvailable: 400 kB\n")
+        self.write("uptime", "60.0 1.0\n")
+        stats = server.system_stats()
+        self.assertEqual(set(stats),
+                         {"memory", "disk", "load", "cpus", "uptime_s"})
+        self.assertEqual(stats["uptime_s"], 60.0)
+        self.assertEqual(stats["memory"]["available"], 400 * 1024)
+
+
+class SystemPayloadTest(SandboxTest):
+
+    def test_payload_carries_system_block(self):
+        self.write_registry({"services": []})
+        server.probe_all = lambda urls: {}
+        server.magicdns_host = lambda: "box.ts.net"
+        payload = server.services_payload()
+        self.assertIn("system", payload)
+        self.assertIn("disk", payload["system"])
+
+
 # ---------------------------------------------------------------- HOST
 
 class HostSubstitutionTest(SandboxTest):
