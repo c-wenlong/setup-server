@@ -954,6 +954,7 @@
         var fresh = find(detailKey);
         if (fresh) {
           detailSvc.state = fresh.state;
+          detailSvc.degraded = fresh.degraded;
           detailSvc.job = fresh.job;
           if (fresh.control !== undefined) detailSvc.control = fresh.control;
           if (fresh.removable !== undefined) detailSvc.removable = fresh.removable;
@@ -2294,6 +2295,7 @@
       icon:    d.icon || known.icon,
       url:     d.url !== undefined ? d.url : known.url,
       state:   d.state || known.state,
+      degraded: d.degraded !== undefined ? d.degraded : known.degraded,
       job:     d.job !== undefined ? d.job : known.job,
       /* {controllable, reason} — whether this service gets start/stop buttons
          at all. Undefined on a backend that has no lifecycle endpoint. */

@@ -1025,22 +1025,38 @@ def control_running(svc, resources):
 
     Services and containers answer through the resources pass: a cgroup
     exists only while its part runs. A .timer owns no cgroup while armed,
-    so timers ask systemctl directly. None means nothing could say — no
-    parts configured, or the measurement itself failed — so a caller can
-    keep a warning it cannot disprove rather than declaring 'paused'."""
+    so timers ask systemctl directly. A container part that is absent from
+    `docker ps -a` is NOT 'stopped' — stopped containers still appear
+    there — it means docker could not answer, which is unknowable, same
+    as a timer systemctl cannot read. None means nothing could say, so a
+    caller can keep a warning it cannot disprove rather than declaring
+    'paused'."""
     parts = control_parts(control_block(svc))
     measured = {p["name"]: p for p in resources.get("parts") or []}
     if parts and not measured:
         return None
+    docker_map = None
+    unknowable = False
     for part in parts:
         if part["kind"] == "unit" and part["name"].endswith(".timer"):
-            if _timer_active(part["name"]):
+            state = _timer_active(part["name"])
+            if state:
                 return True
+            if state is None:
+                unknowable = True
             continue
+        if part["kind"] == "container":
+            if docker_map is None:
+                docker_map = docker_name_map()
+            if part["name"] not in docker_map:
+                unknowable = True
+                continue
         entry = measured.get(part["name"])
         if entry and entry.get("running"):
             return True
-    return None if not parts else False
+    if unknowable or not parts:
+        return None
+    return False
 
 
 def deployed_at(marker):

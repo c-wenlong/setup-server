@@ -4775,6 +4775,28 @@ class DegradedStateTest(ResourceTestBase):
         self.assertEqual(self.tile("n")["state"], "stopped")
         self.assertFalse(self.tile("n")["degraded"])
 
+    def test_container_absent_from_docker_ps_is_unknowable_not_paused(self):
+        # Stopped containers still appear in `docker ps -a`; a name absent
+        # there means docker could not answer, not that the part is off.
+        # The failed probe's warning must stay on.
+        server.docker_name_map = lambda: {}   # docker unreachable → empty map
+        self.registry_with({"parts": [{"container": "c1"}]}, key="a",
+                           health="http://127.0.0.1:1/h", marker=self.tmp)
+        tile = self.tile("a")
+        self.assertEqual(tile["state"], "stopped")
+        self.assertTrue(tile["degraded"])
+
+    def test_container_present_in_docker_ps_but_stopped_is_paused(self):
+        # Name IS in the map (docker answered) but the cgroup is gone:
+        # provably stopped → muted.
+        CID_LOCAL = "c" * 64
+        server.docker_name_map = lambda: {"c1": CID_LOCAL}
+        self.registry_with({"parts": [{"container": "c1"}]}, key="a",
+                           health="http://127.0.0.1:1/h", marker=self.tmp)
+        tile = self.tile("a")
+        self.assertEqual(tile["state"], "stopped")
+        self.assertFalse(tile["degraded"])
+
 
 class ResourceReadingTest(ResourceTestBase):
     """What comes out of the fake sysfs tree."""

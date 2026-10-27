@@ -122,18 +122,22 @@
    * closes it, and the next repaint drops whatever was open anyway. */
   var openMenu = null;
 
-  function closeMenu() {
+  /* Esc returns focus to the row's ⋯ button — removing the focused item
+     would otherwise dump a keyboard user at document top. */
+  function closeMenu(restoreFocus) {
     if (!openMenu) return;
-    if (openMenu._btn) openMenu._btn.setAttribute('aria-expanded', 'false');
+    var btn = openMenu._btn;
+    if (btn) btn.setAttribute('aria-expanded', 'false');
     openMenu.remove();
     openMenu = null;
+    if (restoreFocus && btn) btn.focus();
   }
 
   document.addEventListener('click', function (ev) {
     if (openMenu && !openMenu.contains(ev.target)) closeMenu();
   });
   document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Escape') closeMenu();
+    if (ev.key === 'Escape') closeMenu(true);
   });
 
   function menuItem(label, title, fn) {
