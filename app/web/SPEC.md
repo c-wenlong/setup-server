@@ -535,9 +535,9 @@ c-wenlong) and the Categories multi-select. In their place:
   Catalogue, Deploys (deployd's page) and shortcuts to the running
   monitoring apps (Uptime Kuma, beszel, ntfy).
 
-view.js keeps the theme control, the detail page's Resources block and the
-usage beacons; its table, board and toolbar code is unreachable now and is
-due out in a follow-up.
+view.js keeps only the theme control, the detail page's Resources block and
+the usage beacons; its table, board, toolbar, star and tile-RAM code is
+deleted along with the grid, tab and category code in app.js and app.css.
 
 ### Payload
 

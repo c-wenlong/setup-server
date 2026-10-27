@@ -1,12 +1,12 @@
-/* tooltip.js — hover-intent description bubble for the service grid.
+/* tooltip.js — hover-intent description bubble for the home list.
  *
- * Rest the pointer on a tile for HOVER_INTENT_MS and a small bubble with that
- * service's description appears beside it. Sweeping across the grid arms and
- * disarms a single timer, so crossing six tiles shows nothing.
+ * Rest the pointer on a row for HOVER_INTENT_MS and a small bubble with that
+ * service's description appears beside it. Sweeping across the list arms and
+ * disarms a single timer, so crossing six rows shows nothing.
  *
- * Self-contained on purpose: it touches no app.js global, binds no listener to
- * an individual tile (app.js reconciles those nodes away), and reads only two
- * things from the page — `#grid` and the `data-key` on each tile. Everything
+ * Self-contained on purpose: it touches no app.js or home.js global, binds no
+ * listener to an individual row (home.js repaints those on every poll), and
+ * reads only two things from the page: `#grid` and the `data-key` on each row. Everything
  * here is progressive enhancement; the description lives in full on the detail
  * page, so the bubble is aria-hidden decoration and never takes focus.
  *
