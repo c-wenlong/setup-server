@@ -119,6 +119,23 @@ for svc in $SERVICES; do
       fi ;;
   esac
 
+  # A script on lib/common.sh takes info/ok/warn/die from it. A local copy
+  # would silently shadow the shared one, and a suite that does not copy the
+  # lib into its sandbox fails on the first `.` with "No such file".
+  uses_lib=0
+  for script in "$svc/setup.sh" "$svc/teardown.sh"; do
+    [ -f "$script" ] || continue
+    grep -q '^\. "\$SERVICE_DIR/\.\./\.\./lib/common\.sh"$' "$script" || continue
+    uses_lib=1
+    redefined="$(sed -n -E 's/^(info|ok|warn|die)\(\) .*/\1/p' "$script" | tr '\n' ' ')"
+    [ -z "$redefined" ] \
+      || fail "$script sources lib/common.sh but redefines: $redefined(drop the local copy)"
+  done
+  if [ "$uses_lib" -eq 1 ] && [ -f "$svc/tests/run-tests.sh" ] \
+     && ! grep -q 'lib/common\.sh' "$svc/tests/run-tests.sh"; then
+    fail "$svc/tests/run-tests.sh never copies lib/common.sh into its sandbox (see copy_lib in services/forgejo/tests/run-tests.sh)"
+  fi
+
   links_to README.md "$svc" \
     || fail "README.md has no Services row linking to ($svc/)"
   links_to DIRECTORY.md "$svc" \

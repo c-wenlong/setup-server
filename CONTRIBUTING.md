@@ -50,7 +50,9 @@ under coverage.
 There are two reference implementations: [code-server](services/code-server/setup.sh)
 for a native service under a systemd user unit or a launchd LaunchAgent, and
 [forgejo](services/forgejo/setup.sh) for the Docker shape. Read whichever matches the
-service you are adding.
+service you are adding. Both source [lib/common.sh](lib/common.sh) for the output
+helpers, preflight checks and the Tailscale Serve publish step; AGENTS.md's
+"Shared helpers" section has the rules for using and extending it.
 
 ## Project layout
 
