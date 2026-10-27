@@ -187,8 +187,9 @@ service is deployed on this machine, run `--live` too.
 ## Adding a new service (checklist)
 
 1. `mkdir services/<service>/tests/stubs`; start `setup.sh` from a reference
-   implementation (sources `lib/common.sh` for its helpers and preflight,
-   section ordering):
+   implementation (section ordering, preflight), sourcing `lib/common.sh`
+   for the helpers. forgejo already does; code-server still carries its own
+   copies, so swap those for the lib calls when you start from it:
    `services/code-server/setup.sh` for a native binary under a systemd user unit or a
    launchd LaunchAgent, `services/forgejo/setup.sh` for the Docker shape (gitignored
    `.env`, `LOCAL_PORT`/`HTTPS_PORT`, Compose restart policy instead of a unit).

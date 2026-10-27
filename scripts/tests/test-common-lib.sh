@@ -52,7 +52,12 @@ setup() {
   stub sleep ':'
   stub sudo 'exit 0'
   stub tailscale 'case "$1" in
-  status) printf "{\"BackendState\": \"%s\", \"Self\": {\"DNSName\": \"box.tail1.ts.net.\"}}\n" "${FAKE_TS_STATE:-Running}" ;;
+  status) [ -z "${FAKE_TS_STATUS_FAILS:-}" ] || exit 1
+          if [ -n "${FAKE_TS_NO_DNS:-}" ]; then
+            printf "{\"BackendState\": \"%s\"}\n" "${FAKE_TS_STATE:-Running}"
+          else
+            printf "{\"BackendState\": \"%s\", \"Self\": {\"DNSName\": \"box.tail1.ts.net.\"}}\n" "${FAKE_TS_STATE:-Running}"
+          fi ;;
   serve)  n=$(cat "'"$SB"'/serve_n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SB"'/serve_n"
           [ "$n" -gt "${FAKE_SERVE_FAILS:-0}" ] ;;
 esac'
@@ -63,7 +68,7 @@ esac'
   stub curl 'n=$(cat "'"$SB"'/curl_n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SB"'/curl_n"
 [ "$n" -gt "${FAKE_CURL_FAILS:-0}" ]'
 }
-teardown() { rm -rf "$SB"; unset FAKE_OS FAKE_UID FAKE_TS_STATE FAKE_SERVE_FAILS FAKE_DOCKER_DOWN FAKE_NO_COMPOSE FAKE_CURL_FAILS; }
+teardown() { rm -rf "$SB"; unset FAKE_OS FAKE_UID FAKE_TS_STATE FAKE_TS_NO_DNS FAKE_TS_STATUS_FAILS FAKE_SERVE_FAILS FAKE_DOCKER_DOWN FAKE_NO_COMPOSE FAKE_CURL_FAILS; }
 
 # lib 'commands': source the lib in a fresh bash under the stubs, run the
 # commands, capture stdout+stderr in OUT and the status in CODE.
@@ -114,6 +119,13 @@ check "MagicDNS name, trailing dot gone"   out_has "host=box.tail1.ts.net"
 FAKE_TS_STATE=Stopped lib 'detect_os; resolve_tailscale; require_tailscale_up'
 check "a stopped tailscaled is fatal"      [ "$CODE" -ne 0 ]
 check "  shows the state"                  out_has "state: Stopped"
+# A bare assignment under set -euo pipefail, the way the scripts call it: a
+# missing name must come back empty with status 0, so the caller's own
+# "Could not determine tailnet DNS name" die is what the user sees.
+FAKE_TS_NO_DNS=1 lib 'detect_os; resolve_tailscale; host="$(tailnet_host)"; echo "reached host=[$host]"'
+check "no DNSName: empty, not a silent exit" out_has "reached host=[]"
+FAKE_TS_STATUS_FAILS=1 lib 'detect_os; resolve_tailscale; host="$(tailnet_host)"; echo "reached host=[$host]"'
+check "status fails: empty, not a silent exit" out_has "reached host=[]"
 rm "$SB/bin/tailscale"
 BARE=1 lib 'detect_os; resolve_tailscale'
 check "no CLI at all is fatal"             out_has "Tailscale is not installed"
