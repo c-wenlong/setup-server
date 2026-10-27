@@ -21,3 +21,12 @@ disable=SC2034
 # harnesses define helpers with optional arguments (`run_deploy "${1:-}"`) that
 # some suites call bare and others call with input. That is deliberate.
 disable=SC2120
+
+# Deploy scripts source the shared helpers by a path relative to themselves
+# (`. "$SERVICE_DIR/../../lib/common.sh"` under a
+# `# shellcheck source=../../lib/common.sh` directive). SCRIPTDIR resolves that
+# directive against the script's own folder, and external-sources lets
+# ShellCheck follow it even when lib/common.sh is not among the files passed
+# (the pre-commit hook lints only changed files).
+source-path=SCRIPTDIR
+external-sources=true

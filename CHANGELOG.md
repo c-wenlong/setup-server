@@ -16,6 +16,19 @@ first, dated by merge.
   add / edit / delete for pollers. `app.json` gains `"hidden": true` for
   machinery with a page of its own; `#/service/deployd` redirects there.
 
+- **`lib/common.sh`: shared deploy helpers.** The output helpers
+  (`info`/`ok`/`warn`/`die`), the preflight checks (supported OS, not root,
+  Tailscale CLI and state, Docker + Compose v2, numeric ports), the
+  local health wait and the Tailscale Serve publish-with-operator-grant step
+  were copied word for word into almost every `setup.sh` and `teardown.sh`.
+  They now live once in `lib/common.sh`, which scripts source by a path
+  relative to themselves. First migrated: stirling-pdf, forgejo, n8n and
+  umami (setup and teardown); the rest follow in later PRs. The lib has its
+  own suite (`scripts/tests/test-common-lib.sh`), mocked suites copy it into
+  their sandbox, and `make structure` checks both that a migrated script does
+  not redefine the helpers and that its suite ships the lib. User-visible
+  change: `teardown.sh`'s "Docker is not installed" message now carries the
+  same install hint as `setup.sh`'s.
 - **Launcher: ops home page and sidebar.** The tile grid is replaced by a
   list grouped Running / Stopped / Not installed, under a health strip for
   the box (apps running, memory, disk, CPU load) and a disk-full alert past

@@ -33,10 +33,8 @@ SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 STATE="$HOME/services/umami"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -56,39 +54,18 @@ randpass() {
 }
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+refuse_root
 command -v curl >/dev/null || die "curl is required."
-if ! command -v docker >/dev/null; then
-  [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
-  die "Docker is not installed. On macOS install Docker Desktop or OrbStack."
-fi
-
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed: https://tailscale.com/download"
-fi
-
-if ! docker ps >/dev/null 2>&1; then
-  [ "$OS" = "Linux" ] && die "Cannot talk to the Docker daemon. Fix: sudo usermod -aG docker $USER, then log out/in (or run via: sg docker -c ./setup.sh)"
-  die "Cannot talk to the Docker daemon. Is Docker Desktop/OrbStack running?"
-fi
-docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)."
-
-state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
-
-case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
-case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
+resolve_tailscale
+require_docker_compose
+require_tailscale_up
+require_numeric LOCAL_PORT HTTPS_PORT
 
 ok "$OS + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
 
-TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+TS_HOST="$(tailnet_host)"
 [ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 ok "Tailnet name: $TS_HOST"
 
@@ -187,14 +164,8 @@ info "Starting Umami (docker compose up -d) — first run pulls the image and ru
 "${COMPOSE[@]}" up -d
 
 info "Waiting for Umami on 127.0.0.1:$LOCAL_PORT (first boot runs Prisma migrations)"
-for i in $(seq 1 90); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$LOCAL_PORT/api/heartbeat" 2>/dev/null; then
-    ok "Umami is answering locally"
-    break
-  fi
-  [ "$i" -eq 90 ] && die "Umami did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs umami"
-  sleep 3
-done
+wait_http "http://127.0.0.1:$LOCAL_PORT/api/heartbeat" 90 3 || die "Umami did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs umami"
+ok "Umami is answering locally"
 
 # Upstream seeds admin/umami. Rotate it so the well-known pair is not
 # sitting on the tailnet. Re-runs: if the generated password already
@@ -246,18 +217,7 @@ rotate_admin
 
 # ------------------------------------------------------- tailscale serve
 info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT -> 127.0.0.1:$LOCAL_PORT)"
-if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
-  if [ "$OS" = "Linux" ]; then
-    info "Direct serve failed — trying operator grant (needs sudo, one time)"
-    sudo tailscale set --operator="$USER"
-  fi
-  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
-    echo
-    info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
-    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
-  done
-fi
-ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
+ts_serve_publish "$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"
 
 url="https://$TS_HOST:$HTTPS_PORT"
 info "Verifying $url/api/heartbeat (first request can take ~60s while the TLS cert is minted)"

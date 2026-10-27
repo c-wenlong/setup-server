@@ -19,6 +19,7 @@ keep it in step when you add a service.
 |---|---|
 | `services/<service>/` | One deployable service each: everything the launcher can install. |
 | `app/<surface>/` | Front ends for the box itself. `app/web/` is the launcher (Python server plus its static UI in `app/web/static/`); a future desktop app goes in `app/desktop/`. Each one follows the same per-directory contract as a service. |
+| `lib/common.sh` | Shell helpers every deploy script sources (see "Shared helpers" below). |
 | `scripts/` | Repo tooling (`check-structure.sh`, one-off migrations). |
 | `docs/` | Cross-service design notes. |
 
@@ -65,6 +66,39 @@ from the repo's `services/` folder despite the shared name.
 - **Interactive pauses are allowed only for one-time approvals** that
   genuinely can't be automated (e.g. Tailscale Serve enablement link). Print
   the URL, wait for Enter, retry in a loop.
+
+## Shared helpers (`lib/common.sh`)
+
+A `setup.sh` or `teardown.sh` sources the shared helpers by a path relative
+to itself, right after `SERVICE_DIR` is set:
+
+```bash
+SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
+```
+
+It provides `info`/`ok`/`warn`/`die`, `detect_os` (sets `OS`),
+`refuse_root [msg]`, `resolve_tailscale` (sets `TAILSCALE`),
+`require_tailscale_up`, `tailnet_host`, `require_docker_compose`,
+`require_numeric VAR...`, `wait_http URL TRIES SLEEP` and
+`ts_serve_publish HTTPS_PORT TARGET`. Rules:
+
+- Something goes into the lib only when at least ~5 scripts share it
+  unchanged. A service's own quirk (a tailnet-IP listener, a native
+  unit, a custom health probe) stays in its script.
+- A script on the lib never redefines `info`/`ok`/`warn`/`die`;
+  `make structure` fails if it does.
+- The mocked suite must copy the lib into its sandbox, laid out as
+  `<sandbox>/repo/services/<service>/` with `<sandbox>/repo/lib/` beside it
+  (`copy_lib` in `services/forgejo/tests/run-tests.sh`). `make structure`
+  fails when a suite for a lib-using script never mentions `lib/common.sh`.
+- The lib has its own suite, `scripts/tests/test-common-lib.sh`
+  (`make test-scripts`). A change to the lib runs that plus every
+  migrated service's suite (`make test`).
+
+Scripts not yet migrated still carry their own copies; migrating one is a
+mechanical swap of those blocks for the calls above, with its suite green.
 
 ## Required files per service
 
@@ -153,7 +187,9 @@ service is deployed on this machine, run `--live` too.
 ## Adding a new service (checklist)
 
 1. `mkdir services/<service>/tests/stubs`; start `setup.sh` from a reference
-   implementation (preflight/info/ok/warn/die helpers, section ordering):
+   implementation (section ordering, preflight), sourcing `lib/common.sh`
+   for the helpers. forgejo already does; code-server still carries its own
+   copies, so swap those for the lib calls when you start from it:
    `services/code-server/setup.sh` for a native binary under a systemd user unit or a
    launchd LaunchAgent, `services/forgejo/setup.sh` for the Docker shape (gitignored
    `.env`, `LOCAL_PORT`/`HTTPS_PORT`, Compose restart policy instead of a unit).
