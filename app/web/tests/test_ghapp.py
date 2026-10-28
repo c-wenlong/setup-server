@@ -411,6 +411,19 @@ class PlumbingTest(Sandbox):
                 fh.write('SERVICE_HOME="%s"\n' % home)
             ghapp.DEPLOYD_ENV = env
             self.assertEqual(ghapp.deployd_state_dir(), os.path.join(home, "state"))
+            # setup.sh writes %q-escaped paths; deployd shlex-splits them.
+            spaced = os.path.join(self.tmp, "deploy state")
+            os.makedirs(os.path.join(spaced, "state"))
+            with open(env, "w") as fh:
+                fh.write("SERVICE_HOME=%s\n" % spaced.replace(" ", "\\ "))
+            self.assertEqual(ghapp.deployd_state_dir(), os.path.join(spaced, "state"))
+            fail = os.path.join(spaced, "state", "hello-app.fail")
+            with open(fail, "w") as fh:
+                fh.write('{"sha": "old"}\n')
+            ghapp.record_deployd_sha("hello-app", SHA)
+            self.assertFalse(os.path.exists(fail))
+            with open(os.path.join(spaced, "state", "hello-app.sha")) as fh:
+                self.assertEqual(fh.read().strip(), SHA)
             ghapp.DEPLOYD_ENV = os.path.join(self.tmp, "absent.env")
             ghapp.DEPLOYD_HOME = os.path.join(self.tmp, "nothing-here")
             self.assertIsNone(ghapp.deployd_state_dir())

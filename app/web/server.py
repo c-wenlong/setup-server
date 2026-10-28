@@ -513,8 +513,11 @@ def is_secret(name):
     return any(marker in upper for marker in SECRET_MARKERS)
 
 
-def parse_env(text):
+def parse_env(text, literal=False):
     """.env text -> {NAME: value}, in file order. Never executes anything.
+
+    literal=True reads Docker's --env-file format instead (a GitHub app's
+    .env): everything after the first `=` is the value, quotes and all.
 
     Handles what these files actually contain: KEY=value, blank lines, whole
     line `#` comments, `export KEY=value`, values containing `=`, and values
@@ -533,6 +536,9 @@ def parse_env(text):
         if hit is None:
             continue
         name, value = hit
+        if literal:
+            out[name] = value
+            continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             quote = value[0]
@@ -592,7 +598,13 @@ def read_env(svc):
             text = fh.read()
     except OSError:
         raise DeployError(404, "env file not readable")
-    return parse_env(text)
+    return parse_env(text, literal=is_docker_env(svc))
+
+
+def is_docker_env(svc):
+    """True for a GitHub app: its .env feeds `docker run --env-file`, which
+    keeps quotes as part of the value, so it is read and written bare."""
+    return svc.get("runner") == "ghapp"
 
 
 def env_payload(svc):
@@ -2390,7 +2402,10 @@ def update_env_var(key, var, body):
         raise DeployError(400, "value must be a single line")
 
     path = env_path(svc)                       # allowed-roots gate: 403
-    rendered = quote_env_value(value)          # 400
+    literal = is_docker_env(svc)
+    if literal and value != value.strip():
+        raise DeployError(400, "value cannot start or end with whitespace")
+    rendered = value if literal else quote_env_value(value)   # 400
 
     with _env_lock:
         try:
@@ -2404,7 +2419,7 @@ def update_env_var(key, var, body):
         new_text, count = render_env_edit(text, var, rendered)
         if count == 0:
             raise DeployError(404, "unknown variable")
-        if parse_env(new_text).get(var) != value:
+        if parse_env(new_text, literal=literal).get(var) != value:
             log("refusing to write %s.%s: quoting does not round-trip" % (key, var))
             raise DeployError(500, "could not encode that value safely")
         _write_env_atomically(path, new_text, st)

@@ -622,7 +622,10 @@ list only when an app exists), container control part `app-<key>`, marker
 same key. Everything downstream (state, Open, Start/Stop, Remove, the .env
 editor, image-update checks) goes through the existing paths, with
 `runner_args()` adding `deploy|remove <key>` to the argv and `env_path()`
-deriving the `.env` from the key instead of the allowed-roots gate.
+deriving the `.env` from the key instead of the allowed-roots gate. That
+`.env` is Docker's `--env-file` format, which keeps quotes as part of the
+value, so the editor reads and writes it bare (`KEY=hello world`) and
+refuses a value with leading or trailing whitespace.
 
 **Auto-deploy** is a custom `state/pollers.json` entry written on create:
 `{repo: https://github.com/<repo>.git, ref, cmd: "app/web/ghapp.py deploy

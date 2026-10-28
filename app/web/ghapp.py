@@ -143,17 +143,25 @@ def load(key):
 def deployd_state_dir():
     """deployd's state dir: $SERVICE_HOME/state from services/deployd/.env
     (read, never sourced), else ~/services/deployd/state. None when deployd
-    has never run here."""
+    has never run here. Decoded exactly like deployd's own load_env(): the
+    value is shlex-split, so setup.sh's %q-escaped paths
+    (SERVICE_HOME=/home/u/deploy\\ state) come back real."""
     home = DEPLOYD_HOME
     try:
         with open(DEPLOYD_ENV, encoding="utf-8") as fh:
             for line in fh:
-                name, sep, value = line.strip().partition("=")
-                if sep and name.strip() in ("SERVICE_HOME", "export SERVICE_HOME"):
-                    value = value.strip().strip("'\"")
-                    if value:
-                        home = os.path.expanduser(value.replace("$HOME", "~")
-                                                  .replace("${HOME}", "~"))
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, raw = line.partition("=")
+                if name.strip() != "SERVICE_HOME":
+                    continue
+                try:
+                    parts = shlex.split(raw)
+                    value = parts[0] if parts else ""
+                except ValueError:
+                    value = raw
+                home = value or DEPLOYD_HOME
     except OSError:
         pass
     state = os.path.join(home, "state")
@@ -179,10 +187,16 @@ def set_paused(key, paused):
 
 def record_deployd_sha(key, sha):
     """Tell deployd this commit is live, so its next tick does not rebuild a
-    commit the launcher just deployed."""
+    commit the launcher just deployed. Like deployd's own success path, this
+    drops any state/<key>.fail: a failure record left beside a matching sha
+    would show the app as failed forever, since deployd never reruns it."""
     state = deployd_state_dir()
     if not state:
         return
+    try:
+        os.remove(os.path.join(state, key + ".fail"))
+    except OSError:
+        pass
     tmp = os.path.join(state, ".%s.sha.tmp" % key)
     with open(tmp, "w") as fh:
         fh.write(sha + "\n")

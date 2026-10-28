@@ -6847,6 +6847,28 @@ class GithubAppsTest(SandboxTest):
         self.assertEqual([v["name"] for v in env["vars"]], ["A", "B"])
         self.assertEqual(env["path"], "~/services/apps/hello-app/.env")
 
+    def test_env_editor_writes_docker_env_file_values_bare(self):
+        # docker run --env-file keeps quotes, so a value with a space must
+        # land as KEY=hello world, never KEY='hello world'.
+        self.create()
+        path = os.path.join(ghapp.app_dir("hello-app"), ".env")
+        server.update_env_var("hello-app", "A", {"value": "hello world"})
+        server.update_env_var("hello-app", "B", {"value": "it's $x"})
+        with open(path) as fh:
+            text = fh.read()
+        self.assertIn("A=hello world\n", text)
+        self.assertIn("B=it's $x\n", text)
+        self.assertEqual(server.reveal_env_var("hello-app", "A")["value"], "hello world")
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_env_var("hello-app", "A", {"value": " padded"})
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_env_editor_reads_quotes_as_part_of_the_value(self):
+        self.create()
+        with open(os.path.join(ghapp.app_dir("hello-app"), ".env"), "w") as fh:
+            fh.write("A='quoted'\n")
+        self.assertEqual(server.reveal_env_var("hello-app", "A")["value"], "'quoted'")
+
     def test_delete_refused_while_a_deploy_holds_the_lock(self):
         self.create()
         with ghapp.Lock("hello-app"):
