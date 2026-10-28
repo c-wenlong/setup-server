@@ -13,7 +13,7 @@
 set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
-SCRIPT="$TESTS_DIR/../setup.sh"
+SCRIPT="$TESTS_DIR/../setup.sh"   # run in place, so ../../lib/common.sh is the repo's own
 TEARDOWN="$TESTS_DIR/../teardown.sh"
 STUBS="$TESTS_DIR/stubs"
 

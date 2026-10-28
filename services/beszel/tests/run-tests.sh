@@ -15,6 +15,10 @@
 set -u
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SERVICE_DIR/../.." && pwd)"
+# setup.sh sources ../../lib/common.sh, so every sandbox copy of the
+# service sits at <root>/services/<name> with <root>/lib beside it.
+copy_lib() { mkdir -p "$1/lib" && cp "$REPO_ROOT/lib/common.sh" "$1/lib/"; }
 SETUP="$SERVICE_DIR/setup.sh"
 COMPOSE="$SERVICE_DIR/docker-compose.yml"
 
@@ -221,9 +225,10 @@ td_setup() {
   export HOME="$SANDBOX/home"
   export STATE_DIR="$SANDBOX/state"
   export CALLS_LOG="$SANDBOX/calls.log"
-  SVC="$SANDBOX/svc"
+  SVC="$SANDBOX/repo/services/beszel"
   STUB_BIN="$SANDBOX/bin"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
+  copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
   write_stubs "$STUB_BIN"
   cp "$SETUP" "$SERVICE_DIR/teardown.sh" "$COMPOSE" "$SVC/"
@@ -647,6 +652,7 @@ test_teardown_purge_keeps_a_checkout_inside() {
   repo="$top/services/beszel"
   mkdir -p "$repo"
   cp -R "$SVC/." "$repo/"
+  copy_lib "${repo%/services/*}"
   echo secret > "$top/other.env"
   sed -i.bak "s#^BESZEL_VOLUME=.*#BESZEL_VOLUME=$HOME/services/beszel#" "$repo/.env"
   OUT="$(printf '%s\n' "beszel" | PATH="$STUB_BIN:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?

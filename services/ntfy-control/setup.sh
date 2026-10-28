@@ -28,16 +28,13 @@ REPLY_TOPIC="${REPLY_TOPIC:-alerts}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+refuse_root
 command -v curl >/dev/null || die "curl is required."
 command -v python3 >/dev/null || die "python3 is required (runs the listener)."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
@@ -62,7 +59,7 @@ elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Ta
   TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 fi
 if [ -n "${TAILSCALE:-}" ]; then
-  TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+  TS_HOST="$(tailnet_host)"
 fi
 if [ -n "$TS_HOST" ]; then
   PUBLIC_NTFY_URL="https://$TS_HOST:$NTFY_PORT"

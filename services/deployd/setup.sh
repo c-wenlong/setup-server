@@ -60,16 +60,13 @@ DEFAULT_SETUP_REPO="$(cd "$SERVICE_DIR/../.." && pwd)"
 SETUP_REPO="${SETUP_REPO:-$DEFAULT_SETUP_REPO}"
 POLL_SECONDS="${POLL_SECONDS:-60}"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+refuse_root
 command -v git >/dev/null     || die "git is required (polling remote refs)."
 command -v python3 >/dev/null || die "python3 is required (the poller is stdlib-only python)."
 command -v bash >/dev/null    || die "bash is required (deploy commands run through it)."
@@ -83,7 +80,7 @@ if [ "$OS" = "Linux" ]; then
   command -v loginctl >/dev/null  || die "loginctl is required on Linux (lingering, for boot persistence)."
 fi
 [ -d "$SETUP_REPO/services" ] || die "SETUP_REPO=$SETUP_REPO is not a setup-server checkout (no services/ dir)."
-case "$POLL_SECONDS" in ''|*[!0-9]*) die "POLL_SECONDS must be numeric (got: $POLL_SECONDS)";; esac
+require_numeric POLL_SECONDS
 ok "$OS + git + python3 + checkout at $SETUP_REPO"
 
 # ------------------------------------------------------------------- .env

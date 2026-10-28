@@ -24,30 +24,20 @@ set -euo pipefail
 
 PORT="${PORT:-8080}"
 CONFIG="$HOME/.config/code-server/config.yaml"
-OS="$(uname -s)"
+SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 # ---------------------------------------------------------------- preflight
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root (sudo is invoked only where needed)."
+refuse_root "Run as a regular user, not root (sudo is invoked only where needed)."
 command -v curl >/dev/null || die "curl is required."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
 
-# Tailscale CLI: on PATH, or inside the macOS app bundle.
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed. Install it first: https://tailscale.com/download"
-fi
-
-state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+resolve_tailscale
+require_tailscale_up
 ok "$OS + curl + Tailscale (running)"
 
 # ---------------------------------------------------- install / upgrade
@@ -158,7 +148,8 @@ fi
 ok "Tailscale Serve: HTTPS :443 -> http://127.0.0.1:$PORT (tailnet only)"
 
 # ------------------------------------------------------------ final check
-host="$("$TAILSCALE" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+host="$(tailnet_host)"
+[ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 url="https://$host"
 
 info "Verifying $url (first request can take ~60s while the TLS cert is minted)"
