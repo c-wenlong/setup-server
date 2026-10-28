@@ -21,7 +21,11 @@ first, dated by merge.
   kaichenpedia, metabase, open-webui, plane, sources, trigger-dev,
   vaultwarden, seafile, paperless-ngx, jellyfin, then coolify, firefly-iii,
   gnosia-learn, home-assistant, monitoring, openhands, paperclip,
-  quiver-hub, adguard and syncthing; the native services follow. The lib has its
+  quiver-hub, adguard and syncthing, then code-server, deployd,
+  ntfy-control, remote-desktop and the launcher (`app/web`). Only beszel's
+  `setup.sh` keeps its own helpers (its suite is static analysis of the
+  script text), and `make structure` now fails on any other deploy script
+  that does not source the lib. The lib has its
   own suite (`scripts/tests/test-common-lib.sh`), mocked suites copy it into
   their sandbox, and `make structure` checks both that a migrated script does
   not redefine the helpers and that its suite ships the lib. User-visible

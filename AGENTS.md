@@ -87,8 +87,9 @@ It provides `info`/`ok`/`warn`/`die`, `detect_os` (sets `OS`),
 - Something goes into the lib only when at least ~5 scripts share it
   unchanged. A service's own quirk (a tailnet-IP listener, a native
   unit, a custom health probe) stays in its script.
-- A script on the lib never redefines `info`/`ok`/`warn`/`die`;
-  `make structure` fails if it does.
+- Every `setup.sh` and `teardown.sh` sources the lib and never redefines
+  `info`/`ok`/`warn`/`die`; `make structure` fails on either. Its
+  `LIB_EXEMPT` list names the one exception below.
 - The mocked suite must copy the lib into its sandbox, laid out as
   `<sandbox>/repo/services/<service>/` with `<sandbox>/repo/lib/` beside it
   (`copy_lib` in `services/forgejo/tests/run-tests.sh`). `make structure`

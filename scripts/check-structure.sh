@@ -41,6 +41,12 @@ STUBS_EXEMPT="beszel"
 # other services' deploy commands; nothing to open or probe in the launcher.
 NO_TILE="ntfy-control deployd"
 
+# Deploy scripts allowed to keep their own helpers instead of sourcing
+# lib/common.sh. beszel's suite is static analysis of setup.sh's text, and the
+# script keeps its own output style and Serve logic; see AGENTS.md "Shared
+# helpers". Keep this list at one entry unless AGENTS.md names another.
+LIB_EXEMPT="services/beszel/setup.sh"
+
 FAILURES=0
 
 fail() {
@@ -125,7 +131,13 @@ for svc in $SERVICES; do
   uses_lib=0
   for script in "$svc/setup.sh" "$svc/teardown.sh"; do
     [ -f "$script" ] || continue
-    grep -q '^\. "\$SERVICE_DIR/\.\./\.\./lib/common\.sh"$' "$script" || continue
+    if ! grep -q '^\. "\$SERVICE_DIR/\.\./\.\./lib/common\.sh"$' "$script"; then
+      case " $LIB_EXEMPT " in
+        *" $script "*) ;;
+        *) fail "$script does not source lib/common.sh (see AGENTS.md \"Shared helpers\")" ;;
+      esac
+      continue
+    fi
     uses_lib=1
     redefined="$(sed -n -E 's/^(info|ok|warn|die)\(\) .*/\1/p' "$script" | tr '\n' ' ')"
     [ -z "$redefined" ] \
