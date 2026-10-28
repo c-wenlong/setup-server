@@ -5,6 +5,7 @@
   "group": "infra",
   "icon": "workflow",
   "author": "c-wenlong",
+  "hidden": true,
   "url": null,
   "health": null,
   "marker": "~/services/deployd",

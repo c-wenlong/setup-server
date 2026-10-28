@@ -25,10 +25,8 @@ NAME="home-assistant"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 PURGE=0
 case "${1:-}" in
@@ -39,24 +37,12 @@ esac
 [ "$#" -le 1 ] || die "Too many arguments (usage: ./teardown.sh [--purge])"
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+refuse_root
 [ -f "$ENV_FILE" ] || die "No $ENV_FILE — nothing here was deployed by setup.sh, so there is nothing to tear down (and no paths to trust)."
-command -v docker >/dev/null || die "Docker is not installed."
-if ! docker ps >/dev/null 2>&1; then
-  [ "$OS" = "Linux" ] && die "Cannot talk to the Docker daemon. Run via: sg docker -c ./teardown.sh"
-  die "Cannot talk to the Docker daemon. Is Docker Desktop/OrbStack running?"
-fi
-docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)."
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed: https://tailscale.com/download"
-fi
+require_docker_compose
+resolve_tailscale
 
 # .env is the authority for ports and paths. Values are read the way Docker
 # Compose reads them (an optional `export `, matching single or double quotes,

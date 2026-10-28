@@ -21,14 +21,24 @@ first, dated by merge.
   api/apps/{key}`. Ports 8300–8399 are reserved for them. The New app
   screens follow.
 
+- **Launcher: Deploys page.** deployd leaves the app list and becomes a
+  top-level page in the sidebar (`#/deploys`): the timer as Polling or
+  Paused with Pause / Resume, every watched repo with its last deploy, and
+  add / edit / delete for pollers. `app.json` gains `"hidden": true` for
+  machinery with a page of its own; `#/service/deployd` redirects there.
+
 - **`lib/common.sh`: shared deploy helpers.** The output helpers
   (`info`/`ok`/`warn`/`die`), the preflight checks (supported OS, not root,
   Tailscale CLI and state, Docker + Compose v2, numeric ports), the
   local health wait and the Tailscale Serve publish-with-operator-grant step
   were copied word for word into almost every `setup.sh` and `teardown.sh`.
   They now live once in `lib/common.sh`, which scripts source by a path
-  relative to themselves. First migrated: stirling-pdf, forgejo, n8n and
-  umami (setup and teardown); the rest follow in later PRs. The lib has its
+  relative to themselves. Migrated so far (setup and teardown): stirling-pdf,
+  forgejo, n8n, umami, then appflowy, design-systems, homepage, immich,
+  kaichenpedia, metabase, open-webui, plane, sources, trigger-dev,
+  vaultwarden, seafile, paperless-ngx, jellyfin, then coolify, firefly-iii,
+  gnosia-learn, home-assistant, monitoring, openhands, paperclip,
+  quiver-hub, adguard and syncthing; the native services follow. The lib has its
   own suite (`scripts/tests/test-common-lib.sh`), mocked suites copy it into
   their sandbox, and `make structure` checks both that a migrated script does
   not redefine the helpers and that its suite ships the lib. User-visible

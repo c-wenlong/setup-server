@@ -1965,7 +1965,7 @@
     document.title = 'Launcher';
 
     elVDetail.hidden = true;
-    elVGrid.hidden = isCatalogueRoute();
+    elVGrid.hidden = isCatalogueRoute() || isDeploysRoute();
 
     /* Back on the home list: focus returns to the row's name link. */
     var target = null;
@@ -1987,15 +1987,27 @@
     return String(location.hash || '') === '#/catalogue';
   }
 
+  /* #/deploys is painted by deployd.js, the same arrangement as the
+     catalogue. deployd's old detail URL lands there too. */
+  function isDeploysRoute() {
+    return String(location.hash || '') === '#/deploys';
+  }
+
   function showGrid(on) {
     elVGrid.hidden = !on;
   }
 
   function route() {
     var key = routeKey();
+    if (key === 'deployd' && window.history && history.replaceState) {
+      history.replaceState(null, '', '#/deploys');
+      try { window.dispatchEvent(new HashChangeEvent('hashchange')); }
+      catch (e) { /* the other modules read the hash on their next tick */ }
+      return;
+    }
     if (key) { openDetail(key); return; }
     closeDetail();
-    showGrid(!isCatalogueRoute());
+    showGrid(!isCatalogueRoute() && !isDeploysRoute());
   }
 
   /* The small surface home.js and catalogue.js need: the list this file

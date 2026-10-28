@@ -13,6 +13,10 @@ set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SERVICE_DIR/../.." && pwd)"
+# setup.sh sources ../../lib/common.sh, so every sandbox copy of the
+# service sits at <root>/services/<name> with <root>/lib beside it.
+copy_lib() { mkdir -p "$1/lib" && cp "$REPO_ROOT/lib/common.sh" "$1/lib/"; }
 STUBS="$TESTS_DIR/stubs"
 
 PASS=0; FAIL=0
@@ -27,8 +31,9 @@ setup() {
   export HOME="$SANDBOX/home"
   export STATE_DIR="$SANDBOX/state"
   export CALLS_LOG="$SANDBOX/calls.log"
-  SVC="$SANDBOX/svc"
+  SVC="$SANDBOX/repo/services/seafile"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
+  copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
   cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 }
@@ -594,6 +599,7 @@ test_teardown_purge_never_its_own_checkout() {
   deployed
   local own="$HOME/services/seafile"
   cp "$SVC/setup.sh" "$SVC/teardown.sh" "$SVC/docker-compose.yml" "$SVC/.env" "$own/"
+  copy_lib "$own/../.."
   SVC="$own"
   sed -i.bak "s#^SEAFILE_VOLUME=.*#SEAFILE_VOLUME=$own#" "$SVC/.env"
   run_teardown --purge "seafile"
@@ -814,7 +820,7 @@ test_teardown_down_network_in_use() {
   printf 'seadoc seafile-notification-server ' > "$STATE_DIR/network_users_seafile-net"
   run_teardown
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check "checked this project's containers" calls_have "ps -aq --filter label=com.docker.compose.project=svc"
+  check "checked this project's containers" calls_have "ps -aq --filter label=com.docker.compose.project=seafile"
   check "names who keeps the network" out_has "Docker kept the seafile-net network: still used by seadoc seafile-notification-server (not"
   check "data and .env kept"          [ -f "$(data_dir)/seafile-data/storage/block" ] && [ -f "$SVC/.env" ]
   check "says it is done"             out_has "Done."

@@ -7,7 +7,9 @@
  * id to the app's own sheet so its live log streams the way a deploy does.
  *
  * What it draws depends on which page is open:
- *   #/service/deployd  — the whole watched table plus the poller controls:
+ *   #/deploys          — its own top-level page (#view-deploys): header with
+ *                         the engine's state and Pause/Resume, then the whole
+ *                         watched table plus the poller controls:
  *                         add/edit/delete via state/pollers.json (never the
  *                         checkout deployd ff-pulls), pause/resume via the
  *                         <key>.disabled marker, Deploy-now via
@@ -24,8 +26,15 @@
 (function () {
   'use strict';
 
-  var mount = document.getElementById('deployd-mount');
-  if (!mount) return;
+  var detailMount = document.getElementById('deployd-mount');
+  var page = document.getElementById('view-deploys');
+  if (!detailMount && !page) return;
+  var PAGE_ROUTE = '#/deploys';
+  var pageBody = null;       // the page's list mount, built once
+  var pageSub = null;
+  var pageEngine = null;
+  var pageAdd = null;        // + Add poller: off until a payload has painted
+  var mount = detailMount;   // where paint() draws: detail section or page body
 
   var TICK_MS = 60000;       // deploys are slow; the app's own poll is 30s
   var FETCH_TIMEOUT = 8000;
@@ -546,37 +555,19 @@
   function paint(data) {
     var snap = snapshot();
     mount.textContent = '';
-    if (!data || typeof data !== 'object') return;
+    if (key === PAGE_ROUTE && pageAdd) pageAdd.disabled = !data || typeof data !== 'object';
+    if (!data || typeof data !== 'object') {
+      if (key === PAGE_ROUTE) mount.appendChild(loadFailed());
+      return;
+    }
 
     var sec = make('section', 'd-sec dep');
     var h = make('h3', 'd-sec-h');
     var rows;
 
-    if (key === 'deployd') {
-      var head = make('div', 'dep-head');
-      text(h, 'Deployment activity');
-      head.appendChild(h);
-      head.appendChild(act('+ Add poller',
-        'Watch a repo ref and run a cmd when it moves — stored in '
-        + 'state/pollers.json',
-        function () {
-          if (editing) return;
-          var form = openEditor(null, null);
-          var list = sec.querySelector('.dep-list');
-          if (list) sec.insertBefore(form, list);
-          else sec.appendChild(form);
-          var first = form.querySelector('.dep-input');
-          if (first) first.focus();
-        }));
-      sec.appendChild(head);
-
-      var status = make('p', 'dep-status');
-      var t = data.timer;
-      text(status, t === 'active' ? 'Timer active — polling each tick.'
-                 : t ? 'Timer reports “' + t + '”.'
-                 : 'Timer state unknown (no systemd, or not installed).');
-      status.classList.add(t === 'active' ? 'is-ok' : 'is-warn');
-      sec.appendChild(status);
+    if (key === PAGE_ROUTE) {
+      sec = make('section', 'dep dep-page');
+      paintHeader(data);
 
       if (data.self_update_pending) {
         var su = make('p', 'dep-note');
@@ -617,7 +608,14 @@
     }
 
     var list = make('div', 'dep-list');
-    var full = (key === 'deployd');
+    var full = (key === PAGE_ROUTE);
+    if (full && !rows.length) {
+      var none = make('div', 'dep-empty');
+      none.appendChild(text(make('strong'), 'Nothing is watched yet'));
+      none.appendChild(text(make('span'),
+        'Add a poller to redeploy an app whenever a branch on GitHub moves.'));
+      sec.appendChild(none);
+    }
     for (var j = 0; j < rows.length; j++) {
       list.appendChild(row(rows[j], full));
     }
@@ -640,11 +638,137 @@
 
   /* ---------- routing ---------- */
 
+  /* The page's key is the route itself, so `key` stays a single "what is on
+     screen" value: PAGE_ROUTE, a service key, or null. */
   function routeKey() {
-    var m = /^#\/service\/(.+)$/.exec(String(location.hash || ''));
+    var h = String(location.hash || '');
+    if (h === PAGE_ROUTE) return page ? PAGE_ROUTE : null;
+    var m = /^#\/service\/(.+)$/.exec(h);
     if (!m) return null;
     try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
   }
+
+  /* ---------- the Deploys page ---------- */
+
+  function loadFailed() {
+    var box = make('div', 'dep-empty');
+    box.appendChild(text(make('strong'), 'Could not load deploys'));
+    box.appendChild(text(make('span'),
+      'The launcher did not answer api/deployd. It may be restarting.'));
+    var retry = make('button', 'h-btn');
+    retry.type = 'button';
+    text(retry, 'Retry');
+    retry.addEventListener('click', function () { retry.disabled = true; refresh(); });
+    box.appendChild(retry);
+    return box;
+  }
+
+  function app() { return window.LauncherApp || null; }
+
+  function buildPage() {
+    if (pageBody || !page) return;
+    var head = make('div', 'h-head');
+    var titles = make('div', 'h-titles');
+    var h = text(make('h2', 'h-title'), 'Deploys');
+    h.id = 'dps-title';
+    titles.appendChild(h);
+    pageSub = text(make('p', 'h-sub'),
+      'Redeploys an app whenever its branch on GitHub moves.');
+    titles.appendChild(pageSub);
+    head.appendChild(titles);
+    pageEngine = make('div', 'dep-engine');
+    head.appendChild(pageEngine);
+    var add = make('button', 'h-btn h-btn-accent');
+    add.type = 'button';
+    add.disabled = true;
+    pageAdd = add;
+    add.appendChild(text(make('span'), '+ Add poller'));
+    add.addEventListener('click', function () {
+      if (editing || !mount) return;
+      var sec = mount.querySelector('.dep-page');
+      if (!sec) return;
+      var form = openEditor(null, null);
+      var list = sec.querySelector('.dep-list');
+      if (list) sec.insertBefore(form, list);
+      else sec.appendChild(form);
+      var first = form.querySelector('.dep-input');
+      if (first) first.focus();
+    });
+    head.appendChild(add);
+    page.appendChild(head);
+    pageBody = make('div', 'dep-pagebody');
+    page.appendChild(pageBody);
+  }
+
+  function engineService() {
+    var a = app();
+    var list = (a && typeof a.services === 'function') ? a.services() : [];
+    for (var i = 0; i < list.length; i++) if (list[i].key === 'deployd') return list[i];
+    return null;
+  }
+
+  /* Engine state lives in the page header: a pill for the timer and the
+     one control that matters, Pause (stop the timer) or Resume. Both go
+     through app.js's confirm sheet as the deployd service's stop/start. */
+  function paintHeader(data) {
+    if (!pageEngine) return;
+    var n = (data.watched || []).length;
+    text(pageSub, 'Watching ' + n + (n === 1 ? ' repo' : ' repos') +
+      '. Each one redeploys when its branch on GitHub moves; checked every minute.');
+    pageEngine.textContent = '';
+    var t = data.timer;
+    var a = app();
+    var svc = engineService();
+    /* Not on the box at all: the only useful control is Install, which is
+       deployd's own setup.sh through app.js's deploy sheet. A hidden
+       service has no catalogue row or detail page to install it from. */
+    if (svc && svc.state === 'available') {
+      var off = make('span', 'dep-pill is-warn');
+      text(off, 'Not installed');
+      pageEngine.appendChild(off);
+      if (a && typeof a.deploy === 'function') {
+        var inst = make('button', 'h-btn');
+        inst.type = 'button';
+        text(inst, 'Install');
+        inst.title = 'Run services/deployd/setup.sh on this box';
+        inst.addEventListener('click', function () { a.deploy('deployd', inst); });
+        pageEngine.appendChild(inst);
+      }
+      return;
+    }
+    /* Only "inactive" is a pause someone chose. "failed" is a fault, and
+       activating/deactivating are mid-change, so neither reads as Paused. */
+    var look = TIMER_LOOK[t] || (t ? ['is-warn', 'Timer ' + t] : ['is-warn', 'Timer state unknown']);
+    var pill = make('span', 'dep-pill ' + look[0]);
+    text(pill, look[1]);
+    pill.title = t ? 'deployd.timer reports “' + t + '”'
+                   : 'Timer state unavailable: no systemd, no unit, or no connection';
+    pageEngine.appendChild(pill);
+    var verb = t === 'active' ? 'stop' : (t === 'inactive' || t === 'failed') ? 'start' : '';
+    if (verb && a && typeof a.action === 'function') {
+      var b = make('button', 'h-btn');
+      b.type = 'button';
+      text(b, t === 'active' ? 'Pause' : t === 'failed' ? 'Restart' : 'Resume');
+      b.title = t === 'active' ? 'Stop polling: nothing redeploys until you resume'
+              : t === 'failed' ? 'Start the failed timer again'
+                               : 'Start polling again';
+      b.addEventListener('click', function () {
+        if (!a.action('deployd', verb, b)) {
+          text(b, 'Not available here');
+          b.disabled = true;
+        }
+      });
+      pageEngine.appendChild(b);
+    }
+  }
+
+  var TIMER_LOOK = {
+    active: ['is-ok', 'Polling'],
+    inactive: ['is-warn', 'Paused'],
+    failed: ['is-bad', 'Timer failed'],
+    activating: ['is-warn', 'Starting…'],
+    deactivating: ['is-warn', 'Stopping…']
+  };
 
   function refresh() {
     var t = ++token;
@@ -657,12 +781,18 @@
 
   function route() {
     var next = routeKey();
+    var onPage = next === PAGE_ROUTE;
+    if (page) page.hidden = !onPage;
+    if (onPage) { buildPage(); document.title = 'Deploys · Launcher'; }
+    else if (document.title === 'Deploys · Launcher') document.title = 'Launcher';
     if (next === key && tick) return;
-    key = next;
+    if (mount) mount.textContent = '';
+    mount = onPage ? pageBody : detailMount;
+    key = mount ? next : null;
     token++;
     editing = null;
     pendingData = null;
-    mount.textContent = '';
+    if (mount) mount.textContent = '';
     if (tick) { clearInterval(tick); tick = null; }
     if (key !== null) {
       refresh();
@@ -671,5 +801,10 @@
   }
 
   window.addEventListener('hashchange', route);
+  /* A Pause, Resume or Install job ends with app.js re-polling its list;
+     follow it here so the header never offers the verb that just ran. */
+  document.addEventListener('launcher:services', function () {
+    if (key === PAGE_ROUTE && !editing) refresh();
+  });
   route();
 })();

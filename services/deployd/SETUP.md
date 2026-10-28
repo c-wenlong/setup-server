@@ -115,8 +115,11 @@ by hand.
 ## Notes
 
 - No port, no container, nothing published — deployd is outbound-only. It
-  intentionally has no launcher tile (`NO_TILE` in `scripts/check-structure.sh`)
-  and no Kuma monitor (nothing HTTP to probe; a dead timer is surfaced by
+  is not a row in the launcher's app list (`"hidden": true` in `app.json`,
+  `NO_TILE` in `scripts/check-structure.sh`): the launcher's **Deploys** page
+  (`#/deploys`, in the sidebar) is its UI, with the timer's state, Pause /
+  Resume, every watched repo and add / edit / delete for
+  `state/pollers.json` entries. No Kuma monitor (nothing HTTP to probe; a dead timer is surfaced by
   the deploys not happening, and `--status` shows recorded state).
 - `deployd` deliberately does not stop a poll mid-deploy; teardown refuses
   while the lock is fresh rather than kill another service's setup.sh.

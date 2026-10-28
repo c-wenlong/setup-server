@@ -1339,6 +1339,10 @@ def services_payload():
             # when it has not been checked (or is not installed).
             "updates": (update_summary(updates.get(svc.get("key")))
                         if installed else None),
+            # true for machinery with a page of its own rather than a row in
+            # the app list (deployd: the Deploys page). Always present; only
+            # a JSON true hides. Appended last, like every key after v1.
+            "hidden": svc.get("hidden") is True,
         })
     return {"host": host, "groups": load_groups(), "services": services,
             "system": system_stats()}

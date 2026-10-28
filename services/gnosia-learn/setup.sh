@@ -52,10 +52,8 @@ SKIP_SEED="${SKIP_SEED:-0}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 # deployd's runtime home is SERVICE_HOME in services/deployd/.env —
 # overridable there; the conventional path is the fallback.
@@ -108,10 +106,9 @@ node_at_least() {
 }
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+refuse_root
 command -v curl >/dev/null || die "curl is required."
 command -v git >/dev/null || die "git is required."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
@@ -120,26 +117,18 @@ command -v node >/dev/null || die "Node.js >= 22.22.2 is required (upstream engi
 node_at_least "22.22.2" \
   || die "Node.js >= 22.22.2 is required (found: $(node --version)). Upgrade node and re-run."
 
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed: https://tailscale.com/download"
-fi
-state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+resolve_tailscale
+require_tailscale_up
 
 # deployd polls and the deploy fetches the (private) repo unattended — verify that works now.
 if ! GIT_TERMINAL_PROMPT=0 git ls-remote --heads "$REPO_URL" >/dev/null 2>&1; then
   die "Cannot read $REPO_URL non-interactively. Fix auth first: gh auth login && gh auth setup-git (or use an SSH deploy key and set REPO_URL accordingly)."
 fi
 
-case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
-case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
+require_numeric LOCAL_PORT HTTPS_PORT
 ok "$OS + curl + git (repo reachable) + node $(node --version) + Tailscale (running)"
 
-host="$("$TAILSCALE" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+host="$(tailnet_host)"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 
 # ---------------------------------------------------------------- .env
@@ -651,18 +640,7 @@ fi
 
 # ------------------------------------------------------- tailscale serve
 info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT, tailnet only)"
-if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
-  if [ "$OS" = "Linux" ]; then
-    info "Direct serve failed — trying operator grant (needs sudo, one time)"
-    sudo tailscale set --operator="$USER"
-  fi
-  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
-    echo
-    info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
-    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
-  done
-fi
-ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
+ts_serve_publish "$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"
 
 # ------------------------------------------------------------ final check
 if [ "$APP_SHOULD_RUN" = "1" ]; then
