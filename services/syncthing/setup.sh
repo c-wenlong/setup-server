@@ -81,7 +81,10 @@ ENV_FILE="$SERVICE_DIR/.env"
 STATE="$HOME/services/syncthing"
 BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/syncthing"
-OS="$(uname -s)"
+
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
+detect_os
 
 # A recovery instruction is only useful if it names the service manager this
 # box actually has. This script already branches on $OS in eight places and
@@ -97,19 +100,13 @@ else
   LOGS_HINT="tail -n 50 ~/Library/Logs/syncthing.log"
 fi
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
-
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 PROBLEMS=0   # non-fatal findings that still make the run exit non-zero
 
 # ---------------------------------------------------------------- preflight
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root (sudo is invoked only where needed)."
+refuse_root "Run as a regular user, not root (sudo is invoked only where needed)."
 command -v curl >/dev/null || die "curl is required."
 # python3 does two jobs here: it patches the generated config.xml before the
 # first start (so the wildcard listeners never go live, even briefly), and it
@@ -130,21 +127,12 @@ else
   die "sha256sum or shasum is required to verify the download."
 fi
 
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed: https://tailscale.com/download"
-fi
-state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+resolve_tailscale
+require_tailscale_up
 
-for v in LOCAL_PORT HTTPS_PORT SYNC_PORT; do
-  case "${!v}" in ''|*[!0-9]*) die "$v must be numeric (got: ${!v})";; esac
-done
+require_numeric LOCAL_PORT HTTPS_PORT SYNC_PORT
 
-TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+TS_HOST="$(tailnet_host)"
 [ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 # The sync listener binds this address, so without it there is nothing
 # sensible to bind. `|| true` because pipefail would otherwise turn a
@@ -720,18 +708,7 @@ fi
 
 # ------------------------------------------------------- tailscale serve
 info "Publishing the GUI via Tailscale Serve (HTTPS :$HTTPS_PORT, tailnet only)"
-if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
-  if [ "$OS" = "Linux" ]; then
-    info "Direct serve failed — trying operator grant (needs sudo, one time)"
-    sudo tailscale set --operator="$USER"
-  fi
-  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
-    echo
-    info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
-    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
-  done
-fi
-ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
+ts_serve_publish "$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"
 
 # ------------------------------------------------------------ final checks
 url="https://$TS_HOST:$HTTPS_PORT"
