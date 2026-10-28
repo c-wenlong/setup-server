@@ -10,6 +10,14 @@ first, dated by merge.
 
 ### Added
 
+- **Launcher: restore GitHub apps from the repo.** Every
+  `app/web/apps/<key>.json` with no copy on the box shows under From GitHub
+  as not installed. Install copies the definition onto the box (keeping
+  its port unless something else has it), starts its `.env` with the
+  exported variable names and empty values, wires the paused deploy
+  poller and deploys. New apps now record their env variable names
+  (`env_names`, never values) so an export carries them.
+
 - **Launcher: Export to repo for GitHub apps.** A GitHub app's detail page
   gains a Source section: repo, branch, whether this repo holds its
   definition, and **Export to repo**, which opens a pull request adding

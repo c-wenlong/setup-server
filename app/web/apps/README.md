@@ -12,5 +12,7 @@ not clashing with a service in `services.json`
 (`ExportedAppsInRepoTest` in `app/web/tests/test_server.py`).
 
 The launcher compares each file with the box copy to show "Saved in this
-repo" on the app's detail page. Bringing an app back on a fresh box from
-its file here is not built yet.
+repo" on the app's detail page. A file here with no box copy shows as a
+not-installed app under From GitHub; Install copies it onto the box (a new
+port if its own is taken), starts its `.env` from `env_names` with empty
+values, and deploys it.

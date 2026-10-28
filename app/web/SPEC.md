@@ -731,6 +731,38 @@ export PR, and **Export to repo** / **Export changes** / **Export again**.
 `ghapp.validate` accepts it, it is named `<key>.json`, its key is not a
 service in `services.json`, its port is in 8300–8399 and no two share one.
 
-Not yet: bringing an exported app back on a fresh box (the launcher
-listing `app/web/apps/` entries that have no box copy, and Deploy adopting
-one: copy the definition, allocate a port if taken, write the poller).
+Bringing an exported app back on a fresh box landed in v13.
+
+## v13 — Restore from repo (2026-10-28)
+
+The other half of v12: an `app/web/apps/<key>.json` in this checkout with
+no box copy is a restore candidate, listed and deployable like any app.
+
+**Listing.** `_ghapp_defs()` returns `(definition, source)` pairs: every
+valid box definition (`box`), then each valid repo file whose key the box
+lacks (`repo`). A repo file must pass `ghapp.validate` and be named for its
+key; a bad one is logged and skipped. The entry carries `ghapp_source` and
+`env_names`; its marker (`deployed.json`) is absent, so its state is
+`available` and it shows under From GitHub with Install. Create refuses a
+key the repo defines (409): Deploy that one instead.
+
+**Adopt on Deploy.** `start_deploy` on a repo-only entry first runs
+`adopt_app` under the GitHub-apps lock: 409 if a job is running or a
+custom poller of that key has another command; copy the definition to the
+box unchanged, except the port when anything else has it (another
+registry entry, a Serve handler proxying elsewhere, or a listener not
+behind its own Serve handler), which gets the first free one; write a 0600
+`.env` with each `env_names` entry and an empty value (only if absent);
+wire the paused poller exactly as create does. Then the normal deploy
+runs. A kept port means `in_repo` reads `same` afterwards; a new one reads
+`differs`, and Export changes records it.
+
+**`env_names`.** Create now stores the names (never values) of the env
+lines it was given as an optional `env_names` list; `ghapp.validate`
+accepts it when it is a list of up to 100 env-var names. It is what lets a
+restored app's `.env` editor show the variables to fill in, since the
+editor edits names and never adds them.
+
+**UI.** The Source section's `only` state: "Not set up on this box yet",
+which values the `.env` starts empty, and no Export button. Export and
+Delete refuse a repo-only app (409).

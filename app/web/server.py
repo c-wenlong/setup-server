@@ -1471,18 +1471,47 @@ _gh_cache = {}
 
 
 def _ghapp_defs():
-    """Valid definitions from the apps dir, sorted by key. A bad file is
-    logged and skipped: one broken definition must not empty the list."""
+    """[(definition, source)] sorted by key: every valid box definition
+    ("box"), then each one this checkout's app/web/apps/ holds that the box
+    does not ("repo", a restore candidate). A bad file is logged and
+    skipped: one broken definition must not empty the list."""
     try:
         names = sorted(n for n in os.listdir(ghapp.DEFS_DIR) if n.endswith(".json"))
     except OSError:
-        return []
+        names = []
     out = []
+    on_box = set()
     for name in names:
+        on_box.add(name[:-5])
         try:
-            out.append(ghapp.load(name[:-5]))
+            out.append((ghapp.load(name[:-5]), "box"))
         except ghapp.AppError as exc:
             log("github app %s skipped: %s" % (name, exc))
+    for key, d in sorted(_repo_defs().items()):
+        if key not in on_box:
+            out.append((d, "repo"))
+    out.sort(key=lambda pair: pair[0]["key"])
+    return out
+
+
+def _repo_defs():
+    """{key: definition} for each valid app/web/apps/<key>.json here."""
+    folder = os.path.join(REPO_ROOT, EXPORT_DIR)
+    try:
+        names = sorted(n for n in os.listdir(folder) if n.endswith(".json"))
+    except OSError:
+        return {}
+    out = {}
+    for name in names:
+        try:
+            with open(os.path.join(folder, name), encoding="utf-8") as fh:
+                d = ghapp.validate(json.load(fh))
+            if d["key"] + ".json" != name:
+                raise ghapp.AppError("key %r does not match the file name" % d["key"])
+        except (OSError, ValueError, ghapp.AppError) as exc:
+            log("repo app %s skipped: %s" % (name, exc))
+            continue
+        out[d["key"]] = d
     return out
 
 
@@ -1490,7 +1519,7 @@ def ghapp_entries():
     """Registry-shaped entries for the GitHub apps. The URL keeps the HOST
     placeholder services.json uses, so substitute_host fills it in."""
     entries = []
-    for d in _ghapp_defs():
+    for d, source in _ghapp_defs():
         key = d["key"]
         owner = d["repo"].split("/", 1)[0]
         entries.append({
@@ -1513,6 +1542,9 @@ def ghapp_entries():
             "setup": "app/web/ghapp.py",
             "github": {"repo": d["repo"], "ref": d["ref"]},
             "control": {"parts": [{"container": ghapp.container_name(key)}]},
+            # "repo": only this checkout's app/web/apps/ has it; Deploy adopts it.
+            "ghapp_source": source,
+            "env_names": list(d.get("env_names") or []),
         })
     return entries
 
@@ -1541,10 +1573,13 @@ def _port_free(port):
         s.close()
 
 
-def _registry_ports():
-    """Every port number a registry URL or health probe mentions."""
+def _registry_ports(exclude=None):
+    """Every port number a registry URL or health probe mentions, except
+    the entry keyed `exclude`."""
     ports = set()
     for svc in load_registry():
+        if exclude is not None and svc.get("key") == exclude:
+            continue
         for field in ("url", "health"):
             m = re.search(r":(\d{2,5})(?:/|$)", str(svc.get(field) or ""))
             if m:
@@ -1746,15 +1781,10 @@ def create_app(body):
     health = body.get("health_path") or "/"
     volume = body.get("volume") or None
     env_text = _env_text(body.get("env"))
-    cmd = "app/web/ghapp.py deploy %s" % key
     with _ghapp_lock:
         if find_service(key) is not None:
             raise DeployError(409, "%s already exists" % key)
-        # A custom poller of that name belongs to someone else unless it is
-        # this app's own leftover (same cmd); never silently repoint it.
-        existing = _deployd_overrides(_deployd_state_dir(_deployd_env())).get(key)
-        if isinstance(existing, dict) and existing.get("cmd") != cmd:
-            raise DeployError(409, "a deploy poller called %s already exists" % key)
+        _check_poller_free(key)
         d = {"version": 1, "key": key, "name": name, "tagline": tagline,
              "repo": repo, "ref": ref,
              "dockerfile": body.get("dockerfile") or "Dockerfile",
@@ -1762,34 +1792,93 @@ def create_app(body):
              "container_port": _int_field(body, "container_port"),
              "port": allocate_port(),
              "health_path": health, "volume": volume,
+             # Names only: an export carries these so a restored box knows
+             # which values to fill in. The values stay in the .env.
+             "env_names": list(parse_env(env_text, literal=True)),
              "created_at": _now_iso()}
         try:
             ghapp.validate(d)
         except ghapp.AppError as exc:
             raise DeployError(400, str(exc))
-        os.makedirs(ghapp.app_dir(key), exist_ok=True)
-        env_file = os.path.join(ghapp.app_dir(key), ".env")
-        if not os.path.exists(env_file):
-            fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                fh.write(env_text)
-        os.makedirs(ghapp.DEFS_DIR, exist_ok=True)
-        _write_json_atomically(ghapp.def_path(key), d, ".app.")
-    auto = True
-    # Paused until the first deploy succeeds (ghapp clears the marker and
-    # records the sha), so deployd never races the launcher's own first run.
+        _write_app_files(d, env_text)
+    auto = _wire_poller(d)
+    return {"key": key, "port": d["port"], "auto_deploy": auto,
+            "job_id": start_deploy(key)}
+
+
+def _poller_cmd(key):
+    return "app/web/ghapp.py deploy %s" % key
+
+
+def _check_poller_free(key):
+    """409 when a custom poller of that name exists with another command: it
+    belongs to someone else unless it is this app's own leftover, and is
+    never silently repointed. Caller holds _ghapp_lock."""
+    existing = _deployd_overrides(_deployd_state_dir(_deployd_env())).get(key)
+    if isinstance(existing, dict) and existing.get("cmd") != _poller_cmd(key):
+        raise DeployError(409, "a deploy poller called %s already exists" % key)
+
+
+def _write_app_files(d, env_text):
+    """The runtime dir, a 0600 .env (only if absent) and the box definition.
+    Caller holds _ghapp_lock."""
+    key = d["key"]
+    os.makedirs(ghapp.app_dir(key), exist_ok=True)
+    env_file = os.path.join(ghapp.app_dir(key), ".env")
+    if not os.path.exists(env_file):
+        fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(env_text)
+    os.makedirs(ghapp.DEFS_DIR, exist_ok=True)
+    _write_json_atomically(ghapp.def_path(key), d, ".app.")
+
+
+def _wire_poller(d):
+    """Paused deploy poller for a new or adopted app -> True, or False when
+    deployd cannot take one (not installed): still deployable by hand. It
+    stays paused until the first deploy succeeds (ghapp clears the marker
+    and records the sha), so deployd never races the launcher's first run."""
+    key = d["key"]
     try:
         ghapp.set_paused(key, True)
     except OSError as exc:
         log("github app %s: could not pause its poller: %s" % (key, exc))
     try:
-        deployd_upsert_poller(key, {"repo": ghapp.clone_url(repo), "ref": ref,
-                                    "cmd": cmd})
+        deployd_upsert_poller(key, {"repo": ghapp.clone_url(d["repo"]), "ref": d["ref"],
+                                    "cmd": _poller_cmd(key)})
     except Exception as exc:          # deployd not installed: still deployable
         log("github app %s: no deploy poller (%s)" % (key, exc))
-        auto = False
-    return {"key": key, "port": d["port"], "auto_deploy": auto,
-            "job_id": start_deploy(key)}
+        return False
+    return True
+
+
+def adopt_app(key):
+    """Bring a repo-only app (app/web/apps/<key>.json, no box copy) onto
+    this box: copy the definition, keep its port when nothing else has it
+    (else allocate one), start a .env with its env_names and empty values,
+    and wire its paused poller. Runs before the first Deploy. A no-op when
+    the box already has it."""
+    with _ghapp_lock:
+        if os.path.exists(ghapp.def_path(key)):
+            return
+        d = _repo_defs().get(key)
+        if d is None:
+            raise DeployError(404, "no app/web/apps/%s.json in this repo" % key)
+        _check_poller_free(key)
+        d = dict(d)
+        serve = ghapp.serve_ports() or {}
+        mine = "http://127.0.0.1:%d" % d["port"]
+        port_key = str(d["port"])
+        if d["port"] in _registry_ports(exclude=key) \
+                or (port_key in serve and serve[port_key] != mine) \
+                or (port_key not in serve and not _port_free(d["port"])):
+            d["port"] = allocate_port()
+            log("github app %s: port %s is taken here, using %d"
+                % (key, port_key, d["port"]))
+        env_text = "".join("%s=\n" % n for n in d.get("env_names") or [])
+        _write_app_files(d, env_text)
+    _wire_poller(d)
+    log("github app %s adopted from %s/%s.json" % (key, EXPORT_DIR, key))
 
 
 def delete_app(key):
@@ -1799,6 +1888,9 @@ def delete_app(key):
     svc = find_service(key)
     if svc is None or svc.get("runner") != "ghapp":
         raise DeployError(404, "no GitHub app called %s" % key)
+    if svc.get("ghapp_source") == "repo":
+        raise DeployError(409, "%s is only in this repo: delete app/web/apps/%s.json "
+                          "there to forget it" % (key, key))
     if marker_exists(svc.get("marker")):
         raise DeployError(409, "%s is still installed: Remove it first" % key)
     if jobs_by_key().get(key, {}).get("status") == "running":
@@ -1869,6 +1961,10 @@ def github_payload(svc):
     have it yet."""
     if svc.get("runner") != "ghapp":
         return None
+    gh = svc.get("github") or {}
+    if svc.get("ghapp_source") == "repo":
+        return {"repo": gh.get("repo"), "ref": gh.get("ref"), "in_repo": "only",
+                "export_pr": None, "env_names": list(svc.get("env_names") or [])}
     key = svc.get("key")
     try:
         d = ghapp.load(key)
@@ -1887,7 +1983,8 @@ def github_payload(svc):
                 and isinstance(rec.get("url"), str) \
                 and rec["url"].startswith("https://github.com/"):
             pr = rec["url"]
-    return {"repo": d["repo"], "ref": d["ref"], "in_repo": in_repo, "export_pr": pr}
+    return {"repo": d["repo"], "ref": d["ref"], "in_repo": in_repo, "export_pr": pr,
+            "env_names": list(d.get("env_names") or [])}
 
 
 def setup_repo_slug():
@@ -1927,6 +2024,8 @@ def export_app(key):
     svc = find_service(key)
     if svc is None or svc.get("runner") != "ghapp":
         raise DeployError(404, "no GitHub app called %s" % key)
+    if svc.get("ghapp_source") == "repo":
+        raise DeployError(409, "%s is only in the repo: Deploy it first" % key)
     try:
         d = ghapp.load(key)
     except ghapp.AppError as exc:
@@ -3082,6 +3181,13 @@ def start_deploy(key):
     svc = find_service(key)
     if svc is None:
         raise DeployError(404, "unknown service")
+    if svc.get("runner") == "ghapp" and svc.get("ghapp_source") == "repo":
+        if jobs_by_key().get(key, {}).get("status") == "running":
+            raise DeployError(409, "a job is already running for %s" % key)
+        adopt_app(key)
+        svc = find_service(key)
+        if svc is None:
+            raise DeployError(404, "unknown service")
     script = resolve_script(svc)
 
     job = register_job(key, "deploy")
