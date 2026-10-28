@@ -1719,9 +1719,15 @@ def create_app(body):
     health = body.get("health_path") or "/"
     volume = body.get("volume") or None
     env_text = _env_text(body.get("env"))
+    cmd = "app/web/ghapp.py deploy %s" % key
     with _ghapp_lock:
         if find_service(key) is not None:
             raise DeployError(409, "%s already exists" % key)
+        # A custom poller of that name belongs to someone else unless it is
+        # this app's own leftover (same cmd); never silently repoint it.
+        existing = _deployd_overrides(_deployd_state_dir(_deployd_env())).get(key)
+        if isinstance(existing, dict) and existing.get("cmd") != cmd:
+            raise DeployError(409, "a deploy poller called %s already exists" % key)
         d = {"version": 1, "key": key, "name": name, "tagline": tagline,
              "repo": repo, "ref": ref,
              "dockerfile": body.get("dockerfile") or "Dockerfile",
@@ -1751,7 +1757,7 @@ def create_app(body):
         log("github app %s: could not pause its poller: %s" % (key, exc))
     try:
         deployd_upsert_poller(key, {"repo": ghapp.clone_url(repo), "ref": ref,
-                                    "cmd": "app/web/ghapp.py deploy %s" % key})
+                                    "cmd": cmd})
     except Exception as exc:          # deployd not installed: still deployable
         log("github app %s: no deploy poller (%s)" % (key, exc))
         auto = False

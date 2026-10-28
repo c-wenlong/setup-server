@@ -451,15 +451,29 @@ def deploy(key):
 
 
 def remove(key):
+    """Drop the container and this app's Serve port. Nothing changes until
+    Docker answers and (where Tailscale is installed) Serve status reads;
+    a container or route already gone is fine, but one that will not go
+    fails the job and keeps deployed.json, so the app still shows installed."""
     d = load(key)
+    name = container_name(key)
     with Lock(key):
-        quiet(["docker", "rm", "--force", container_name(key)])
-        say("container %s removed" % container_name(key))
         ts = tailscale_bin()
-        ports = serve_ports()
+        ports = serve_ports() if ts else {}
+        if ports is None:
+            raise AppError("cannot read `tailscale serve status`; nothing was changed")
+        code, out = quiet(["docker", "ps", "--all", "--filter", "name=^/%s$" % name,
+                           "--format", "{{.Names}}"])
+        if code != 0:
+            raise AppError("docker is not answering; nothing was changed")
+        if name in out.split():
+            run(["docker", "rm", "--force", name])
+            say("container %s removed" % name)
+        else:
+            say("container %s was already gone" % name)
         target = "http://127.0.0.1:%d" % d["port"]
-        if ts and ports and ports.get(str(d["port"])) == target:
-            run([ts, "serve", "--https=%d" % d["port"], "off"], check=False)
+        if ports.get(str(d["port"])) == target:
+            run([ts, "serve", "--https=%d" % d["port"], "off"])
         try:
             os.remove(os.path.join(app_dir(key), "deployed.json"))
         except OSError:

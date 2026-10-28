@@ -6835,6 +6835,23 @@ class GithubAppsTest(SandboxTest):
             with self.assertRaises(server.DeployError):
                 server._env_text(bad)
 
+    def test_create_refuses_a_key_another_poller_owns(self):
+        saved = server._deployd_overrides
+        try:
+            server._deployd_overrides = lambda state: {
+                "hello-app": {"repo": "https://x/y.git", "cmd": "make deploy"}}
+            with self.assertRaises(server.DeployError) as ctx:
+                self.create()
+            self.assertEqual(ctx.exception.status, 409)
+            self.assertFalse(os.path.exists(ghapp.def_path("hello-app")))
+            # This app's own leftover poller (same cmd) is taken over.
+            server._deployd_overrides = lambda state: {
+                "hello-app": {"repo": "r", "cmd": "app/web/ghapp.py deploy hello-app"}}
+            self.create()
+            self.assertTrue(os.path.exists(ghapp.def_path("hello-app")))
+        finally:
+            server._deployd_overrides = saved
+
     def test_create_starts_the_poller_paused(self):
         self.create()
         marker = os.path.join(ghapp.DEPLOYD_HOME, "state", "hello-app.disabled")

@@ -607,7 +607,10 @@ commit can still roll back) and fail the job → `tailscale serve
 --https=<port>` unless already mapped → write `deployed.json`, record the
 sha in deployd's `state/<key>.sha` (so its next tick does not rebuild it)
 and clear `state/<key>.disabled` → keep one older image. Remove: drop the
-container and this port's Serve handler (only when it proxies to this app),
+container and this port's Serve handler (only when it proxies to this app;
+nothing changes unless Docker answers and Serve status reads, and a
+container or route that will not go fails the job and keeps
+`deployed.json`),
 drop `state/<key>.disabled` so a push cannot bring it back (the teardown.sh
 contract), keep `src/`, `.env`, `data/` and the definition. `origin` is
 re-pointed at the definition's repo before every fetch (a key can be
@@ -632,8 +635,9 @@ refuses a value with leading or trailing whitespace.
 <key>"}`. It starts paused (`state/<key>.disabled`) and the first
 successful deploy un-pauses it, so deployd never races the launcher's own
 first run. deployd is unchanged; the Deploys page lists it like any poller.
-Delete is refused while a launcher job runs or a deploy holds the app's
-lock.
+Create is refused (409) when a custom poller of that key already exists
+with another command. Delete is refused while a launcher job runs or a
+deploy holds the app's lock.
 
 **API.**
 

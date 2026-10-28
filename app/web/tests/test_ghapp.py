@@ -46,12 +46,19 @@ class Sandbox(unittest.TestCase):
         os.makedirs(ghapp.DEFS_DIR)
         self.calls = []
         self.quiet_out = {}
+        self.run_codes = {}
 
         def fake_run(argv, check=True, capture=False, cwd=None):
             self.calls.append(list(argv))
+            code = 0
+            for prefix, c in self.run_codes.items():
+                if " ".join(argv).startswith(prefix):
+                    code = c
+            if check and code:
+                raise ghapp.AppError("%s exited %d" % (argv[0], code))
 
             class R(object):
-                returncode = 0
+                returncode = code
                 stdout = ""
             return R()
 
@@ -233,6 +240,44 @@ class RemoveTest(Sandbox):
         with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
             fh.write("{}")
         ghapp.tailscale_bin = lambda: "/bin/tailscale"
+        self.quiet_out["docker ps"] = (0, "app-hello-app\n")
+
+    def marker(self):
+        return os.path.join(ghapp.app_dir("hello-app"), "deployed.json")
+
+    def test_unreadable_serve_status_changes_nothing(self):
+        self.quiet_out["/bin/tailscale serve status"] = (1, "")
+        with self.assertRaises(ghapp.AppError):
+            ghapp.remove("hello-app")
+        self.assertFalse(self.argv_with("docker", "rm"))
+        self.assertTrue(os.path.exists(self.marker()))
+
+    def test_docker_not_answering_changes_nothing(self):
+        self.quiet_out["/bin/tailscale serve status"] = (0, "{}")
+        self.quiet_out["docker ps"] = (1, "")
+        with self.assertRaises(ghapp.AppError):
+            ghapp.remove("hello-app")
+        self.assertFalse(self.argv_with("docker", "rm"))
+        self.assertTrue(os.path.exists(self.marker()))
+
+    def test_a_failed_rm_or_serve_off_keeps_the_marker(self):
+        status = {"Web": {"box:8301": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8301"}}}}}
+        self.quiet_out["/bin/tailscale serve status"] = (0, json.dumps(status))
+        self.run_codes["docker rm"] = 1
+        with self.assertRaises(ghapp.AppError):
+            ghapp.remove("hello-app")
+        self.assertTrue(os.path.exists(self.marker()))
+        self.run_codes = {"/bin/tailscale serve": 1}
+        with self.assertRaises(ghapp.AppError):
+            ghapp.remove("hello-app")
+        self.assertTrue(os.path.exists(self.marker()))
+
+    def test_a_container_already_gone_is_fine(self):
+        self.quiet_out["/bin/tailscale serve status"] = (0, "{}")
+        self.quiet_out["docker ps"] = (0, "")
+        ghapp.remove("hello-app")
+        self.assertFalse(self.argv_with("docker", "rm"))
+        self.assertFalse(os.path.exists(self.marker()))
 
     def test_drops_container_serve_and_marker_but_keeps_data(self):
         status = {"Web": {"box:8301": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8301"}}}}}
