@@ -1,0 +1,18 @@
+{
+  "container_port": 80,
+  "context": ".",
+  "created_at": "2026-10-28T15:13:03.233Z",
+  "dockerfile": "Dockerfile",
+  "env_names": [
+    "WHOAMI_NAME"
+  ],
+  "health_path": "/",
+  "key": "whoami",
+  "name": "whoami",
+  "port": 8300,
+  "ref": "master",
+  "repo": "traefik/whoami",
+  "tagline": "From GitHub",
+  "version": 1,
+  "volume": null
+}
