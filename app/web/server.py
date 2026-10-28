@@ -45,7 +45,9 @@ Run: python3 server.py     (env: LAUNCHER_PORT, REPO_ROOT)
 """
 
 import datetime
+import base64
 import grp
+import hashlib
 import http.server
 import json
 import mimetypes
@@ -1355,6 +1357,7 @@ def services_payload():
             # the app list (deployd: the Deploys page). Always present; only
             # a JSON true hides. Appended last, like every key after v1.
             "hidden": svc.get("hidden") is True,
+            "github": github_payload(svc),
         })
     return {"host": host, "groups": load_groups(), "services": services,
             "system": system_stats()}
@@ -1454,6 +1457,7 @@ def service_detail(key):
 #   POST   api/github/inspect         {repo, ref?} -> branches, Dockerfile, port
 #   POST   api/apps                   create + first deploy (202, job id)
 #   DELETE api/apps/{key}             forget a removed app (keeps its data)
+#   POST   api/apps/{key}/export      open a PR adding its definition to this repo
 
 GHAPP_SCRIPT = os.path.join(HERE, "ghapp.py")
 GHAPP_GROUP = {"id": "github", "label": "From GitHub"}
@@ -1587,6 +1591,13 @@ def gh_api(path, cache=True):
                              timeout=20, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise DeployError(502, "gh api failed: %s" % exc)
+    data = _gh_result(res, path)
+    _gh_cache[path] = (now, data)
+    return data
+
+
+def _gh_result(res, path):
+    """A finished `gh api` run -> parsed JSON, or raise DeployError."""
     if res.returncode != 0:
         msg = (res.stderr or res.stdout or "").strip().splitlines()
         msg = msg[-1] if msg else "exit %d" % res.returncode
@@ -1596,11 +1607,27 @@ def gh_api(path, cache=True):
             raise DeployError(503, "gh is not logged in on this box (run `gh auth login`)")
         raise DeployError(502, "gh api: %s" % msg[:200])
     try:
-        data = json.loads(res.stdout or "null")
+        return json.loads(res.stdout or "null")
     except ValueError:
         raise DeployError(502, "gh api returned something that is not JSON")
-    _gh_cache[path] = (now, data)
-    return data
+
+
+def gh_write(method, path, fields):
+    """`gh api -X METHOD <path> -f k=v ...` -> parsed JSON, or raise. -f
+    sends every value as a raw string (no @file or number magic), and the
+    argv never passes through a shell."""
+    gh = _gh_bin()
+    if not gh:
+        raise DeployError(503, "the gh CLI is not installed on this box")
+    argv = [gh, "api", "-X", method, path]
+    for name, value in fields:
+        argv += ["-f", "%s=%s" % (name, value)]
+    try:
+        res = subprocess.run(argv, capture_output=True, text=True,
+                             timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DeployError(502, "gh api failed: %s" % exc)
+    return _gh_result(res, path)
 
 
 def github_repos():
@@ -1792,6 +1819,159 @@ def delete_app(key):
     except DeployError:
         pass
     return {"key": key, "kept": ghapp.app_dir(key)}
+
+
+# ---- export to repo
+#
+# A GitHub app's definition can be copied into this repo as
+# app/web/apps/<key>.json through a pull request the box's gh login opens.
+# It all goes through the GitHub API (a branch, one file, one PR), never
+# through the checkout here: deployd ff-pulls it and other sessions share it.
+# The definition holds no secrets; the .env never leaves the box (the PR
+# lists its variable NAMES so a rebuild knows what to fill in).
+
+EXPORT_DIR = "app/web/apps"
+_GITHUB_REMOTE_RE = re.compile(
+    r"github\.com[:/]([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}?)(?:\.git)?/?$")
+_export_lock = threading.Lock()
+
+
+def export_text(d):
+    """The exported file's bytes: the same layout the box copy is written in."""
+    return json.dumps(d, indent=2, sort_keys=True) + "\n"
+
+
+def repo_copy(key):
+    """The definition this checkout holds for `key`, or None."""
+    path = os.path.join(REPO_ROOT, EXPORT_DIR, key + ".json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _export_record_path(key):
+    return os.path.join(ghapp.app_dir(key), "exported.json")
+
+
+def _digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def github_payload(svc):
+    """{repo, ref, in_repo, export_pr} for a GitHub app, else None.
+
+    in_repo compares this checkout's app/web/apps/<key>.json with the box
+    copy: "same", "differs" or "absent". export_pr is the last export's PR
+    URL while it still carries the current definition and the repo does not
+    have it yet."""
+    if svc.get("runner") != "ghapp":
+        return None
+    key = svc.get("key")
+    try:
+        d = ghapp.load(key)
+    except ghapp.AppError:
+        return None
+    copy = repo_copy(key)
+    in_repo = "absent" if copy is None else ("same" if copy == d else "differs")
+    pr = None
+    if in_repo != "same":
+        try:
+            with open(_export_record_path(key), encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError):
+            rec = None
+        if isinstance(rec, dict) and rec.get("digest") == _digest(export_text(d)) \
+                and isinstance(rec.get("url"), str) \
+                and rec["url"].startswith("https://github.com/"):
+            pr = rec["url"]
+    return {"repo": d["repo"], "ref": d["ref"], "in_repo": in_repo, "export_pr": pr}
+
+
+def setup_repo_slug():
+    """owner/name of this checkout's GitHub origin, or raise 503."""
+    try:
+        res = subprocess.run(["git", "-C", REPO_ROOT, "remote", "get-url", "origin"],
+                             capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise DeployError(503, "git is not available to read this checkout's origin")
+    m = _GITHUB_REMOTE_RE.search((res.stdout or "").strip())
+    if res.returncode != 0 or not m or not ghapp.REPO_RE.match(m.group(1)):
+        raise DeployError(503, "this checkout's origin is not a GitHub repo")
+    return m.group(1)
+
+
+def _export_body(key, d):
+    names = []
+    try:
+        names = list(read_env(find_service(key) or {}).keys())
+    except DeployError:
+        pass
+    lines = [
+        "Exported from the launcher on this box: the definition of the GitHub "
+        "app **%s**, built from `%s` (`%s`)." % (key, d["repo"], d["ref"]),
+        "",
+        "It holds no secrets. The app's `.env` stays on the box.",
+    ]
+    if names:
+        lines += ["", "A rebuilt box needs these `.env` variables: "
+                  + ", ".join("`%s`" % n for n in names) + "."]
+    return "\n".join(lines)
+
+
+def export_app(key):
+    """Open a PR on this checkout's GitHub repo adding (or updating)
+    app/web/apps/<key>.json. -> {key, url, number, branch}."""
+    svc = find_service(key)
+    if svc is None or svc.get("runner") != "ghapp":
+        raise DeployError(404, "no GitHub app called %s" % key)
+    try:
+        d = ghapp.load(key)
+    except ghapp.AppError as exc:
+        raise DeployError(409, str(exc))
+    if repo_copy(key) == d:
+        raise DeployError(409, "%s is already in the repo as it is" % key)
+    text = export_text(d)
+    slug = setup_repo_slug()
+    path = "%s/%s.json" % (EXPORT_DIR, key)
+    with _export_lock:
+        meta = gh_api("repos/%s" % slug, cache=False)
+        base = _check_ref((meta or {}).get("default_branch") or "main")
+        ref = gh_api("repos/%s/git/ref/heads/%s" % (slug, base), cache=False)
+        sha = ((ref or {}).get("object") or {}).get("sha")
+        if not isinstance(sha, str) or not ghapp.SHA_RE.match(sha):
+            raise DeployError(502, "GitHub did not return the %s commit" % base)
+        branch = "launcher/export-%s-%s" % (key, time.strftime("%Y%m%d-%H%M%S"))
+        gh_write("POST", "repos/%s/git/refs" % slug,
+                 [("ref", "refs/heads/" + branch), ("sha", sha)])
+        fields = [("message", "apps: export %s from the launcher" % key),
+                  ("content", base64.b64encode(text.encode("utf-8")).decode("ascii")),
+                  ("branch", branch)]
+        try:
+            cur = gh_api("repos/%s/contents/%s?ref=%s"
+                         % (slug, path, urllib.parse.quote(base, safe="")), cache=False)
+            if isinstance(cur, dict) and isinstance(cur.get("sha"), str):
+                fields.append(("sha", cur["sha"]))
+        except DeployError as exc:
+            if exc.status != 404:
+                raise
+        gh_write("PUT", "repos/%s/contents/%s" % (slug, path), fields)
+        pr = gh_write("POST", "repos/%s/pulls" % slug,
+                      [("title", "apps: export %s from the launcher" % key),
+                       ("head", branch), ("base", base),
+                       ("body", _export_body(key, d))])
+        url = (pr or {}).get("html_url")
+        if not isinstance(url, str) or not url.startswith("https://github.com/"):
+            raise DeployError(502, "GitHub did not return the pull request "
+                              "(branch %s was pushed)" % branch)
+        _write_json_atomically(_export_record_path(key),
+                               {"url": url, "number": pr.get("number"),
+                                "branch": branch, "at": _now_iso(),
+                                "digest": _digest(text)}, ".exported.")
+    log("github app %s exported: %s" % (key, url))
+    return {"key": key, "url": url, "number": pr.get("number"), "branch": branch}
 
 # ---- deployd
 
@@ -4290,6 +4470,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if parts == ["api", "apps"]:
             self._json(202, create_app(body))
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "apps"] and parts[3] == "export":
+            self._json(200, export_app(parts[2]))
             return
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "services" \
                 and parts[3] == "deploy":

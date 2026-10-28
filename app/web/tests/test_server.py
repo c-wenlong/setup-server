@@ -7,6 +7,7 @@ at a sandbox. Run from app/web/:
     python3 -m unittest discover -s tests -p 'test_*.py'
 """
 
+import base64
 import json
 import os
 import re
@@ -744,7 +745,8 @@ class ServiceJobFieldTest(SandboxTest):
         for tile in self.tiles().values():
             self.assertEqual(list(tile), self.EIGHT + [
                 "degraded", "job", "control", "usage", "deployed_at",
-                "resources", "receipt", "removable", "updates", "hidden"])
+                "resources", "receipt", "removable", "updates", "hidden",
+                "github"])
 
     # ---- restart
 
@@ -878,7 +880,7 @@ class HttpTest(SandboxTest):
         svc = doc["services"][0]
         self.assertEqual(sorted(svc), ["active", "author", "control",
                                        "degraded", "deployed_at",
-                                       "description", "group", "hidden",
+                                       "description", "github", "group", "hidden",
                                        "icon", "installed", "job", "key",
                                        "name", "receipt", "removable", "resources",
                                        "state", "tagline", "updates", "url", "usage"])
@@ -897,7 +899,7 @@ class HttpTest(SandboxTest):
                           "active", "degraded", "job", "control", "usage",
                           "deployed_at",
                           "resources", "receipt", "removable", "updates",
-                          "hidden"])
+                          "hidden", "github"])
 
     def test_groups_empty_when_the_registry_has_none(self):
         # An older services.json without a catalog still paints a flat grid.
@@ -6667,7 +6669,7 @@ if __name__ == "__main__":
 import ghapp  # noqa: E402
 
 
-class GithubAppsTest(SandboxTest):
+class GithubAppsBase(SandboxTest):
     """Apps built from a GitHub repo: definitions in a temp apps dir, merged
     into the registry; gh, Serve, deployd and the deploy job are all fakes."""
 
@@ -6711,6 +6713,10 @@ class GithubAppsTest(SandboxTest):
                 "name": "Hello", "container_port": 3000, "env": "A=1\n# note\nB = two words"}
         body.update(over)
         return server.create_app(body)
+
+
+
+class GithubAppsTest(GithubAppsBase):
 
     def test_create_writes_definition_env_and_poller_then_deploys(self):
         out = self.create()
@@ -6897,6 +6903,222 @@ class GithubAppsTest(SandboxTest):
     def test_static_serve_port_is_not_allocated(self):
         ghapp.serve_ports = lambda: {"8300": None, "8302": None}
         self.assertEqual(server.allocate_port(), 8303)
+
+
+class ExportAppTest(GithubAppsBase):
+    """Export to repo: gh is a recorder, the checkout is the sandbox repo."""
+
+    def setUp(self):
+        super().setUp()
+        self._ex_saved = (server.gh_write, server.setup_repo_slug)
+        self.writes = []
+        self.contents_sha = None
+
+        def fake_api(path, cache=True):
+            if path == "repos/c-wenlong/setup-server":
+                return {"default_branch": "main"}
+            if path == "repos/c-wenlong/setup-server/git/ref/heads/main":
+                return {"object": {"sha": "a" * 40}}
+            if path.startswith("repos/c-wenlong/setup-server/contents/"):
+                if self.contents_sha:
+                    return {"sha": self.contents_sha}
+                raise server.DeployError(404, "not found on GitHub")
+            raise AssertionError(path)
+
+        def fake_write(method, path, fields):
+            self.writes.append((method, path, dict(fields)))
+            if path.endswith("/pulls"):
+                return {"html_url": "https://github.com/c-wenlong/setup-server/pull/9",
+                        "number": 9}
+            return {}
+
+        server.gh_api = fake_api
+        server.gh_write = fake_write
+        server.setup_repo_slug = lambda: "c-wenlong/setup-server"
+        self.create()
+
+    def tearDown(self):
+        server.gh_write, server.setup_repo_slug = self._ex_saved
+        super().tearDown()
+
+    def put_repo_copy(self, doc):
+        path = os.path.join(server.REPO_ROOT, server.EXPORT_DIR, "hello-app.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(doc, fh)
+
+    def entry(self):
+        return server.find_service("hello-app")
+
+    def test_export_opens_a_branch_a_file_and_a_pr(self):
+        out = server.export_app("hello-app")
+        self.assertEqual(out["url"], "https://github.com/c-wenlong/setup-server/pull/9")
+        (m1, p1, f1), (m2, p2, f2), (m3, p3, f3) = self.writes
+        self.assertEqual((m1, p1), ("POST", "repos/c-wenlong/setup-server/git/refs"))
+        self.assertEqual(f1["sha"], "a" * 40)
+        self.assertTrue(f1["ref"].startswith("refs/heads/launcher/export-hello-app-"))
+        self.assertEqual((m2, p2), ("PUT", "repos/c-wenlong/setup-server/contents/"
+                                           "app/web/apps/hello-app.json"))
+        self.assertNotIn("sha", f2)                      # a new file
+        sent = json.loads(base64.b64decode(f2["content"]))
+        self.assertEqual(sent, json.load(open(ghapp.def_path("hello-app"))))
+        self.assertEqual(f2["branch"], f1["ref"][len("refs/heads/"):])
+        self.assertEqual((m3, p3), ("POST", "repos/c-wenlong/setup-server/pulls"))
+        self.assertEqual((f3["head"], f3["base"]), (f2["branch"], "main"))
+        # .env names only, never values
+        self.assertIn("`A`, `B`", f3["body"])
+        self.assertNotIn("two words", f3["body"])
+        gh = server.github_payload(self.entry())
+        self.assertEqual(gh, {"repo": "c-wenlong/hello", "ref": "main",
+                              "in_repo": "absent", "export_pr": out["url"]})
+
+    def test_an_existing_repo_file_is_updated_with_its_sha(self):
+        self.contents_sha = "b" * 40
+        self.put_repo_copy({"key": "hello-app", "stale": True})
+        self.assertEqual(server.github_payload(self.entry())["in_repo"], "differs")
+        server.export_app("hello-app")
+        self.assertEqual(self.writes[1][2]["sha"], "b" * 40)
+
+    def test_same_copy_in_repo_is_refused_and_reported(self):
+        self.put_repo_copy(json.load(open(ghapp.def_path("hello-app"))))
+        gh = server.github_payload(self.entry())
+        self.assertEqual((gh["in_repo"], gh["export_pr"]), ("same", None))
+        with self.assertRaises(server.DeployError) as ctx:
+            server.export_app("hello-app")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.writes, [])
+
+    def test_a_changed_definition_drops_the_old_pr_link(self):
+        server.export_app("hello-app")
+        path = ghapp.def_path("hello-app")
+        d = json.load(open(path))
+        d["ref"] = "release"
+        with open(path, "w") as fh:
+            json.dump(d, fh)
+        self.assertIsNone(server.github_payload(self.entry())["export_pr"])
+
+    def test_unknown_or_registry_keys_are_404(self):
+        for key in ("nope-app", "forgejo"):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.export_app(key)
+            self.assertEqual(ctx.exception.status, 404)
+        self.assertIsNone(server.github_payload(server.find_service("forgejo")))
+
+    def test_a_pr_without_a_url_is_502_and_records_nothing(self):
+        server.gh_write = lambda m, p, f: (self.writes.append(p), {})[1]
+        with self.assertRaises(server.DeployError) as ctx:
+            server.export_app("hello-app")
+        self.assertEqual(ctx.exception.status, 502)
+        self.assertFalse(os.path.exists(server._export_record_path("hello-app")))
+
+    def test_bad_base_commit_is_502(self):
+        api = server.gh_api
+        server.gh_api = lambda p, cache=True: ({"object": {"sha": "nope"}}
+                                               if "/git/ref/" in p else api(p, cache))
+        with self.assertRaises(server.DeployError) as ctx:
+            server.export_app("hello-app")
+        self.assertEqual(ctx.exception.status, 502)
+        self.assertEqual(self.writes, [])
+
+    def test_route(self):
+        import http.client
+        import threading
+        srv = server.Server(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+            conn.request("POST", "/api/apps/hello-app/export", body="{}",
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            body = resp.read().decode()
+            conn.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(resp.status, 200, body)
+        self.assertEqual(json.loads(body)["number"], 9)
+
+
+class SetupRepoSlugTest(unittest.TestCase):
+
+    def run_with(self, url, code=0):
+        saved = server.subprocess.run
+
+        class R(object):
+            returncode = code
+            stdout = url + "\n"
+        server.subprocess.run = lambda *a, **k: R()
+        try:
+            return server.setup_repo_slug()
+        finally:
+            server.subprocess.run = saved
+
+    def test_parses_https_and_ssh_remotes(self):
+        self.assertEqual(self.run_with("https://github.com/c-wenlong/setup-server.git"),
+                         "c-wenlong/setup-server")
+        self.assertEqual(self.run_with("git@github.com:c-wenlong/setup-server.git"),
+                         "c-wenlong/setup-server")
+        self.assertEqual(self.run_with("https://github.com/c-wenlong/setup-server"),
+                         "c-wenlong/setup-server")
+
+    def test_non_github_or_failed_is_503(self):
+        for url, code in (("https://gitlab.com/a/b.git", 0), ("", 1)):
+            with self.assertRaises(server.DeployError) as ctx:
+                self.run_with(url, code)
+            self.assertEqual(ctx.exception.status, 503)
+
+
+class GhWriteTest(unittest.TestCase):
+
+    def test_argv_and_errors(self):
+        saved = (server.subprocess.run, server._gh_bin)
+        seen = []
+
+        class R(object):
+            returncode = 0
+            stdout = '{"ok": true}'
+            stderr = ""
+        server._gh_bin = lambda: "/bin/gh"
+        server.subprocess.run = lambda argv, **k: (seen.append(argv), R())[1]
+        try:
+            self.assertEqual(server.gh_write("PUT", "repos/a/b/contents/x",
+                                             [("content", "@not-a-file")]), {"ok": True})
+            self.assertEqual(seen[0], ["/bin/gh", "api", "-X", "PUT",
+                                       "repos/a/b/contents/x", "-f", "content=@not-a-file"])
+            R.returncode, R.stderr = 1, "HTTP 422: Reference already exists"
+            with self.assertRaises(server.DeployError) as ctx:
+                server.gh_write("POST", "repos/a/b/git/refs", [])
+            self.assertEqual(ctx.exception.status, 502)
+            server._gh_bin = lambda: None
+            with self.assertRaises(server.DeployError) as ctx:
+                server.gh_write("POST", "x", [])
+            self.assertEqual(ctx.exception.status, 503)
+        finally:
+            server.subprocess.run, server._gh_bin = saved
+
+
+class ExportedAppsInRepoTest(unittest.TestCase):
+    """Every app/web/apps/<key>.json this repo carries must be a definition
+    the runner accepts, named for its key, on its own port in the block."""
+
+    def test_every_exported_definition_is_valid(self):
+        here = os.path.join(os.path.dirname(os.path.abspath(server.__file__)), "apps")
+        try:
+            names = sorted(n for n in os.listdir(here) if n.endswith(".json"))
+        except OSError:
+            names = []
+        with open(os.path.join(os.path.dirname(os.path.abspath(server.__file__)),
+                               "services.json")) as fh:
+            keys = {s["key"] for s in json.load(fh)["services"]}
+        ports = {}
+        for name in names:
+            with open(os.path.join(here, name)) as fh:
+                d = ghapp.validate(json.load(fh))
+            self.assertEqual(d["key"] + ".json", name)
+            self.assertNotIn(d["key"], keys, "%s clashes with a service" % name)
+            self.assertIn(d["port"], server.GHAPP_PORTS, name)
+            self.assertNotIn(d["port"], ports, "%s reuses %s's port" % (name, ports.get(d["port"])))
+            ports[d["port"]] = name
 
 
 class GhApiTest(unittest.TestCase):

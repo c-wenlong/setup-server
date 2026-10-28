@@ -688,5 +688,45 @@ Keys and ports are checked in the browser only for a quick message; the
 server's checks are the authority. Esc, the scrim and Back/Cancel close or
 step back; focus returns to **+ New app**.
 
-Not yet: forgetting an app from the UI (`DELETE api/apps/{key}` exists),
-and Export to repo (a PR adding the app's manifest to this repo).
+Not yet: forgetting an app from the UI (`DELETE api/apps/{key}` exists).
+Export to repo landed in v12.
+
+## v12 — Export to repo (2026-10-28)
+
+The "Export to repo button later" half of the config decision in v10: a
+GitHub app's definition lives on the box, and can be copied into this repo
+as `app/web/apps/<key>.json` through a pull request.
+
+**Server.** `POST api/apps/{key}/export` (GitHub apps only, 404 otherwise;
+409 when the repo copy already equals the box copy). It reads this
+checkout's `origin` (must be GitHub), then through the box's `gh` login and
+the GitHub API only (never the checkout, which deployd ff-pulls and other
+sessions share): the default branch's head → a new branch
+`launcher/export-<key>-<timestamp>` → PUT the file (with the current
+file's sha when the repo already has one) → open a PR. The PR body lists
+the app's `.env` variable NAMES, never values. The reply `{key, url,
+number, branch}` is also recorded in `~/services/apps/<key>/exported.json`
+with a sha256 of the exported bytes.
+
+`gh_write()` runs `gh api -X <method> <path> -f k=v ...`: `-f` sends raw
+strings (no `@file` or number magic) and the argv never meets a shell. It
+shares `gh_api()`'s error mapping (404, 503 not logged in, 502 else).
+
+**Payload.** `/api/services` gains `github` (appended last; `null` for
+everything that is not a GitHub app): `{repo, ref, in_repo, export_pr}`.
+`in_repo` compares this checkout's file with the box copy: `same`,
+`differs` or `absent`. `export_pr` is the recorded PR URL while its digest
+still matches the box copy and the repo does not have it yet.
+
+**UI.** `static/ghsource.js` (+ `ghsource.css`), the notes.js contract,
+mounted at `#ghsource-mount` under the deploy section of the detail page:
+a Source section with the repo and branch, the in-repo status, the open
+export PR, and **Export to repo** / **Export changes** / **Export again**.
+
+**CI.** `ExportedAppsInRepoTest` checks every file in `app/web/apps/`:
+`ghapp.validate` accepts it, it is named `<key>.json`, its key is not a
+service in `services.json`, its port is in 8300–8399 and no two share one.
+
+Not yet: bringing an exported app back on a fresh box (the launcher
+listing `app/web/apps/` entries that have no box copy, and Deploy adopting
+one: copy the definition, allocate a port if taken, write the poller).

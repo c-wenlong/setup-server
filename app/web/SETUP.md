@@ -253,7 +253,10 @@ lists yours; type `owner/name` for any other), choose the branch, check
 the container port and key, add env lines, then **Create and deploy**.
 The first build streams in the usual job sheet; after that every push to
 the branch redeploys it. It shows under **From GitHub** with the usual
-Open / Start / Stop / Remove and .env editing.
+Open / Start / Stop / Remove and .env editing. Its detail page has a
+**Source** section with **Export to repo**, which opens a pull request on
+this repo adding its definition as `app/web/apps/<key>.json` (no secrets;
+the `.env` stays on the box).
 
 **Phone.** The sidebar is a drawer behind the ☰ in the top bar; the ⋯ menu
 opens as a sheet from the bottom.
