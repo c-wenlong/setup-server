@@ -33,6 +33,7 @@
   var pageBody = null;       // the page's list mount, built once
   var pageSub = null;
   var pageEngine = null;
+  var pageAdd = null;        // + Add poller: off until a payload has painted
   var mount = detailMount;   // where paint() draws: detail section or page body
 
   var TICK_MS = 60000;       // deploys are slow; the app's own poll is 30s
@@ -554,7 +555,11 @@
   function paint(data) {
     var snap = snapshot();
     mount.textContent = '';
-    if (!data || typeof data !== 'object') return;
+    if (key === PAGE_ROUTE && pageAdd) pageAdd.disabled = !data || typeof data !== 'object';
+    if (!data || typeof data !== 'object') {
+      if (key === PAGE_ROUTE) mount.appendChild(loadFailed());
+      return;
+    }
 
     var sec = make('section', 'd-sec dep');
     var h = make('h3', 'd-sec-h');
@@ -645,6 +650,19 @@
 
   /* ---------- the Deploys page ---------- */
 
+  function loadFailed() {
+    var box = make('div', 'dep-empty');
+    box.appendChild(text(make('strong'), 'Could not load deploys'));
+    box.appendChild(text(make('span'),
+      'The launcher did not answer api/deployd. It may be restarting.'));
+    var retry = make('button', 'h-btn');
+    retry.type = 'button';
+    text(retry, 'Retry');
+    retry.addEventListener('click', function () { retry.disabled = true; refresh(); });
+    box.appendChild(retry);
+    return box;
+  }
+
   function app() { return window.LauncherApp || null; }
 
   function buildPage() {
@@ -662,6 +680,8 @@
     head.appendChild(pageEngine);
     var add = make('button', 'h-btn h-btn-accent');
     add.type = 'button';
+    add.disabled = true;
+    pageAdd = add;
     add.appendChild(text(make('span'), '+ Add poller'));
     add.addEventListener('click', function () {
       if (editing || !mount) return;
@@ -680,6 +700,13 @@
     page.appendChild(pageBody);
   }
 
+  function engineService() {
+    var a = app();
+    var list = (a && typeof a.services === 'function') ? a.services() : [];
+    for (var i = 0; i < list.length; i++) if (list[i].key === 'deployd') return list[i];
+    return null;
+  }
+
   /* Engine state lives in the page header: a pill for the timer and the
      one control that matters, Pause (stop the timer) or Resume. Both go
      through app.js's confirm sheet as the deployd service's stop/start. */
@@ -690,11 +717,30 @@
       '. Each one redeploys when its branch on GitHub moves; checked every minute.');
     pageEngine.textContent = '';
     var t = data.timer;
-    var pill = make('span', 'dep-pill ' + (t === 'active' ? 'is-ok' : 'is-warn'));
-    text(pill, t === 'active' ? 'Polling' : t ? 'Paused' : 'Engine not installed');
-    pill.title = t ? 'deployd.timer reports “' + t + '”' : 'No systemd timer found on this box';
-    pageEngine.appendChild(pill);
     var a = app();
+    var svc = engineService();
+    /* Not on the box at all: the only useful control is Install, which is
+       deployd's own setup.sh through app.js's deploy sheet. A hidden
+       service has no catalogue row or detail page to install it from. */
+    if (svc && svc.state === 'available') {
+      var off = make('span', 'dep-pill is-warn');
+      text(off, 'Not installed');
+      pageEngine.appendChild(off);
+      if (a && typeof a.deploy === 'function') {
+        var inst = make('button', 'h-btn');
+        inst.type = 'button';
+        text(inst, 'Install');
+        inst.title = 'Run services/deployd/setup.sh on this box';
+        inst.addEventListener('click', function () { a.deploy('deployd', inst); });
+        pageEngine.appendChild(inst);
+      }
+      return;
+    }
+    var pill = make('span', 'dep-pill ' + (t === 'active' ? 'is-ok' : 'is-warn'));
+    text(pill, t === 'active' ? 'Polling' : t ? 'Paused' : 'Timer state unknown');
+    pill.title = t ? 'deployd.timer reports “' + t + '”'
+                   : 'Timer state unavailable: no systemd, no unit, or no connection';
+    pageEngine.appendChild(pill);
     if (t && a && typeof a.action === 'function') {
       var verb = t === 'active' ? 'stop' : 'start';
       var b = make('button', 'h-btn');
@@ -726,6 +772,7 @@
     var onPage = next === PAGE_ROUTE;
     if (page) page.hidden = !onPage;
     if (onPage) { buildPage(); document.title = 'Deploys · Launcher'; }
+    else if (document.title === 'Deploys · Launcher') document.title = 'Launcher';
     if (next === key && tick) return;
     if (mount) mount.textContent = '';
     mount = onPage ? pageBody : detailMount;
@@ -742,5 +789,10 @@
   }
 
   window.addEventListener('hashchange', route);
+  /* A Pause, Resume or Install job ends with app.js re-polling its list;
+     follow it here so the header never offers the verb that just ran. */
+  document.addEventListener('launcher:services', function () {
+    if (key === PAGE_ROUTE && !editing) refresh();
+  });
   route();
 })();

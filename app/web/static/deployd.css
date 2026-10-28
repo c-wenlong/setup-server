@@ -382,3 +382,5 @@ textarea.dep-input {
   .dps .h-head { align-items: flex-start; }
   .dep-engine { order: 3; width: 100%; }
 }
+
+.dps .h-btn[disabled] { opacity: .5; cursor: not-allowed; }
