@@ -283,7 +283,10 @@
     var status = make('p', 'nap-empty');
     text(status, 'Looking for branches and a Dockerfile…');
     card.appendChild(status);
-    card.appendChild(bar([button('Back', false, back)]));
+    var backBtn = button('Back', false, back);
+    card.appendChild(bar([backBtn]));
+    /* The repo button that had focus is gone; keep focus inside the dialog. */
+    backBtn.focus();
     call('POST', 'api/github/inspect', { repo: repo }, function (data, code) {
       if (mine !== token) return;
       if (code !== 200 || !data) {
@@ -357,11 +360,22 @@
 
     var create = button('Create and deploy', true, submit);
     card.appendChild(bar([button('Back', false, back), create]));
+    var pending = false;       // api/apps in flight: nothing re-enables Create
+    var checking = false;      // a branch re-inspect in flight
+    var checkError = null;     // that re-inspect failed: its message
 
+    /* Create is on only when the branch is known to have a Dockerfile (or a
+       custom path is named) and nothing is in flight. */
     function paintDocker() {
       var custom = dockerfile.value.trim() && dockerfile.value.trim() !== 'Dockerfile';
-      docker.className = 'nap-check ' + (info.dockerfile ? 'is-ok' : 'is-warn');
-      if (info.dockerfile) {
+      var ok = !checking && !checkError && info.dockerfile;
+      create.disabled = pending || checking || !(ok || custom);
+      if (checking) return;
+      docker.className = 'nap-check ' + (ok ? 'is-ok' : 'is-warn');
+      if (checkError) {
+        text(docker, checkError + (custom ? '' : ' Pick the branch again to retry,'
+             + ' or name the Dockerfile under Advanced.'));
+      } else if (info.dockerfile) {
         text(docker, 'Dockerfile found on ' + info.ref
              + (info.container_port ? ', EXPOSE ' + info.container_port : ', no EXPOSE line'));
       } else if (custom) {
@@ -371,10 +385,10 @@
         text(docker, 'No Dockerfile at the root of ' + info.ref
              + '. Apps build from a Dockerfile; set its path under Advanced if it lives elsewhere.');
       }
-      create.disabled = !info.dockerfile && !custom;
     }
     paintDocker();
     dockerfile.addEventListener('input', paintDocker);
+    setTimeout(function () { name.focus(); }, 0);
 
     /* A branch change re-reads that branch's Dockerfile and EXPOSE line,
        keeping whatever port the user has typed. */
@@ -382,15 +396,19 @@
       var ref = branch.value;
       var t = ++token;
       mine = t;
+      checking = true;
+      checkError = null;
       text(docker, 'Checking ' + ref + '…');
       docker.className = 'nap-check';
-      create.disabled = true;
+      paintDocker();
       call('POST', 'api/github/inspect', { repo: repo, ref: ref }, function (data, code) {
         if (t !== token) return;
+        checking = false;
         if (code !== 200 || !data) {
-          docker.className = 'nap-check is-warn';
-          text(docker, errorText(data, code, 'Reading ' + ref));
-          create.disabled = false;
+          info.ref = ref;
+          info.dockerfile = false;
+          checkError = errorText(data, code, 'Reading ' + ref);
+          paintDocker();
           return;
         }
         info.ref = data.ref;
@@ -408,6 +426,7 @@
     }
 
     function submit() {
+      if (pending || create.disabled) return;
       err.hidden = true;
       var k = key.value.trim();
       var p = port.value.trim();
@@ -423,20 +442,41 @@
         env: env.value
       };
       if (volume.value.trim()) body.volume = volume.value.trim();
-      create.disabled = true;
+      pending = true;
+      paintDocker();
       text(create, 'Creating…');
       call('POST', 'api/apps', body, function (data, code) {
         if (mine !== token) return;
         if ((code === 200 || code === 202) && data && data.job_id) {
+          if (data.auto_deploy === false) { createdWithoutPoller(body.name, data); return; }
           close();
           started(data);
           return;
         }
-        create.disabled = false;
+        pending = false;
+        paintDocker();
         text(create, 'Create and deploy');
         fail(errorText(data, code, 'Creating the app'));
       });
     }
+  }
+
+  /* Created, but the server could not add its deployd poller (deployd not
+     installed, or its state unreadable). Say so before handing over to the
+     build log, since every other screen promises redeploy-on-push. */
+  function createdWithoutPoller(appName, res) {
+    ++token;
+    card.textContent = '';
+    card.appendChild(head('Created ' + appName, 'Its first build is running'));
+    var warn = make('p', 'nap-alert');
+    text(warn, 'Automatic deploys are off: the deploy poller could not be added, '
+         + 'usually because deployd is not installed on this box. Pushes will '
+         + 'not redeploy this app until a poller for “' + res.key + '” exists '
+         + 'on the Deploys page.');
+    card.appendChild(warn);
+    var watch = button('Watch the build', true, function () { close(); started(res); });
+    card.appendChild(bar([watch]));
+    watch.focus();
   }
 
   /* The app exists now: refresh the services list so it has a row (and the

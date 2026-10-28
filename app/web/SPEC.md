@@ -678,7 +678,11 @@ button; **+ Add poller** drops to a plain one) and calls
    `LauncherApp.refresh()` brings the new From GitHub row in, and
    `LauncherApp.watchJob(key, job_id, 'deploy')` streams the first build
    in app.js's job sheet. Errors (409 key taken, 400 bad field, 503 no
-   free port) show inline and keep the form.
+   free port) show inline and keep the form. Create stays off while a
+   request is in flight or a branch check is running or failed. When the
+   reply says `auto_deploy: false` (deployd's poller could not be added),
+   the dialog stays open on a "Created" step that says pushes will not
+   redeploy, with **Watch the build** to continue.
 
 Keys and ports are checked in the browser only for a quick message; the
 server's checks are the authority. Esc, the scrim and Back/Cancel close or
