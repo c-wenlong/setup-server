@@ -1,0 +1,119 @@
+/* newapp.css: the "New app from GitHub" dialog (newapp.js). It reuses
+   app.css's .scrim / .sheet / .sheet-card / .btn and deployd.css's
+   .dep-field / .dep-input, so only its own pieces live here. */
+
+.nap-card { max-width: 560px; }
+
+.nap-head { display: flex; align-items: flex-start; gap: 10px; }
+.nap-head h2 { overflow-wrap: anywhere; }
+.nap-back {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin-top: -2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.nap-back:hover { color: var(--text); }
+
+.nap-search { width: 100%; }
+
+.nap-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 120px;
+  max-height: 46vh;
+  overflow-y: auto;
+  margin: 0 -6px;
+  padding: 0 6px;
+}
+
+.nap-repo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.nap-repo:hover, .nap-repo:focus-visible { background: var(--surface-2); outline: none; }
+.nap-repo-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.nap-repo-name { font-size: 13.5px; font-weight: 560; overflow-wrap: anywhere; }
+.nap-repo-meta {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nap-tag {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 620;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--faint);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+.nap-empty { margin: 8px 4px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+.nap-alert {
+  margin: 4px 0;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: var(--warn-soft);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.nap-form { display: flex; flex-direction: column; gap: 12px; }
+.nap-form .dep-input { width: 100%; box-sizing: border-box; }
+.nap-hint { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+
+.nap-check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: -2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.nap-check::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  transform: translateY(-1px);
+}
+.nap-check.is-ok::before { background: var(--ok); }
+.nap-check.is-warn { color: var(--text); }
+.nap-check.is-warn::before { background: var(--warn); }
+
+.nap-adv summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 560;
+  color: var(--muted);
+  padding: 2px 0;
+}
+.nap-adv[open] summary { margin-bottom: 10px; }

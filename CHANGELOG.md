@@ -10,6 +10,13 @@ first, dated by merge.
 
 ### Added
 
+- **Launcher: New app from GitHub.** **+ New app** on the Deploys page
+  opens a two-step dialog: pick one of the box's `gh` login's repos (or type
+  `owner/name`), then branch, container port (from `EXPOSE`), key, health
+  path, env and, under Advanced, Dockerfile path, context and data volume.
+  **Create and deploy** writes the app and streams its first build in the
+  usual job sheet; pushes to the branch redeploy it from then on.
+
 - **Launcher: apps built from GitHub repos (backend).** `app/web/ghapp.py`
   builds a repo's Dockerfile at an exact commit, runs it on
   `127.0.0.1:<port>`, health-checks it (rolling back to the previous image
