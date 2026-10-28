@@ -576,13 +576,20 @@ container port, allocated port, health path, optional volume) and
 ref (or `$DEPLOY_SHA` from deployd) → fetch that exact commit → `docker
 build` tagged `launcher-app/<key>:<sha12>` → swap the `app-<key>` container
 (`127.0.0.1:<port>`, `--restart unless-stopped`, `--env-file`, optional
-volume) → health-check `127.0.0.1:<port><health_path>` for 90 s → on
-failure, put the previous image back and fail the job → `tailscale serve
---https=<port>` unless already mapped → write `deployed.json` → keep one
-older image for rollback. Remove: drop the container and this port's Serve
-handler (only when it proxies to this app), keep `src/`, `.env`, `data/`
-and the definition. A per-app flock serialises deployd and the launcher;
-without the docker group (a user unit) it re-enters under `sg docker` once.
+volume) → health-check `127.0.0.1:<port><health_path>` for 90 s → if the new
+container cannot start OR does not answer, put back the image that was
+running (by image ID, captured before the build, so a rebuild of the same
+commit can still roll back) and fail the job → `tailscale serve
+--https=<port>` unless already mapped → write `deployed.json`, record the
+sha in deployd's `state/<key>.sha` (so its next tick does not rebuild it)
+and clear `state/<key>.disabled` → keep one older image. Remove: drop the
+container and this port's Serve handler (only when it proxies to this app),
+drop `state/<key>.disabled` so a push cannot bring it back (the teardown.sh
+contract), keep `src/`, `.env`, `data/` and the definition. `origin` is
+re-pointed at the definition's repo before every fetch (a key can be
+re-created for another repo). A per-app flock serialises deployd and the
+launcher, and the definition is re-read under it; without the docker group
+(a user unit) the runner re-enters under `sg docker` once.
 
 **Registry merge.** `load_registry()` appends the definitions as entries
 with `runner: "ghapp"`, group `github` ("From GitHub", added to the groups
@@ -595,7 +602,11 @@ deriving the `.env` from the key instead of the allowed-roots gate.
 
 **Auto-deploy** is a custom `state/pollers.json` entry written on create:
 `{repo: https://github.com/<repo>.git, ref, cmd: "app/web/ghapp.py deploy
-<key>"}`. deployd is unchanged; the Deploys page lists it like any poller.
+<key>"}`. It starts paused (`state/<key>.disabled`) and the first
+successful deploy un-pauses it, so deployd never races the launcher's own
+first run. deployd is unchanged; the Deploys page lists it like any poller.
+Delete is refused while a launcher job runs or a deploy holds the app's
+lock.
 
 **API.**
 
@@ -607,5 +618,6 @@ deriving the `.env` from the key instead of the allowed-roots gate.
 | `DELETE api/apps/{key}` | forget a GitHub app (409 while installed: Remove it first); keeps `~/services/apps/<key>` |
 
 **Ports.** 8300–8399, local == HTTPS, first free: not in any registry URL
-or health probe, not a Serve port, not listening. Recorded in DIRECTORY.md.
+or health probe, not any configured Serve port (proxy, static or text), not
+listening. Recorded in DIRECTORY.md.
 

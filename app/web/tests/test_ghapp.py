@@ -35,7 +35,12 @@ class Sandbox(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ghapp-test-")
         self._saved = (ghapp.DEFS_DIR, ghapp.APPS_HOME, ghapp.run, ghapp.quiet,
-                       ghapp.healthy, ghapp.tailscale_bin, os.environ.get("DEPLOY_SHA"))
+                       ghapp.healthy, ghapp.tailscale_bin, os.environ.get("DEPLOY_SHA"),
+                       ghapp.DEPLOYD_ENV, ghapp.DEPLOYD_HOME)
+        # deployd's state is sandboxed for every test: a real
+        # ~/services/deployd/state must never see a test's .sha/.disabled.
+        ghapp.DEPLOYD_ENV = os.path.join(self.tmp, "no-deployd.env")
+        ghapp.DEPLOYD_HOME = os.path.join(self.tmp, "deployd-home")
         ghapp.DEFS_DIR = os.path.join(self.tmp, "defs")
         ghapp.APPS_HOME = os.path.join(self.tmp, "apps")
         os.makedirs(ghapp.DEFS_DIR)
@@ -64,7 +69,8 @@ class Sandbox(unittest.TestCase):
 
     def tearDown(self):
         (ghapp.DEFS_DIR, ghapp.APPS_HOME, ghapp.run, ghapp.quiet,
-         ghapp.healthy, ghapp.tailscale_bin, sha) = self._saved
+         ghapp.healthy, ghapp.tailscale_bin, sha,
+         ghapp.DEPLOYD_ENV, ghapp.DEPLOYD_HOME) = self._saved
         if sha is None:
             os.environ.pop("DEPLOY_SHA", None)
         else:
@@ -182,12 +188,12 @@ class DeployTest(Sandbox):
 
     def test_unhealthy_rolls_back_to_previous_image(self):
         self.make_src("hello-app")
-        self.quiet_out["docker inspect"] = (0, "launcher-app/hello-app:oldoldoldold\n")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "a" * 64 + "\n")
         ghapp.healthy = lambda d, t: False
         with self.assertRaises(ghapp.AppError):
             ghapp.deploy("hello-app")
         runs = self.argv_with("docker", "run")
-        self.assertEqual(runs[-1][-1], "launcher-app/hello-app:oldoldoldold")
+        self.assertEqual(runs[-1][-1], "sha256:" + "a" * 64)
         self.assertFalse(os.path.exists(os.path.join(ghapp.app_dir("hello-app"),
                                                      "deployed.json")))
 
@@ -260,3 +266,181 @@ class MainTest(Sandbox):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixesTest(Sandbox):
+    """The rollback, pause and ownership rules added after review."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_def(good())
+        os.environ["DEPLOY_SHA"] = SHA
+        self.state = os.path.join(self.tmp, "deployd-state")
+        os.makedirs(self.state)
+        self._ds = ghapp.deployd_state_dir
+        ghapp.deployd_state_dir = lambda: self.state
+
+    def tearDown(self):
+        ghapp.deployd_state_dir = self._ds
+        super().tearDown()
+
+    def test_a_container_that_cannot_start_is_rolled_back_too(self):
+        self.make_src("hello-app")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "b" * 64)
+        real = ghapp.run
+
+        def run(argv, check=True, capture=False, cwd=None):
+            res = real(argv, check, capture, cwd)
+            if argv[:2] == ["docker", "run"] and argv[-1].startswith("launcher-app/"):
+                raise ghapp.AppError("docker run exited 125")
+            return res
+        ghapp.run = run
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(self.argv_with("docker", "run")[-1][-1], "sha256:" + "b" * 64)
+
+    def test_same_commit_rebuild_still_rolls_back_to_the_old_image_id(self):
+        self.make_src("hello-app")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "c" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        inspect = self.argv_with("docker", "inspect")[0]
+        build = self.argv_with("docker", "build")[0]
+        self.assertLess(self.calls.index(inspect), self.calls.index(build))
+        self.assertEqual(self.argv_with("docker", "run")[-1][-1], "sha256:" + "c" * 64)
+
+    def test_success_records_sha_for_deployd_and_unpauses(self):
+        self.make_src("hello-app")
+        open(os.path.join(self.state, "hello-app.disabled"), "w").close()
+        ghapp.healthy = lambda d, t: True
+        ghapp.deploy("hello-app")
+        self.assertEqual(open(os.path.join(self.state, "hello-app.sha")).read().strip(), SHA)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "hello-app.disabled")))
+
+    def test_remove_pauses_the_poller(self):
+        os.makedirs(ghapp.app_dir("hello-app"), exist_ok=True)
+        ghapp.remove("hello-app")
+        self.assertTrue(os.path.exists(os.path.join(self.state, "hello-app.disabled")))
+
+    def test_reused_key_repoints_origin_before_fetching(self):
+        self.make_src("hello-app")
+        ghapp.healthy = lambda d, t: True
+        ghapp.deploy("hello-app")
+        seturl = self.argv_with("remote", "set-url")[0]
+        fetch = self.argv_with("fetch", "origin")[0]
+        self.assertEqual(seturl[-1], "https://github.com/c-wenlong/hello.git")
+        self.assertLess(self.calls.index(seturl), self.calls.index(fetch))
+        self.assertFalse(self.argv_with("clone"))
+
+    def test_first_deploy_clones(self):
+        os.makedirs(ghapp.app_dir("hello-app"))
+        ghapp.healthy = lambda d, t: True
+        src = os.path.join(ghapp.app_dir("hello-app"), "src")
+        real = ghapp.run
+
+        def run(argv, check=True, capture=False, cwd=None):
+            if "clone" in argv:
+                os.makedirs(os.path.join(src, ".git"))
+                open(os.path.join(src, "Dockerfile"), "w").close()
+            return real(argv, check, capture, cwd)
+        ghapp.run = run
+        ghapp.deploy("hello-app")
+        self.assertEqual(self.argv_with("clone")[0][-2:],
+                         ["https://github.com/c-wenlong/hello.git", src])
+
+    def test_deleted_definition_stops_a_deploy_waiting_on_the_lock(self):
+        with ghapp.Lock("hello-app"):
+            with self.assertRaises(ghapp.AppError):
+                ghapp.deploy("hello-app")      # lock busy
+
+
+class PlumbingTest(Sandbox):
+
+    def test_serve_ports_reserves_every_port_but_owns_only_proxies(self):
+        ghapp.tailscale_bin = lambda: "/bin/ts"
+        status = {"TCP": {"443": {}, "8305": {}},
+                  "Web": {"box:8305": {"Handlers": {"/": {"Text": "hi"}}},
+                          "box:8306": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8306"}}}}}
+        self.quiet_out["/bin/ts serve status"] = (0, json.dumps(status))
+        ports = ghapp.serve_ports()
+        self.assertEqual(ports, {"443": None, "8305": None,
+                                 "8306": "http://127.0.0.1:8306"})
+
+    def test_serve_ports_unreadable_is_none(self):
+        self.assertIsNone(ghapp.serve_ports())             # no tailscale
+        ghapp.tailscale_bin = lambda: "/bin/ts"
+        self.quiet_out["/bin/ts serve status"] = (1, "")
+        self.assertIsNone(ghapp.serve_ports())
+        self.quiet_out["/bin/ts serve status"] = (0, "{nope")
+        self.assertIsNone(ghapp.serve_ports())
+
+    def test_prune_keeps_current_and_one_older(self):
+        self.quiet_out["docker image ls"] = (0, "r:new\nr:a\nr:b\nr:c\n")
+        ghapp.prune_images("hello-app", "r:new")
+        removed = [c[-1] for c in self.argv_with("docker", "image", "rm")]
+        self.assertEqual(removed, ["r:b", "r:c"])
+
+    def test_healthy_counts_any_answer_below_500(self):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(404 if self.path == "/missing" else 503)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            self.assertTrue(ghapp.healthy(good(port=port, health_path="/missing"), 3))
+            self.assertFalse(ghapp.healthy(good(port=port, health_path="/"), 0.1))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_deployd_state_dir_reads_service_home(self):
+        if True:
+            home = os.path.join(self.tmp, "dh")
+            os.makedirs(os.path.join(home, "state"))
+            env = os.path.join(self.tmp, "deployd.env")
+            with open(env, "w") as fh:
+                fh.write('SERVICE_HOME="%s"\n' % home)
+            ghapp.DEPLOYD_ENV = env
+            self.assertEqual(ghapp.deployd_state_dir(), os.path.join(home, "state"))
+            ghapp.DEPLOYD_ENV = os.path.join(self.tmp, "absent.env")
+            ghapp.DEPLOYD_HOME = os.path.join(self.tmp, "nothing-here")
+            self.assertIsNone(ghapp.deployd_state_dir())
+            ghapp.set_paused("hello-app", True)       # no state dir: a no-op
+            ghapp.record_deployd_sha("hello-app", SHA)
+
+    def test_tailscale_bin_prefers_path(self):
+        saved = ghapp.shutil.which
+        try:
+            ghapp.shutil.which = lambda n: "/usr/bin/tailscale"
+            self.assertEqual(self._saved[5](), "/usr/bin/tailscale")
+        finally:
+            ghapp.shutil.which = saved
+
+    def test_reexec_is_skipped_when_docker_answers_or_on_the_second_pass(self):
+        execs = []
+        saved = ghapp.os.execv
+        ghapp.os.execv = lambda *a: execs.append(a)
+        try:
+            os.environ["GHAPP_SG"] = "1"
+            ghapp.reexec_with_docker_group(["ghapp.py", "deploy", "x"])
+            os.environ.pop("GHAPP_SG")
+            self.quiet_out["docker info"] = (0, "id")
+            ghapp.reexec_with_docker_group(["ghapp.py", "deploy", "x"])
+            self.assertEqual(execs, [])
+            self.quiet_out["docker info"] = (1, "")
+            ghapp.reexec_with_docker_group(["ghapp.py", "deploy", "hello-app"])
+            if ghapp.shutil.which("sg"):
+                self.assertEqual(execs[0][1][1:3], ["docker", "-c"])
+                self.assertIn("deploy hello-app", execs[0][1][3])
+        finally:
+            ghapp.os.execv = saved
+            os.environ.pop("GHAPP_SG", None)

@@ -67,6 +67,11 @@ REL_RE = re.compile(r"^(?!-)(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9._/-]{1,200}$")
 HEALTH_RE = re.compile(r"^/[A-Za-z0-9._~/?=&%-]{0,200}$")
 VOLUME_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,200}$")
 
+# deployd's .env (read for SERVICE_HOME, never sourced) and its default home.
+DEPLOYD_ENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "services", "deployd", ".env")
+DEPLOYD_HOME = os.path.expanduser("~/services/deployd")
+
 HEALTH_WAIT = 90        # seconds a new container gets to answer
 KEEP_IMAGES = 2         # current + one to roll back to
 
@@ -133,6 +138,55 @@ def load(key):
         raise AppError("no app called %s (no %s)" % (key, def_path(key)))
     except ValueError as exc:
         raise AppError("%s is not valid JSON: %s" % (def_path(key), exc))
+
+
+def deployd_state_dir():
+    """deployd's state dir: $SERVICE_HOME/state from services/deployd/.env
+    (read, never sourced), else ~/services/deployd/state. None when deployd
+    has never run here."""
+    home = DEPLOYD_HOME
+    try:
+        with open(DEPLOYD_ENV, encoding="utf-8") as fh:
+            for line in fh:
+                name, sep, value = line.strip().partition("=")
+                if sep and name.strip() in ("SERVICE_HOME", "export SERVICE_HOME"):
+                    value = value.strip().strip("'\"")
+                    if value:
+                        home = os.path.expanduser(value.replace("$HOME", "~")
+                                                  .replace("${HOME}", "~"))
+    except OSError:
+        pass
+    state = os.path.join(home, "state")
+    return state if os.path.isdir(state) else None
+
+
+def set_paused(key, paused):
+    """Drop or clear deployd's state/<key>.disabled, the marker every
+    teardown.sh uses so a push cannot bring a removed app back."""
+    state = deployd_state_dir()
+    if not state:
+        return
+    path = os.path.join(state, key + ".disabled")
+    if paused:
+        with open(path, "w") as fh:
+            fh.write("removed via ghapp.py\n")
+    else:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def record_deployd_sha(key, sha):
+    """Tell deployd this commit is live, so its next tick does not rebuild a
+    commit the launcher just deployed."""
+    state = deployd_state_dir()
+    if not state:
+        return
+    tmp = os.path.join(state, ".%s.sha.tmp" % key)
+    with open(tmp, "w") as fh:
+        fh.write(sha + "\n")
+    os.replace(tmp, os.path.join(state, key + ".sha"))
 
 
 def clone_url(repo):
@@ -224,15 +278,22 @@ def checkout(d, sha, src):
         os.makedirs(os.path.dirname(src), exist_ok=True)
         run(["git", "clone", "--no-checkout", "--filter=blob:none",
              clone_url(d["repo"]), src])
+    # A key can be deleted and re-created for another repo while src/ stays:
+    # origin always follows the current definition.
+    run(["git", "-C", src, "remote", "set-url", "origin", clone_url(d["repo"])])
     run(["git", "-C", src, "fetch", "--quiet", "origin", sha])
     run(["git", "-C", src, "checkout", "--quiet", "--force", "--detach", sha])
     run(["git", "-C", src, "clean", "-ffdxq"])
 
 
 def current_image(key):
-    code, out = quiet(["docker", "inspect", "--format", "{{.Config.Image}}",
+    """The image ID (sha256:...) the app's container runs, or None. The ID,
+    not the tag: a redeploy of the same commit rebuilds the same tag, and
+    only the ID still names the image that was working."""
+    code, out = quiet(["docker", "inspect", "--format", "{{.Image}}",
                        container_name(key)])
-    return out.strip() if code == 0 and out.strip() else None
+    out = out.strip()
+    return out if code == 0 and out.startswith("sha256:") else None
 
 
 def healthy(d, timeout):
@@ -253,8 +314,10 @@ def healthy(d, timeout):
 
 
 def serve_ports():
-    """{https_port: target} for this node's Serve config, or None if it
-    cannot be read."""
+    """{https_port: proxy target or None} for EVERY port this node's Serve
+    config holds (a static or text handler maps to None), or None if the
+    config cannot be read. Allocation treats every key as taken; ownership
+    checks compare the target, which a non-proxy handler never matches."""
     ts = tailscale_bin()
     if not ts:
         return None
@@ -266,8 +329,11 @@ def serve_ports():
     except ValueError:
         return None
     ports = {}
+    for port in (doc.get("TCP") or {}):
+        ports.setdefault(str(port), None)
     for hostport, conf in (doc.get("Web") or {}).items():
         port = hostport.rsplit(":", 1)[-1]
+        ports.setdefault(port, None)
         for h in ((conf or {}).get("Handlers") or {}).values():
             if isinstance(h, dict) and h.get("Proxy"):
                 ports[port] = h["Proxy"]
@@ -316,9 +382,31 @@ class Lock(object):
 
 # ------------------------------------------------------------------ verbs
 
+def swap(d, image, previous):
+    """Replace the running container with `image`. If the new one cannot
+    start or does not answer in time, put `previous` (an image ID) back and
+    fail: the box is never left without the version that was working."""
+    key = d["key"]
+    quiet(["docker", "rm", "--force", container_name(key)])
+    say("starting %s on 127.0.0.1:%d" % (container_name(key), d["port"]))
+    try:
+        run(run_argv(d, image))
+        if not healthy(d, HEALTH_WAIT):
+            run(["docker", "logs", "--tail", "40", container_name(key)], check=False)
+            raise AppError("http://127.0.0.1:%d%s did not answer within %ds"
+                           % (d["port"], d["health_path"], HEALTH_WAIT))
+    except AppError:
+        quiet(["docker", "rm", "--force", container_name(key)])
+        if previous:
+            say("rolling back to the image that was running (%s)" % previous[:19])
+            run(run_argv(d, previous), check=False)
+        raise
+
+
 def deploy(key):
-    d = load(key)
+    load(key)                 # fail fast on a bad key or missing definition
     with Lock(key):
+        d = load(key)         # re-read under the lock: a delete may have won
         sha = resolve_sha(d)
         say("deploying %s at %s (%s)" % (d["repo"], sha[:12], d["ref"]))
         src = os.path.join(app_dir(key), "src")
@@ -329,22 +417,12 @@ def deploy(key):
             os.makedirs(os.path.join(app_dir(key), "data"), exist_ok=True)
 
         image = "%s:%s" % (image_repo(key), sha[:12])
+        # Taken BEFORE the build: rebuilding the same commit moves the tag,
+        # and the ID is then the only name left for the working image.
+        previous = current_image(key)
         say("building %s" % image)
         run(build_argv(d, sha, src))
-
-        previous = current_image(key)
-        quiet(["docker", "rm", "--force", container_name(key)])
-        say("starting %s on 127.0.0.1:%d" % (container_name(key), d["port"]))
-        run(run_argv(d, image))
-
-        if not healthy(d, HEALTH_WAIT):
-            run(["docker", "logs", "--tail", "40", container_name(key)], check=False)
-            quiet(["docker", "rm", "--force", container_name(key)])
-            if previous and previous != image:
-                say("not answering after %ds: rolling back to %s" % (HEALTH_WAIT, previous))
-                run(run_argv(d, previous), check=False)
-            raise AppError("http://127.0.0.1:%d%s did not answer within %ds"
-                           % (d["port"], d["health_path"], HEALTH_WAIT))
+        swap(d, image, previous)
 
         publish(d)
         with open(os.path.join(app_dir(key), "deployed.json.tmp"), "w") as fh:
@@ -353,6 +431,8 @@ def deploy(key):
         os.replace(os.path.join(app_dir(key), "deployed.json.tmp"),
                    os.path.join(app_dir(key), "deployed.json"))
         prune_images(key, image)
+        record_deployd_sha(key, sha)
+        set_paused(key, False)    # a removed (or new) app resumes auto-deploy
         say("deployed %s at %s" % (key, sha[:12]))
 
 
@@ -370,6 +450,7 @@ def remove(key):
             os.remove(os.path.join(app_dir(key), "deployed.json"))
         except OSError:
             pass
+        set_paused(key, True)     # a push must not bring it back
         say("removed %s; src, .env and data stay in %s" % (key, app_dir(key)))
 
 

@@ -6654,7 +6654,12 @@ class GithubAppsTest(SandboxTest):
         super().setUp()
         self._gh_saved = (ghapp.DEFS_DIR, ghapp.APPS_HOME, ghapp.serve_ports,
                           server.deployd_upsert_poller, server.deployd_remove_poller,
-                          server.start_deploy, server.gh_api, server._port_free)
+                          server.start_deploy, server.gh_api, server._port_free,
+                          ghapp.DEPLOYD_ENV, ghapp.DEPLOYD_HOME)
+        # Sandboxed deployd state: create pauses the poller with a marker.
+        ghapp.DEPLOYD_ENV = os.path.join(self.tmp, "no-deployd.env")
+        ghapp.DEPLOYD_HOME = os.path.join(self.tmp, "deployd-home")
+        os.makedirs(os.path.join(ghapp.DEPLOYD_HOME, "state"))
         ghapp.DEFS_DIR = os.path.join(self.tmp, "launcher-apps")
         ghapp.APPS_HOME = os.path.join(self.tmp, "apps")
         ghapp.serve_ports = lambda: {"8300": "http://127.0.0.1:8300"}
@@ -6676,7 +6681,8 @@ class GithubAppsTest(SandboxTest):
     def tearDown(self):
         (ghapp.DEFS_DIR, ghapp.APPS_HOME, ghapp.serve_ports,
          server.deployd_upsert_poller, server.deployd_remove_poller,
-         server.start_deploy, server.gh_api, server._port_free) = self._gh_saved
+         server.start_deploy, server.gh_api, server._port_free,
+         ghapp.DEPLOYD_ENV, ghapp.DEPLOYD_HOME) = self._gh_saved
         super().tearDown()
 
     def create(self, **over):
@@ -6807,3 +6813,81 @@ class GithubAppsTest(SandboxTest):
         for bad in ("A", "1A=2", "A B=1", 5):
             with self.assertRaises(server.DeployError):
                 server._env_text(bad)
+
+    def test_create_starts_the_poller_paused(self):
+        self.create()
+        marker = os.path.join(ghapp.DEPLOYD_HOME, "state", "hello-app.disabled")
+        self.assertTrue(os.path.exists(marker))
+
+    def test_env_editor_lists_the_apps_variables(self):
+        self.create()
+        env = server.env_payload(server.find_service("hello-app"))
+        self.assertTrue(env["exists"])
+        self.assertEqual([v["name"] for v in env["vars"]], ["A", "B"])
+        self.assertEqual(env["path"], "~/services/apps/hello-app/.env")
+
+    def test_delete_refused_while_a_deploy_holds_the_lock(self):
+        self.create()
+        with ghapp.Lock("hello-app"):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.delete_app("hello-app")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertTrue(os.path.exists(ghapp.def_path("hello-app")))
+
+    def test_static_serve_port_is_not_allocated(self):
+        ghapp.serve_ports = lambda: {"8300": None, "8302": None}
+        self.assertEqual(server.allocate_port(), 8303)
+
+
+class GhApiTest(unittest.TestCase):
+    """gh_api / github_repos with subprocess.run replaced: no gh, no network."""
+
+    def setUp(self):
+        self._saved = (server._gh_bin, subprocess.run)
+        server._gh_bin = lambda: "/bin/gh"
+        server._gh_cache.clear()
+        self.argvs = []
+
+    def tearDown(self):
+        server._gh_bin, subprocess.run = self._saved
+        server._gh_cache.clear()
+
+    def answer(self, code, out="", err=""):
+        def fake(argv, **kw):
+            self.argvs.append(argv)
+
+            class R(object):
+                returncode = code
+                stdout = out
+                stderr = err
+            return R()
+        subprocess.run = fake
+
+    def test_parses_and_caches(self):
+        self.answer(0, json.dumps([{"full_name": "c-wenlong/a", "private": True,
+                                    "default_branch": "trunk"},
+                                   {"full_name": "../evil"}]))
+        repos = server.github_repos()["repos"]
+        self.assertEqual([r["repo"] for r in repos], ["c-wenlong/a"])
+        self.assertEqual(repos[0]["default_branch"], "trunk")
+        server.github_repos()
+        self.assertEqual(len(self.argvs), 1)          # second call cached
+
+    def test_errors_map_to_statuses(self):
+        for err, status in (("HTTP 404: Not Found", 404),
+                            ("gh auth login required", 503),
+                            ("something else", 502)):
+            server._gh_cache.clear()
+            self.answer(1, "", err)
+            with self.assertRaises(server.DeployError) as ctx:
+                server.gh_api("repos/a/b", cache=False)
+            self.assertEqual(ctx.exception.status, status, err)
+        self.answer(0, "not json")
+        with self.assertRaises(server.DeployError):
+            server.gh_api("repos/a/c", cache=False)
+
+    def test_missing_gh_is_503(self):
+        server._gh_bin = lambda: None
+        with self.assertRaises(server.DeployError) as ctx:
+            server.gh_api("user/repos")
+        self.assertEqual(ctx.exception.status, 503)

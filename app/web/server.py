@@ -1486,6 +1486,9 @@ def ghapp_entries():
             "url": "https://HOST:%d/" % d["port"],
             "health": "http://127.0.0.1:%d%s" % (d["port"], d["health_path"]),
             "marker": os.path.join(ghapp.app_dir(key), "deployed.json"),
+            # Shown by the detail page's env editor; every read and write
+            # goes through env_path(), which derives it from the key.
+            "env": "~/services/apps/%s/.env" % key,
             "runner": "ghapp",
             "setup": "app/web/ghapp.py",
             "github": {"repo": d["repo"], "ref": d["ref"]},
@@ -1724,6 +1727,12 @@ def create_app(body):
         os.makedirs(ghapp.DEFS_DIR, exist_ok=True)
         _write_json_atomically(ghapp.def_path(key), d, ".app.")
     auto = True
+    # Paused until the first deploy succeeds (ghapp clears the marker and
+    # records the sha), so deployd never races the launcher's own first run.
+    try:
+        ghapp.set_paused(key, True)
+    except OSError as exc:
+        log("github app %s: could not pause its poller: %s" % (key, exc))
     try:
         deployd_upsert_poller(key, {"repo": ghapp.clone_url(repo), "ref": ref,
                                     "cmd": "app/web/ghapp.py deploy %s" % key})
@@ -1743,9 +1752,17 @@ def delete_app(key):
         raise DeployError(404, "no GitHub app called %s" % key)
     if marker_exists(svc.get("marker")):
         raise DeployError(409, "%s is still installed: Remove it first" % key)
+    if jobs_by_key().get(key, {}).get("status") == "running":
+        raise DeployError(409, "a job is running for %s" % key)
+    # The runner's own per-app lock covers a deploy deployd started too; held
+    # while the definition goes, a deploy that starts after re-reads it under
+    # the same lock and stops.
     with _ghapp_lock:
         try:
-            os.remove(ghapp.def_path(key))
+            with ghapp.Lock(key):
+                os.remove(ghapp.def_path(key))
+        except ghapp.AppError:
+            raise DeployError(409, "a deploy of %s is running: try again when it ends" % key)
         except OSError as exc:
             raise DeployError(500, "could not delete the definition: %s" % exc)
     try:
