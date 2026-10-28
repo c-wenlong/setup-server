@@ -579,3 +579,76 @@ unchanged: the same systemd timer, the same `app.json` `deploy` blocks and
 Next (v10): new apps straight from a GitHub repo (Dockerfile builds,
 repo picker on the box's `gh` login, config on the box with Export to
 repo).
+
+## v10 — apps from GitHub: the runner and API (2026-10-28)
+
+The second half of "deploys in the dashboard": a repo with a Dockerfile
+becomes an app on this box without a `setup.sh` folder in this repo.
+Decided with the owner on 2026-10-28: the engine stays deployd's hidden
+timer, Dockerfile builds first, private repos through the box's existing
+`gh` login (git's credential helper; no token in the launcher), config on
+the box with an Export to repo button later. This version is the backend;
+the New app screens on the Deploys page follow in v11.
+
+**One app = one definition + one runtime dir.**
+`~/services/launcher/apps/<key>.json` (repo, ref, Dockerfile path, context,
+container port, allocated port, health path, optional volume) and
+`~/services/apps/<key>/` (`src/` at the deployed commit, `.env` 0600,
+`data/`, `deployed.json`, `.lock`).
+
+**`app/web/ghapp.py deploy|remove <key>`** (stdlib). Deploy: resolve the
+ref (or `$DEPLOY_SHA` from deployd) → fetch that exact commit → `docker
+build` tagged `launcher-app/<key>:<sha12>` → swap the `app-<key>` container
+(`127.0.0.1:<port>`, `--restart unless-stopped`, `--env-file`, optional
+volume) → health-check `127.0.0.1:<port><health_path>` for 90 s → if the new
+container cannot start OR does not answer, put back the image that was
+running (by image ID, captured before the build, so a rebuild of the same
+commit can still roll back) and fail the job → `tailscale serve
+--https=<port>` unless already mapped → write `deployed.json`, record the
+sha in deployd's `state/<key>.sha` (so its next tick does not rebuild it)
+and clear `state/<key>.disabled` → keep one older image. Remove: drop the
+container and this port's Serve handler (only when it proxies to this app;
+nothing changes unless Docker answers and Serve status reads, and a
+container or route that will not go fails the job and keeps
+`deployed.json`),
+drop `state/<key>.disabled` so a push cannot bring it back (the teardown.sh
+contract), keep `src/`, `.env`, `data/` and the definition. `origin` is
+re-pointed at the definition's repo before every fetch (a key can be
+re-created for another repo). A per-app flock serialises deployd and the
+launcher, and the definition is re-read under it; without the docker group
+(a user unit) the runner re-enters under `sg docker` once.
+
+**Registry merge.** `load_registry()` appends the definitions as entries
+with `runner: "ghapp"`, group `github` ("From GitHub", added to the groups
+list only when an app exists), container control part `app-<key>`, marker
+`deployed.json`. A registry key always wins over a definition with the
+same key. Everything downstream (state, Open, Start/Stop, Remove, the .env
+editor, image-update checks) goes through the existing paths, with
+`runner_args()` adding `deploy|remove <key>` to the argv and `env_path()`
+deriving the `.env` from the key instead of the allowed-roots gate. That
+`.env` is Docker's `--env-file` format, which keeps quotes as part of the
+value, so the editor reads and writes it bare (`KEY=hello world`) and
+refuses a value with leading or trailing whitespace.
+
+**Auto-deploy** is a custom `state/pollers.json` entry written on create:
+`{repo: https://github.com/<repo>.git, ref, cmd: "app/web/ghapp.py deploy
+<key>"}`. It starts paused (`state/<key>.disabled`) and the first
+successful deploy un-pauses it, so deployd never races the launcher's own
+first run. deployd is unchanged; the Deploys page lists it like any poller.
+Create is refused (409) when a custom poller of that key already exists
+with another command. Delete is refused while a launcher job runs or a
+deploy holds the app's lock.
+
+**API.**
+
+| Route | Does |
+|---|---|
+| `GET api/github/repos` | the login's repos, pushed-recently first (`gh api user/repos`, cached 2 min) |
+| `POST api/github/inspect` `{repo, ref?}` | branches, default branch, whether `Dockerfile` exists at the ref, the first `EXPOSE` port, a free key |
+| `POST api/apps` `{repo, ref, key, name?, tagline?, container_port, health_path?, volume?, dockerfile?, context?, env?}` | validate, allocate a port, write definition + `.env` + poller, start the first deploy; 202 `{key, port, auto_deploy, job_id}` |
+| `DELETE api/apps/{key}` | forget a GitHub app (409 while installed: Remove it first); keeps `~/services/apps/<key>` |
+
+**Ports.** 8300–8399, local == HTTPS, first free: not in any registry URL
+or health probe, not any configured Serve port (proxy, static or text), not
+listening. Recorded in DIRECTORY.md.
+

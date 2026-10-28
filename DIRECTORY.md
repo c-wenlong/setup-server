@@ -84,6 +84,12 @@ Supporting services (no Tailscale Serve entry):
   handler and takes code-server down.
 - Convention: monitoring-class services use HTTPS port == local port
   (3002/3003); earlier services predate that and differ.
+- **8300–8399 is reserved for apps built from GitHub** by the launcher
+  (`app/web/ghapp.py`, SPEC v10): each takes one port there, local and HTTPS
+  the same number, picked by the launcher's allocator, which skips anything
+  a registry URL names, a Serve handler holds or a process listens on.
+  Never hand-pick a service port in this block. The live list is
+  `ls ~/services/launcher/apps/` on the box.
 - Before claiming a port for a new service: check this table, then
   `ss -ltn` and `tailscale serve status` on the box, then add rows here,
   a monitor line in `services/monitoring/seed_kuma.py`, and a row in README.md.

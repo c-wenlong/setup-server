@@ -1,0 +1,504 @@
+"""Mocked tests for app/web/ghapp.py, the GitHub-app runner.
+
+No docker, git, tailscale or network: every subprocess goes through
+ghapp.run / ghapp.quiet, which these tests replace, and the state dirs point
+at a temp dir. Run from app/web/:
+
+    python3 -m unittest discover -s tests -p 'test_*.py'
+"""
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import ghapp  # noqa: E402
+
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def good(**over):
+    d = {"key": "hello-app", "name": "Hello", "repo": "c-wenlong/hello",
+         "ref": "main", "dockerfile": "Dockerfile", "context": ".",
+         "container_port": 3000, "port": 8301, "health_path": "/",
+         "volume": None}
+    d.update(over)
+    return d
+
+
+class Sandbox(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ghapp-test-")
+        self._saved = (ghapp.DEFS_DIR, ghapp.APPS_HOME, ghapp.run, ghapp.quiet,
+                       ghapp.healthy, ghapp.tailscale_bin, os.environ.get("DEPLOY_SHA"),
+                       ghapp.DEPLOYD_ENV, ghapp.DEPLOYD_HOME)
+        # deployd's state is sandboxed for every test: a real
+        # ~/services/deployd/state must never see a test's .sha/.disabled.
+        ghapp.DEPLOYD_ENV = os.path.join(self.tmp, "no-deployd.env")
+        ghapp.DEPLOYD_HOME = os.path.join(self.tmp, "deployd-home")
+        ghapp.DEFS_DIR = os.path.join(self.tmp, "defs")
+        ghapp.APPS_HOME = os.path.join(self.tmp, "apps")
+        os.makedirs(ghapp.DEFS_DIR)
+        self.calls = []
+        self.quiet_out = {}
+        self.run_codes = {}
+
+        def fake_run(argv, check=True, capture=False, cwd=None):
+            self.calls.append(list(argv))
+            code = 0
+            for prefix, c in self.run_codes.items():
+                if " ".join(argv).startswith(prefix):
+                    code = c
+            if check and code:
+                raise ghapp.AppError("%s exited %d" % (argv[0], code))
+
+            class R(object):
+                returncode = code
+                stdout = ""
+            return R()
+
+        def fake_quiet(argv, cwd=None):
+            self.calls.append(list(argv))
+            for prefix, out in self.quiet_out.items():
+                if " ".join(argv).startswith(prefix):
+                    return out
+            return 0, ""
+
+        ghapp.run = fake_run
+        ghapp.quiet = fake_quiet
+        ghapp.tailscale_bin = lambda: None
+        os.environ.pop("DEPLOY_SHA", None)
+
+    def tearDown(self):
+        (ghapp.DEFS_DIR, ghapp.APPS_HOME, ghapp.run, ghapp.quiet,
+         ghapp.healthy, ghapp.tailscale_bin, sha,
+         ghapp.DEPLOYD_ENV, ghapp.DEPLOYD_HOME) = self._saved
+        if sha is None:
+            os.environ.pop("DEPLOY_SHA", None)
+        else:
+            os.environ["DEPLOY_SHA"] = sha
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_def(self, d):
+        with open(ghapp.def_path(d["key"]), "w") as fh:
+            json.dump(d, fh)
+
+    def make_src(self, key, dockerfile="Dockerfile"):
+        src = os.path.join(ghapp.app_dir(key), "src")
+        os.makedirs(os.path.join(src, ".git"), exist_ok=True)
+        path = os.path.join(src, dockerfile)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        return src
+
+    def argv_with(self, *words):
+        return [c for c in self.calls if all(w in c for w in words)]
+
+
+class ValidateTest(unittest.TestCase):
+
+    def test_good_definition_passes(self):
+        self.assertEqual(ghapp.validate(good())["key"], "hello-app")
+        ghapp.validate(good(volume="/data", context="web", dockerfile="web/Dockerfile"))
+
+    def test_shapes_that_could_reach_an_argv_are_refused(self):
+        bad = [
+            {"key": "X"}, {"key": "-flag"}, {"key": "ab"},
+            {"repo": "no-slash"}, {"repo": "a/b/c"}, {"repo": "../x"},
+            {"ref": "-b"}, {"ref": "a b"},
+            {"dockerfile": "../Dockerfile"}, {"dockerfile": "/etc/passwd"},
+            {"dockerfile": "-f"}, {"context": "a/../../b"},
+            {"container_port": 0}, {"port": 70000}, {"port": "8301"}, {"port": True},
+            {"health_path": "health"}, {"health_path": "/a b"},
+            {"volume": "data"}, {"volume": "/a/../etc"},
+        ]
+        for over in bad:
+            with self.assertRaises(ghapp.AppError, msg=over):
+                ghapp.validate(good(**over))
+
+
+class ArgvTest(Sandbox):
+
+    def test_run_binds_loopback_only_and_restarts_unless_stopped(self):
+        argv = ghapp.run_argv(good(), "img:1")
+        self.assertIn("127.0.0.1:8301:3000", argv)
+        self.assertNotIn("0.0.0.0", " ".join(argv))
+        self.assertEqual(argv[argv.index("--restart") + 1], "unless-stopped")
+        self.assertEqual(argv[argv.index("--name") + 1], "app-hello-app")
+        self.assertEqual(argv[-1], "img:1")
+        self.assertNotIn("--env-file", argv)       # no .env yet
+        self.assertNotIn("--volume", argv)
+
+    def test_env_file_and_volume_only_when_present(self):
+        os.makedirs(ghapp.app_dir("hello-app"))
+        open(os.path.join(ghapp.app_dir("hello-app"), ".env"), "w").close()
+        argv = ghapp.run_argv(good(volume="/data"), "img:1")
+        self.assertIn("--env-file", argv)
+        vol = argv[argv.index("--volume") + 1]
+        self.assertTrue(vol.endswith("/apps/hello-app/data:/data"), vol)
+
+    def test_build_tags_by_sha_and_stays_inside_src(self):
+        argv = ghapp.build_argv(good(dockerfile="web/Dockerfile", context="web"),
+                                SHA, "/x/src")
+        self.assertEqual(argv[argv.index("--tag") + 1], "launcher-app/hello-app:0123456789ab")
+        self.assertEqual(argv[argv.index("--file") + 1], "/x/src/web/Dockerfile")
+        self.assertEqual(argv[-1], "/x/src/web")
+        self.assertIn("org.opencontainers.image.revision=%s" % SHA, argv)
+
+    def test_deploy_sha_from_env_skips_ls_remote(self):
+        os.environ["DEPLOY_SHA"] = SHA
+        self.assertEqual(ghapp.resolve_sha(good()), SHA)
+        self.assertFalse(self.argv_with("ls-remote"))
+
+    def test_bad_deploy_sha_falls_back_to_ls_remote(self):
+        os.environ["DEPLOY_SHA"] = "not-a-sha"
+        self.quiet_out["git ls-remote"] = (0, "%s\trefs/heads/main\n" % SHA)
+        self.assertEqual(ghapp.resolve_sha(good()), SHA)
+        self.assertEqual(self.argv_with("ls-remote")[0][-2:],
+                         ["https://github.com/c-wenlong/hello.git", "main"])
+
+    def test_unresolvable_ref_is_an_error(self):
+        self.quiet_out["git ls-remote"] = (2, "")
+        with self.assertRaises(ghapp.AppError):
+            ghapp.resolve_sha(good())
+
+
+class DeployTest(Sandbox):
+
+    def setUp(self):
+        super().setUp()
+        self.write_def(good())
+        os.environ["DEPLOY_SHA"] = SHA
+
+    def test_happy_path_builds_swaps_and_records(self):
+        self.make_src("hello-app")
+        ghapp.healthy = lambda d, t: True
+        ghapp.deploy("hello-app")
+        self.assertTrue(self.argv_with("docker", "build"))
+        self.assertTrue(self.argv_with("docker", "run"))
+        rec = json.load(open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json")))
+        self.assertEqual(rec["sha"], SHA)
+        self.assertEqual(rec["image"], "launcher-app/hello-app:0123456789ab")
+        # checkout pins the exact sha, detached
+        self.assertTrue(self.argv_with("checkout", "--detach", SHA))
+
+    def test_missing_dockerfile_stops_before_building(self):
+        os.makedirs(os.path.join(ghapp.app_dir("hello-app"), "src", ".git"))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertFalse(self.argv_with("docker", "build"))
+
+    def test_unhealthy_rolls_back_to_previous_image(self):
+        self.make_src("hello-app")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "a" * 64 + "\n")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        runs = self.argv_with("docker", "run")
+        self.assertEqual(runs[-1][-1], "sha256:" + "a" * 64)
+        self.assertFalse(os.path.exists(os.path.join(ghapp.app_dir("hello-app"),
+                                                     "deployed.json")))
+
+    def test_unhealthy_first_deploy_has_nothing_to_roll_back_to(self):
+        self.make_src("hello-app")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(len(self.argv_with("docker", "run")), 1)
+
+    def test_publish_uses_serve_on_the_app_port(self):
+        self.make_src("hello-app")
+        ghapp.healthy = lambda d, t: True
+        ghapp.tailscale_bin = lambda: "/bin/tailscale"
+        self.quiet_out["/bin/tailscale serve status"] = (0, json.dumps({"Web": {}}))
+        ghapp.deploy("hello-app")
+        serve = self.argv_with("/bin/tailscale", "--bg")
+        self.assertEqual(serve[0], ["/bin/tailscale", "serve", "--bg", "--https=8301",
+                                    "http://127.0.0.1:8301"])
+
+    def test_already_published_is_left_alone(self):
+        self.make_src("hello-app")
+        ghapp.healthy = lambda d, t: True
+        ghapp.tailscale_bin = lambda: "/bin/tailscale"
+        status = {"Web": {"box.ts.net:8301": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8301"}}}}}
+        self.quiet_out["/bin/tailscale serve status"] = (0, json.dumps(status))
+        ghapp.deploy("hello-app")
+        self.assertFalse(self.argv_with("/bin/tailscale", "--bg"))
+
+
+class RemoveTest(Sandbox):
+
+    def setUp(self):
+        super().setUp()
+        self.write_def(good())
+        os.makedirs(ghapp.app_dir("hello-app"))
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
+            fh.write("{}")
+        ghapp.tailscale_bin = lambda: "/bin/tailscale"
+        self.quiet_out["docker ps"] = (0, "app-hello-app\n")
+
+    def marker(self):
+        return os.path.join(ghapp.app_dir("hello-app"), "deployed.json")
+
+    def test_unreadable_serve_status_changes_nothing(self):
+        self.quiet_out["/bin/tailscale serve status"] = (1, "")
+        with self.assertRaises(ghapp.AppError):
+            ghapp.remove("hello-app")
+        self.assertFalse(self.argv_with("docker", "rm"))
+        self.assertTrue(os.path.exists(self.marker()))
+
+    def test_docker_not_answering_changes_nothing(self):
+        self.quiet_out["/bin/tailscale serve status"] = (0, "{}")
+        self.quiet_out["docker ps"] = (1, "")
+        with self.assertRaises(ghapp.AppError):
+            ghapp.remove("hello-app")
+        self.assertFalse(self.argv_with("docker", "rm"))
+        self.assertTrue(os.path.exists(self.marker()))
+
+    def test_a_failed_rm_or_serve_off_keeps_the_marker(self):
+        status = {"Web": {"box:8301": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8301"}}}}}
+        self.quiet_out["/bin/tailscale serve status"] = (0, json.dumps(status))
+        self.run_codes["docker rm"] = 1
+        with self.assertRaises(ghapp.AppError):
+            ghapp.remove("hello-app")
+        self.assertTrue(os.path.exists(self.marker()))
+        self.run_codes = {"/bin/tailscale serve": 1}
+        with self.assertRaises(ghapp.AppError):
+            ghapp.remove("hello-app")
+        self.assertTrue(os.path.exists(self.marker()))
+
+    def test_a_container_already_gone_is_fine(self):
+        self.quiet_out["/bin/tailscale serve status"] = (0, "{}")
+        self.quiet_out["docker ps"] = (0, "")
+        ghapp.remove("hello-app")
+        self.assertFalse(self.argv_with("docker", "rm"))
+        self.assertFalse(os.path.exists(self.marker()))
+
+    def test_drops_container_serve_and_marker_but_keeps_data(self):
+        status = {"Web": {"box:8301": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8301"}}}}}
+        self.quiet_out["/bin/tailscale serve status"] = (0, json.dumps(status))
+        ghapp.remove("hello-app")
+        self.assertTrue(self.argv_with("docker", "rm", "app-hello-app"))
+        self.assertEqual(self.argv_with("--https=8301", "off")[0][-1], "off")
+        self.assertFalse(os.path.exists(os.path.join(ghapp.app_dir("hello-app"), "deployed.json")))
+        self.assertTrue(os.path.isdir(ghapp.app_dir("hello-app")))
+        self.assertTrue(os.path.isfile(ghapp.def_path("hello-app")))
+
+    def test_a_port_another_target_owns_is_not_turned_off(self):
+        status = {"Web": {"box:8301": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}}}
+        self.quiet_out["/bin/tailscale serve status"] = (0, json.dumps(status))
+        ghapp.remove("hello-app")
+        self.assertFalse(self.argv_with("off"))
+
+
+class MainTest(Sandbox):
+
+    def test_usage_and_unknown_app(self):
+        self.assertEqual(ghapp.main(["ghapp.py"]), 2)
+        self.assertEqual(ghapp.main(["ghapp.py", "nuke", "x"]), 2)
+        os.environ["GHAPP_SG"] = "1"     # skip the docker-group re-exec
+        try:
+            self.assertEqual(ghapp.main(["ghapp.py", "deploy", "nope-app"]), 1)
+            self.assertEqual(ghapp.main(["ghapp.py", "deploy", "../etc"]), 1)
+        finally:
+            os.environ.pop("GHAPP_SG", None)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class ReviewFixesTest(Sandbox):
+    """The rollback, pause and ownership rules added after review."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_def(good())
+        os.environ["DEPLOY_SHA"] = SHA
+        self.state = os.path.join(self.tmp, "deployd-state")
+        os.makedirs(self.state)
+        self._ds = ghapp.deployd_state_dir
+        ghapp.deployd_state_dir = lambda: self.state
+
+    def tearDown(self):
+        ghapp.deployd_state_dir = self._ds
+        super().tearDown()
+
+    def test_a_container_that_cannot_start_is_rolled_back_too(self):
+        self.make_src("hello-app")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "b" * 64)
+        real = ghapp.run
+
+        def run(argv, check=True, capture=False, cwd=None):
+            res = real(argv, check, capture, cwd)
+            if argv[:2] == ["docker", "run"] and argv[-1].startswith("launcher-app/"):
+                raise ghapp.AppError("docker run exited 125")
+            return res
+        ghapp.run = run
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(self.argv_with("docker", "run")[-1][-1], "sha256:" + "b" * 64)
+
+    def test_same_commit_rebuild_still_rolls_back_to_the_old_image_id(self):
+        self.make_src("hello-app")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "c" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        inspect = self.argv_with("docker", "inspect")[0]
+        build = self.argv_with("docker", "build")[0]
+        self.assertLess(self.calls.index(inspect), self.calls.index(build))
+        self.assertEqual(self.argv_with("docker", "run")[-1][-1], "sha256:" + "c" * 64)
+
+    def test_success_records_sha_for_deployd_and_unpauses(self):
+        self.make_src("hello-app")
+        open(os.path.join(self.state, "hello-app.disabled"), "w").close()
+        ghapp.healthy = lambda d, t: True
+        ghapp.deploy("hello-app")
+        self.assertEqual(open(os.path.join(self.state, "hello-app.sha")).read().strip(), SHA)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "hello-app.disabled")))
+
+    def test_remove_pauses_the_poller(self):
+        os.makedirs(ghapp.app_dir("hello-app"), exist_ok=True)
+        ghapp.remove("hello-app")
+        self.assertTrue(os.path.exists(os.path.join(self.state, "hello-app.disabled")))
+
+    def test_reused_key_repoints_origin_before_fetching(self):
+        self.make_src("hello-app")
+        ghapp.healthy = lambda d, t: True
+        ghapp.deploy("hello-app")
+        seturl = self.argv_with("remote", "set-url")[0]
+        fetch = self.argv_with("fetch", "origin")[0]
+        self.assertEqual(seturl[-1], "https://github.com/c-wenlong/hello.git")
+        self.assertLess(self.calls.index(seturl), self.calls.index(fetch))
+        self.assertFalse(self.argv_with("clone"))
+
+    def test_first_deploy_clones(self):
+        os.makedirs(ghapp.app_dir("hello-app"))
+        ghapp.healthy = lambda d, t: True
+        src = os.path.join(ghapp.app_dir("hello-app"), "src")
+        real = ghapp.run
+
+        def run(argv, check=True, capture=False, cwd=None):
+            if "clone" in argv:
+                os.makedirs(os.path.join(src, ".git"))
+                open(os.path.join(src, "Dockerfile"), "w").close()
+            return real(argv, check, capture, cwd)
+        ghapp.run = run
+        ghapp.deploy("hello-app")
+        self.assertEqual(self.argv_with("clone")[0][-2:],
+                         ["https://github.com/c-wenlong/hello.git", src])
+
+    def test_deleted_definition_stops_a_deploy_waiting_on_the_lock(self):
+        with ghapp.Lock("hello-app"):
+            with self.assertRaises(ghapp.AppError):
+                ghapp.deploy("hello-app")      # lock busy
+
+
+class PlumbingTest(Sandbox):
+
+    def test_serve_ports_reserves_every_port_but_owns_only_proxies(self):
+        ghapp.tailscale_bin = lambda: "/bin/ts"
+        status = {"TCP": {"443": {}, "8305": {}},
+                  "Web": {"box:8305": {"Handlers": {"/": {"Text": "hi"}}},
+                          "box:8306": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8306"}}}}}
+        self.quiet_out["/bin/ts serve status"] = (0, json.dumps(status))
+        ports = ghapp.serve_ports()
+        self.assertEqual(ports, {"443": None, "8305": None,
+                                 "8306": "http://127.0.0.1:8306"})
+
+    def test_serve_ports_unreadable_is_none(self):
+        self.assertIsNone(ghapp.serve_ports())             # no tailscale
+        ghapp.tailscale_bin = lambda: "/bin/ts"
+        self.quiet_out["/bin/ts serve status"] = (1, "")
+        self.assertIsNone(ghapp.serve_ports())
+        self.quiet_out["/bin/ts serve status"] = (0, "{nope")
+        self.assertIsNone(ghapp.serve_ports())
+
+    def test_prune_keeps_current_and_one_older(self):
+        self.quiet_out["docker image ls"] = (0, "r:new\nr:a\nr:b\nr:c\n")
+        ghapp.prune_images("hello-app", "r:new")
+        removed = [c[-1] for c in self.argv_with("docker", "image", "rm")]
+        self.assertEqual(removed, ["r:b", "r:c"])
+
+    def test_healthy_counts_any_answer_below_500(self):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(404 if self.path == "/missing" else 503)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            self.assertTrue(ghapp.healthy(good(port=port, health_path="/missing"), 3))
+            self.assertFalse(ghapp.healthy(good(port=port, health_path="/"), 0.1))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_deployd_state_dir_reads_service_home(self):
+        if True:
+            home = os.path.join(self.tmp, "dh")
+            os.makedirs(os.path.join(home, "state"))
+            env = os.path.join(self.tmp, "deployd.env")
+            with open(env, "w") as fh:
+                fh.write('SERVICE_HOME="%s"\n' % home)
+            ghapp.DEPLOYD_ENV = env
+            self.assertEqual(ghapp.deployd_state_dir(), os.path.join(home, "state"))
+            # setup.sh writes %q-escaped paths; deployd shlex-splits them.
+            spaced = os.path.join(self.tmp, "deploy state")
+            os.makedirs(os.path.join(spaced, "state"))
+            with open(env, "w") as fh:
+                fh.write("SERVICE_HOME=%s\n" % spaced.replace(" ", "\\ "))
+            self.assertEqual(ghapp.deployd_state_dir(), os.path.join(spaced, "state"))
+            fail = os.path.join(spaced, "state", "hello-app.fail")
+            with open(fail, "w") as fh:
+                fh.write('{"sha": "old"}\n')
+            ghapp.record_deployd_sha("hello-app", SHA)
+            self.assertFalse(os.path.exists(fail))
+            with open(os.path.join(spaced, "state", "hello-app.sha")) as fh:
+                self.assertEqual(fh.read().strip(), SHA)
+            ghapp.DEPLOYD_ENV = os.path.join(self.tmp, "absent.env")
+            ghapp.DEPLOYD_HOME = os.path.join(self.tmp, "nothing-here")
+            self.assertIsNone(ghapp.deployd_state_dir())
+            ghapp.set_paused("hello-app", True)       # no state dir: a no-op
+            ghapp.record_deployd_sha("hello-app", SHA)
+
+    def test_tailscale_bin_prefers_path(self):
+        saved = ghapp.shutil.which
+        try:
+            ghapp.shutil.which = lambda n: "/usr/bin/tailscale"
+            self.assertEqual(self._saved[5](), "/usr/bin/tailscale")
+        finally:
+            ghapp.shutil.which = saved
+
+    def test_reexec_is_skipped_when_docker_answers_or_on_the_second_pass(self):
+        execs = []
+        saved = ghapp.os.execv
+        ghapp.os.execv = lambda *a: execs.append(a)
+        try:
+            os.environ["GHAPP_SG"] = "1"
+            ghapp.reexec_with_docker_group(["ghapp.py", "deploy", "x"])
+            os.environ.pop("GHAPP_SG")
+            self.quiet_out["docker info"] = (0, "id")
+            ghapp.reexec_with_docker_group(["ghapp.py", "deploy", "x"])
+            self.assertEqual(execs, [])
+            self.quiet_out["docker info"] = (1, "")
+            ghapp.reexec_with_docker_group(["ghapp.py", "deploy", "hello-app"])
+            if ghapp.shutil.which("sg"):
+                self.assertEqual(execs[0][1][1:3], ["docker", "-c"])
+                self.assertIn("deploy hello-app", execs[0][1][3])
+        finally:
+            ghapp.os.execv = saved
+            os.environ.pop("GHAPP_SG", None)

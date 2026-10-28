@@ -68,6 +68,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+import ghapp  # noqa: E402  (app/web/ghapp.py, beside this file)
+
 # ------------------------------------------------------------------ config
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -220,9 +222,12 @@ def load_document():
 
 
 def load_registry():
-    """The `services` array of services.json."""
+    """The `services` array of services.json, plus the apps built from GitHub
+    repos (ghapp_entries), which live in box state rather than the repo."""
     services = load_document().get("services")
-    return services if isinstance(services, list) else []
+    services = services if isinstance(services, list) else []
+    taken = {s.get("key") for s in services if isinstance(s, dict)}
+    return services + [e for e in ghapp_entries() if e["key"] not in taken]
 
 
 def load_groups():
@@ -248,6 +253,8 @@ def load_groups():
             continue
         seen.add(gid)
         out.append({"id": gid, "label": label.strip()})
+    if GHAPP_GROUP["id"] not in seen and ghapp_entries():
+        out.append(dict(GHAPP_GROUP))
     return out
 
 
@@ -506,8 +513,11 @@ def is_secret(name):
     return any(marker in upper for marker in SECRET_MARKERS)
 
 
-def parse_env(text):
+def parse_env(text, literal=False):
     """.env text -> {NAME: value}, in file order. Never executes anything.
+
+    literal=True reads Docker's --env-file format instead (a GitHub app's
+    .env): everything after the first `=` is the value, quotes and all.
 
     Handles what these files actually contain: KEY=value, blank lines, whole
     line `#` comments, `export KEY=value`, values containing `=`, and values
@@ -526,6 +536,9 @@ def parse_env(text):
         if hit is None:
             continue
         name, value = hit
+        if literal:
+            out[name] = value
+            continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             quote = value[0]
@@ -555,22 +568,43 @@ def _split_assignment(line):
     return name, value
 
 
+def env_path(svc):
+    """Absolute .env path for a service, or raise DeployError.
+
+    Registry entries go through the allowed-roots gate. A GitHub app's .env
+    is derived from its key (shape-checked) under ~/services/apps instead:
+    nothing about that path comes from the registry or a request.
+    """
+    if svc.get("runner") == "ghapp":
+        key = svc.get("key")
+        if not isinstance(key, str) or not ghapp.KEY_RE.match(key):
+            raise DeployError(403, "env path is outside the allowed roots")
+        return os.path.join(ghapp.app_dir(key), ".env")
+    raw = svc.get("env")
+    if not raw:
+        raise DeployError(404, "service has no env file")
+    return resolve_registry_path(raw, "env")
+
+
 def read_env(svc):
     """Parsed .env for a service, or raise DeployError.
 
     The path comes from the registry only and goes through the same
     allowed-roots gate as a deploy script.
     """
-    raw = svc.get("env")
-    if not raw:
-        raise DeployError(404, "service has no env file")
-    path = resolve_registry_path(raw, "env")
+    path = env_path(svc)
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             text = fh.read()
     except OSError:
         raise DeployError(404, "env file not readable")
-    return parse_env(text)
+    return parse_env(text, literal=is_docker_env(svc))
+
+
+def is_docker_env(svc):
+    """True for a GitHub app: its .env feeds `docker run --env-file`, which
+    keeps quotes as part of the value, so it is read and written bare."""
+    return svc.get("runner") == "ghapp"
 
 
 def env_payload(svc):
@@ -1406,6 +1440,359 @@ def service_detail(key):
     }
 
 
+# ------------------------------------------------------------------ github apps
+#
+# Apps built straight from a GitHub repo's Dockerfile (app/web/ghapp.py does
+# the building). Each is one definition in ~/services/launcher/apps/<key>.json,
+# written here and never by hand, merged into the registry by load_registry()
+# so the list, detail page, start/stop, Remove and the .env editor all work
+# through the same code as a service from this repo. A push to the watched
+# branch redeploys through deployd: creating an app also writes a custom
+# state/pollers.json entry whose cmd is `app/web/ghapp.py deploy <key>`.
+#
+#   GET    api/github/repos           the box's `gh` login's repos
+#   POST   api/github/inspect         {repo, ref?} -> branches, Dockerfile, port
+#   POST   api/apps                   create + first deploy (202, job id)
+#   DELETE api/apps/{key}             forget a removed app (keeps its data)
+
+GHAPP_SCRIPT = os.path.join(HERE, "ghapp.py")
+GHAPP_GROUP = {"id": "github", "label": "From GitHub"}
+# Local port == HTTPS (Serve) port, one per app, from this block. Nothing in
+# DIRECTORY.md lives here; the allocator still checks what is actually taken.
+GHAPP_PORTS = range(8300, 8400)
+GH_CACHE_TTL = 120.0
+_EXPOSE_RE = re.compile(r"^\s*EXPOSE\s+(\d{1,5})", re.I | re.M)
+_ghapp_lock = threading.Lock()
+_gh_cache = {}
+
+
+def _ghapp_defs():
+    """Valid definitions from the apps dir, sorted by key. A bad file is
+    logged and skipped: one broken definition must not empty the list."""
+    try:
+        names = sorted(n for n in os.listdir(ghapp.DEFS_DIR) if n.endswith(".json"))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        try:
+            out.append(ghapp.load(name[:-5]))
+        except ghapp.AppError as exc:
+            log("github app %s skipped: %s" % (name, exc))
+    return out
+
+
+def ghapp_entries():
+    """Registry-shaped entries for the GitHub apps. The URL keeps the HOST
+    placeholder services.json uses, so substitute_host fills it in."""
+    entries = []
+    for d in _ghapp_defs():
+        key = d["key"]
+        owner = d["repo"].split("/", 1)[0]
+        entries.append({
+            "key": key,
+            "name": d.get("name") or key,
+            "tagline": d.get("tagline") or "From GitHub",
+            "group": GHAPP_GROUP["id"],
+            "description": "Built on this box from github.com/%s (%s) with its "
+                           "%s, redeployed when that branch moves."
+                           % (d["repo"], d["ref"], d["dockerfile"]),
+            "author": owner,
+            "icon": "code",
+            "url": "https://HOST:%d/" % d["port"],
+            "health": "http://127.0.0.1:%d%s" % (d["port"], d["health_path"]),
+            "marker": os.path.join(ghapp.app_dir(key), "deployed.json"),
+            # Shown by the detail page's env editor; every read and write
+            # goes through env_path(), which derives it from the key.
+            "env": "~/services/apps/%s/.env" % key,
+            "runner": "ghapp",
+            "setup": "app/web/ghapp.py",
+            "github": {"repo": d["repo"], "ref": d["ref"]},
+            "control": {"parts": [{"container": ghapp.container_name(key)}]},
+        })
+    return entries
+
+
+def runner_args(svc, verb):
+    """Extra argv words for a service's deploy/remove script: [] for a
+    setup.sh, [verb, key] for a GitHub app. Registry words only."""
+    if svc.get("runner") != "ghapp":
+        return []
+    key = svc.get("key")
+    if not isinstance(key, str) or not ghapp.KEY_RE.match(key):
+        raise DeployError(400, "bad app key")
+    return [verb, key]
+
+
+def _port_free(port):
+    """True if nothing on this box listens on 127.0.0.1:port right now."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _registry_ports():
+    """Every port number a registry URL or health probe mentions."""
+    ports = set()
+    for svc in load_registry():
+        for field in ("url", "health"):
+            m = re.search(r":(\d{2,5})(?:/|$)", str(svc.get(field) or ""))
+            if m:
+                ports.add(int(m.group(1)))
+    return ports
+
+
+def allocate_port():
+    """First port in GHAPP_PORTS no service, app, Serve handler or listener
+    already has. 409 when the block is full."""
+    taken = _registry_ports()
+    serve = ghapp.serve_ports() or {}
+    taken.update(int(p) for p in serve if str(p).isdigit())
+    for port in GHAPP_PORTS:
+        if port not in taken and _port_free(port):
+            return port
+    raise DeployError(409, "no free port left in %d-%d"
+                      % (GHAPP_PORTS[0], GHAPP_PORTS[-1]))
+
+
+def _gh_bin():
+    found = _which("gh")
+    if found:
+        return found
+    for candidate in ("~/.local/bin/gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"):
+        path = os.path.expanduser(candidate)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def gh_api(path, cache=True):
+    """`gh api <path>` -> parsed JSON, or raise DeployError. Path words are
+    built here from shape-checked values only."""
+    gh = _gh_bin()
+    if not gh:
+        raise DeployError(503, "the gh CLI is not installed on this box")
+    now = time.monotonic()
+    hit = _gh_cache.get(path)
+    if cache and hit and now - hit[0] < GH_CACHE_TTL:
+        return hit[1]
+    try:
+        res = subprocess.run([gh, "api", path], capture_output=True, text=True,
+                             timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DeployError(502, "gh api failed: %s" % exc)
+    if res.returncode != 0:
+        msg = (res.stderr or res.stdout or "").strip().splitlines()
+        msg = msg[-1] if msg else "exit %d" % res.returncode
+        if "404" in msg or "Not Found" in msg:
+            raise DeployError(404, "not found on GitHub: %s" % path.split("?")[0])
+        if "auth" in msg.lower() or "401" in msg:
+            raise DeployError(503, "gh is not logged in on this box (run `gh auth login`)")
+        raise DeployError(502, "gh api: %s" % msg[:200])
+    try:
+        data = json.loads(res.stdout or "null")
+    except ValueError:
+        raise DeployError(502, "gh api returned something that is not JSON")
+    _gh_cache[path] = (now, data)
+    return data
+
+
+def github_repos():
+    """The login's repos, most recently pushed first."""
+    data = gh_api("user/repos?per_page=100&sort=pushed"
+                  "&affiliation=owner,collaborator,organization_member")
+    out = []
+    for r in data if isinstance(data, list) else []:
+        name = r.get("full_name")
+        if not isinstance(name, str) or not ghapp.REPO_RE.match(name):
+            continue
+        out.append({"repo": name, "private": bool(r.get("private")),
+                    "default_branch": r.get("default_branch") or "main",
+                    "description": (r.get("description") or "")[:200],
+                    "pushed_at": r.get("pushed_at"),
+                    "archived": bool(r.get("archived"))})
+    return {"repos": out}
+
+
+def _check_repo(repo):
+    if not isinstance(repo, str) or not ghapp.REPO_RE.match(repo):
+        raise DeployError(400, "repo must look like owner/name")
+    return repo
+
+
+def _check_ref(ref):
+    if not isinstance(ref, str) or not ghapp.REF_RE.match(ref) or ref.startswith("-"):
+        raise DeployError(400, "branch name is not valid")
+    return ref
+
+
+def suggest_key(repo):
+    base = re.sub(r"[^a-z0-9-]+", "-", repo.split("/", 1)[1].lower()).strip("-")
+    base = (base or "app")[:28].strip("-")
+    if len(base) < 3:
+        base = (base + "-app")[:28]
+    taken = {s.get("key") for s in load_registry()}
+    key, n = base, 2
+    while key in taken:
+        key = "%s-%d" % (base, n)
+        n += 1
+    return key
+
+
+def github_inspect(body):
+    """{repo, ref?} -> branches, whether the Dockerfile exists at that ref,
+    the port its first EXPOSE names, and a free key to suggest."""
+    if not isinstance(body, dict):
+        raise DeployError(400, "body must be a JSON object")
+    repo = _check_repo(body.get("repo"))
+    meta = gh_api("repos/%s" % repo)
+    ref = body.get("ref") or meta.get("default_branch") or "main"
+    _check_ref(ref)
+    branches = gh_api("repos/%s/branches?per_page=100" % repo)
+    names = [b.get("name") for b in branches if isinstance(b, dict)
+             and isinstance(b.get("name"), str)] if isinstance(branches, list) else []
+    dockerfile, port = False, None
+    try:
+        f = gh_api("repos/%s/contents/Dockerfile?ref=%s"
+                   % (repo, urllib.parse.quote(ref, safe="")), cache=False)
+        dockerfile = isinstance(f, dict) and f.get("type") == "file"
+        if dockerfile and f.get("encoding") == "base64":
+            import base64
+            text = base64.b64decode(f.get("content") or "").decode("utf-8", "replace")
+            m = _EXPOSE_RE.search(text)
+            port = int(m.group(1)) if m and 0 < int(m.group(1)) < 65536 else None
+    except DeployError as exc:
+        if exc.status != 404:
+            raise
+    return {"repo": repo, "ref": ref, "branches": names[:100],
+            "default_branch": meta.get("default_branch") or "main",
+            "private": bool(meta.get("private")),
+            "dockerfile": dockerfile, "container_port": port,
+            "key": suggest_key(repo)}
+
+
+def _int_field(body, field, default=None):
+    v = body.get(field, default)
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= 65535:
+        raise DeployError(400, "%s must be a port number" % field)
+    return v
+
+
+def _env_text(raw):
+    """The create form's KEY=value lines -> .env text, or raise 400."""
+    if raw in (None, ""):
+        return ""
+    if not isinstance(raw, str) or len(raw) > 16384:
+        raise DeployError(400, "env must be text (max 16 KB)")
+    lines = []
+    for n, line in enumerate(raw.replace("\r\n", "\n").split("\n"), 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        name, sep, value = s.partition("=")
+        if not sep or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name.strip()):
+            raise DeployError(400, "env line %d is not KEY=value" % n)
+        lines.append("%s=%s" % (name.strip(), value.strip()))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def create_app(body):
+    """Write a definition, its .env and its deploy poller, then start the
+    first deploy. Returns {key, job_id}."""
+    if not isinstance(body, dict):
+        raise DeployError(400, "body must be a JSON object")
+    repo = _check_repo(body.get("repo"))
+    ref = _check_ref(body.get("ref") or "main")
+    key = body.get("key")
+    if not isinstance(key, str) or not ghapp.KEY_RE.match(key):
+        raise DeployError(400, "key must be 3-32 lowercase letters, digits or dashes")
+    name = clean_field("name", body.get("name") or key, 60, False) or key
+    tagline = clean_field("tagline", body.get("tagline") or "From GitHub", 40, False)
+    health = body.get("health_path") or "/"
+    volume = body.get("volume") or None
+    env_text = _env_text(body.get("env"))
+    cmd = "app/web/ghapp.py deploy %s" % key
+    with _ghapp_lock:
+        if find_service(key) is not None:
+            raise DeployError(409, "%s already exists" % key)
+        # A custom poller of that name belongs to someone else unless it is
+        # this app's own leftover (same cmd); never silently repoint it.
+        existing = _deployd_overrides(_deployd_state_dir(_deployd_env())).get(key)
+        if isinstance(existing, dict) and existing.get("cmd") != cmd:
+            raise DeployError(409, "a deploy poller called %s already exists" % key)
+        d = {"version": 1, "key": key, "name": name, "tagline": tagline,
+             "repo": repo, "ref": ref,
+             "dockerfile": body.get("dockerfile") or "Dockerfile",
+             "context": body.get("context") or ".",
+             "container_port": _int_field(body, "container_port"),
+             "port": allocate_port(),
+             "health_path": health, "volume": volume,
+             "created_at": _now_iso()}
+        try:
+            ghapp.validate(d)
+        except ghapp.AppError as exc:
+            raise DeployError(400, str(exc))
+        os.makedirs(ghapp.app_dir(key), exist_ok=True)
+        env_file = os.path.join(ghapp.app_dir(key), ".env")
+        if not os.path.exists(env_file):
+            fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(env_text)
+        os.makedirs(ghapp.DEFS_DIR, exist_ok=True)
+        _write_json_atomically(ghapp.def_path(key), d, ".app.")
+    auto = True
+    # Paused until the first deploy succeeds (ghapp clears the marker and
+    # records the sha), so deployd never races the launcher's own first run.
+    try:
+        ghapp.set_paused(key, True)
+    except OSError as exc:
+        log("github app %s: could not pause its poller: %s" % (key, exc))
+    try:
+        deployd_upsert_poller(key, {"repo": ghapp.clone_url(repo), "ref": ref,
+                                    "cmd": cmd})
+    except Exception as exc:          # deployd not installed: still deployable
+        log("github app %s: no deploy poller (%s)" % (key, exc))
+        auto = False
+    return {"key": key, "port": d["port"], "auto_deploy": auto,
+            "job_id": start_deploy(key)}
+
+
+def delete_app(key):
+    """Forget a GitHub app: its definition and its poller. Refused while it
+    is installed (Remove it first, which stops it and drops its Serve port).
+    ~/services/apps/<key> stays, as every Remove here keeps data."""
+    svc = find_service(key)
+    if svc is None or svc.get("runner") != "ghapp":
+        raise DeployError(404, "no GitHub app called %s" % key)
+    if marker_exists(svc.get("marker")):
+        raise DeployError(409, "%s is still installed: Remove it first" % key)
+    if jobs_by_key().get(key, {}).get("status") == "running":
+        raise DeployError(409, "a job is running for %s" % key)
+    # The runner's own per-app lock covers a deploy deployd started too; held
+    # while the definition goes, a deploy that starts after re-reads it under
+    # the same lock and stops.
+    with _ghapp_lock:
+        try:
+            with ghapp.Lock(key):
+                os.remove(ghapp.def_path(key))
+        except ghapp.AppError:
+            raise DeployError(409, "a deploy of %s is running: try again when it ends" % key)
+        except OSError as exc:
+            raise DeployError(500, "could not delete the definition: %s" % exc)
+    try:
+        deployd_remove_poller(key)
+    except DeployError:
+        pass
+    return {"key": key, "kept": ghapp.app_dir(key)}
+
 # ---- deployd
 
 # deployd writes ANSI-coloured setup.sh output into <key>.log; the detail
@@ -2020,11 +2407,11 @@ def update_env_var(key, var, body):
     if "\n" in value or "\r" in value or "\0" in value:
         raise DeployError(400, "value must be a single line")
 
-    raw = svc.get("env")
-    if not raw:
-        raise DeployError(404, "service has no env file")
-    path = resolve_registry_path(raw, "env")   # allowed-roots gate: 403
-    rendered = quote_env_value(value)          # 400
+    path = env_path(svc)                       # allowed-roots gate: 403
+    literal = is_docker_env(svc)
+    if literal and value != value.strip():
+        raise DeployError(400, "value cannot start or end with whitespace")
+    rendered = value if literal else quote_env_value(value)   # 400
 
     with _env_lock:
         try:
@@ -2038,7 +2425,7 @@ def update_env_var(key, var, body):
         new_text, count = render_env_edit(text, var, rendered)
         if count == 0:
             raise DeployError(404, "unknown variable")
-        if parse_env(new_text).get(var) != value:
+        if parse_env(new_text, literal=literal).get(var) != value:
             log("refusing to write %s.%s: quoting does not round-trip" % (key, var))
             raise DeployError(500, "could not encode that value safely")
         _write_env_atomically(path, new_text, st)
@@ -2368,6 +2755,10 @@ def resolve_script(svc):
     looked up in the registry first. This resolves and re-checks anyway so
     a bad registry edit (or a `..` in one) still cannot escape.
     """
+    if svc.get("runner") == "ghapp":
+        if not os.path.isfile(GHAPP_SCRIPT):
+            raise DeployError(404, "ghapp.py not found")
+        return GHAPP_SCRIPT
     setup = svc.get("setup")
     if not setup:
         raise DeployError(400, "service has no setup script (planned)")
@@ -2479,7 +2870,7 @@ def start_deploy(key):
     # deploy runs must not change which revision and script the receipt names.
     job["source"] = deploy_source(svc, script)
 
-    argv = build_command(script)
+    argv = build_command(script, runner_args(svc, "deploy"))
     cwd = os.path.dirname(script)
     try:
         # Combined stdout+stderr straight into the job log: the UI polls the
@@ -2930,6 +3321,8 @@ def teardown_script(svc):
         script = resolve_script(svc)
     except DeployError:
         return None
+    if svc.get("runner") == "ghapp":
+        return script            # `ghapp.py remove <key>` is its teardown
     path = os.path.join(os.path.dirname(script), "teardown.sh")
     return path if os.path.isfile(path) else None
 
@@ -3067,8 +3460,8 @@ def plan_action(svc, action):
         if guard and os.path.realpath(guard[0]) != os.path.realpath(teardown):
             steps.append(_guard_step(guard))
         steps.extend(_kuma_steps("pause", monitors))
-        steps.append({"argv": build_command(teardown), "optional": False,
-                      "always": False, "env": None})
+        steps.append({"argv": build_command(teardown, runner_args(svc, "remove")),
+                      "optional": False, "always": False, "env": None})
         # A teardown that fails leaves the service up, so its monitors must
         # not stay paused. Runs only after a failure (see _run_steps).
         steps.extend(_kuma_steps("resume", monitors, on_failure=True))
@@ -3637,8 +4030,8 @@ def plan_update(svc, script, refs):
     for ref in refs:
         steps.append({"argv": sg_docker(["docker", "pull", ref]),
                       "optional": False, "always": False, "env": None})
-    steps.append({"argv": build_command(script), "optional": False,
-                  "always": False, "env": None,
+    steps.append({"argv": build_command(script, runner_args(svc, "deploy")),
+                  "optional": False, "always": False, "env": None,
                   "cwd": os.path.dirname(script)})
     steps.extend(_kuma_steps("resume", monitors))
     return steps
@@ -3852,6 +4245,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "api/deployd":
             self._json(200, deployd_payload())
             return
+        if path == "api/github/repos":
+            self._json(200, github_repos())
+            return
         if path.startswith("api/services/"):
             rest = path[len("api/services/"):].strip("/")
             if rest and "/" not in rest:
@@ -3889,6 +4285,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         limit = MAX_TOUCH_BYTES if is_touch else MAX_BODY_BYTES
         body = self._read_json_body(limit)
 
+        if parts == ["api", "github", "inspect"]:
+            self._json(200, github_inspect(body))
+            return
+        if parts == ["api", "apps"]:
+            self._json(202, create_app(body))
+            return
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "services" \
                 and parts[3] == "deploy":
             job_id = start_deploy(parts[2])
@@ -3983,6 +4385,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "deployd" \
                 and parts[2] == "pollers":
             self._json(200, deployd_remove_poller(parts[3]))
+            return
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "apps":
+            self._json(200, delete_app(parts[2]))
             return
         self._error(404, "unknown endpoint")
 

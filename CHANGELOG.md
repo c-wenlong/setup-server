@@ -10,6 +10,17 @@ first, dated by merge.
 
 ### Added
 
+- **Launcher: apps built from GitHub repos (backend).** `app/web/ghapp.py`
+  builds a repo's Dockerfile at an exact commit, runs it on
+  `127.0.0.1:<port>`, health-checks it (rolling back to the previous image
+  on failure) and publishes it with `tailscale serve`. Apps live in box state
+  (`~/services/launcher/apps/`), appear in the launcher under **From
+  GitHub** with the usual Open / Start / Stop / Remove / .env editing, and
+  redeploy on every push through a deployd poller. New API: `GET
+  api/github/repos`, `POST api/github/inspect`, `POST api/apps`, `DELETE
+  api/apps/{key}`. Ports 8300–8399 are reserved for them. The New app
+  screens follow.
+
 - **Launcher: Deploys page.** deployd leaves the app list and becomes a
   top-level page in the sidebar (`#/deploys`): the timer as Polling or
   Paused with Pause / Resume, every watched repo with its last deploy, and
