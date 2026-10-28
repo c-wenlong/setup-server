@@ -19,7 +19,9 @@
 
   var mount = document.getElementById('ghsource-mount');
   if (!mount) return;
-  var FETCH_TIMEOUT = 60000;   // a branch, a file and a PR on GitHub
+  /* Above the server's own worst case (six gh calls, 20-30 s each); a
+     second export while one runs is a 409, never a queue. */
+  var FETCH_TIMEOUT = 180000;
   var busy = null;             // key being exported: repaints keep the button off
   var last = {};               // key -> {url, error}: url only until the next payload
 

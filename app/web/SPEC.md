@@ -702,8 +702,12 @@ as `app/web/apps/<key>.json` through a pull request.
 checkout's `origin` (must be GitHub), then through the box's `gh` login and
 the GitHub API only (never the checkout, which deployd ff-pulls and other
 sessions share): the default branch's head → a new branch
-`launcher/export-<key>-<timestamp>` → PUT the file (with the current
-file's sha when the repo already has one) → open a PR. The PR body lists
+`launcher/export-<key>-<timestamp>` → PUT the file (with the file's sha
+as read on that new branch, so a merge to the default branch in between
+cannot mismatch) → open a PR. Exports never queue: a second one while one
+runs is a 409. A retry of the same bytes while the recorded PR is still
+open is a 409 naming that PR; once it is closed unmerged, export runs
+again. The page waits 180 s, above the server's worst case. The PR body lists
 the app's `.env` variable NAMES, never values. The reply `{key, url,
 number, branch}` is also recorded in `~/services/apps/<key>/exported.json`
 with a sha256 of the exported bytes.

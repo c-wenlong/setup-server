@@ -6913,13 +6913,18 @@ class ExportAppTest(GithubAppsBase):
         self._ex_saved = (server.gh_write, server.setup_repo_slug)
         self.writes = []
         self.contents_sha = None
+        self.contents_refs = []
+        self.pr_state = "open"
 
         def fake_api(path, cache=True):
             if path == "repos/c-wenlong/setup-server":
                 return {"default_branch": "main"}
             if path == "repos/c-wenlong/setup-server/git/ref/heads/main":
                 return {"object": {"sha": "a" * 40}}
+            if path.startswith("repos/c-wenlong/setup-server/pulls/"):
+                return {"state": self.pr_state}
             if path.startswith("repos/c-wenlong/setup-server/contents/"):
+                self.contents_refs.append(path.split("?ref=", 1)[1])
                 if self.contents_sha:
                     return {"sha": self.contents_sha}
                 raise server.DeployError(404, "not found on GitHub")
@@ -6978,6 +6983,29 @@ class ExportAppTest(GithubAppsBase):
         self.assertEqual(server.github_payload(self.entry())["in_repo"], "differs")
         server.export_app("hello-app")
         self.assertEqual(self.writes[1][2]["sha"], "b" * 40)
+        # read from the export branch (cut from the captured commit), not main
+        self.assertEqual(self.contents_refs,
+                         [server.urllib.parse.quote(self.writes[1][2]["branch"], safe="")])
+
+    def test_an_open_pr_for_the_same_version_is_not_duplicated(self):
+        first = server.export_app("hello-app")
+        self.writes = []
+        with self.assertRaises(server.DeployError) as ctx:
+            server.export_app("hello-app")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn(first["url"], str(ctx.exception))
+        self.assertEqual(self.writes, [])
+        self.pr_state = "closed"           # closed unmerged: export again
+        server.export_app("hello-app")
+        self.assertEqual(len(self.writes), 3)
+
+    def test_a_second_export_while_one_runs_is_409(self):
+        with server._export_lock:
+            with self.assertRaises(server.DeployError) as ctx:
+                server.export_app("hello-app")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.writes, [])
+        server.export_app("hello-app")     # the lock was released
 
     def test_same_copy_in_repo_is_refused_and_reported(self):
         self.put_repo_copy(json.load(open(ghapp.def_path("hello-app"))))

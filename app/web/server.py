@@ -1936,42 +1936,82 @@ def export_app(key):
     text = export_text(d)
     slug = setup_repo_slug()
     path = "%s/%s.json" % (EXPORT_DIR, key)
-    with _export_lock:
-        meta = gh_api("repos/%s" % slug, cache=False)
-        base = _check_ref((meta or {}).get("default_branch") or "main")
-        ref = gh_api("repos/%s/git/ref/heads/%s" % (slug, base), cache=False)
-        sha = ((ref or {}).get("object") or {}).get("sha")
-        if not isinstance(sha, str) or not ghapp.SHA_RE.match(sha):
-            raise DeployError(502, "GitHub did not return the %s commit" % base)
-        branch = "launcher/export-%s-%s" % (key, time.strftime("%Y%m%d-%H%M%S"))
-        gh_write("POST", "repos/%s/git/refs" % slug,
-                 [("ref", "refs/heads/" + branch), ("sha", sha)])
-        fields = [("message", "apps: export %s from the launcher" % key),
-                  ("content", base64.b64encode(text.encode("utf-8")).decode("ascii")),
-                  ("branch", branch)]
-        try:
-            cur = gh_api("repos/%s/contents/%s?ref=%s"
-                         % (slug, path, urllib.parse.quote(base, safe="")), cache=False)
-            if isinstance(cur, dict) and isinstance(cur.get("sha"), str):
-                fields.append(("sha", cur["sha"]))
-        except DeployError as exc:
-            if exc.status != 404:
-                raise
-        gh_write("PUT", "repos/%s/contents/%s" % (slug, path), fields)
-        pr = gh_write("POST", "repos/%s/pulls" % slug,
-                      [("title", "apps: export %s from the launcher" % key),
-                       ("head", branch), ("base", base),
-                       ("body", _export_body(key, d))])
-        url = (pr or {}).get("html_url")
-        if not isinstance(url, str) or not url.startswith("https://github.com/"):
-            raise DeployError(502, "GitHub did not return the pull request "
-                              "(branch %s was pushed)" % branch)
-        _write_json_atomically(_export_record_path(key),
-                               {"url": url, "number": pr.get("number"),
-                                "branch": branch, "at": _now_iso(),
-                                "digest": _digest(text)}, ".exported.")
+    # Never queue behind another export: the page gives up long before a
+    # queued one would finish, and a retry would then open a second PR.
+    if not _export_lock.acquire(blocking=False):
+        raise DeployError(409, "another export is running: try again when it ends")
+    try:
+        return _export_locked(key, d, text, slug, path)
+    finally:
+        _export_lock.release()
+
+
+def _open_export_pr(slug, key, text):
+    """The recorded export PR for exactly this definition, if still open."""
+    try:
+        with open(_export_record_path(key), encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) or rec.get("digest") != _digest(text):
+        return None
+    number = rec.get("number")
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        return None
+    try:
+        pr = gh_api("repos/%s/pulls/%d" % (slug, number), cache=False)
+    except DeployError as exc:
+        if exc.status == 404:
+            return None
+        raise
+    return rec.get("url") if isinstance(pr, dict) and pr.get("state") == "open" else None
+
+
+def _export_locked(key, d, text, slug, path):
+    """export_app's GitHub calls; caller holds _export_lock."""
+    # A retry after the page timed out must not open a second PR for
+    # the same bytes while the first is still open.
+    already = _open_export_pr(slug, key, text)
+    if already:
+        raise DeployError(409, "an export PR for this version is already open: %s" % already)
+    meta = gh_api("repos/%s" % slug, cache=False)
+    base = _check_ref((meta or {}).get("default_branch") or "main")
+    ref = gh_api("repos/%s/git/ref/heads/%s" % (slug, base), cache=False)
+    sha = ((ref or {}).get("object") or {}).get("sha")
+    if not isinstance(sha, str) or not ghapp.SHA_RE.match(sha):
+        raise DeployError(502, "GitHub did not return the %s commit" % base)
+    branch = "launcher/export-%s-%s" % (key, time.strftime("%Y%m%d-%H%M%S"))
+    gh_write("POST", "repos/%s/git/refs" % slug,
+             [("ref", "refs/heads/" + branch), ("sha", sha)])
+    fields = [("message", "apps: export %s from the launcher" % key),
+              ("content", base64.b64encode(text.encode("utf-8")).decode("ascii")),
+              ("branch", branch)]
+    # The file's sha must come from the commit the branch was cut from,
+    # not the moving default branch, or a merge in between breaks the PUT.
+    try:
+        cur = gh_api("repos/%s/contents/%s?ref=%s"
+                     % (slug, path, urllib.parse.quote(branch, safe="")), cache=False)
+        if isinstance(cur, dict) and isinstance(cur.get("sha"), str):
+            fields.append(("sha", cur["sha"]))
+    except DeployError as exc:
+        if exc.status != 404:
+            raise
+    gh_write("PUT", "repos/%s/contents/%s" % (slug, path), fields)
+    pr = gh_write("POST", "repos/%s/pulls" % slug,
+                  [("title", "apps: export %s from the launcher" % key),
+                   ("head", branch), ("base", base),
+                   ("body", _export_body(key, d))])
+    url = (pr or {}).get("html_url")
+    if not isinstance(url, str) or not url.startswith("https://github.com/"):
+        raise DeployError(502, "GitHub did not return the pull request "
+                          "(branch %s was pushed)" % branch)
+    _write_json_atomically(_export_record_path(key),
+                           {"url": url, "number": pr.get("number"),
+                            "branch": branch, "at": _now_iso(),
+                            "digest": _digest(text)}, ".exported.")
     log("github app %s exported: %s" % (key, url))
     return {"key": key, "url": url, "number": pr.get("number"), "branch": branch}
+
 
 # ---- deployd
 
