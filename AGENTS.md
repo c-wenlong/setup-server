@@ -87,8 +87,9 @@ It provides `info`/`ok`/`warn`/`die`, `detect_os` (sets `OS`),
 - Something goes into the lib only when at least ~5 scripts share it
   unchanged. A service's own quirk (a tailnet-IP listener, a native
   unit, a custom health probe) stays in its script.
-- A script on the lib never redefines `info`/`ok`/`warn`/`die`;
-  `make structure` fails if it does.
+- Every `setup.sh` and `teardown.sh` sources the lib and never redefines
+  `info`/`ok`/`warn`/`die`; `make structure` fails on either. Its
+  `LIB_EXEMPT` list names the one exception below.
 - The mocked suite must copy the lib into its sandbox, laid out as
   `<sandbox>/repo/services/<service>/` with `<sandbox>/repo/lib/` beside it
   (`copy_lib` in `services/forgejo/tests/run-tests.sh`). `make structure`
@@ -97,8 +98,13 @@ It provides `info`/`ok`/`warn`/`die`, `detect_os` (sets `OS`),
   (`make test-scripts`). A change to the lib runs that plus every
   migrated service's suite (`make test`).
 
-Scripts not yet migrated still carry their own copies; migrating one is a
-mechanical swap of those blocks for the calls above, with its suite green.
+Every `setup.sh` and `teardown.sh` sources the lib except
+`services/beszel/setup.sh`, which keeps its own output style and Serve logic
+because its suite is static analysis of the script text (see
+`services/beszel/SETUP.md`). Blocks a service does its own way stay local even
+in a migrated script: code-server's default-port Serve, coolify's optional
+Soketi publish, the launcher's `--set-path` publish, ntfy-control's optional
+Tailscale lookup, and remote-desktop's Linux-only preflight.
 
 ## Required files per service
 
@@ -187,9 +193,8 @@ service is deployed on this machine, run `--live` too.
 ## Adding a new service (checklist)
 
 1. `mkdir services/<service>/tests/stubs`; start `setup.sh` from a reference
-   implementation (section ordering, preflight), sourcing `lib/common.sh`
-   for the helpers. forgejo already does; code-server still carries its own
-   copies, so swap those for the lib calls when you start from it:
+   implementation (sources `lib/common.sh` for its helpers and preflight,
+   section ordering):
    `services/code-server/setup.sh` for a native binary under a systemd user unit or a
    launchd LaunchAgent, `services/forgejo/setup.sh` for the Docker shape (gitignored
    `.env`, `LOCAL_PORT`/`HTTPS_PORT`, Compose restart policy instead of a unit).

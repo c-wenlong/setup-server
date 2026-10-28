@@ -73,10 +73,8 @@ set -euo pipefail
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 have()  { command -v "$1" >/dev/null 2>&1; }
 
 # 0700. Holds the RDP TLS private key on its way to /var/lib, and the probe
@@ -252,7 +250,7 @@ RDP_PASSWORD="${RDP_PASSWORD:-}"
 # .env's value first; fall back to whatever was exported into the environment.
 [ -n "$RDP_PASSWORD" ] || RDP_PASSWORD="$REQUESTED_RDP_PASSWORD"
 [ "$GUAC_PORT" = "$REQUESTED_PORT" ] || warn "GUAC_PORT=$REQUESTED_PORT ignored — $ENV_FILE says $GUAC_PORT. Edit .env and re-run to move the port."
-case "$GUAC_PORT" in ''|*[!0-9]*) die "GUAC_PORT must be numeric (got: $GUAC_PORT)";; esac
+require_numeric GUAC_PORT
 case "$RDP_PORT"  in ''|*[!0-9]*) die "RDP_PORT must be numeric (got: $RDP_PORT)";; esac
 
 APPLIED="$GUAC_STATE/.applied"

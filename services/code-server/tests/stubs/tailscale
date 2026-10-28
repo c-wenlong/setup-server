@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tailscale stub. State lives in $STATE_DIR:
 #   backend_state       — override BackendState (default Running)
+#   no_dns_name         — exists => status JSON has no DNSName (MagicDNS off)
 #   operator            — exists => serve allowed without sudo
 #   serve_fails_left    — countdown of forced serve failures (approval-link flow)
 #   serve_status        — text `tailscale serve status` prints (teardown tests)
@@ -21,7 +22,10 @@ case "$1" in
   status)
     state="Running"
     [ -f "$STATE_DIR/backend_state" ] && state="$(cat "$STATE_DIR/backend_state")"
-    cat <<EOF
+    if [ -f "$STATE_DIR/no_dns_name" ]; then
+      printf '{\n  "BackendState": "%s",\n  "Self": {}\n}\n' "$state"
+    else
+      cat <<EOF
 {
   "BackendState": "$state",
   "Self": {
@@ -29,6 +33,7 @@ case "$1" in
   }
 }
 EOF
+    fi
     ;;
   serve)
     if [ -f "$STATE_DIR/serve_fails_left" ]; then

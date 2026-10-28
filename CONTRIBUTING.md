@@ -51,10 +51,10 @@ There are two reference implementations: [code-server](services/code-server/setu
 for a native service under a systemd user unit or a launchd LaunchAgent, and
 [forgejo](services/forgejo/setup.sh) for the Docker shape. Read whichever matches the
 service you are adding. A new script sources [lib/common.sh](lib/common.sh) for
-the output helpers, preflight checks and the Tailscale Serve publish step.
-forgejo already does; code-server has not been migrated yet, so when you copy
-it, swap its local helper and preflight blocks for the lib calls. AGENTS.md's
-"Shared helpers" section lists them and the rules for extending the lib.
+the output helpers and preflight checks, as both references do; forgejo also
+uses the shared Tailscale Serve publish step (code-server keeps its own,
+since it publishes on the default :443). AGENTS.md's "Shared helpers" section
+lists the calls and the rules for extending the lib.
 
 ## Project layout
 

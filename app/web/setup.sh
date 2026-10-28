@@ -49,19 +49,16 @@ UNIT="$HOME/.config/systemd/user/$UNIT_NAME"
 PLIST_LABEL="com.launcher.server"
 PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root. The unit is a *user* unit and the deploy API must run as you."
+refuse_root "Run as a regular user, not root. The unit is a *user* unit and the deploy API must run as you."
 
 command -v curl >/dev/null || die "curl is required (health checks)."
 command -v python3 >/dev/null || die "python3 is required — launcher is a stdlib-only Python 3 server."
@@ -73,19 +70,11 @@ if [ "$OS" = "Linux" ]; then
   command -v loginctl >/dev/null  || die "loginctl is required on Linux (lingering, for boot persistence)."
 fi
 
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed: https://tailscale.com/download"
-fi
-
-state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+resolve_tailscale
+require_tailscale_up
 
 case "$PORT" in ''|*[!0-9]*) die "LAUNCHER_PORT must be numeric (got: $PORT)";; esac
-case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
+require_numeric HTTPS_PORT
 case "$SHORT_PATH" in
   ''|/*) ;;
   *) die "SHORT_PATH must start with '/' (got: $SHORT_PATH). Use SHORT_PATH= to disable the :$SHORT_HTTPS_PORT handler.";;
@@ -203,14 +192,8 @@ else
 fi
 
 info "Waiting for launcher on http://127.0.0.1:$PORT/healthz"
-for i in $(seq 1 40); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
-    ok "launcher is answering locally"
-    break
-  fi
-  [ "$i" -eq 40 ] && die "launcher did not answer on http://127.0.0.1:$PORT/healthz. Logs: $LOGCMD"
-  sleep 1
-done
+wait_http "http://127.0.0.1:$PORT/healthz" 40 1 || die "launcher did not answer on http://127.0.0.1:$PORT/healthz. Logs: $LOGCMD"
+ok "launcher is answering locally"
 
 # ------------------------------------------------------- tailscale serve
 # Published twice, both proxying the same backend. Every serve invocation goes
@@ -245,7 +228,7 @@ else
   info "SHORT_PATH is empty — skipping the :$SHORT_HTTPS_PORT path handler"
 fi
 
-host="$("$TAILSCALE" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+host="$(tailnet_host)"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 
 port_url="https://$host:$HTTPS_PORT/"

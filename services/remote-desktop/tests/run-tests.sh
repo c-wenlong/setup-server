@@ -109,6 +109,10 @@ set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SERVICE_DIR/../.." && pwd)"
+# setup.sh sources ../../lib/common.sh, so every sandbox copy of the
+# service sits at <root>/services/<name> with <root>/lib beside it.
+copy_lib() { mkdir -p "$1/lib" && cp "$REPO_ROOT/lib/common.sh" "$1/lib/"; }
 STUBS="$TESTS_DIR/stubs"
 
 PASS=0; FAIL=0
@@ -129,8 +133,9 @@ setup() {
   export HOME="$SANDBOX/home"
   export STATE_DIR="$SANDBOX/state"
   export CALLS_LOG="$SANDBOX/calls.log"
-  SVC="$SANDBOX/svc"
+  SVC="$SANDBOX/repo/services/remote-desktop"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
+  copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
   cp "$SERVICE_DIR/setup.sh" "$SVC/"
   [ -f "$SERVICE_DIR/teardown.sh" ] && cp "$SERVICE_DIR/teardown.sh" "$SVC/"
@@ -1550,6 +1555,7 @@ test_teardown_purge_keeps_a_checkout_inside() {
   local repo="$HOME/services/remote-desktop/setup-server/services/remote-desktop"
   mkdir -p "$repo"
   cp -R "$SVC/." "$repo/"
+  copy_lib "${repo%/services/*}"
   echo secret > "$HOME/services/remote-desktop/setup-server/other.env"
   OUT="$(printf '%s\n' "remote-desktop" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
   check "exits non-zero"                [ "$CODE" -ne 0 ]

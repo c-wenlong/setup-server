@@ -46,10 +46,8 @@ PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/$PLIST_LABEL.plist"
 LOCK="$SERVICE_HOME/.poll.lock"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 PURGE=0
 case "${1:-}" in
@@ -60,10 +58,9 @@ esac
 [ "$#" -le 1 ] || die "Too many arguments (usage: ./teardown.sh [--purge])"
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+refuse_root
 if [ "$OS" = "Linux" ]; then
   command -v systemctl >/dev/null || die "systemd is required on Linux (the poller is a systemd user timer)."
 else
