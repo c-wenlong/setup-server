@@ -45,10 +45,8 @@ BRANCH="${BRANCH:-main}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 # A manual ./setup.sh re-installs the service: clear deployd's disabled
 # flag (written by teardown.sh) so auto-deploy resumes. deployd itself
@@ -63,35 +61,18 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+refuse_root
 command -v curl >/dev/null || die "curl is required."
 command -v git >/dev/null || die "git is required."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
 
 command -v uv >/dev/null || die "uv is required (the site builds with 'uv run apps/web/build/build_site.py'). Install: https://docs.astral.sh/uv/"
 
-if ! command -v docker >/dev/null; then
-  [ "$OS" = "Linux" ] && die "Docker is not installed. On Ubuntu: sudo apt-get install -y docker.io docker-compose-v2"
-  die "Docker is not installed. On macOS install Docker Desktop or OrbStack."
-fi
-if ! docker ps >/dev/null 2>&1; then
-  [ "$OS" = "Linux" ] && die "Cannot talk to the Docker daemon. Fix: sudo usermod -aG docker $USER, then log out/in (or run via: sg docker -c ./setup.sh)"
-  die "Cannot talk to the Docker daemon. Is Docker Desktop/OrbStack running?"
-fi
-docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)."
-
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed: https://tailscale.com/download"
-fi
-state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
+require_docker_compose
+resolve_tailscale
+require_tailscale_up
 
 # The build runs inside the fetch clone; it must exist and look like sources.
 # A saved .env wins over the default path on re-runs: only an explicit
@@ -110,11 +91,10 @@ if [ ! -f "$ENV_FILE" ] && [ -z "${SITE_PASSPHRASE:-}" ]; then
   die "SITE_PASSPHRASE is required on first run: SITE_PASSPHRASE='...' ./setup.sh (same value as the sources repo's GitHub secret)."
 fi
 
-case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
-case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
+require_numeric HTTPS_PORT LOCAL_PORT
 ok "$OS + curl + git + uv + Docker + Compose v2 + Tailscale (running) + repo at $SOURCE_REPO"
 
-host="$("$TAILSCALE" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+host="$(tailnet_host)"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 
 # ---------------------------------------------------------------- .env
@@ -192,14 +172,8 @@ info "Starting nginx container (docker compose up -d)"
 docker compose --project-directory "$SERVICE_DIR" up -d
 
 info "Waiting for nginx on 127.0.0.1:$LOCAL_PORT"
-for i in $(seq 1 15); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$LOCAL_PORT/" 2>/dev/null; then
-    ok "Site is answering locally"
-    break
-  fi
-  [ "$i" -eq 15 ] && die "nginx did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs"
-  sleep 1
-done
+wait_http "http://127.0.0.1:$LOCAL_PORT/" 15 1 || die "nginx did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs"
+ok "Site is answering locally"
 
 # ------------------------------------------------- legacy poller removal
 # deployd (services/deployd) polls the remote and re-runs this script now;
@@ -228,18 +202,7 @@ fi
 
 # ------------------------------------------------------- tailscale serve
 info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT, tailnet only)"
-if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT" >/dev/null 2>&1; then
-  if [ "$OS" = "Linux" ]; then
-    info "Direct serve failed — trying operator grant (needs sudo, one time)"
-    sudo tailscale set --operator="$USER"
-  fi
-  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"; do
-    echo
-    info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
-    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
-  done
-fi
-ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
+ts_serve_publish "$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"
 
 # ------------------------------------------------------------ final check
 url="https://$host:$HTTPS_PORT"
