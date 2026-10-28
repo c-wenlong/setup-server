@@ -247,6 +247,14 @@ last deployed, and **+ Add poller** for a repo, branch and command stored
 in `~/services/deployd/state/pollers.json`. See
 [services/deployd/SETUP.md](../../services/deployd/SETUP.md).
 
+**New app.** **+ New app** on the Deploys page turns a GitHub repo with a
+Dockerfile into an app on this box: pick a repo (the box's `gh` login
+lists yours; type `owner/name` for any other), choose the branch, check
+the container port and key, add env lines, then **Create and deploy**.
+The first build streams in the usual job sheet; after that every push to
+the branch redeploys it. It shows under **From GitHub** with the usual
+Open / Start / Stop / Remove and .env editing.
+
 **Phone.** The sidebar is a drawer behind the ☰ in the top bar; the ⋯ menu
 opens as a sheet from the bottom.
 

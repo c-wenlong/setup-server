@@ -652,3 +652,41 @@ deploy holds the app's lock.
 or health probe, not any configured Serve port (proxy, static or text), not
 listening. Recorded in DIRECTORY.md.
 
+## v11 — New app from GitHub: the screens (2026-10-28)
+
+The front end for v10's API, on the Deploys page. `static/newapp.js`
+(plus `newapp.css`) is a self-contained dialog, the same module contract
+as notes.js and deployd.js: deployd.js adds **+ New app** (the accent
+button; **+ Add poller** drops to a plain one) and calls
+`window.LauncherNewApp.open(button)`.
+
+1. **Pick a repo.** `GET api/github/repos` fills a list (archived repos
+   hidden, newest push first, a Private tag, description and push age),
+   filtered as you type. A query shaped `owner/name` that is not in the
+   list becomes a "Use this repo" row, so a public repo of someone else's,
+   or one the listing missed, still works. When the listing fails (no `gh`
+   login) the error says so and typing `owner/name` still works.
+2. **Configure.** `POST api/github/inspect` fills: Name (repo name), Key
+   (the suggested free key), Branch (a select of the repo's branches),
+   Container port (the first `EXPOSE`), Health path (`/`), Environment
+   (KEY=value lines), and under Advanced the Dockerfile path, build context
+   and data volume. A status line says whether a Dockerfile sits at the
+   root of that branch. Create stays disabled without one unless Advanced
+   names another path. Changing the branch re-inspects it and refreshes the
+   port unless it was typed.
+3. **Create and deploy** posts `api/apps`. On 202 the dialog closes,
+   `LauncherApp.refresh()` brings the new From GitHub row in, and
+   `LauncherApp.watchJob(key, job_id, 'deploy')` streams the first build
+   in app.js's job sheet. Errors (409 key taken, 400 bad field, 503 no
+   free port) show inline and keep the form. Create stays off while a
+   request is in flight or a branch check is running or failed. When the
+   reply says `auto_deploy: false` (deployd's poller could not be added),
+   the dialog stays open on a "Created" step that says pushes will not
+   redeploy, with **Watch the build** to continue.
+
+Keys and ports are checked in the browser only for a quick message; the
+server's checks are the authority. Esc, the scrim and Back/Cancel close or
+step back; focus returns to **+ New app**.
+
+Not yet: forgetting an app from the UI (`DELETE api/apps/{key}` exists),
+and Export to repo (a PR adding the app's manifest to this repo).

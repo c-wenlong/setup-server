@@ -678,9 +678,20 @@
     head.appendChild(titles);
     pageEngine = make('div', 'dep-engine');
     head.appendChild(pageEngine);
-    var add = make('button', 'h-btn h-btn-accent');
+    /* The common case first: an app straight from a GitHub repo (newapp.js
+       builds and wires its poller). + Add poller stays for anything else,
+       a custom command watching any git remote. */
+    var newApp = make('button', 'h-btn h-btn-accent');
+    newApp.type = 'button';
+    newApp.title = 'Build a GitHub repo’s Dockerfile on this box and redeploy on every push';
+    newApp.appendChild(text(make('span'), '+ New app'));
+    newApp.addEventListener('click', function () {
+      if (window.LauncherNewApp) window.LauncherNewApp.open(newApp);
+    });
+    var add = make('button', 'h-btn');
     add.type = 'button';
     add.disabled = true;
+    add.title = 'Run any command when a git branch moves';
     pageAdd = add;
     add.appendChild(text(make('span'), '+ Add poller'));
     add.addEventListener('click', function () {
@@ -695,6 +706,7 @@
       if (first) first.focus();
     });
     head.appendChild(add);
+    head.appendChild(newApp);
     page.appendChild(head);
     pageBody = make('div', 'dep-pagebody');
     page.appendChild(pageBody);
