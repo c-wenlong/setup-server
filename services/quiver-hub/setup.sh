@@ -59,12 +59,10 @@ UNIT_NAME="quiver-hub.service"
 UNIT="$HOME/.config/systemd/user/$UNIT_NAME"
 PLIST_LABEL="com.setup-server.quiver-hub"
 PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
-OS="$(uname -s)"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
+detect_os
 
 # A manual ./setup.sh re-installs the service: clear deployd's disabled
 # flag (written by teardown.sh) so auto-deploy resumes. deployd itself
@@ -83,8 +81,7 @@ hub_ok() {  # hub_ok <status url> <timeout>: the hub answers {"ok": true}
 
 # ---------------------------------------------------------------- preflight
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root. The hub reads your own sessions (~/.claude, ~/.codex, ...) and runs as a user unit."
+refuse_root "Run as a regular user, not root. The hub reads your own sessions (~/.claude, ~/.codex, ...) and runs as a user unit."
 command -v curl >/dev/null || die "curl is required (health checks)."
 command -v git >/dev/null  || die "git is required (resolving QUIVER_REF, and uv installs quiver from git)."
 command -v uv >/dev/null   || die "uv is required to install quiver. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh"
@@ -93,19 +90,10 @@ if [ "$OS" = "Linux" ]; then
   command -v loginctl >/dev/null  || die "loginctl is required on Linux (lingering, for boot persistence)."
 fi
 
-# Tailscale CLI: on PATH, or inside the macOS app bundle.
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed. Install it first: https://tailscale.com/download"
-fi
+resolve_tailscale
+require_tailscale_up
 
-state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
-
-TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+TS_HOST="$(tailnet_host)"
 [ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 ok "$OS + curl + git + uv + Tailscale (running as $TS_HOST)"
 
@@ -147,8 +135,7 @@ if [ -n "$HTTPS_PORT_EXPLICIT" ] && [ "$HTTPS_PORT" != "$REQUESTED_HTTPS" ]; the
   warn "HTTPS_PORT=$REQUESTED_HTTPS ignored: $ENV_FILE says $HTTPS_PORT. Edit .env and re-run to move it."
 fi
 
-case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT must be numeric (got: $LOCAL_PORT)";; esac
-case "$HTTPS_PORT" in ''|*[!0-9]*) die "HTTPS_PORT must be numeric (got: $HTTPS_PORT)";; esac
+require_numeric LOCAL_PORT HTTPS_PORT
 # A bare `--https=443` replaces whatever owns "/" there (code-server on this box).
 [ "$HTTPS_PORT" != "443" ] || die "HTTPS_PORT=443 would replace the :443 / handler (code-server). Pick another port."
 
@@ -328,18 +315,7 @@ if [ "$OS" = "Linux" ]; then
 fi
 
 # ------------------------------------------------------- tailscale serve
-if ! "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "$SERVE_TARGET" >/dev/null 2>&1; then
-  if [ "$OS" = "Linux" ]; then
-    info "Granting Tailscale operator rights to $USER (needs sudo, one time)"
-    sudo tailscale set --operator="$USER"
-  fi
-  until "$TAILSCALE" serve --bg --https="$HTTPS_PORT" "$SERVE_TARGET"; do
-    echo
-    info "Tailscale Serve needs one-time enablement: open the URL above, approve, then press Enter to retry."
-    read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
-  done
-fi
-ok "Tailscale Serve: HTTPS :$HTTPS_PORT -> $SERVE_TARGET (tailnet only)"
+ts_serve_publish "$HTTPS_PORT" "$SERVE_TARGET"
 
 # ------------------------------------------------------------ final check
 url="$PUBLIC_URL"

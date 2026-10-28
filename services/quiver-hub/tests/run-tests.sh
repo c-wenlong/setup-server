@@ -16,6 +16,10 @@ set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SERVICE_DIR/../.." && pwd)"
+# setup.sh sources ../../lib/common.sh, so every sandbox copy of the
+# service sits at <root>/services/<name> with <root>/lib beside it.
+copy_lib() { mkdir -p "$1/lib" && cp "$REPO_ROOT/lib/common.sh" "$1/lib/"; }
 STUBS="$TESTS_DIR/stubs"
 
 PASS=0; FAIL=0
@@ -33,8 +37,9 @@ setup() {
   export HOME="$SANDBOX/home"
   export STATE_DIR="$SANDBOX/state"
   export CALLS_LOG="$SANDBOX/calls.log"
-  SVC="$SANDBOX/svc"
+  SVC="$SANDBOX/repo/services/quiver-hub"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
+  copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
   cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/pair.sh" "$SERVICE_DIR/teardown.sh" "$SVC/"
   UNIT="$HOME/.config/systemd/user/quiver-hub.service"
@@ -459,7 +464,7 @@ test_serve_approval_retry() {
   echo 2 > "$STATE_DIR/serve_fails_left"   # fail twice, succeed on 3rd attempt
   run_deploy $'\n'                         # press Enter at the approval prompt
   check "exits zero after retry"     [ "$CODE" -eq 0 ]
-  check "showed the approval prompt" out_has "one-time enablement"
+  check "showed the approval prompt" out_has "approval URL"
   check "eventually published"       out_has "Tailscale Serve: HTTPS :8477"
   [ "$OS" = "Linux" ] && check "granted operator on 1st failure" calls_have "sudo tailscale set --operator="
   teardown
@@ -957,6 +962,7 @@ test_teardown_purge_keeps_a_checkout_inside() {
   local repo="$HOME/services/quiver-hub/setup-server/services/quiver-hub"
   mkdir -p "$repo"
   cp -R "$SVC/." "$repo/"
+  copy_lib "${repo%/services/*}"
   echo secret > "$HOME/services/quiver-hub/setup-server/other.env"
   OUT="$(printf '%s\n' "quiver-hub" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
   check "exits non-zero"              [ "$CODE" -ne 0 ]

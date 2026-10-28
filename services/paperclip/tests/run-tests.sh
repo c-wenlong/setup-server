@@ -14,6 +14,10 @@ set -u
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SERVICE_DIR/../.." && pwd)"
+# setup.sh sources ../../lib/common.sh, so every sandbox copy of the
+# service sits at <root>/services/<name> with <root>/lib beside it.
+copy_lib() { mkdir -p "$1/lib" && cp "$REPO_ROOT/lib/common.sh" "$1/lib/"; }
 STUBS="$TESTS_DIR/stubs"
 
 PASS=0; FAIL=0
@@ -28,8 +32,9 @@ setup() {
   export HOME="$SANDBOX/home"
   export STATE_DIR="$SANDBOX/state"
   export CALLS_LOG="$SANDBOX/calls.log"
-  SVC="$SANDBOX/svc"
+  SVC="$SANDBOX/repo/services/paperclip"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC/ui"
+  copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
   cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SVC/"
   cp "$SERVICE_DIR/ui/profile-credentials.js" "$SVC/ui/"
@@ -375,10 +380,10 @@ test_migrates_legacy_env() {
   echo "• paperclip-openhands/.env is split, not regenerated"
   setup
   touch "$STATE_DIR/operator" "$STATE_DIR/linger"
-  mkdir -p "$SANDBOX/paperclip-openhands"
-  # setup.sh looks at $SERVICE_DIR/../paperclip-openhands/.env — SVC is
-  # $SANDBOX/svc, so sibling is $SANDBOX/paperclip-openhands.
-  cat > "$SANDBOX/paperclip-openhands/.env" <<'EOF'
+  mkdir -p "$SANDBOX/repo/services/paperclip-openhands"
+  # setup.sh looks at $SERVICE_DIR/../paperclip-openhands/.env, the
+  # sibling of $SVC in the sandbox's services/ folder.
+  cat > "$SANDBOX/repo/services/paperclip-openhands/.env" <<'EOF'
 PAPERCLIP_PORT=3100
 TZ=Asia/Singapore
 AGENT_WORKSPACES=$HOME/agent-workspaces
@@ -799,6 +804,7 @@ test_teardown_purge_keeps_a_checkout_inside() {
   local repo="$HOME/services/paperclip/setup-server/services/paperclip"
   mkdir -p "$repo"
   cp -R "$SVC/." "$repo/"
+  copy_lib "${repo%/services/*}"
   echo secret > "$HOME/services/paperclip/setup-server/other.env"
   OUT="$(printf '%s\n' "paperclip" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
   check "checkout intact"              [ -f "$repo/teardown.sh" ] && [ -f "$repo/setup.sh" ]

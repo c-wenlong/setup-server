@@ -42,10 +42,8 @@ LEGACY_MARKER="$HOME/services/paperclip-openhands"
 PAPERCLIP_DATA="${PAPERCLIP_DATA:-$HOME/.paperclip}"
 WORKSPACES="${AGENT_WORKSPACES:-$HOME/agent-workspaces}"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m ✓ \033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m ! \033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31m ✗ \033[0m %s\n' "$*" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$SERVICE_DIR/../../lib/common.sh"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -118,27 +116,16 @@ find_paperclip_config() {
 }
 
 # ---------------------------------------------------------------- preflight
-OS="$(uname -s)"
+detect_os
 info "Preflight checks ($OS)"
-case "$OS" in Linux|Darwin) ;; *) die "Unsupported OS: $OS (Linux and macOS only)";; esac
-[ "$(id -u)" -ne 0 ] || die "Run as a regular user, not root."
+refuse_root
 command -v curl >/dev/null || die "curl is required."
 command -v python3 >/dev/null || die "python3 is required (JSON patch + version compare)."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
 
-if command -v tailscale >/dev/null; then
-  TAILSCALE="tailscale"
-elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-  TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-else
-  die "Tailscale is not installed: https://tailscale.com/download"
-fi
-
-state="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-[ "$state" = "Running" ] || die "Tailscale is not up (state: ${state:-unknown}). Run: sudo tailscale up (or open the Tailscale app)"
-
-case "$PAPERCLIP_PORT" in ''|*[!0-9]*) die "PAPERCLIP_PORT must be numeric (got: $PAPERCLIP_PORT)";; esac
-case "$PAPERCLIP_HTTPS_PORT" in ''|*[!0-9]*) die "PAPERCLIP_HTTPS_PORT must be numeric (got: $PAPERCLIP_HTTPS_PORT)";; esac
+resolve_tailscale
+require_tailscale_up
+require_numeric PAPERCLIP_PORT PAPERCLIP_HTTPS_PORT
 
 if ! command -v node >/dev/null; then
   die "Node.js >= 24.11.0 is required for Paperclip (official managed install). Install it user-locally and re-run."
@@ -149,7 +136,7 @@ fi
 
 ok "$OS + curl + python3 + Node $(node --version) + Tailscale (running)"
 
-TS_HOST="$("$TAILSCALE" status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+TS_HOST="$(tailnet_host)"
 [ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 ok "Tailnet name: $TS_HOST"
 
@@ -557,18 +544,7 @@ done
 
 # ------------------------------------------------------- tailscale serve
 publish() { # publish <https_port> <local_port>
-  if ! "$TAILSCALE" serve --bg --https="$1" "http://127.0.0.1:$2" >/dev/null 2>&1; then
-    if [ "$OS" = "Linux" ]; then
-      info "Serve failed — trying operator grant (needs sudo, one time)"
-      sudo tailscale set --operator="$USER"
-    fi
-    until "$TAILSCALE" serve --bg --https="$1" "http://127.0.0.1:$2"; do
-      echo
-      info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
-      read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"
-    done
-  fi
-  ok "Tailscale Serve: HTTPS :$1 -> http://127.0.0.1:$2"
+  ts_serve_publish "$1" "http://127.0.0.1:$2"
 }
 info "Publishing via Tailscale Serve (tailnet only, no Funnel)"
 publish "$PAPERCLIP_HTTPS_PORT" "$PAPERCLIP_PORT"

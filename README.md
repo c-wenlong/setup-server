@@ -32,9 +32,11 @@ setup-server
 
 **setup-server** turns each self-hosted service into a single script you can run
 and re-run. Every service lives in its own directory and deploys independently:
-copy that directory to the target server, run its `setup.sh`, and you get an
-installed, configured, boot-persistent service published over HTTPS to your
-Tailscale network and nowhere else.
+clone the repo on the target server, run that service's `setup.sh`, and you get
+an installed, configured, boot-persistent service published over HTTPS to your
+Tailscale network and nowhere else. (The scripts source shared helpers from
+`lib/common.sh`, so a copy of one service folder needs `lib/` two levels up
+beside it, as in the repo.)
 
 Nothing binds to LAN or internet interfaces, there are no passwords to invent,
 and every script ships with a mocked test suite that runs the real `setup.sh`
@@ -148,7 +150,10 @@ than rebuilding it, so it is the normal way to apply a change.
 ## Layout
 
 Services live in `services/<service>/`. Front ends for the box live in
-`app/`: `app/web/` is the launcher. Every service directory contains:
+`app/`: `app/web/` is the launcher. Shell helpers every script shares
+(logging, preflight, the Tailscale Serve publish) live in `lib/common.sh`,
+which each script sources by a path relative to itself. Every service
+directory contains:
 
 ```
 services/<service>/
