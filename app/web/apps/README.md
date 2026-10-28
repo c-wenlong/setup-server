@@ -1,0 +1,16 @@
+# Exported GitHub apps
+
+One `<key>.json` per app built from a GitHub repo by the launcher
+(`app/web/ghapp.py`). Each is a copy of the box's
+`~/services/launcher/apps/<key>.json`, added here by the launcher's
+**Export to repo** button as a pull request, never by hand.
+
+The files carry no secrets: an app's `.env` stays on the box, and the export
+PR lists only its variable names. CI checks every file here is a definition
+the runner accepts, named for its key, on its own port in 8300–8399, and
+not clashing with a service in `services.json`
+(`ExportedAppsInRepoTest` in `app/web/tests/test_server.py`).
+
+The launcher compares each file with the box copy to show "Saved in this
+repo" on the app's detail page. Bringing an app back on a fresh box from
+its file here is not built yet.

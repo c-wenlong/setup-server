@@ -10,6 +10,14 @@ first, dated by merge.
 
 ### Added
 
+- **Launcher: Export to repo for GitHub apps.** A GitHub app's detail page
+  gains a Source section: repo, branch, whether this repo holds its
+  definition, and **Export to repo**, which opens a pull request adding
+  `app/web/apps/<key>.json` through the box's `gh` login (never touching
+  the checkout). No secrets leave the box; CI validates every exported
+  file. New: `POST api/apps/{key}/export`, a `github` field on
+  `/api/services`.
+
 - **Launcher: New app from GitHub.** **+ New app** on the Deploys page
   opens a two-step dialog: pick one of the box's `gh` login's repos (or type
   `owner/name`), then branch, container port (from `EXPOSE`), key, health

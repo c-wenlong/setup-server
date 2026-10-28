@@ -45,6 +45,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <link rel="stylesheet" href="catalogue.css">
 <link rel="stylesheet" href="deployd.css">
 <link rel="stylesheet" href="newapp.css">
+<link rel="stylesheet" href="ghsource.css">
 <link rel="stylesheet" href="home.css">
 </head>
 <body>
@@ -186,6 +187,10 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
           other. Renders nothing when /api/deployd has nothing to say. -->
      <div id="deployd-mount"></div>
 
+     <!-- Mount point for ghsource.js: a GitHub app's repo, branch and its
+          Export to repo control. Renders nothing for any other service. -->
+     <div id="ghsource-mount"></div>
+
      <!-- Image updates: what the last registry check found for each of the
           service's containers, and a Check now. app.js fills it; hidden for
           anything that runs no containers or is not installed. -->
@@ -287,6 +292,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <script src="notes.js"></script>
 <script src="deployd.js"></script>
 <script src="newapp.js"></script>
+<script src="ghsource.js"></script>
 <script src="catalogue.js"></script>
 <script src="tooltip.js"></script>
 </body>

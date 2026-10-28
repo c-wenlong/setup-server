@@ -1,0 +1,26 @@
+/* ghsource.css: the Source section on a GitHub app's detail page
+   (ghsource.js). The section shell and button come from app.css. */
+
+.ghs { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.ghs-line, .ghs-status, .ghs-err { margin: 0; font-size: 13px; line-height: 1.5; color: var(--muted); }
+.ghs-line a { color: var(--text); font-weight: 560; }
+.ghs code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.ghs-status { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 4px; }
+.ghs-status::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--faint);
+  transform: translateY(-1px);
+}
+.ghs-status.is-ok::before { background: var(--ok); }
+.ghs-status.is-warn::before { background: var(--warn); }
+.ghs-err { color: var(--bad); }
