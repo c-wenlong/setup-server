@@ -736,17 +736,21 @@
       }
       return;
     }
-    var pill = make('span', 'dep-pill ' + (t === 'active' ? 'is-ok' : 'is-warn'));
-    text(pill, t === 'active' ? 'Polling' : t ? 'Paused' : 'Timer state unknown');
+    /* Only "inactive" is a pause someone chose. "failed" is a fault, and
+       activating/deactivating are mid-change, so neither reads as Paused. */
+    var look = TIMER_LOOK[t] || (t ? ['is-warn', 'Timer ' + t] : ['is-warn', 'Timer state unknown']);
+    var pill = make('span', 'dep-pill ' + look[0]);
+    text(pill, look[1]);
     pill.title = t ? 'deployd.timer reports “' + t + '”'
                    : 'Timer state unavailable: no systemd, no unit, or no connection';
     pageEngine.appendChild(pill);
-    if (t && a && typeof a.action === 'function') {
-      var verb = t === 'active' ? 'stop' : 'start';
+    var verb = t === 'active' ? 'stop' : (t === 'inactive' || t === 'failed') ? 'start' : '';
+    if (verb && a && typeof a.action === 'function') {
       var b = make('button', 'h-btn');
       b.type = 'button';
-      text(b, t === 'active' ? 'Pause' : 'Resume');
+      text(b, t === 'active' ? 'Pause' : t === 'failed' ? 'Restart' : 'Resume');
       b.title = t === 'active' ? 'Stop polling: nothing redeploys until you resume'
+              : t === 'failed' ? 'Start the failed timer again'
                                : 'Start polling again';
       b.addEventListener('click', function () {
         if (!a.action('deployd', verb, b)) {
@@ -757,6 +761,14 @@
       pageEngine.appendChild(b);
     }
   }
+
+  var TIMER_LOOK = {
+    active: ['is-ok', 'Polling'],
+    inactive: ['is-warn', 'Paused'],
+    failed: ['is-bad', 'Timer failed'],
+    activating: ['is-warn', 'Starting…'],
+    deactivating: ['is-warn', 'Stopping…']
+  };
 
   function refresh() {
     var t = ++token;

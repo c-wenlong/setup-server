@@ -367,6 +367,7 @@ textarea.dep-input {
 .dep-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .dep-pill.is-ok { color: var(--ok); }
 .dep-pill.is-warn { color: var(--warn); }
+.dep-pill.is-bad { color: var(--bad); }
 /* The rows are cards already; the page section is only a column. */
 .dep-page { display: flex; flex-direction: column; }
 .dep-page > .dep-note:first-child { margin-top: 10px; }

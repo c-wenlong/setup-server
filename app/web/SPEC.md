@@ -567,8 +567,10 @@ unchanged: the same systemd timer, the same `app.json` `deploy` blocks and
   its own rather than a row. `GET /api/services` always carries `hidden`
   (only a JSON `true` hides); the home list and the catalogue skip it, the
   payload keeps it so the page can drive its controls.
-- The page header shows the timer as **Polling** or **Paused** with
-  Pause / Resume (deployd's stop / start, through the confirm sheet) and
+- The page header shows the timer as **Polling** (`active`), **Paused**
+  (`inactive`), **Timer failed** (`failed`, in the error colour) or
+  Starting… / Stopping… while it changes, with Pause / Resume / Restart
+  (deployd's stop / start, through the confirm sheet; none mid-change) and
   **+ Add poller**; below it every watched repo, the not-polled list and the
   notes deployd leaves (failed self-update, pending launcher restart).
 - `#/service/deployd` redirects to `#/deploys`. Other detail pages keep
