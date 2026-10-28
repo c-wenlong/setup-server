@@ -70,6 +70,19 @@ test_preflight_tailscale_down() {
   teardown
 }
 
+# MagicDNS off: no tailnet name to build the URL from. Must stop with the
+# reason, not exit silently (pipefail) or carry on with "https://".
+test_no_tailnet_name() {
+  echo "• no tailnet DNS name: stops with the reason"
+  setup
+  touch "$STATE_DIR/no_dns_name"
+  run_deploy
+  check "exits non-zero"            [ "$CODE" -ne 0 ]
+  check "names the problem"         out_has "Could not determine tailnet DNS name"
+  check "never prints a bare URL"   bash -c '! grep -q "https://$" <<<"$1"' _ "$OUT"
+  teardown
+}
+
 test_preflight_refuses_root() {
   echo "• preflight refuses to run as root"
   setup
@@ -514,11 +527,15 @@ test_teardown_purge_keeps_a_checkout_inside() {
   echo "• teardown --purge: a checkout living inside ~/services/code-server survives"
   deployed
   local repo="$HOME/services/code-server/setup-server/services/code-server"
-  mkdir -p "$repo"
+  mkdir -p "$repo" "$HOME/services/code-server/setup-server/lib"
   cp "$TEARDOWN" "$repo/teardown.sh"
+  # The lib goes too, so the purge reaches real_dir instead of dying on a
+  # missing source.
+  cp "$TESTS_DIR/../../../lib/common.sh" "$HOME/services/code-server/setup-server/lib/"
   echo secret > "$HOME/services/code-server/setup-server/other.env"
   OUT="$(printf '%s\n' "code-server" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
   check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says why"                    out_has "holds this checkout"
   check "checkout intact"             [ -f "$repo/teardown.sh" ]
   check "other services' files kept"  [ -f "$HOME/services/code-server/setup-server/other.env" ]
   check "nothing changed"             no_call "systemctl"
@@ -640,6 +657,7 @@ test_live() {
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_tailscale_down
+test_no_tailnet_name
 test_preflight_refuses_root
 test_fresh_deploy
 test_idempotent_rerun
