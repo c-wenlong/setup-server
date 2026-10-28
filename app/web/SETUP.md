@@ -256,7 +256,11 @@ the branch redeploys it. It shows under **From GitHub** with the usual
 Open / Start / Stop / Remove and .env editing. Its detail page has a
 **Source** section with **Export to repo**, which opens a pull request on
 this repo adding its definition as `app/web/apps/<key>.json` (no secrets;
-the `.env` stays on the box).
+the `.env` stays on the box). On a rebuilt box, each exported app shows
+under From GitHub as not installed; **Install** copies its definition onto
+the box, starts its `.env` with the variable names and empty values, and
+deploys it. Fill the values in under Environment, then deploy again if the
+first build fails its health check.
 
 **Phone.** The sidebar is a drawer behind the ☰ in the top bar; the ⋯ menu
 opens as a sheet from the bottom.

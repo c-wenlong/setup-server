@@ -6975,7 +6975,8 @@ class ExportAppTest(GithubAppsBase):
         self.assertNotIn("two words", f3["body"])
         gh = server.github_payload(self.entry())
         self.assertEqual(gh, {"repo": "c-wenlong/hello", "ref": "main",
-                              "in_repo": "absent", "export_pr": out["url"]})
+                              "in_repo": "absent", "export_pr": out["url"],
+                              "env_names": ["A", "B"]})
 
     def test_an_existing_repo_file_is_updated_with_its_sha(self):
         self.contents_sha = "b" * 40
@@ -7065,6 +7066,169 @@ class ExportAppTest(GithubAppsBase):
             srv.server_close()
         self.assertEqual(resp.status, 200, body)
         self.assertEqual(json.loads(body)["number"], 9)
+
+
+class RestoreAppTest(GithubAppsBase):
+    """Repo-only definitions (app/web/apps/<key>.json with no box copy) are
+    listed, and Deploy adopts one onto the box first."""
+
+    def setUp(self):
+        super().setUp()
+        self._rs_saved = (server.start_deploy,)
+        self.real_start = self._gh_saved[5]          # the unpatched start_deploy
+        self.started = []
+        self.d = {"version": 1, "key": "kept-app", "name": "Kept",
+                  "tagline": "From GitHub", "repo": "c-wenlong/kept", "ref": "main",
+                  "dockerfile": "Dockerfile", "context": ".", "container_port": 3000,
+                  "port": 8310, "health_path": "/", "volume": None,
+                  "env_names": ["TOKEN", "DB_URL"], "created_at": "2026-10-01T00:00:00Z"}
+
+    def put(self, d, name=None):
+        folder = os.path.join(server.REPO_ROOT, server.EXPORT_DIR)
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, name or d["key"] + ".json"), "w") as fh:
+            json.dump(d, fh)
+
+    def deploy(self, key):
+        """The real start_deploy with the job itself faked."""
+        saved = (server.register_job, server.build_command, server.subprocess.Popen,
+                 server.threading.Thread)
+        server.register_job = lambda k, a: self.started.append(k) or {
+            "id": "job-9", "log_path": os.path.join(self.tmp, "job.log")}
+        try:
+            server.build_command = lambda script, args: ["true"]
+            server.subprocess.Popen = lambda *a, **k: None
+            server.threading.Thread = lambda *a, **k: type("T", (), {"start": lambda s: None})()
+            return self.real_start(key)
+        finally:
+            (server.register_job, server.build_command, server.subprocess.Popen,
+             server.threading.Thread) = saved
+
+    def test_repo_only_definition_is_listed_as_not_installed(self):
+        self.put(self.d)
+        svc = server.find_service("kept-app")
+        self.assertEqual(svc["ghapp_source"], "repo")
+        self.assertFalse(os.path.exists(ghapp.def_path("kept-app")))
+        gh = server.github_payload(svc)
+        self.assertEqual((gh["in_repo"], gh["env_names"]), ("only", ["TOKEN", "DB_URL"]))
+        self.assertIn({"id": "github", "label": "From GitHub"}, server.load_groups())
+
+    def test_create_refuses_a_key_the_repo_defines(self):
+        self.put(dict(self.d, key="hello-app"), "hello-app.json")
+        with self.assertRaises(server.DeployError) as ctx:
+            self.create()
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_something_answering_on_its_port_does_not_make_it_installed(self):
+        self.put(self.d)
+        svc = server.find_service("kept-app")
+        self.assertIsNone(svc["health"])
+        self.assertIsNone(svc["control"])
+        server.probe_all = lambda urls: {u: True for u in urls}
+        saved = server.control_running
+        server.control_running = lambda s, r: True
+        try:
+            tile = [s for s in server.services_payload()["services"]
+                    if s["key"] == "kept-app"][0]
+            detail = server.service_detail("kept-app")
+        finally:
+            server.control_running = saved
+        self.assertEqual((tile["state"], tile["installed"], tile["active"]),
+                         ("available", False, False))
+        self.assertEqual((detail["state"], detail["installed"], detail["active"]),
+                         ("available", False, False))
+
+    def test_box_copy_wins_over_the_repo_copy(self):
+        self.create()
+        self.put(dict(self.d, key="hello-app", ref="old"), "hello-app.json")
+        svc = server.find_service("hello-app")
+        self.assertEqual((svc["ghapp_source"], svc["github"]["ref"]), ("box", "main"))
+        self.assertEqual(server.github_payload(svc)["in_repo"], "differs")
+
+    def test_deploy_adopts_then_runs(self):
+        self.put(self.d)
+        self.assertEqual(self.deploy("kept-app"), "job-9")
+        self.assertEqual(self.started, ["kept-app"])
+        box = json.load(open(ghapp.def_path("kept-app")))
+        self.assertEqual(box, self.d)                    # port kept: nothing had it
+        env = os.path.join(ghapp.app_dir("kept-app"), ".env")
+        self.assertEqual(open(env).read(), "TOKEN=\nDB_URL=\n")
+        self.assertEqual(os.stat(env).st_mode & 0o777, 0o600)
+        self.assertEqual(self.pollers["kept-app"]["cmd"], "app/web/ghapp.py deploy kept-app")
+        marker = os.path.join(ghapp.DEPLOYD_HOME, "state", "kept-app.disabled")
+        self.assertTrue(os.path.exists(marker))           # paused until it deploys
+        svc = server.find_service("kept-app")
+        self.assertEqual(svc["ghapp_source"], "box")
+        self.assertEqual(server.github_payload(svc)["in_repo"], "same")
+
+    def test_a_taken_port_gets_a_new_one(self):
+        self.put(dict(self.d, port=8301))                 # forgejo's URL port
+        self.deploy("kept-app")
+        port = json.load(open(ghapp.def_path("kept-app")))["port"]
+        self.assertNotIn(port, (8300, 8301))
+        self.assertIn(port, server.GHAPP_PORTS)
+
+    def test_a_serve_port_proxying_elsewhere_is_taken(self):
+        ghapp.serve_ports = lambda: {"8310": "http://127.0.0.1:9999"}
+        self.put(self.d)
+        self.deploy("kept-app")
+        self.assertNotEqual(json.load(open(ghapp.def_path("kept-app")))["port"], 8310)
+
+    def test_its_own_leftover_serve_port_is_kept(self):
+        ghapp.serve_ports = lambda: {"8310": "http://127.0.0.1:8310"}
+        server._port_free = lambda p: p != 8310          # its old container
+        self.put(self.d)
+        self.deploy("kept-app")
+        self.assertEqual(json.load(open(ghapp.def_path("kept-app")))["port"], 8310)
+
+    def test_an_existing_env_is_never_overwritten(self):
+        self.put(self.d)
+        os.makedirs(ghapp.app_dir("kept-app"))
+        env = os.path.join(ghapp.app_dir("kept-app"), ".env")
+        with open(env, "w") as fh:
+            fh.write("TOKEN=kept\n")
+        self.deploy("kept-app")
+        self.assertEqual(open(env).read(), "TOKEN=kept\n")
+
+    def test_adopt_refuses_another_poller_and_writes_nothing(self):
+        self.put(self.d)
+        saved = server._deployd_overrides
+        server._deployd_overrides = lambda s: {"kept-app": {"repo": "r", "cmd": "make"}}
+        try:
+            with self.assertRaises(server.DeployError) as ctx:
+                self.deploy("kept-app")
+        finally:
+            server._deployd_overrides = saved
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertFalse(os.path.exists(ghapp.def_path("kept-app")))
+        self.assertEqual(self.started, [])
+
+    def test_bad_repo_files_are_skipped(self):
+        self.put(dict(self.d, key="other-app"), "kept-app.json")   # name mismatch
+        self.put(dict(self.d, key="bad-app", repo="../x"))
+        folder = os.path.join(server.REPO_ROOT, server.EXPORT_DIR)
+        with open(os.path.join(folder, "junk-app.json"), "w") as fh:
+            fh.write("{not json")
+        self.assertEqual(server._repo_defs(), {})
+        self.assertIsNone(server.find_service("kept-app"))
+
+    def test_export_and_delete_refuse_a_repo_only_app(self):
+        self.put(self.d)
+        for fn in (server.export_app, server.delete_app):
+            with self.assertRaises(server.DeployError) as ctx:
+                fn("kept-app")
+            self.assertEqual(ctx.exception.status, 409)
+
+    def test_create_records_env_names(self):
+        self.create()
+        self.assertEqual(json.load(open(ghapp.def_path("hello-app")))["env_names"], ["A", "B"])
+
+    def test_bad_env_names_are_refused(self):
+        for bad in ("A", ["1A"], ["A B"], [3], ["A"] * 101):
+            with self.assertRaises(ghapp.AppError):
+                ghapp.validate(dict(self.d, env_names=bad))
+        ghapp.validate(dict(self.d, env_names=[]))
+        ghapp.validate({k: v for k, v in self.d.items() if k != "env_names"})
 
 
 class SetupRepoSlugTest(unittest.TestCase):

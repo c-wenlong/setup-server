@@ -59,7 +59,8 @@
   var STATUS = {
     same: ['is-ok', 'Saved in this repo as '],
     differs: ['is-warn', 'This repo has an older copy at '],
-    absent: ['', 'Only on this box. Export it so a rebuilt box can bring it back from ']
+    absent: ['', 'Only on this box. Export it so a rebuilt box can bring it back from '],
+    only: ['is-warn', 'Not set up on this box yet. Deploy builds it here from ']
   };
 
   function paint() {
@@ -89,6 +90,20 @@
     status.appendChild(text(make('code'), 'app/web/apps/' + key + '.json'));
     status.appendChild(document.createTextNode('.'));
     sec.appendChild(status);
+
+    /* A repo-only app: Deploy (app.js's own button) adopts it. Say which
+       .env values it will start without, since only names travel. */
+    if (gh.in_repo === 'only') {
+      var names = Array.isArray(gh.env_names) ? gh.env_names : [];
+      var how = make('p', 'ghs-line');
+      text(how, names.length
+        ? 'Its .env starts with empty values for ' + names.join(', ')
+          + '. Fill them in under Environment, then Deploy again if the first build fails its health check.'
+        : 'Deploy copies its definition onto this box and turns on auto-deploy.');
+      sec.appendChild(how);
+      mount.appendChild(sec);
+      return;
+    }
 
     var mine = last[key] || {};
     var pr = mine.url || gh.export_pr;

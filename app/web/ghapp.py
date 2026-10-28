@@ -66,6 +66,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REL_RE = re.compile(r"^(?!-)(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9._/-]{1,200}$")
 HEALTH_RE = re.compile(r"^/[A-Za-z0-9._~/?=&%-]{0,200}$")
 VOLUME_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,200}$")
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 # deployd's .env (read for SERVICE_HOME, never sourced) and its default home.
 DEPLOYD_ENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -125,6 +126,11 @@ def validate(d):
     if vol is not None and (not isinstance(vol, str) or not VOLUME_RE.match(vol)
                             or "/../" in vol + "/"):
         raise AppError("bad volume %r" % (vol,))
+    names = d.get("env_names")
+    if names is not None and (not isinstance(names, list) or len(names) > 100
+                              or not all(isinstance(n, str) and ENV_NAME_RE.match(n)
+                                         for n in names)):
+        raise AppError("bad env_names %r" % (names,))
     return d
 
 
