@@ -16,8 +16,11 @@ first, dated by merge.
   local health wait and the Tailscale Serve publish-with-operator-grant step
   were copied word for word into almost every `setup.sh` and `teardown.sh`.
   They now live once in `lib/common.sh`, which scripts source by a path
-  relative to themselves. First migrated: stirling-pdf, forgejo, n8n and
-  umami (setup and teardown); the rest follow in later PRs. The lib has its
+  relative to themselves. Migrated so far (setup and teardown): stirling-pdf,
+  forgejo, n8n, umami, then appflowy, design-systems, homepage, immich,
+  kaichenpedia, metabase, open-webui, plane, sources, trigger-dev,
+  vaultwarden, seafile, paperless-ngx and jellyfin; the rest follow in later
+  PRs. The lib has its
   own suite (`scripts/tests/test-common-lib.sh`), mocked suites copy it into
   their sandbox, and `make structure` checks both that a migrated script does
   not redefine the helpers and that its suite ships the lib. User-visible
