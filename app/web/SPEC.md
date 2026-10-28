@@ -742,8 +742,12 @@ no box copy is a restore candidate, listed and deployable like any app.
 valid box definition (`box`), then each valid repo file whose key the box
 lacks (`repo`). A repo file must pass `ghapp.validate` and be named for its
 key; a bad one is logged and skipped. The entry carries `ghapp_source` and
-`env_names`; its marker (`deployed.json`) is absent, so its state is
-`available` and it shows under From GitHub with Install. Create refuses a
+`env_names`, and no health probe or control parts, and `restore_pending()`
+forces it to not installed and not active in both `/api/services` and the
+detail response: something else may answer on its exported port on a
+rebuilt box, and it must still offer Install (which reaches the port check
+in `adopt_app`), never Open. Its state is `available` and it shows under
+From GitHub with Install. Create refuses a
 key the repo defines (409): Deploy that one instead.
 
 **Adopt on Deploy.** `start_deploy` on a repo-only entry first runs

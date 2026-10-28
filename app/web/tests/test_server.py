@@ -7119,6 +7119,25 @@ class RestoreAppTest(GithubAppsBase):
             self.create()
         self.assertEqual(ctx.exception.status, 409)
 
+    def test_something_answering_on_its_port_does_not_make_it_installed(self):
+        self.put(self.d)
+        svc = server.find_service("kept-app")
+        self.assertIsNone(svc["health"])
+        self.assertIsNone(svc["control"])
+        server.probe_all = lambda urls: {u: True for u in urls}
+        saved = server.control_running
+        server.control_running = lambda s, r: True
+        try:
+            tile = [s for s in server.services_payload()["services"]
+                    if s["key"] == "kept-app"][0]
+            detail = server.service_detail("kept-app")
+        finally:
+            server.control_running = saved
+        self.assertEqual((tile["state"], tile["installed"], tile["active"]),
+                         ("available", False, False))
+        self.assertEqual((detail["state"], detail["installed"], detail["active"]),
+                         ("available", False, False))
+
     def test_box_copy_wins_over_the_repo_copy(self):
         self.create()
         self.put(dict(self.d, key="hello-app", ref="old"), "hello-app.json")

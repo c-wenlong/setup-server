@@ -1302,6 +1302,8 @@ def services_payload():
         receipt = load_receipt(svc.get("key"))
         installed = ((active or marker_exists(svc.get("marker")))
                      and not is_removed(receipt, active))
+        if restore_pending(svc):
+            active = degraded = installed = False
         name, description = effective(svc, overrides)
         gid = svc.get("group")
         services.append({
@@ -1401,6 +1403,8 @@ def service_detail(key):
     receipt = load_receipt(key)
     installed = ((active or marker_exists(svc.get("marker")))
                  and not is_removed(receipt, active))
+    if restore_pending(svc):
+        active = degraded = installed = False
     overrides = load_overrides()
     name, description = effective(svc, overrides)
     edited = sorted(overrides.get(key, {}))
@@ -1533,7 +1537,10 @@ def ghapp_entries():
             "author": owner,
             "icon": "code",
             "url": "https://HOST:%d/" % d["port"],
-            "health": "http://127.0.0.1:%d%s" % (d["port"], d["health_path"]),
+            # A repo-only app is not on this box: something else may answer
+            # on its exported port, so it gets no probe and no parts.
+            "health": (None if source == "repo" else
+                       "http://127.0.0.1:%d%s" % (d["port"], d["health_path"])),
             "marker": os.path.join(ghapp.app_dir(key), "deployed.json"),
             # Shown by the detail page's env editor; every read and write
             # goes through env_path(), which derives it from the key.
@@ -1541,12 +1548,20 @@ def ghapp_entries():
             "runner": "ghapp",
             "setup": "app/web/ghapp.py",
             "github": {"repo": d["repo"], "ref": d["ref"]},
-            "control": {"parts": [{"container": ghapp.container_name(key)}]},
+            "control": (None if source == "repo" else
+                        {"parts": [{"container": ghapp.container_name(key)}]}),
             # "repo": only this checkout's app/web/apps/ has it; Deploy adopts it.
             "ghapp_source": source,
             "env_names": list(d.get("env_names") or []),
         })
     return entries
+
+
+def restore_pending(svc):
+    """True for a GitHub app only this checkout's app/web/apps/ holds: it is
+    available (Install adopts it) and never installed or active, whatever
+    happens to answer on its exported port, until adopt_app copies it."""
+    return svc.get("runner") == "ghapp" and svc.get("ghapp_source") == "repo"
 
 
 def runner_args(svc, verb):
@@ -3181,7 +3196,7 @@ def start_deploy(key):
     svc = find_service(key)
     if svc is None:
         raise DeployError(404, "unknown service")
-    if svc.get("runner") == "ghapp" and svc.get("ghapp_source") == "repo":
+    if restore_pending(svc):
         if jobs_by_key().get(key, {}).get("status") == "running":
             raise DeployError(409, "a job is already running for %s" % key)
         adopt_app(key)
