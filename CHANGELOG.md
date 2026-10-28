@@ -19,8 +19,9 @@ first, dated by merge.
   relative to themselves. Migrated so far (setup and teardown): stirling-pdf,
   forgejo, n8n, umami, then appflowy, design-systems, homepage, immich,
   kaichenpedia, metabase, open-webui, plane, sources, trigger-dev,
-  vaultwarden, seafile, paperless-ngx and jellyfin; the rest follow in later
-  PRs. The lib has its
+  vaultwarden, seafile, paperless-ngx, jellyfin, then coolify, firefly-iii,
+  gnosia-learn, home-assistant, monitoring, openhands, paperclip,
+  quiver-hub, adguard and syncthing; the native services follow. The lib has its
   own suite (`scripts/tests/test-common-lib.sh`), mocked suites copy it into
   their sandbox, and `make structure` checks both that a migrated script does
   not redefine the helpers and that its suite ships the lib. User-visible
