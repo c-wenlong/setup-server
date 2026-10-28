@@ -10,6 +10,12 @@ first, dated by merge.
 
 ### Added
 
+- **Launcher: Deploys page.** deployd leaves the app list and becomes a
+  top-level page in the sidebar (`#/deploys`): the timer as Polling or
+  Paused with Pause / Resume, every watched repo with its last deploy, and
+  add / edit / delete for pollers. `app.json` gains `"hidden": true` for
+  machinery with a page of its own; `#/service/deployd` redirects there.
+
 - **`lib/common.sh`: shared deploy helpers.** The output helpers
   (`info`/`ok`/`warn`/`die`), the preflight checks (supported OS, not root,
   Tailscale CLI and state, Docker + Compose v2, numeric ports), the
