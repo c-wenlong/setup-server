@@ -121,6 +121,35 @@ body.is-rail .nav-link { justify-content: center; padding: 0; }
 body.is-rail .nav + .nav { border-top: 1px solid var(--border); padding-top: 14px; }
 body.is-rail .side-foot { justify-content: center; }
 
+/* Rail hover: peek at the full sidebar without un-pinning it. The grid
+   column stays at --rail-w while the aside itself widens over the main
+   column (sticky + z-index 30 already paint it above the content), so
+   nothing underneath moves. Mouse-only: a tap must not pop it, and below
+   900px the sidebar is a drawer, not a rail. */
+@media (hover: hover) and (pointer: fine) and (min-width: 900px) {
+  body.is-rail .side {
+    width: var(--rail-w);
+    transition: width .22s cubic-bezier(.4, 0, .2, 1);
+  }
+  body.is-rail .side:hover {
+    width: var(--side-w);
+    padding-inline: max(12px, env(safe-area-inset-left)) 12px;
+    box-shadow: var(--menu-shadow);
+  }
+  body.is-rail .side:hover .brand { justify-content: flex-start; padding: 2px 4px; }
+  body.is-rail .side:hover .brand-text,
+  body.is-rail .side:hover .nav-sec,
+  body.is-rail .side:hover .nav-label,
+  body.is-rail .side:hover .nav-ct,
+  body.is-rail .side:hover .nav-exti { display: revert; }
+  body.is-rail .side:hover .nav-link { justify-content: flex-start; padding: 0 10px; }
+  body.is-rail .side:hover .nav + .nav { border-top: 0; padding-top: 0; }
+  /* The foot keeps the theme button hidden and rail-btn hard against the
+     left padding: centred it would slide ~90px right mid-hover, out from
+     under the cursor aiming to pin the sidebar open. */
+  body.is-rail .side:hover .side-foot { justify-content: flex-start; }
+}
+
 .main-col { min-width: 0; display: flex; flex-direction: column; }
 
 .topbar {
@@ -596,5 +625,5 @@ body.is-rail .abar { left: var(--rail-w); }
 
 @media (prefers-reduced-motion: reduce) {
   .h-glyph .spin { animation: none; }
-  .side, .toast, .h-row, .h-pill, .nav-link, .h-g-car, .h-fold, .shell { transition: none; }
+  .side, body.is-rail .side, .toast, .h-row, .h-pill, .nav-link, .h-g-car, .h-fold, .shell { transition: none; }
 }
