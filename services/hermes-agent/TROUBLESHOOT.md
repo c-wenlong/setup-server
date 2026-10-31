@@ -42,6 +42,33 @@ of every page once the container binds non-loopback.
 - The API starts after the dashboard in the same container; setup warns
   rather than fails when it is slow — check `docker compose logs gateway`.
 
+## A channel (Telegram, Discord, …) never connects after setup
+
+The dashboard ends channel setup with "Setup looks complete, but the
+gateway has not reported a connection yet. Restart the gateway." — and in
+this container the **Restart the gateway** button is a no-op.
+
+It spawns `hermes gateway restart`, which dies on boot inside the s6
+image: PM's store Python has no committed environment, so the child writes
+"no dependency environment is committed for this install; run
+`hermes pm repair`" to `data/logs/gateway-restart.log` and exits. The
+supervised gateway keeps running on the pre-setup config, so the channel
+never connects no matter how many times the button is clicked.
+
+Restart the supervised gateway at the container level instead:
+
+```bash
+cd services/hermes-agent
+docker compose restart
+```
+
+`docker logs hermes-agent | grep -i telegram` should show
+`Connected to Telegram (polling mode)` within ~30s. Don't "fix" the button
+with `hermes pm repair` inside the container — the image boots the
+gateway off its own `/opt/hermes/.venv`, and a committed PM generation
+would swap which packages it runs with. The dead button is an upstream
+incompatibility with the s6 image, not a broken install.
+
 ## `tailscale serve` errors during setup
 
 - **`serve is not enabled` / permission denied** — first publish needs the
