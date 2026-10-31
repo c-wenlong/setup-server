@@ -163,13 +163,14 @@
 
   function say(message) { text(elLive, message); }
 
-  /* The icon module owns brand logo -> hand-drawn glyph -> fallback. We only
-     ever call window.iconFor(key, name). If it has not loaded (or throws),
-     drop in an empty box so the grid still lays out. */
+  /* The icon module owns the icon: a local rung (vendored brand mark or
+     drawn glyph) upgraded in place to the live favicon once it loads. We
+     only ever call window.iconFor(key, name, liveUrl). If it has not
+     loaded (or throws), drop in an empty box so the grid still lays out. */
   function iconNode(svc) {
     var node = null;
     if (typeof window.iconFor === 'function') {
-      try { node = window.iconFor(svc.key, svc.icon); } catch (e) { node = null; }
+      try { node = window.iconFor(svc.key, svc.icon, svc.favicon); } catch (e) { node = null; }
     }
     if (!node || node.nodeType !== 1) {
       node = make('span', 'icon-blank');
@@ -1863,6 +1864,7 @@
       name:    d.name || known.name || key,
       tagline: d.tagline != null ? d.tagline : known.tagline,
       icon:    d.icon || known.icon,
+      favicon: d.favicon !== undefined ? d.favicon : known.favicon,
       url:     d.url !== undefined ? d.url : known.url,
       state:   d.state || known.state,
       degraded: d.degraded !== undefined ? d.degraded : known.degraded,

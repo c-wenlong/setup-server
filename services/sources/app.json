@@ -4,6 +4,7 @@
   "tagline": "Archive",
   "group": "mine",
   "icon": "archive",
+  "favicon": "/favicon.svg",
   "author": "c-wenlong",
   "url": "https://HOST:8098/",
   "health": "http://127.0.0.1:8098/",

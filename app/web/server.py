@@ -1894,10 +1894,10 @@ def services_payload():
             # tab. Always present, null when the registry row has none.
             "author": svc.get("author"),
             "icon": svc.get("icon"),
-            # Live favicon URL for tiles that opt in: the <img> shows the
-            # service's own current mark, so a favicon update in that repo
-            # propagates here instead of waiting for a re-vendor. Falls
-            # back to the vendored mark, then the drawn glyph.
+            # Live favicon URL for tiles that opt in: the <img> upgrades to
+            # the service's own current mark once it loads, so a favicon
+            # update in that repo propagates here instead of waiting for a
+            # re-vendor. The vendored mark or glyph shows until then.
             "favicon": resolve_favicon(svc, host),
             "url": resolve_url(svc, host),
             "state": derive_state(svc.get("setup"), installed, active),
