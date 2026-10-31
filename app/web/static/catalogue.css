@@ -252,7 +252,12 @@
   align-items: center;
   gap: 10px;
   padding: 0 12px 0 8px;
+  /* The padding is dead space over the detail link — let it click through.
+     On phones the wrap makes this a full-width second line, so only the
+     button itself should block the link. */
+  pointer-events: none;
 }
+.cat-actions > * { pointer-events: auto; }
 .cat-btn { min-height: 34px; padding: 0 14px; font-size: 13px; text-decoration: none; }
 
 /* Narrow phones: the name keeps its floor and the action wraps to a line
