@@ -583,6 +583,7 @@ button.h-group { cursor: pointer; }
 }
 .dsk-status { display: inline-flex; align-items: center; gap: 7px; flex: 1; min-width: 0; font-size: 12px; color: var(--faint); }
 .dsk-status .h-glyph { width: 13px; height: 13px; flex: none; }
+.dsk-note { color: var(--warn-text); }
 .dsk-again { flex: none; }
 
 /* ---------- desktop action bar ---------- */

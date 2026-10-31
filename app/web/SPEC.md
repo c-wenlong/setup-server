@@ -785,9 +785,13 @@ sits on, shaped for the sheet that renders it:
 - `scanning`: a walk is in flight.
 - `scanned_at`: epoch of the last finished walk (null until one lands).
 - `apps`: `[{key, name, bytes}]`: every registry service's `_disk_target`
-  measured once, largest first; `bytes` is null when its `du` failed and
-  the row renders a dash. A `du` here crosses filesystem boundaries the
-  same way the grid's per-service figure does, so the two always agree.
+  measured once, largest first; `bytes` is null when its `du` failed or
+  the target lives on another mount, and the row renders a dash. Targets
+  inside `~` reuse the walk's `du -xsk` figure; targets outside get
+  their own `du -sk`, the same number the grid shows.
+- `apps_total`: the deduped sum of every measured target: two services
+  sharing a data dir list it on each row but bill it once. The bar's
+  Apps slice uses this, never a row sum.
 - `docker`: `{images, containers, volumes, build_cache}` from
   `docker system df`, present only when the daemon's root is outside `~`
   *and* on this filesystem. A rootless docker lives inside the home rows
@@ -795,11 +799,14 @@ sits on, shaped for the sheet that renders it:
   unverifiable root stays out of the arithmetic rather than guess.
 - `home`: `[{name, path, bytes, shared}]`: one row per top-level entry of
   `~`, measured with `du -xsk` so a bind mount or a second disk living
-  under home is not billed to this one. `~/services` is split one level
+  under home is not billed to this one; an entry that is itself a
+  mountpoint is skipped outright, since `du` would count the mounted
+  filesystem's bytes against this disk. `~/services` is split one level
   deeper so each app claims its own directory; what is left shows as the
   `~/services` row with `shared: true`. Bytes the apps claimed are
   subtracted from their home entry, so the sections partition the disk
-  instead of double-counting. Symlinked entries are skipped, never walked.
+  instead of double-counting. Symlinked entries are skipped, never
+  walked.
 - `other_bytes`: `used` minus everything the walk attributed: system
   files, other users, mounts the home scan cannot see. Null when `statvfs`
   failed.

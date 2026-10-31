@@ -1671,7 +1671,9 @@
         if (timer) clearTimeout(timer);
         dsk.fetching = false;
         dsk.err = true;
-        if (dsk.el) paintDisk();
+        /* A dropped poll is not a dropped sheet: keep polling while the
+           server is still walking, and show the retry the footer offers. */
+        if (dsk.el) { paintDisk(); scheduleDisk(); }
       });
   }
 
@@ -1738,9 +1740,12 @@
 
     /* One scale for everything: each figure is a slice of used+free. A
        bucket the walk could not measure takes no width, so what it shows
-       never overstates. */
+       never overstates. Apps uses the server's deduped target total, not
+       a row sum: two apps sharing a data dir would bill it twice. */
+    var appsBytes = num(d.apps_total);
+    if (appsBytes === null) appsBytes = sumBytes(apps);
     var segs = [
-      { cls: 'dsk-seg-a', label: 'Apps', bytes: sumBytes(apps) },
+      { cls: 'dsk-seg-a', label: 'Apps', bytes: appsBytes },
       { cls: 'dsk-seg-d', label: 'Docker', bytes: sumBytes(dockerParts) },
       { cls: 'dsk-seg-h', label: 'Files', bytes: sumBytes(home) },
       { cls: 'dsk-seg-s', label: 'System', bytes: other },
@@ -1818,11 +1823,15 @@
       st.appendChild(document.createTextNode(
         num(d.scanned_at) ? 'Measured ' + (ago(num(d.scanned_at)) || 'just now') : 'Not measured yet'));
     }
+    if (dsk.err) st.appendChild(make('span', 'dsk-note', 'refresh failed'));
     foot.appendChild(st);
-    var again = make('button', 'h-btn dsk-again', 'Scan again');
+    /* After a failed fetch the button retries the poll; a fresh walk is
+       only asked for when the last answer is healthy. */
+    var again = make('button', 'h-btn dsk-again',
+      dsk.err ? 'Try again' : 'Scan again');
     again.type = 'button';
-    again.setAttribute('data-dsk-rescan', '1');
-    again.disabled = scanning || dsk.fetching;
+    again.setAttribute(dsk.err ? 'data-dsk-retry' : 'data-dsk-rescan', '1');
+    again.disabled = dsk.fetching || (scanning && !dsk.err);
     foot.appendChild(again);
   }
 

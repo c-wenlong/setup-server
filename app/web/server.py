@@ -1525,7 +1525,7 @@ _audit = {"at": 0.0, "running": False, "result": None, "error": None}
 _audit_lock = threading.Lock()
 
 
-def _du_children(path):
+def _du_children(path, mount=None):
     """{child path: bytes|None} for each non-symlink child, or None when the
     directory cannot be listed.
 
@@ -1542,6 +1542,11 @@ def _du_children(path):
     for name in names:
         child = os.path.join(path, name)
         if os.path.islink(child):
+            continue
+        # A volume mounted inside services belongs to another disk: du
+        # would bill its bytes to this one, so it reports unmeasurable.
+        if mount and _mount_of(child) != mount:
+            out[child] = None
             continue
         out[child] = _du_fs_bytes(child)
     return out
@@ -1605,19 +1610,29 @@ def _docker_df():
     return df
 
 
-def _service_disk_bytes(key, target, pools, now):
-    """Bytes for one service's du target: the grid's fresh sample, a path
-    the home scan already walked, 0 for a dir that does not exist, else a
-    `du` of its own, the same number _sample_disk would report."""
+def _service_disk_bytes(key, target, pools, now, mount):
+    """Bytes for one service's du target on this filesystem: the grid's
+    fresh sample, a path the home scan already walked, 0 for a dir that
+    does not exist, else a `du` of its own, the same number _sample_disk
+    would report. A target on another mount is not this disk's bill at
+    all: None, never its real size."""
+    if not os.path.exists(target):
+        return 0
+    if mount and _mount_of(target) != mount:
+        return None
     with _disk_lock:
         hit = _disk_samples.get(key)
     if hit and now - hit[0] < DISK_TTL:
         return hit[1]
     if target in pools:
         return pools[target]
-    if not os.path.exists(target):
-        return 0
-    return _du_bytes(target)
+    size = _du_bytes(target)
+    # Only the `du -sk` figure goes to the grid's cache: a pool value is a
+    # `du -xsk` number, which would shrink a service with a mounted volume
+    # under its dir.
+    with _disk_lock:
+        _disk_samples[key] = (now, size)
+    return size
 
 
 def _audit_scan(home=None):
@@ -1632,6 +1647,7 @@ def _audit_scan(home=None):
     home = home or os.path.expanduser("~")
     now = time.time()
     disk = _disk(SYSTEM_DISK_PATH)
+    mount = disk["mount"] if disk else None
     registry = load_registry()
     overrides = load_overrides()
 
@@ -1645,11 +1661,14 @@ def _audit_scan(home=None):
         path = os.path.join(home, name)
         # A symlinked entry's real bytes live wherever the link points,
         # usually another mount; listing it would show a misleading
-        # near-zero row.
+        # near-zero row. A mounted volume hides on the other disk too:
+        # du would charge this disk for bytes it does not hold.
         if os.path.islink(path):
             continue
+        if mount and _mount_of(path) != mount:
+            continue
         if path == services_dir and os.path.isdir(path):
-            children = _du_children(path)
+            children = _du_children(path, mount)
             total = (None if children is None
                      else sum(b for b in children.values() if b))
             entries.append({"name": name, "path": path, "bytes": total,
@@ -1676,10 +1695,8 @@ def _audit_scan(home=None):
         if target in measured:
             size = measured[target]
         else:
-            size = _service_disk_bytes(key, target, pools, now)
+            size = _service_disk_bytes(key, target, pools, now, mount)
             measured[target] = size
-            with _disk_lock:
-                _disk_samples[key] = (now, size)
         # A zero-byte row says nothing: skip it unless the service is
         # installed, in which case a missing measurement shows as a dash.
         if size or marker_exists(svc.get("marker")):
@@ -1687,7 +1704,6 @@ def _audit_scan(home=None):
             apps.append({"key": key, "name": name or key, "bytes": size})
     apps.sort(key=lambda a: -(a["bytes"] or 0))
 
-    mount = disk["mount"] if disk else None
     docker = _docker_df()
     docker_out = None
     docker_extra = 0
@@ -1725,8 +1741,12 @@ def _audit_scan(home=None):
     if disk:
         other = max(0, disk["used"] - home_raw - docker_extra - apps_outside)
 
-    return {"scanned_at": now, "apps": apps, "docker": docker_out,
-            "home": home_rows, "other_bytes": other}
+    # The bar's Apps slice sums targets, not rows: two services sharing a
+    # data dir list it on each row but only bill it once.
+    apps_total = sum(b for b in measured.values() if b)
+    return {"scanned_at": now, "apps": apps, "apps_total": apps_total,
+            "docker": docker_out, "home": home_rows,
+            "other_bytes": other}
 
 
 def _audit_worker():
@@ -1767,12 +1787,12 @@ def disk_payload(fresh=False):
         result, running, error = (_audit["result"], _audit["running"],
                                   _audit["error"])
     payload = {"disk": _disk(SYSTEM_DISK_PATH), "scanning": running,
-               "scanned_at": None, "apps": [], "docker": None,
-               "home": [], "other_bytes": None}
+               "scanned_at": None, "apps": [], "apps_total": None,
+               "docker": None, "home": [], "other_bytes": None}
     if result:
         payload.update({k: result[k] for k in
-                        ("scanned_at", "apps", "docker", "home",
-                         "other_bytes")})
+                        ("scanned_at", "apps", "apps_total", "docker",
+                         "home", "other_bytes")})
     elif error:
         payload["error"] = ("The storage scan failed. The health strip's "
                             "totals are still right; the breakdown is missing.")

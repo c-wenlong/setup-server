@@ -1006,9 +1006,9 @@ class HttpTest(SandboxTest):
         status, body = self.get("/api/disk")
         self.assertEqual(status, 200)
         doc = json.loads(body)
-        self.assertEqual(sorted(doc), ["apps", "disk", "docker", "home",
-                                       "other_bytes", "scanned_at",
-                                       "scanning"])
+        self.assertEqual(sorted(doc), ["apps", "apps_total", "disk",
+                                       "docker", "home", "other_bytes",
+                                       "scanned_at", "scanning"])
         # No worker is spawned in the sandbox, so the cold answer is
         # "not measured": keys present, every figure empty, no error.
         self.assertFalse(doc["scanning"])
@@ -5964,6 +5964,8 @@ class DiskAuditScanTest(SandboxTest):
                          [("a", 40), ("b", 40)])
         # Once inside the services children split; the second app reads it.
         self.assertEqual(self.du_calls.count(shared), 1)
+        # Two rows still bill the dir once: the bar's slice sums targets.
+        self.assertEqual(out["apps_total"], 40)
 
     def test_a_malformed_registry_entry_cannot_crash_the_scan(self):
         self.write_registry({"services": [
@@ -6063,6 +6065,88 @@ class DiskAuditScanTest(SandboxTest):
         out = server._audit_scan(home=self.home)
         self.assertIsNone(out["other_bytes"])
 
+    def test_a_mounted_volume_under_home_is_not_billed(self):
+        docs = os.path.join(self.home, "Documents")
+        vol = os.path.join(self.home, "external")
+        os.makedirs(docs)
+        os.makedirs(vol)
+        self.du = {docs: 100, vol: 900}
+        mounts = {vol: "/mnt/external"}
+        server._mount_of = lambda p: mounts.get(p, "/")
+        out = server._audit_scan(home=self.home)
+        # The volume's bytes belong to another disk: no row, and none of
+        # the 900 lands in `other`'s subtraction either.
+        self.assertEqual([r["name"] for r in out["home"]], ["Documents"])
+        self.assertEqual(out["other_bytes"], 400 - 100)
+        self.assertNotIn(vol, self.du_calls)
+
+    def test_a_mounted_service_dir_reports_dash_not_other_disk_bytes(self):
+        sdir = os.path.join(self.home, "services")
+        sea = os.path.join(sdir, "sea")
+        big = os.path.join(sdir, "big")
+        os.makedirs(sea)
+        os.makedirs(big)
+        self.du = {sea: 30}
+        mounts = {big: "/mnt/big"}
+        server._mount_of = lambda p: mounts.get(p, "/")
+        self.write_registry({"services": [
+            {"key": "sea", "name": "Sea", "marker": sea},
+            {"key": "big", "name": "Big", "marker": big}]})
+        out = server._audit_scan(home=self.home)
+        # Sea claims its 30; Big's dir is another disk, so it shows a
+        # dash and bills nothing here.
+        rows = {a["key"]: a for a in out["apps"]}
+        self.assertEqual(rows["sea"]["bytes"], 30)
+        self.assertIsNone(rows["big"]["bytes"])
+        self.assertEqual(out["apps_total"], 30)
+        self.assertEqual(out["other_bytes"], 400 - 30)
+        self.assertNotIn(big, self.du_calls)
+
+    def test_an_app_outside_home_on_another_mount_is_not_billed(self):
+        docs = os.path.join(self.home, "Documents")
+        os.makedirs(docs)
+        ext = os.path.join(self.tmp, "ext-app")
+        os.makedirs(ext)
+        self.du = {docs: 100}
+        mounts = {ext: "/mnt/ext"}
+        server._mount_of = lambda p: mounts.get(p, "/")
+        self.write_registry({"services": [
+            {"key": "ext", "name": "Ext", "marker": ext}]})
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["apps"],
+                         [{"key": "ext", "name": "Ext", "bytes": None}])
+        self.assertEqual(out["apps_total"], 0)
+        self.assertEqual(out["other_bytes"], 400 - 100)
+
+    def test_an_app_outside_home_on_this_disk_bills_it(self):
+        docs = os.path.join(self.home, "Documents")
+        os.makedirs(docs)
+        ext = os.path.join(self.tmp, "ext-app")
+        os.makedirs(ext)
+        self.du = {docs: 100}
+        server._du_bytes = lambda p: 60 if p == ext else 0
+        self.write_registry({"services": [
+            {"key": "ext", "name": "Ext", "marker": ext}]})
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["apps"],
+                         [{"key": "ext", "name": "Ext", "bytes": 60}])
+        self.assertEqual(out["apps_total"], 60)
+        # 400 used - 100 home - 60 app data on the same filesystem.
+        self.assertEqual(out["other_bytes"], 400 - 100 - 60)
+
+    def test_a_pool_figure_never_reaches_the_grid_cache(self):
+        sdir = os.path.join(self.home, "services")
+        sea = os.path.join(sdir, "sea")
+        os.makedirs(sea)
+        self.du = {sea: 30}
+        self.write_registry({"services": [
+            {"key": "sea", "name": "Sea", "marker": sea}]})
+        server._audit_scan(home=self.home)
+        # The apps row used the `du -xsk` pool figure, which must not be
+        # cached as the grid's `du -sk` number.
+        with server._disk_lock:
+            self.assertNotIn("sea", server._disk_samples)
+
 
 class DockerDfTest(SandboxTest):
     """_docker_df: `docker system df` + `docker info` through sg_docker.
@@ -6148,7 +6232,7 @@ class DiskAuditTest(SandboxTest):
 
     def _scan(self, home=None):
         self.scans.append(home)
-        return {"scanned_at": 1.0, "apps": [], "docker": None,
+        return {"scanned_at": 1.0, "apps": [], "apps_total": 0, "docker": None,
                 "home": [], "other_bytes": 10}
 
     def wait_audit(self, tries=200):
@@ -6165,7 +6249,7 @@ class DiskAuditTest(SandboxTest):
         def slow(home=None):
             self.scans.append(home)
             gate.wait(5)
-            return {"scanned_at": 1.0, "apps": [], "docker": None,
+            return {"scanned_at": 1.0, "apps": [], "apps_total": 0, "docker": None,
                     "home": [], "other_bytes": 10}
         server._audit_scan = slow
         p = server.disk_payload()
@@ -6201,7 +6285,7 @@ class DiskAuditTest(SandboxTest):
         def slow(home=None):
             self.scans.append(home)
             gate.wait(5)
-            return {"scanned_at": 2.0, "apps": [], "docker": None,
+            return {"scanned_at": 2.0, "apps": [], "apps_total": 0, "docker": None,
                     "home": [], "other_bytes": 99}
         server._audit_scan = slow
         server.AUDIT_TTL = 0.0
@@ -6231,7 +6315,7 @@ class DiskAuditTest(SandboxTest):
         def slow(home=None):
             self.scans.append(home)
             gate.wait(5)
-            return {"scanned_at": 1.0, "apps": [], "docker": None,
+            return {"scanned_at": 1.0, "apps": [], "apps_total": 0, "docker": None,
                     "home": [], "other_bytes": 10}
         server._audit_scan = slow
         server.disk_payload()
