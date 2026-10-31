@@ -62,6 +62,7 @@
   };
 
   var built = false;
+  var orderAdopted = false;
   var els = {};
   var menuEl = null;
   var menuScrim = null;
@@ -555,6 +556,14 @@
 
   function paint() {
     build();
+    /* First contact with a saved arrangement: adopt it as the sort — the
+       stored order IS the user's earlier choice, so a fresh browser
+       paints it rather than the ram fallback. A click on a sort header
+       stores a preference and this never fires again. */
+    if (!orderAdopted && stored(SORT_STORE, null) === null) {
+      var ord = (app() && typeof app().order === 'function') ? app().order() : [];
+      if (ord.length) { state.sort = { key: 'custom', dir: 1 }; orderAdopted = true; }
+    }
     paintAlert();
     paintHealth();
     paintPills();
@@ -741,7 +750,9 @@
     h.appendChild(btn('ram', 'Memory'));
     h.appendChild(btn('cpu', 'CPU', 'h-c-cpu h-r'));
     h.appendChild(btn('used', 'Last used', 'h-c-last'));
-    h.appendChild(make('span'));
+    var tail = make('span', 'h-r');
+    tail.appendChild(btn('custom', 'Yours'));
+    h.appendChild(tail);
     return h;
   }
 
@@ -1224,14 +1235,24 @@
      and any later column click takes over from it again. */
   function commitMove(dragKey, targetKey, before) {
     if (dragKey === targetKey) return;
+    var a = app();
     var base = orderBase();
+    /* Saved keys absent from today's catalogue keep the rank they had —
+       the API preserves unknown keys for services that come back, so
+       each one is re-inserted at its old position rather than silently
+       dropped by this save. */
+    var saved = (a && typeof a.order === 'function') ? a.order() : [];
+    for (var m = 0; m < saved.length; m++) {
+      if (base.indexOf(saved[m]) === -1) {
+        base.splice(Math.min(m, base.length), 0, saved[m]);
+      }
+    }
     var i = base.indexOf(dragKey);
     if (i !== -1) base.splice(i, 1);
     var j = targetKey ? base.indexOf(targetKey) : -1;
     base.splice(j === -1 ? base.length : j + (before ? 0 : 1), 0, dragKey);
     state.sort = { key: 'custom', dir: 1 };
     remember(SORT_STORE, 'custom:1');
-    var a = app();
     if (a && typeof a.saveOrder === 'function') {
       a.saveOrder(base).then(function (ok) {
         if (!ok) toast('Could not save the new order.');
@@ -1263,13 +1284,32 @@
 
   var dragKey = null, dropRow = null, dropBefore = true;
 
+  /* The section a row paints under: the pinned shelf, or its state
+     bucket. A drag only ever moves a row inside its own section — the
+     keyboard path (moveBy) has the same boundary, and a marker anywhere
+     else would promise a move commitMove cannot do. */
+  function sectionOf(key) {
+    var s = find(key);
+    if (!s) return null;
+    return s.pinned === true ? 'pinned' : bucket(s);
+  }
+
   function clearDrop() {
     if (!els.list) return;
-    var marked = els.list.querySelectorAll('.h-row.is-drag, .h-row.is-drop-above, .h-row.is-drop-below');
+    var marked = els.list.querySelectorAll('.h-row.is-drop-above, .h-row.is-drop-below');
     for (var i = 0; i < marked.length; i++) {
-      marked[i].classList.remove('is-drag', 'is-drop-above', 'is-drop-below');
+      marked[i].classList.remove('is-drop-above', 'is-drop-below');
     }
     dropRow = null;
+  }
+
+  function endDrag() {
+    dragKey = null;
+    if (els.list) {
+      var marked = els.list.querySelectorAll('.h-row.is-drag');
+      for (var i = 0; i < marked.length; i++) marked[i].classList.remove('is-drag');
+    }
+    clearDrop();
   }
 
   function onDragStart(e) {
@@ -1289,7 +1329,11 @@
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     var row = e.target.closest ? e.target.closest('.h-row[data-key]') : null;
-    if (!row || row.getAttribute('data-key') === dragKey) { clearDrop(); return; }
+    if (!row || row.getAttribute('data-key') === dragKey ||
+        sectionOf(row.getAttribute('data-key')) !== sectionOf(dragKey)) {
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+      clearDrop(); return;
+    }
     var rect = row.getBoundingClientRect();
     var before = e.clientY < rect.top + rect.height / 2;
     if (dropRow !== row || dropBefore !== before) {
@@ -1306,14 +1350,14 @@
     var target = dropRow ? dropRow.getAttribute('data-key') : null;
     var before = dropBefore;
     var key = dragKey;
-    dragKey = null;
-    clearDrop();
-    if (target) commitMove(key, target, before);
+    endDrag();
+    if (target && sectionOf(target) === sectionOf(key)) {
+      commitMove(key, target, before);
+    }
   }
 
   function onDragEnd() {
-    dragKey = null;
-    clearDrop();
+    endDrag();
   }
 
   function bindDnd() {
@@ -1322,12 +1366,10 @@
     els.list.addEventListener('drop', onDrop);
     els.list.addEventListener('dragend', onDragEnd);
     els.list.addEventListener('dragleave', function (e) {
-      /* A null relatedTarget means the browser could not say where the
-         pointer went — which some do mid-gesture over child rows. Only a
-         reported destination outside the list is a real leave; dragend
-         cleans up either way. */
+      /* Leaving the list clears the drop marker only: the drag itself
+         stays live so re-entering can still complete the move. dragend
+         or drop does the full cleanup. */
       if (e.relatedTarget && !els.list.contains(e.relatedTarget)) {
-        dragKey = null;
         clearDrop();
       }
     });
@@ -1448,8 +1490,8 @@
     var sort = t.closest('[data-sort]');
     if (sort) {
       var k = sort.getAttribute('data-sort');
-      if (state.sort.key === k) state.sort.dir *= -1;
-      else state.sort = { key: k, dir: k === 'name' ? 1 : -1 };
+      if (state.sort.key === k && k !== 'custom') state.sort.dir *= -1;
+      else state.sort = { key: k, dir: (k === 'name' || k === 'custom') ? 1 : -1 };
       remember(SORT_STORE, state.sort.key + ':' + state.sort.dir);
       paintList();
       return;

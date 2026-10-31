@@ -2063,16 +2063,28 @@
       }).then(function (res) {
         if (!res.ok) { svc.pinned = !on; notifyServices(); }
         return res.ok;
+      }, function () {
+        svc.pinned = !on;
+        notifyServices();
+        return false;
       });
     },
     saveOrder: function (list) {
       if (!Array.isArray(list)) return Promise.resolve(false);
+      var prev = rowOrder;
       rowOrder = list.slice();
       return request('api/order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ order: rowOrder })
-      }).then(function (res) { return res.ok; });
+      }).then(function (res) {
+        if (!res.ok) { rowOrder = prev; notifyServices(); }
+        return res.ok;
+      }, function () {
+        rowOrder = prev;
+        notifyServices();
+        return false;
+      });
     },
     deploy: function (key, opener) {
       var svc = find(key);
