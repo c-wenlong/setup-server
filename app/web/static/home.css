@@ -79,7 +79,10 @@ body.is-rail .shell { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
 .side .brand { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 2px 4px; }
 .side .brand-mark { width: 30px; height: 30px; flex: none; display: inline-flex; }
 .side .brand-mark img { width: 30px; height: 30px; display: block; }
-.side .brand-text { display: flex; flex-direction: column; min-width: 0; }
+/* nowrap matters when a hovered rail is mid-expansion: body sets
+   overflow-wrap: break-word, so a wrappable "Launcher" h1 would stack
+   letter-by-letter at thin widths and balloon the brand row's height. */
+.side .brand-text { display: flex; flex-direction: column; min-width: 0; white-space: nowrap; }
 .side h1 { font-size: 15px; font-weight: 500; letter-spacing: -.01em; line-height: 1.2; }
 .side .host {
   font-size: 11.5px; color: var(--faint);
@@ -143,10 +146,11 @@ body.is-rail .side-foot { justify-content: center; }
   body.is-rail .side:hover .nav-ct,
   body.is-rail .side:hover .nav-exti { display: revert; }
   body.is-rail .side:hover .nav-link { justify-content: flex-start; padding: 0 10px; }
-  body.is-rail .side:hover .nav + .nav { border-top: 0; padding-top: 0; }
-  /* The foot keeps the theme button hidden and rail-btn hard against the
-     left padding: centred it would slide ~90px right mid-hover, out from
-     under the cursor aiming to pin the sidebar open. */
+  /* What does NOT revert on hover, so nothing jumps mid-animation: the
+     .nav + .nav divider (a 15px jolt under the Monitoring block) and the
+     foot — theme stays hidden and rail-btn sits at the left padding, the
+     same spot it occupies collapsed, so a click to pin can't miss or land
+     on the theme button. */
   body.is-rail .side:hover .side-foot { justify-content: flex-start; }
 }
 
