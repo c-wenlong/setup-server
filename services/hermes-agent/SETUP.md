@@ -116,6 +116,10 @@ docker exec -it hermes-agent hermes model    # pick a provider + model
 docker exec -it hermes-agent hermes setup    # full wizard (keys, channels)
 ```
 
+Saving a channel in the dashboard ends with a "Restart the gateway"
+button — it silently does nothing in this container (see TROUBLESHOOT.md).
+Apply channel changes with `docker compose restart` instead.
+
 The loopback API for other services:
 
 ```bash
