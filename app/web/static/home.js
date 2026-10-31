@@ -62,6 +62,7 @@
   };
 
   var built = false;
+  var orderAdopted = false;
   var els = {};
   var menuEl = null;
   var menuScrim = null;
@@ -97,7 +98,7 @@
   }
 
   function parseSort(raw) {
-    var m = /^(name|ram|cpu|used):(-?1)$/.exec(String(raw));
+    var m = /^(name|ram|cpu|used|custom):(-?1)$/.exec(String(raw));
     return m ? { key: m[1], dir: Number(m[2]) } : { key: 'ram', dir: -1 };
   }
 
@@ -152,7 +153,9 @@
               'M6.4 10.6h11.2a1.4 1.4 0 0 1 1.4 1.4v6.2a1.4 1.4 0 0 1-1.4 1.4H6.4A1.4 1.4 0 0 1 5 18.2V12a1.4 1.4 0 0 1 1.4-1.4Z'],
     warn:    ['M12 3.5 2.5 20h19L12 3.5Z', 'M12 10v4', 'M12 17h.01'],
     caret:   ['m7 10 5 5 5-5'],
-    ext:     ['M14 5h5v5', 'M19 5l-8 8']
+    ext:     ['M14 5h5v5', 'M19 5l-8 8'],
+    pin:     ['M12 17v5', 'M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.3V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.7a2 2 0 0 0-1.1-1.8l-1.8-.9A2 2 0 0 1 15 10.8V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z'],
+    grip:    ['M9 5.5h.01', 'M15 5.5h.01', 'M9 12h.01', 'M15 12h.01', 'M9 18.5h.01', 'M15 18.5h.01']
   };
 
   /* Status glyphs: state in the SHAPE (Linear's convention), colour only on
@@ -171,7 +174,8 @@
       ring:  '<circle cx="7" cy="7" r="5.6" class="s"/>',
       dots:  '<circle cx="7" cy="7" r="5.6" class="s" stroke-dasharray="0.1 2.9"/>',
       dash:  '<circle cx="7" cy="7" r="5.6" class="s" stroke-dasharray="2.4 2"/>',
-      busy:  '<circle cx="7" cy="7" r="5.6" class="t"/><path d="M7 1.4a5.6 5.6 0 0 1 5.6 5.6" class="s spin"/>'
+      busy:  '<circle cx="7" cy="7" r="5.6" class="t"/><path d="M7 1.4a5.6 5.6 0 0 1 5.6 5.6" class="s spin"/>',
+      pin:   '<path d="M4.5 2h5v.9l-1 .3v3l1.7 1.9V10H3.8V8.1l1.7-1.9v-3l-1-.3z M6.55 10h.9v2.6h-.9z" class="f"/>'
     }[kind] || '';
     s.innerHTML = html;
     return s;
@@ -347,6 +351,9 @@
     } else if (svc.state === 'available') {
       items.push({ id: 'deploy', label: 'Install', icon: 'down', key: '↵' });
     }
+    items.push({ id: 'pin', label: svc.pinned === true ? 'Unpin from top' : 'Pin to top', icon: 'pin', key: 'P' });
+    items.push({ id: 'move-up', label: 'Move up', icon: 'up', key: 'K' });
+    items.push({ id: 'move-down', label: 'Move down', icon: 'down', key: 'J' });
     if (items.length) items.push('-');
     items.push({ id: 'details', label: svc.state === 'available' || svc.state === 'planned'
       ? 'About this app' : 'Details and settings', icon: 'info', key: 'D' });
@@ -379,45 +386,87 @@
     return true;
   }
 
-  function sortRun(rows) {
+  /* Rank map for the user's explicit arrangement (overrides.json's order
+     list, served on the payload). Keys with no rank sort to the end, so a
+     newly installed app still appears after the arranged ones. */
+  function ranks() {
+    var out = {};
+    var ord = (app() && typeof app().order === 'function') ? app().order() : [];
+    for (var i = 0; i < ord.length; i++) out[ord[i]] = i;
+    return out;
+  }
+
+  /* Infinity, not a missing-key NaN: `undefined - undefined` in a
+     comparator is undefined behaviour the sort does not deserve. */
+  function rankOf(rank, key) {
+    var i = rank[key];
+    return i === undefined ? Infinity : i;
+  }
+
+  function sortRun(rows, rank) {
     var k = state.sort.key, d = state.sort.dir;
     var val = {
       ram:  function (s) { var v = rss(s); return v === null ? -1 : v; },
       cpu:  function (s) { var v = cpu(s); return v === null ? -1 : v; },
-      used: function (s) { var v = lastUsed(s); return v === null ? 0 : v; }
+      used: function (s) { var v = lastUsed(s); return v === null ? 0 : v; },
+      custom: function (s) { return rankOf(rank, s.key); }
     }[k];
     return rows.sort(function (a, b) {
       if (k === 'name') return String(a.name || a.key).localeCompare(String(b.name || b.key)) * d;
       var x = val(a), y = val(b);
       if (x === y) return String(a.name || a.key).localeCompare(String(b.name || b.key));
-      return (x - y) * d;
+      return (x - y) * (k === 'custom' ? 1 : d);
     });
   }
 
-  function sections() {
-    var run = [], stop = [], fresh = [];
-    var all = list();
+  /* The four buckets, in paint order: the explicit pinned shelf first,
+     then running / stopped / not-installed by state. `filtered` applies the
+     search/group filter; orderBase() wants every key for a complete stored
+     permutation, so it calls this unfiltered. */
+  function partition(all, filtered, rank) {
+    var pinned = [], run = [], stop = [], fresh = [];
     for (var i = 0; i < all.length; i++) {
       var s = all[i];
-      if (!matches(s)) continue;
+      if (filtered && !matches(s)) continue;
+      if (s.pinned === true) { pinned.push(s); continue; }
       var b = bucket(s);
       if (b === 'run') run.push(s);
       else if (b === 'stop') stop.push(s);
       else fresh.push(s);
     }
-    sortRun(run);
-    stop.sort(function (a, b) { return (lastUsed(b) || 0) - (lastUsed(a) || 0); });
-    fresh.sort(function (a, b) {
-      /* installable first, then planned */
-      return (a.state === 'planned') - (b.state === 'planned') ||
-             String(a.name || a.key).localeCompare(String(b.name || b.key));
-    });
-    return { run: run, stop: stop, fresh: fresh };
+    sortRun(pinned, rank);
+    sortRun(run, rank);
+    if (state.sort.key === 'custom') {
+      stop.sort(function (a, b) { return rankOf(rank, a.key) - rankOf(rank, b.key) ||
+        String(a.name || a.key).localeCompare(String(b.name || b.key)); });
+      fresh.sort(function (a, b) { return rankOf(rank, a.key) - rankOf(rank, b.key) ||
+        String(a.name || a.key).localeCompare(String(b.name || b.key)); });
+    } else {
+      stop.sort(function (a, b) { return (lastUsed(b) || 0) - (lastUsed(a) || 0); });
+      fresh.sort(function (a, b) {
+        /* installable first, then planned */
+        return (a.state === 'planned') - (b.state === 'planned') ||
+               String(a.name || a.key).localeCompare(String(b.name || b.key));
+      });
+    }
+    return { pinned: pinned, run: run, stop: stop, fresh: fresh };
+  }
+
+  function sections() {
+    return partition(list(), true, ranks());
+  }
+
+  /* Every key the page would paint with no filter, in paint order — the
+     base a drag edits, so keys hidden by the search box keep their place
+     rather than being silently dropped from the stored order. */
+  function orderBase() {
+    var s = partition(list(), false, ranks());
+    return s.pinned.concat(s.run, s.stop, s.fresh).map(function (x) { return x.key; });
   }
 
   function order() {
     var s = sections();
-    return s.run.concat(state.fold.stop ? [] : s.stop, state.fold.fresh ? [] : s.fresh)
+    return s.pinned.concat(s.run, state.fold.stop ? [] : s.stop, state.fold.fresh ? [] : s.fresh)
             .map(function (x) { return x.key; });
   }
 
@@ -492,6 +541,7 @@
     els.list = make('div', 'h-list');
     els.list.id = 'grid';
     panel.appendChild(els.list);
+    bindDnd();
     root.appendChild(panel);
 
     root.addEventListener('click', onClick);
@@ -506,6 +556,14 @@
 
   function paint() {
     build();
+    /* First contact with a saved arrangement: adopt it as the sort — the
+       stored order IS the user's earlier choice, so a fresh browser
+       paints it rather than the ram fallback. A click on a sort header
+       stores a preference and this never fires again. */
+    if (!orderAdopted && stored(SORT_STORE, null) === null) {
+      var ord = (app() && typeof app().order === 'function') ? app().order() : [];
+      if (ord.length) { state.sort = { key: 'custom', dir: 1 }; orderAdopted = true; }
+    }
     paintAlert();
     paintHealth();
     paintPills();
@@ -692,12 +750,14 @@
     h.appendChild(btn('ram', 'Memory'));
     h.appendChild(btn('cpu', 'CPU', 'h-c-cpu h-r'));
     h.appendChild(btn('used', 'Last used', 'h-c-last'));
-    h.appendChild(make('span'));
+    var tail = make('span', 'h-r');
+    tail.appendChild(btn('custom', 'Yours'));
+    h.appendChild(tail);
     return h;
   }
 
   function groupHead(id, kind, label, count, note) {
-    var foldable = id !== 'run';
+    var foldable = id === 'stop' || id === 'fresh';
     var h = make(foldable ? 'button' : 'div', 'h-group');
     if (foldable) {
       h.type = 'button';
@@ -729,6 +789,14 @@
     /* app column */
     var appc = make('div', 'h-app');
     appc.appendChild(glyph(glyphKind(svc)));
+    /* The grip is the only draggable handle: making the whole row draggable
+       would break text selection and the name link's own drag. */
+    var grip = make('span', 'h-grip');
+    grip.draggable = true;
+    grip.setAttribute('data-grip', key);
+    grip.title = 'Drag to reorder';
+    grip.appendChild(svg(ICON.grip, { width: '2.6' }));
+    appc.appendChild(grip);
     var ic = make('span', 'h-ic');
     ic.appendChild(iconNode(svc));
     appc.appendChild(ic);
@@ -754,6 +822,15 @@
       lock.title = lockReason(svc);
       appc.appendChild(lock);
     }
+    var pin = make('button', 'h-pin' + (svc.pinned === true ? ' is-on' : ''));
+    pin.type = 'button';
+    pin.setAttribute('data-pin', key);
+    pin.setAttribute('data-fid', 'pin:' + key);
+    pin.setAttribute('aria-pressed', svc.pinned === true ? 'true' : 'false');
+    pin.setAttribute('aria-label', (svc.pinned === true ? 'Unpin ' : 'Pin ') + (svc.name || key));
+    pin.title = svc.pinned === true ? 'Unpin from top' : 'Pin to top';
+    pin.appendChild(svg(ICON.pin, { width: '1.9' }));
+    appc.appendChild(pin);
     r.appendChild(appc);
 
     /* parts */
@@ -854,6 +931,9 @@
 
   function paintList() {
     var a = app();
+    /* A poll that rebuilt the rows mid-drag would strand the gesture and
+       eat the drop; wait for the next paint instead. */
+    if (dragKey) return;
     var fid = focusId();
     els.list.textContent = '';
 
@@ -869,7 +949,7 @@
     var keys = order();
     if (keys.indexOf(state.sel) === -1) state.sel = keys.length ? keys[0] : null;
 
-    if (!s.run.length && !s.stop.length && !s.fresh.length) {
+    if (!s.pinned.length && !s.run.length && !s.stop.length && !s.fresh.length) {
       els.list.appendChild(emptyState());
       paintBar();
       return;
@@ -878,6 +958,10 @@
     var maxRam = 1;
     list().forEach(function (x) { var v = rss(x); if (v !== null && bucket(x) === 'run' && v > maxRam) maxRam = v; });
 
+    if (s.pinned.length) {
+      els.list.appendChild(groupHead('pinned', 'pin', 'Pinned', s.pinned.length));
+      s.pinned.forEach(function (x) { els.list.appendChild(row(x, maxRam)); });
+    }
     if (s.run.length) {
       els.list.appendChild(groupHead('run', 'ok', 'Running', s.run.length));
       els.list.appendChild(sortHead());
@@ -1097,6 +1181,9 @@
       if (job && typeof a.watchJob === 'function') a.watchJob(key, String(job.id), jobVerb(svc), opener);
       return;
     }
+    if (id === 'pin') { togglePin(key); return; }
+    if (id === 'move-up') { moveBy(key, -1); return; }
+    if (id === 'move-down') { moveBy(key, 1); return; }
     if (typeof a.action === 'function' && !a.action(key, id, opener)) {
       toast(lockReason(svc) || 'That is not available for ' + (svc.name || key) + ' right now.');
     }
@@ -1128,6 +1215,164 @@
     t.classList.add('is-on');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { t.classList.remove('is-on'); }, 2600);
+  }
+
+  /* ---------- pin and reorder ---------- */
+
+  function togglePin(key) {
+    var svc = find(key);
+    var a = app();
+    if (!svc || !a || typeof a.pin !== 'function') return;
+    a.pin(key, svc.pinned !== true).then(function (ok) {
+      if (!ok) toast('Could not save the pin for ' + (svc.name || key) + '.');
+    });
+  }
+
+  /* Commit one move: dragKey lands next to targetKey in the stored order.
+     orderBase() carries every key, so rows hidden by the search box keep
+     their place rather than vanishing from the stored list. Arranging once
+     switches the sort to 'custom' — the mode that reads the order back —
+     and any later column click takes over from it again. */
+  function commitMove(dragKey, targetKey, before) {
+    if (dragKey === targetKey) return;
+    var a = app();
+    var base = orderBase();
+    /* Saved keys absent from today's catalogue keep the rank they had —
+       the API preserves unknown keys for services that come back, so
+       each one is re-inserted at its old position rather than silently
+       dropped by this save. */
+    var saved = (a && typeof a.order === 'function') ? a.order() : [];
+    for (var m = 0; m < saved.length; m++) {
+      if (base.indexOf(saved[m]) === -1) {
+        base.splice(Math.min(m, base.length), 0, saved[m]);
+      }
+    }
+    var i = base.indexOf(dragKey);
+    if (i !== -1) base.splice(i, 1);
+    var j = targetKey ? base.indexOf(targetKey) : -1;
+    base.splice(j === -1 ? base.length : j + (before ? 0 : 1), 0, dragKey);
+    state.sort = { key: 'custom', dir: 1 };
+    remember(SORT_STORE, 'custom:1');
+    if (a && typeof a.saveOrder === 'function') {
+      a.saveOrder(base).then(function (ok) {
+        if (!ok) toast('Could not save the new order.');
+      });
+    }
+    paintList();
+    paintBar();
+  }
+
+  /* The menu's keyboard path for a drag: move one row within ITS section.
+     Sections are filtered views over one global rank, so the swap is
+     against the neighbour in the section, never across a boundary. */
+  function moveBy(key, d) {
+    var s = sections();
+    var sects = ['pinned', 'run', 'stop', 'fresh'];
+    for (var i = 0; i < sects.length; i++) {
+      var arr = s[sects[i]];
+      for (var j = 0; j < arr.length; j++) {
+        if (arr[j].key !== key) continue;
+        var n = j + d;
+        if (n < 0 || n >= arr.length) return;
+        commitMove(key, arr[n].key, d < 0);
+        return;
+      }
+    }
+  }
+
+  /* ---------- drag to reorder ---------- */
+
+  var dragKey = null, dropRow = null, dropBefore = true;
+
+  /* The section a row paints under: the pinned shelf, or its state
+     bucket. A drag only ever moves a row inside its own section — the
+     keyboard path (moveBy) has the same boundary, and a marker anywhere
+     else would promise a move commitMove cannot do. */
+  function sectionOf(key) {
+    var s = find(key);
+    if (!s) return null;
+    return s.pinned === true ? 'pinned' : bucket(s);
+  }
+
+  function clearDrop() {
+    if (!els.list) return;
+    var marked = els.list.querySelectorAll('.h-row.is-drop-above, .h-row.is-drop-below');
+    for (var i = 0; i < marked.length; i++) {
+      marked[i].classList.remove('is-drop-above', 'is-drop-below');
+    }
+    dropRow = null;
+  }
+
+  function endDrag() {
+    dragKey = null;
+    if (els.list) {
+      var marked = els.list.querySelectorAll('.h-row.is-drag');
+      for (var i = 0; i < marked.length; i++) marked[i].classList.remove('is-drag');
+    }
+    clearDrop();
+  }
+
+  function onDragStart(e) {
+    var grip = e.target.closest ? e.target.closest('.h-grip') : null;
+    var row = e.target.closest ? e.target.closest('.h-row[data-key]') : null;
+    if (!grip || !row) return;
+    dragKey = row.getAttribute('data-key');
+    row.classList.add('is-drag');
+    try {
+      e.dataTransfer.setData('text/plain', dragKey);
+      e.dataTransfer.effectAllowed = 'move';
+    } catch (err) { /* dataTransfer absent in legacy browsers */ }
+  }
+
+  function onDragOver(e) {
+    if (!dragKey) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    var row = e.target.closest ? e.target.closest('.h-row[data-key]') : null;
+    if (!row || row.getAttribute('data-key') === dragKey ||
+        sectionOf(row.getAttribute('data-key')) !== sectionOf(dragKey)) {
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+      clearDrop(); return;
+    }
+    var rect = row.getBoundingClientRect();
+    var before = e.clientY < rect.top + rect.height / 2;
+    if (dropRow !== row || dropBefore !== before) {
+      clearDrop();
+      row.classList.add(before ? 'is-drop-above' : 'is-drop-below');
+      dropRow = row;
+      dropBefore = before;
+    }
+  }
+
+  function onDrop(e) {
+    if (!dragKey) return;
+    e.preventDefault();
+    var target = dropRow ? dropRow.getAttribute('data-key') : null;
+    var before = dropBefore;
+    var key = dragKey;
+    endDrag();
+    if (target && sectionOf(target) === sectionOf(key)) {
+      commitMove(key, target, before);
+    }
+  }
+
+  function onDragEnd() {
+    endDrag();
+  }
+
+  function bindDnd() {
+    els.list.addEventListener('dragstart', onDragStart);
+    els.list.addEventListener('dragover', onDragOver);
+    els.list.addEventListener('drop', onDrop);
+    els.list.addEventListener('dragend', onDragEnd);
+    els.list.addEventListener('dragleave', function (e) {
+      /* Leaving the list clears the drop marker only: the drag itself
+         stays live so re-entering can still complete the move. dragend
+         or drop does the full cleanup. */
+      if (e.relatedTarget && !els.list.contains(e.relatedTarget)) {
+        clearDrop();
+      }
+    });
   }
 
   /* ---------- action menu ---------- */
@@ -1245,8 +1490,8 @@
     var sort = t.closest('[data-sort]');
     if (sort) {
       var k = sort.getAttribute('data-sort');
-      if (state.sort.key === k) state.sort.dir *= -1;
-      else state.sort = { key: k, dir: k === 'name' ? 1 : -1 };
+      if (state.sort.key === k && k !== 'custom') state.sort.dir *= -1;
+      else state.sort = { key: k, dir: (k === 'name' || k === 'custom') ? 1 : -1 };
       remember(SORT_STORE, state.sort.key + ':' + state.sort.dir);
       paintList();
       return;
@@ -1256,6 +1501,13 @@
       state.group = 'all'; remember(GROUP_STORE, 'all');
       paintPills(); paintList(); paintBar();
       els.q.focus();
+      return;
+    }
+    var pin = t.closest('[data-pin]');
+    if (pin) {
+      var pk = pin.getAttribute('data-pin');
+      select(pk, false);
+      togglePin(pk);
       return;
     }
     var more = t.closest('[data-menu]');

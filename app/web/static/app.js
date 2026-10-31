@@ -68,6 +68,7 @@
   var groups = DEFAULT_GROUPS.slice();
   var host = '';
   var system = null;    // the payload's box-health block, for home.js
+  var rowOrder = [];    // the user's explicit row arrangement, from the payload
   var loaded = false;
   var lastFetchAt = 0;
   var inflight = false;
@@ -383,6 +384,7 @@
       services = res.data.services;
       groups = resolveGroups(res.data);
       system = (res.data.system && typeof res.data.system === 'object') ? res.data.system : null;
+      rowOrder = Array.isArray(res.data.order) ? res.data.order.slice() : [];
       loaded = true;
       hideNotice();
       text(elHost, host || ' ');
@@ -2044,6 +2046,46 @@
       return true;
     },
     touch: function (key) { VIEW.touch(key, 'launched'); },
+    /* Pin and row order live in overrides.json, so both are PATCH/POST to
+       the API and both land back through the normal payload. The local
+       model is updated optimistically so the repaint is instant; a failed
+       write reverts the field and a refresh re-reads the truth. */
+    order: function () { return rowOrder.slice(); },
+    pin: function (key, on) {
+      var svc = find(key);
+      if (!svc) return Promise.resolve(false);
+      svc.pinned = !!on;
+      notifyServices();
+      return request('api/services/' + encodeURIComponent(key), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pinned: !!on })
+      }).then(function (res) {
+        if (!res.ok) { svc.pinned = !on; notifyServices(); }
+        return res.ok;
+      }, function () {
+        svc.pinned = !on;
+        notifyServices();
+        return false;
+      });
+    },
+    saveOrder: function (list) {
+      if (!Array.isArray(list)) return Promise.resolve(false);
+      var prev = rowOrder;
+      rowOrder = list.slice();
+      return request('api/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: rowOrder })
+      }).then(function (res) {
+        if (!res.ok) { rowOrder = prev; notifyServices(); }
+        return res.ok;
+      }, function () {
+        rowOrder = prev;
+        notifyServices();
+        return false;
+      });
+    },
     deploy: function (key, opener) {
       var svc = find(key);
       if (!svc) return false;

@@ -14,7 +14,8 @@ Serves static/ as static files and a small JSON API:
     POST   api/services/{key}/update   202 -> pull newer images + setup.sh job
     POST   api/services/{key}/updates/check   re-check its images now
     GET    api/services/{key}      detail: identity, meta, env var NAMES
-    PATCH  api/services/{key}      {name?, description?} -> overrides.json
+    PATCH  api/services/{key}      {name?, description?, pinned?} -> overrides.json
+    POST   api/order               {"order": [key...]}  -> overrides.json order
     POST   api/services/{key}/env/{var}/reveal   one value, deliberately POST
     PATCH  api/services/{key}/env/{var}   {"value"} -> rewrites that line in .env
     POST   api/services/{key}/touch  {"event": launched|opened} -> usage.json
@@ -302,9 +303,9 @@ def resolve_registry_path(raw, label):
 
 # ------------------------------------------------------------------ overrides
 
-# UI edits (name, description) layered over the shipped registry. Kept in one
-# small JSON file so "reset to defaults" is `rm overrides.json`, and so a
-# redeploy of the repo never clobbers them.
+# UI edits (name, description, pinned, row order) layered over the shipped
+# registry. Kept in one small JSON file so "reset to defaults" is
+# `rm overrides.json`, and so a redeploy of the repo never clobbers them.
 _overrides_lock = threading.Lock()
 
 
@@ -336,9 +337,38 @@ def load_overrides():
             continue
         kept = {f: entry[f] for f in ("name", "description")
                 if isinstance(entry.get(f), str)}
+        if entry.get("pinned") is True:
+            kept["pinned"] = True
         if kept:
             clean[key] = kept
     return clean
+
+
+def _read_overrides_doc():
+    """The raw overrides.json object, or {} on any failure. Unlike
+    load_overrides this does not pick out the services map: callers that
+    write need every other top-level key (the row order) preserved."""
+    try:
+        with open(OVERRIDES_PATH, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def load_order():
+    """The pinned-first row order the home table was last arranged in, as a
+    list of service keys. Never raises; empty when never arranged."""
+    order = _read_overrides_doc().get("order")
+    if not isinstance(order, list):
+        return []
+    seen = set()
+    out = []
+    for key in order:
+        if isinstance(key, str) and key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
 
 
 def _write_json_atomically(path, doc, prefix):
@@ -372,8 +402,37 @@ def _write_json_atomically(path, doc, prefix):
 
 
 def _write_overrides(data):
-    """Atomically replace overrides.json. Caller holds _overrides_lock."""
-    _write_json_atomically(OVERRIDES_PATH, {"services": data}, ".overrides-")
+    """Atomically replace the services map in overrides.json. Caller holds
+    _overrides_lock. Other top-level keys (the row order) are preserved:
+    renaming a service must not lose a user's arrangement."""
+    doc = _read_overrides_doc()
+    doc["services"] = data
+    _write_json_atomically(OVERRIDES_PATH, doc, ".overrides-")
+
+
+def save_order(order):
+    """Persist the explicit row order; returns {"order": cleaned list}.
+
+    Keys are not checked against the registry: a service that disappears
+    from the catalogue keeps its rank for when it comes back, and an
+    unknown key simply matches nothing on the grid.
+    """
+    if not isinstance(order, list):
+        raise DeployError(400, "order must be a list")
+    seen = set()
+    clean = []
+    for key in order:
+        if not isinstance(key, str) or not key:
+            raise DeployError(400, "order entries must be service keys")
+        if key not in seen:
+            seen.add(key)
+            clean.append(key)
+    with _overrides_lock:
+        doc = _read_overrides_doc()
+        doc["order"] = clean
+        _write_json_atomically(OVERRIDES_PATH, doc, ".overrides-")
+    log("row order saved (%d keys)" % len(clean))
+    return {"order": clean}
 
 
 def effective(svc, overrides=None):
@@ -1414,6 +1473,7 @@ def services_payload():
         if restore_pending(svc):
             active = degraded = installed = False
         name, description = effective(svc, overrides)
+        oentry = overrides.get(svc.get("key")) or {}
         gid = svc.get("group")
         services.append({
             "key": svc.get("key"),
@@ -1469,8 +1529,15 @@ def services_payload():
             # a JSON true hides. Appended last, like every key after v1.
             "hidden": svc.get("hidden") is True,
             "github": github_payload(svc),
+            # Pinned rows paint ahead of every state bucket on the home
+            # table. From overrides.json like a rename, so it survives
+            # redeploys and travels across devices.
+            "pinned": oentry.get("pinned") is True,
         })
     return {"host": host, "groups": load_groups(), "services": services,
+            # The user's explicit row arrangement, verbatim keys. Empty when
+            # never arranged: the grid then falls back to its state sorts.
+            "order": load_order(),
             "system": system_stats()}
 
 
@@ -2688,7 +2755,13 @@ def patch_service(key, body):
         if field in body:
             edits[field] = clean_field(field, body[field], limit, multiline)
 
-    if edits:
+    pin = None
+    if "pinned" in body:
+        if not isinstance(body["pinned"], bool):
+            raise DeployError(400, "pinned must be a boolean")
+        pin = body["pinned"]
+
+    if edits or pin is not None:
         defaults = {"name": svc.get("name") or "",
                     "description": svc.get("description") or ""}
         # Read-modify-write under one lock so two concurrent PATCHes (two
@@ -2701,12 +2774,18 @@ def patch_service(key, body):
                     entry.pop(field, None)
                 else:
                     entry[field] = text
+            if pin is True:
+                entry["pinned"] = True
+            elif pin is False:
+                entry.pop("pinned", None)
             if entry:
                 data[key] = entry
             else:
                 data.pop(key, None)
             _write_overrides(data)
-        log("patched %s: %s" % (key, ", ".join(sorted(edits))))
+        log("patched %s: %s" % (
+            key, ", ".join(sorted(edits) + (["pinned"] if pin is not None
+                                           else []))))
     return service_detail(key)
 
 
@@ -4737,6 +4816,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if parts == ["api", "github", "inspect"]:
             self._json(200, github_inspect(body))
+            return
+        if parts == ["api", "order"]:
+            self._json(200, save_order(
+                (body or {}).get("order") if isinstance(body, dict)
+                else None))
             return
         if parts == ["api", "apps"]:
             self._json(202, create_app(body))
