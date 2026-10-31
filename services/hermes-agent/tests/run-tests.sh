@@ -688,28 +688,32 @@ test_live() {
   api_port="$(sed -n 's/^API_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
   user="$(sed -n 's/^HERMES_DASHBOARD_USERNAME=//p' "$SERVICE_DIR/.env")"
   pass="$(sed -n 's/^HERMES_DASHBOARD_PASSWORD=//p' "$SERVICE_DIR/.env")"
+  creds="$user:$pass"
+  wrongcreds="$user:not-the-real-password"
   api_key="$(sed -n 's/^API_SERVER_KEY=//p' "$SERVICE_DIR/.env")"
   url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
 
   live_check "hermes-agent container running"    sh -c "docker inspect -f '{{.State.Status}}' hermes-agent | grep -qx running"
-  live_check "dashboard answers locally"         sh -c "curl -fsS -o /dev/null -u '$user:$pass' 'http://127.0.0.1:$port/'"
+  live_check "dashboard answers locally"         sh -c "curl -fsS -o /dev/null -u '$creds' 'http://127.0.0.1:$port/'"
   live_check "API health answers locally"        sh -c "curl -fsS -o /dev/null 'http://127.0.0.1:$api_port/health'"
   live_check "dashboard not on non-local ifaces" no_external_listener "$port"
   live_check "API port loopback only"            no_external_listener "$api_port"
   live_check "tailscale serve maps :$https_port" sh -c "'$ts' serve status | grep -A2 ':$https_port' | grep -q 'proxy http://127.0.0.1:$port'"
-  live_check "tailnet HTTPS responds"            sh -c "curl -fsS -o /dev/null --max-time 30 -u '$user:$pass' '$url:$https_port/'"
+  live_check "tailnet HTTPS responds"            sh -c "curl -fsS -o /dev/null --max-time 30 -u '$creds' '$url:$https_port/'"
 
   # The dashboard's basic-auth gate must actually be on: anonymous requests
-  # bounce to login or get a 401/403, and the .env credentials get through.
+  # bounce to login or get a 401/403, the .env credentials get through, and a
+  # wrong password does not.
   live_check "dashboard rejects anonymous" \
     sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 '$url:$https_port/'); [ \"\$code\" != 200 ]"
   live_check "dashboard rejects a wrong password" \
-    sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -u '$user:wrong-password' '$url:$https_port/'); [ \"\$code\" != 200 ]"
+    sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -u '$wrongcreds' '$url:$https_port/'); [ \"\$code\" != 200 ]"
   live_check "dashboard credentials in .env authenticate" \
-    sh -c "curl -fsS -o /dev/null --max-time 30 -u '$user:$pass' '$url:$https_port/'"
+    sh -c "curl -fsS -o /dev/null --max-time 30 -u '$creds' '$url:$https_port/'"
 
-  # The API is key-gated: /v1/models answers 401 without a Bearer key and
-  # 200 with the one in .env. (Verified against the running container.)
+  # The API is key-gated: /v1/models answers 401 (or 403) without a Bearer key
+  # and 200 with the one in .env. Probed locally — the API port is deliberately
+  # never published on the tailnet.
   live_check "API rejects a request without the key" \
     sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 'http://127.0.0.1:$api_port/v1/models'); [ \"\$code\" = 401 ] || [ \"\$code\" = 403 ]"
   live_check "API accepts the .env key" \
