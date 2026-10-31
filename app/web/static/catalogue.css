@@ -156,33 +156,45 @@
 @media (min-width: 780px)  { .cat-rows { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 20px; } }
 @media (min-width: 1160px) { .cat-rows { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 
+/* The row is the hover surface: its background wraps the whole tile,
+   action button included. The -12px margins bleed the highlight into the
+   panel's padding exactly as the old inner link did. */
 .cat-row {
   position: relative;
   display: flex;
   align-items: center;
   min-width: 0;
-  border-radius: 8px;
+  margin: 0 -12px;
+  border-radius: 10px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .cat-row:hover { background: var(--surface-2); }
 }
 .cat-row-planned { opacity: .65; }
 
-.cat-row-main {
+/* Plain content, in flow; the stretched link below overlays it. */
+.cat-row-body {
   display: flex;
   align-items: center;
   gap: 13px;
   flex: 1 1 auto;
   min-width: 0;
   padding: 10px 12px;
-  margin: 0 -12px 0 -12px;
-  color: var(--text);
+}
+
+/* Covers the entire row — every pixel of the tile is the detail link. The
+   action button sits on .cat-actions (z-index:1) above it, so it keeps its
+   own click while the rest of the row navigates. */
+.cat-row-link {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   text-decoration: none;
-  border-radius: 8px;
 }
-@media (hover: hover) and (pointer: fine) {
-  .cat-row-main:hover { background: var(--surface-2); }
-}
-.cat-row-main:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: -2px; }
+.cat-row-link:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: -2px; }
 
 .cat-icon {
+  position: relative;
   flex: none;
   display: flex;
   align-items: center;
@@ -195,6 +207,22 @@
 }
 .cat-icon > * { width: 26px; height: 26px; display: block; }
 .cat-icon > img { border-radius: 6px; }
+
+/* State dot on the icon's top-right corner — running green, stopped peach,
+   a job in flight accent. The solid ring reads as a cutout against the
+   icon and the row behind it. */
+.cat-dot {
+  position: absolute;
+  top: -4px; right: -4px;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--surface);
+  background: var(--faint);
+}
+.cat-dot-ok   { background: var(--ok); }
+.cat-dot-warn { background: var(--warn); }
+.cat-dot-run  { background: var(--accent-fg); }
+.cat-dot-muted { background: var(--faint); }
 
 .cat-names { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .cat-name {
@@ -216,68 +244,33 @@
   -webkit-box-orient: vertical;
 }
 
-.cat-state {
-  flex: none;
-  margin-left: auto;
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.cat-state-ok   { color: var(--ok); }
-.cat-state-warn { color: var(--warn); }
-.cat-state-run  { color: var(--accent-fg); }
-.cat-state-muted { color: var(--faint); }
-
-.cat-chev { flex: none; width: 15px; height: 15px; color: var(--faint); opacity: 0; transition: opacity var(--dur) ease; }
-.cat-chev svg { width: 15px; height: 15px; display: block; }
-@media (hover: hover) and (pointer: fine) {
-  .cat-row-main:hover .cat-chev { opacity: .8; }
-}
-
 .cat-actions {
+  position: relative;
+  z-index: 1;               /* above the stretched link, so the button clicks */
   display: flex;
   flex: none;
   align-items: center;
   gap: 10px;
-  padding-left: 8px;
+  padding: 0 12px 0 8px;
+  /* The padding is dead space over the detail link — let it click through.
+     On phones the wrap makes this a full-width second line, so only the
+     button itself should block the link. */
+  pointer-events: none;
 }
+.cat-actions > * { pointer-events: auto; }
 .cat-btn { min-height: 34px; padding: 0 14px; font-size: 13px; text-decoration: none; }
 
-/* Narrow phones: the name keeps its floor — the status drops to a second
-   line under it and the action moves to a line of its own, rather than the
-   three of them squeezing the name to nothing. */
+/* Narrow phones: the name keeps its floor and the action wraps to a line
+   of its own, right-aligned under it. */
 @media (max-width: 480px) {
   .cat-row { flex-wrap: wrap; }
-  .cat-row-main { flex-wrap: wrap; }
   .cat-names { flex: 1 1 45%; }
-  .cat-state {
-    order: 5;
-    flex: 0 0 100%;
-    margin-left: 0;
-    padding-left: 62px;      /* icon + gap, so it sits under the name */
-    margin-top: 2px;
-  }
-  .cat-chev { order: 4; }
   .cat-actions {
     flex: 0 0 100%;
     justify-content: flex-end;
-    padding: 6px 0 0 62px;
+    padding: 0 12px 6px 62px;   /* icon + gap, so it lines up under the name */
   }
 }
-
-.cat-remove {
-  -webkit-appearance: none;
-  appearance: none;
-  padding: 0;
-  font: inherit;
-  font-size: 13px;
-  color: var(--bad);
-  background: none;
-  border: 0;
-  cursor: pointer;
-}
-.cat-remove:hover { text-decoration: underline; }
-.cat-remove:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; border-radius: 4px; }
 
 /* ---------- states ---------- */
 
