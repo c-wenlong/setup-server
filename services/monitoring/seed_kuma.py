@@ -111,6 +111,10 @@ PUBLISHED = [
     # /v1/status ({"ok": true}) is the hub's one unauthenticated route; "/"
     # is the static PWA, which would stay green with the API down.
     ("quiver-hub", 8477, "/v1/status"),
+    # /healthz ({"ok":true,"status":"live"}), not / — the gateway's own
+    # unauthenticated health route. / would 403 whenever trustedProxies
+    # changes, and everything deeper sits behind the gateway token.
+    ("openclaw", 18789, "/healthz"),
 ]
 
 MONITORS = [
@@ -122,6 +126,13 @@ MONITORS = [
 # tailnet URL and stays on loopback.
 MONITORS.append(
     ("ollama", f"http://127.0.0.1:{os.environ.get('OLLAMA_PORT', '11434')}/api/version")
+)
+
+# hermes-agent's dashboard sits behind HTTP Basic auth, so a published
+# monitor would read 401 as down. The API /health endpoint needs no key and
+# shares the container's fate, watched on loopback like ollama.
+MONITORS.append(
+    ("hermes-agent", f"http://127.0.0.1:{os.environ.get('HERMES_API_PORT', '8642')}/health")
 )
 
 
