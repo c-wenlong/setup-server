@@ -246,12 +246,12 @@ test_handle_beszel() {
   echo "• handler: beszel moves hub and agent together"
   setup
   run_handle "stop beszel"
-  check "agent stopped before hub"   calls_in_order "systemctl --user stop beszel-agent.service" \
+  check "agent stopped before hub"   calls_in_order "systemctl --user disable --now beszel-agent.service" \
                                        "docker stop beszel"
   : > "$CALLS_LOG"
   run_handle "start beszel"
   check "hub started before agent"   calls_in_order "docker start beszel" \
-                                       "systemctl --user start beszel-agent.service"
+                                       "systemctl --user enable --now beszel-agent.service"
   teardown
 }
 
@@ -259,8 +259,8 @@ test_handle_manimkc() {
   echo "• handler: manimkc is a systemd user unit"
   setup
   run_handle "restart manimkc"
-  check "stops then starts the unit" calls_in_order "systemctl --user stop manimkc.service" \
-                                       "systemctl --user start manimkc.service"
+  check "stops then starts the unit" calls_in_order "systemctl --user disable --now manimkc.service" \
+                                       "systemctl --user enable --now manimkc.service"
   check "no docker involved"         no_call "docker stop manimkc\|docker start manimkc"
   teardown
 }
@@ -303,7 +303,7 @@ test_handle_panel() {
   check "start button -> picker"      calls_have '"body": "pick start"'
   check "stop button -> picker"       calls_have '"body": "pick stop"'
   check "restart button -> picker"    calls_have '"body": "pick restart"'
-  check "no service touched"          no_call "docker stop\|docker start\|systemctl --user stop"
+  check "no service touched"          no_call "docker stop\|docker start\|systemctl --user stop\|systemctl --user disable"
   teardown
 }
 
@@ -395,11 +395,11 @@ test_handle_rejects_unknown() {
   : > "$CALLS_LOG"
   run_handle "stop ollama"
   check "ollama IS stoppable now"  calls_have "ollama: stop ok"
-  check "systemctl stop ran"       calls_have "systemctl --user stop ollama.service"
+  check "systemctl stop ran"       calls_have "systemctl --user disable --now ollama.service"
   : > "$CALLS_LOG"
   run_handle "restart launcher"
   check "launcher not stoppable"  calls_have "unknown service 'launcher'"
-  check "nothing executed"        no_call "systemctl --user stop\|systemctl --user restart"
+  check "nothing executed"        no_call "systemctl --user stop\|systemctl --user restart\|systemctl --user disable"
   : > "$CALLS_LOG"
   : > "$CALLS_LOG"
   run_handle "rm -rf /"

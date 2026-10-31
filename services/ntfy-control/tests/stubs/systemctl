@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # systemctl stub. State in $STATE_DIR (mirrors the docker stub):
 #   stopped_<unit>  — exists => `is-active` reports inactive; created by
-#                     `--user stop`, removed by start/restart
+#                     `--user stop`/`disable --now`, removed by
+#                     start/restart/`enable --now`. The unit is always the
+#                     LAST word: `disable --now x.service`, `stop x.service`
+#                     and `kill --signal=SIGKILL x.service` all end in it.
 echo "systemctl $*" >> "$CALLS_LOG"
 
 if [ "${1:-}" = "--user" ]; then
   verb="${2:-}"
-  unit="${3:-}"
+  unit="${!#}"
   case "$verb" in
-    stop)      [ -n "$unit" ] && touch "$STATE_DIR/stopped_$unit" ;;
-    start|restart) [ -n "$unit" ] && rm -f "$STATE_DIR/stopped_$unit" ;;
+    stop|disable|kill) [ -n "$unit" ] && touch "$STATE_DIR/stopped_$unit" ;;
+    start|restart|enable) [ -n "$unit" ] && rm -f "$STATE_DIR/stopped_$unit" ;;
     is-active)
       if [ -n "$unit" ] && [ -f "$STATE_DIR/stopped_$unit" ]; then
         echo inactive

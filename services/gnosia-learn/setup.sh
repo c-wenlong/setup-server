@@ -256,13 +256,17 @@ if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
        && ! systemctl --user is-failed --quiet gnosia-learn; then
       APP_SHOULD_RUN=0
     fi
-    # A studio that is enabled but cleanly stopped was stopped deliberately
-    # (STUDIO_ENABLED=0 disables it instead) — deployd's re-runs must not
-    # bring it back while the flag stays on.
+    # A studio that is cleanly stopped was stopped deliberately, however it
+    # got there: a manual `systemctl --user stop` leaves it enabled but
+    # inactive, and the panels' Stop is `disable --now`. The flag-off
+    # branch below also produces disabled+inactive, so it leaves
+    # state/studio-flag-off behind — same marker launchd uses — to keep
+    # "off because the flag says so" apart from an owner's stop. Deployd's
+    # re-runs must not bring an owner's stop back while the flag stays on.
     if [ -f "$UNIT_DIR/gnosia-learn-studio.service" ] \
-       && systemctl --user is-enabled --quiet gnosia-learn-studio \
        && ! systemctl --user is-active --quiet gnosia-learn-studio \
-       && ! systemctl --user is-failed --quiet gnosia-learn-studio; then
+       && ! systemctl --user is-failed --quiet gnosia-learn-studio \
+       && [ ! -f "$SERVICE_HOME/state/studio-flag-off" ]; then
       STUDIO_SHOULD_RUN=0
     fi
   else
@@ -536,11 +540,16 @@ if [ "$OS" = "Linux" ]; then
     warn "gnosia-learn.service is stopped — leaving it stopped (start: systemctl --user start gnosia-learn)"
   fi
   if [ "$STUDIO_ENABLED" = "1" ]; then
+    rm -f "$SERVICE_HOME/state/studio-flag-off"
     # The runner follows the app's run state: it lives off the same checkout
     # and node_modules, and an owner who stopped the app meant the stack. A
-    # studio-only stop is the owner's too — deployd re-runs leave it down.
-    systemctl --user enable gnosia-learn-studio >/dev/null 2>&1
+    # studio-only stop is the owner's too — deployd re-runs leave it down,
+    # and must not re-enable either: the panels stop with `disable --now`,
+    # so enabling here would resurrect the runner at the next boot. A manual
+    # `systemctl --user stop` keeps its enable bit, so skipping enable when
+    # stopped leaves a manual stop armed and a panel stop disarmed.
     if [ "$APP_SHOULD_RUN" = "1" ] && [ "$STUDIO_SHOULD_RUN" = "1" ]; then
+      systemctl --user enable gnosia-learn-studio >/dev/null 2>&1
       systemctl --user restart gnosia-learn-studio
     else
       warn "gnosia-learn-studio.service is stopped — leaving it stopped (start: systemctl --user start gnosia-learn-studio)"
@@ -548,8 +557,11 @@ if [ "$OS" = "Linux" ]; then
   else
     # Flipping STUDIO_ENABLED to 0 must actually stop the runner, not just
     # skip a start — disable --now covers a unit left running by an older
-    # install or a manual start.
+    # install or a manual start. The marker is what tells the next flag-on
+    # run this disabled+inactive state was the flag's doing, not an owner's
+    # `disable --now` from a panel — launchd writes the same note.
     systemctl --user disable --now gnosia-learn-studio >/dev/null 2>&1 || true
+    touch "$SERVICE_HOME/state/studio-flag-off"
   fi
   systemctl --user enable --now gnosia-learn-export.timer >/dev/null 2>&1
   ok "Export timer active"
