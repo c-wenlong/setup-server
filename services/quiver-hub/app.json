@@ -4,6 +4,7 @@
   "tagline": "Remote",
   "group": "mine",
   "icon": "terminal",
+  "favicon": "/icon-192.png",
   "author": "c-wenlong",
   "url": "https://HOST:8477/",
   "health": "http://127.0.0.1:8477/v1/status",

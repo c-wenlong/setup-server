@@ -163,13 +163,14 @@
 
   function say(message) { text(elLive, message); }
 
-  /* The icon module owns brand logo -> hand-drawn glyph -> fallback. We only
-     ever call window.iconFor(key, name). If it has not loaded (or throws),
-     drop in an empty box so the grid still lays out. */
+  /* The icon module owns live favicon -> brand logo -> hand-drawn glyph ->
+     fallback. We only ever call window.iconFor(key, name, liveUrl). If it
+     has not loaded (or throws), drop in an empty box so the grid still
+     lays out. */
   function iconNode(svc) {
     var node = null;
     if (typeof window.iconFor === 'function') {
-      try { node = window.iconFor(svc.key, svc.icon); } catch (e) { node = null; }
+      try { node = window.iconFor(svc.key, svc.icon, svc.favicon); } catch (e) { node = null; }
     }
     if (!node || node.nodeType !== 1) {
       node = make('span', 'icon-blank');

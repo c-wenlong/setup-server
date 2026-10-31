@@ -4,6 +4,7 @@
   "tagline": "Design",
   "group": "mine",
   "icon": "palette",
+  "favicon": "/assets/favicon.svg",
   "author": "c-wenlong",
   "url": "https://HOST:8108/gallery/",
   "health": "http://127.0.0.1:8108/gallery/",

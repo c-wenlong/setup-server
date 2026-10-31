@@ -1,18 +1,26 @@
 /* icons.js — icon resolution for the launcher.
  *
- * Two sources, in order:
+ * Three sources, in order:
  *
- *   1. Vendored brand marks in static/icons/ — real app logos, in their own
+ *   1. The service's own live favicon, for tiles that opt in: services.json
+ *      `favicon` arrives already resolved to an absolute https URL by the
+ *      backend (a path in app.json is joined onto the tile's url). The
+ *      tile shows whatever the service serves today, so a favicon update
+ *      in that repo propagates here instead of waiting for a re-vendor.
+ *      A load failure (service down, not installed, path moved) steps
+ *      down to source 2, then 3 — see liveImg().
+ *   2. Vendored brand marks in static/icons/ — real app logos, in their own
  *      colours, keyed by service `key` (immich -> icons/immich.svg). Returned
  *      as an <img>. Files are local; nothing here touches the network, so the
  *      page still renders with the internet down.
- *   2. Hand-authored monochrome glyphs, keyed by the semantic `icon` name from
+ *   3. Hand-authored monochrome glyphs, keyed by the semantic `icon` name from
  *      services.json (camera, folder, code, ...). Drawn on a 24x24 grid,
  *      stroke-only, 1.5 weight, round caps/joins, inheriting currentColor.
  *      Unknown names fall back to a neutral rounded-square glyph.
  *
  * Public API:
- *   window.iconFor(key, name) -> HTMLElement   (brand img, else glyph svg)
+ *   window.iconFor(key, name, liveUrl) -> HTMLElement
+ *                                        (live img, brand img, or glyph svg)
  *   window.ICONS.svg(name)    -> SVGElement    (glyph only; unchanged)
  *
  * EVERY path emitted here is RELATIVE ("icons/immich.svg"). The launcher is
@@ -47,8 +55,9 @@
     /* The Gnosia mark from the gnosia repo's own brand set
        (apps/web/public/brand/mark.png). Raster, no vector original. */
     'gnosia-learn':  { file: 'gnosia-learn',  ext: 'png' },
-    /* The site's own favicon (site/favicon.svg in the sources repo) — the
-       filled lavender plate reads on both tile themes, so no -dark pair. */
+    /* Vendored copy of the site's own favicon (site/favicon.svg in the
+       sources repo), the fallback behind the tile's live-favicon rung.
+       The cream plate reads on both tile themes, so no -dark pair. */
     'sources':       { file: 'sources' },
     'manimkc':       { file: 'manimkc',      ext: 'png' },
     'seafile':       { file: 'seafile' },
@@ -409,9 +418,57 @@
     return img;
   }
 
-  /* Resolution order: vendored brand mark for `key`, else the hand-drawn
-     glyph for the semantic `name`, else the `box` glyph. */
-  function iconFor(key, name) {
+  /* The drawn glyph as a data URI — the rung below the vendored file inside
+     a live-favicon <img>, where falling back has to mean swapping src, not
+     the element. `currentColor` does not exist inside an SVG-as-image, so
+     a fixed mid-grey stands in: readable on both tile themes. */
+  function glyphDataUri(name) {
+    var node = svg(name);
+    node.setAttribute('stroke', '#8a8a8a');
+    node.setAttribute('width', '24');
+    node.setAttribute('height', '24');
+    return 'data:image/svg+xml;charset=utf-8,' +
+           encodeURIComponent(new XMLSerializer().serializeToString(node));
+  }
+
+  /* Live favicon first; on error, the vendored mark for `key`; if that
+     fails too (or there is none), the drawn glyph. All inside one <img>,
+     so a detached node degrades exactly like a mounted one and callers
+     keep holding the same element. */
+  function liveImg(key, name, url) {
+    var img = document.createElement('img');
+    img.setAttribute('src', url);
+    img.setAttribute('alt', '');
+    img.setAttribute('loading', 'lazy');
+    img.setAttribute('decoding', 'async');
+    img.setAttribute('width', '24');
+    img.setAttribute('height', '24');
+    img.setAttribute('aria-hidden', 'true');
+    img.style.objectFit = 'contain';
+    var entry = brandEntry(key);
+    var fellToBrand = false;
+    var glyph = null;
+    img.addEventListener('error', function () {
+      if (!fellToBrand && entry) {
+        fellToBrand = true;
+        img.setAttribute('src', fileFor(entry));
+        /* The vendored rung does have a per-theme variant; register it so a
+           scheme flip still repaints, same as a brand-first tile. */
+        if (entry.dark) themed.push({ el: img, entry: entry });
+        return;
+      }
+      if (glyph === null) glyph = glyphDataUri(name);
+      /* Re-arming the same failed src would re-fire this handler forever. */
+      if (img.getAttribute('src') !== glyph) img.setAttribute('src', glyph);
+    });
+    return img;
+  }
+
+  /* Resolution order: the service's live favicon when the registry opts in,
+     else the vendored brand mark for `key`, else the hand-drawn glyph for
+     the semantic `name`, else the `box` glyph. */
+  function iconFor(key, name, liveUrl) {
+    if (liveUrl) return liveImg(key, name, liveUrl);
     var entry = brandEntry(key);
     if (entry) return brandImg(entry);
     return svg(name);
