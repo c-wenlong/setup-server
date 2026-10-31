@@ -468,6 +468,15 @@ class EnvSubstitutionTest(SandboxTest):
         self.assertEqual(server.resolve_url(svc, "box.ts.net"),
                          "https://box.ts.net:8443/")
 
+    def test_env_value_with_inline_comment_falls_back(self):
+        # parse_env keeps `9120 # pinned` verbatim (a password may hold a #),
+        # so the resolver must refuse it as a URL part and take the default.
+        self.make_env("alpha/.env", "LOCAL_PORT=9120 # pinned\n")
+        svc = {"key": "alpha", "env": "alpha/.env",
+               "url": "https://HOST:{HTTPS_PORT|LOCAL_PORT:9119}/"}
+        self.assertEqual(server.resolve_url(svc, "box.ts.net"),
+                         "https://box.ts.net:9119/")
+
     def test_missing_env_file_uses_defaults(self):
         svc = {"key": "alpha", "env": "alpha/.env",
                "url": "https://HOST:{HTTPS_PORT|LOCAL_PORT:9119}/",

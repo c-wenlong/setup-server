@@ -295,6 +295,37 @@ test_https_port_follows_local_port() {
   check "new explicit is ignored"         out_has "HTTPS_PORT=8444 ignored"
   check "  still :8443"                   calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:18792"
   check "  .env keeps 8443"               grep -qx 'HTTPS_PORT=8443' "$SVC/.env"
+
+  # The same saved port counts in every assignment form `source` accepts.
+  sed -i.bak 's/^HTTPS_PORT=/export HTTPS_PORT=/' "$SVC/.env"
+  unset HTTPS_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "export form honoured"            calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:18792"
+  sed -i.bak 's/^export HTTPS_PORT=/  HTTPS_PORT=/' "$SVC/.env"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "indented form honoured"          calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:18792"
+  teardown
+
+  # A .env with no trailing newline must not swallow the appended block.
+  setup
+  touch "$STATE_DIR/operator"
+  export LOCAL_PORT=18792
+  run_deploy
+  check "exits zero"                      [ "$CODE" -eq 0 ]
+  printf '%s' "$(cat "$SVC/.env")" > "$SVC/.env.trim" && mv "$SVC/.env.trim" "$SVC/.env"
+  unset LOCAL_PORT
+  export HTTPS_PORT=8444
+  run_deploy
+  check "re-run exits zero"               [ "$CODE" -eq 0 ]
+  check "appended port recorded"          grep -qx 'HTTPS_PORT=8444' "$SVC/.env"
+  check "served :8444"                    calls_have "tailscale serve --bg --https=8444 http://127.0.0.1:18792"
+  unset HTTPS_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "still parseable on re-run"       [ "$CODE" -eq 0 ]
+  check "still :8444"                     calls_have "tailscale serve --bg --https=8444 http://127.0.0.1:18792"
   teardown
 }
 

@@ -679,6 +679,14 @@ def substitute_host(url, host):
 # explicitly split publish port while still following a lone LOCAL_PORT move.
 _ENV_TOKEN_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_|]*)(?::([^}]*))?\}")
 
+# A token's replacement lands inside a URL, so it must be one URL-safe run —
+# digits, letters, and the hostname/path characters Compose and the shell
+# would also leave alone. Anything wider (an inline comment like
+# `LOCAL_PORT=18789 # pinned`, which parse_env deliberately keeps verbatim
+# for passwords) fails over to the next name or the default rather than
+# producing a link that points nowhere.
+_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]*$")
+
 
 def service_env(svc):
     """Parsed .env for url/health templating, or {} — never raises. This is
@@ -700,7 +708,7 @@ def substitute_env(url, env):
     def repl(match):
         for name in match.group(1).split("|"):
             value = env.get(name)
-            if value is not None:
+            if value is not None and _ENV_VALUE_RE.match(value):
                 return value
         return match.group(2) if match.group(2) is not None else match.group(0)
 
