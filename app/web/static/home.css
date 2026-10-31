@@ -302,6 +302,27 @@ button.h-group { cursor: pointer; }
 .h-row.is-dim .h-ic { opacity: .6; }
 
 .h-app { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.h-grip {
+  flex: none; width: 14px; margin: 0 -4px; cursor: grab;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--faint); opacity: .55; touch-action: none;
+}
+.h-grip svg { width: 12px; height: 12px; stroke-width: 3; }
+.h-row:hover .h-grip { opacity: 1; }
+.h-grip:active { cursor: grabbing; }
+.h-row.is-drag { opacity: .4; }
+.h-row.is-drop-above { box-shadow: inset 0 2px 0 var(--accent); }
+.h-row.is-drop-below { box-shadow: inset 0 -2px 0 var(--accent); }
+.h-pin {
+  -webkit-appearance: none; appearance: none;
+  flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--faint); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.h-pin svg { width: 14px; height: 14px; }
+.h-pin:hover { background: var(--fg-10); color: var(--text); }
+.h-pin.is-on { color: var(--accent); }
+.h-pin.is-on svg { fill: var(--accent); }
 .h-ic {
   width: 26px; height: 26px; flex: none; border-radius: 7px; overflow: hidden;
   display: inline-flex; align-items: center; justify-content: center;

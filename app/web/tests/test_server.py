@@ -746,7 +746,7 @@ class ServiceJobFieldTest(SandboxTest):
             self.assertEqual(list(tile), self.EIGHT + [
                 "degraded", "job", "control", "usage", "deployed_at",
                 "resources", "receipt", "removable", "updates", "hidden",
-                "github"])
+                "github", "pinned"])
 
     # ---- restart
 
@@ -882,7 +882,8 @@ class HttpTest(SandboxTest):
                                        "degraded", "deployed_at",
                                        "description", "github", "group", "hidden",
                                        "icon", "installed", "job", "key",
-                                       "name", "receipt", "removable", "resources",
+                                       "name", "pinned", "receipt", "removable",
+                                       "resources",
                                        "state", "tagline", "updates", "url", "usage"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
         self.assertEqual(svc["author"], "c-wenlong")
@@ -899,7 +900,7 @@ class HttpTest(SandboxTest):
                           "active", "degraded", "job", "control", "usage",
                           "deployed_at",
                           "resources", "receipt", "removable", "updates",
-                          "hidden", "github"])
+                          "hidden", "github", "pinned"])
 
     def test_groups_empty_when_the_registry_has_none(self):
         # An older services.json without a catalog still paints a flat grid.
@@ -1397,6 +1398,47 @@ class OverridesTest(SandboxTest):
         os.unlink(server.OVERRIDES_PATH)
         self.assertEqual(server.service_detail("alpha")["name"], "Alpha")
 
+    # ---- pinned
+
+    def tile(self, key):
+        tiles = {s["key"]: s
+                 for s in server.services_payload()["services"]}
+        return tiles[key]
+
+    def test_pin_roundtrips_through_the_list_payload(self):
+        self.assertFalse(self.tile("alpha")["pinned"])
+        server.patch_service("alpha", {"pinned": True})
+        self.assertTrue(self.tile("alpha")["pinned"])
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"pinned": True})
+        server.patch_service("alpha", {"pinned": False})
+        self.assertFalse(self.tile("alpha")["pinned"])
+        # an unpinned-only entry is no entry at all
+        self.assertEqual(self.read_overrides_file()["services"], {})
+
+    def test_pin_alongside_a_rename_keeps_both(self):
+        server.patch_service("alpha", {"name": "Photos", "pinned": True})
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"name": "Photos", "pinned": True})
+
+    def test_unpin_when_never_pinned_is_a_tidy_noop(self):
+        server.patch_service("alpha", {"pinned": False})
+        self.assertEqual(self.read_overrides_file()["services"], {})
+
+    def test_pinned_must_be_a_boolean(self):
+        for bad in ("yes", 1, [True], {"p": 1}):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.patch_service("alpha", {"pinned": bad})
+            self.assertEqual(ctx.exception.status, 400)
+        self.assertFalse(os.path.exists(server.OVERRIDES_PATH))
+
+    def test_a_rename_does_not_wipe_the_pin(self):
+        server.patch_service("alpha", {"pinned": True})
+        server.patch_service("alpha", {"name": "Photos"})
+        self.assertTrue(self.tile("alpha")["pinned"])
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"name": "Photos", "pinned": True})
+
     # ---- validation
 
     def test_non_string_is_400(self):
@@ -1561,6 +1603,93 @@ class OverridesTest(SandboxTest):
         server.patch_service("alpha", {"name": "Photos"})
         self.assertEqual(self.read_overrides_file()["services"],
                          {"alpha": {"name": "Photos"}})
+
+
+# ---------------------------------------------------------------- row order
+
+class RowOrderTest(SandboxTest):
+    """The `order` top-level key in overrides.json: the explicit row
+    arrangement the home table saves on drag, served back on the list
+    payload. Same file, same lock, same degrade-on-junk discipline as the
+    services map it shares the file with."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "env": None, "description": ""},
+            {"key": "bravo", "name": "Bravo", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "env": None, "description": ""},
+        ]})
+        server.magicdns_host = lambda: "box.ts.net"
+        server.probe_all = lambda urls: {}
+
+    def test_empty_until_first_arranged(self):
+        self.assertEqual(server.load_order(), [])
+        self.assertEqual(server.services_payload()["order"], [])
+
+    def test_roundtrips_in_the_payload(self):
+        server.save_order(["bravo", "alpha"])
+        self.assertEqual(server.services_payload()["order"],
+                         ["bravo", "alpha"])
+        self.assertEqual(self.read_overrides_file()["order"],
+                         ["bravo", "alpha"])
+
+    def test_duplicates_collapse_first_wins(self):
+        out = server.save_order(["alpha", "bravo", "alpha"])
+        self.assertEqual(out["order"], ["alpha", "bravo"])
+
+    def test_bad_shapes_are_400(self):
+        for bad in (None, "alpha", 5, {"o": 1}):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.save_order(bad)
+            self.assertEqual(ctx.exception.status, 400)
+        for bad in ([1], [""], [["alpha"]], [{"k": 1}]):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.save_order(bad)
+            self.assertEqual(ctx.exception.status, 400)
+        self.assertFalse(os.path.exists(server.OVERRIDES_PATH))
+
+    def test_unknown_keys_are_kept(self):
+        # A service removed from the catalogue keeps its rank for when it
+        # comes back; the grid simply matches nothing for it meanwhile.
+        out = server.save_order(["ghost", "alpha"])
+        self.assertEqual(out["order"], ["ghost", "alpha"])
+
+    def test_a_name_patch_preserves_the_order(self):
+        server.save_order(["bravo", "alpha"])
+        server.patch_service("alpha", {"name": "Photos"})
+        self.assertEqual(self.read_overrides_file()["order"],
+                         ["bravo", "alpha"])
+        self.assertEqual(server.load_order(), ["bravo", "alpha"])
+
+    def test_saving_the_order_preserves_the_overrides(self):
+        server.patch_service("alpha", {"name": "Photos", "pinned": True})
+        server.save_order(["bravo", "alpha"])
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"name": "Photos", "pinned": True})
+
+    def test_load_order_tolerates_junk(self):
+        os.makedirs(os.path.dirname(server.OVERRIDES_PATH), exist_ok=True)
+        cases = (
+            ('{ not json', []), ('[]', []), ('null', []),
+            ('{"order": 5}', []), ('{"order": "alpha"}', []),
+            # non-strings drop out; real keys survive
+            ('{"order": [1, null, "alpha"]}', ["alpha"]),
+        )
+        for junk, expected in cases:
+            with open(server.OVERRIDES_PATH, "w") as fh:
+                fh.write(junk)
+            self.assertEqual(server.load_order(), expected,
+                             "junk: %s" % junk)
+
+    def test_the_atomic_write_leaves_no_temp_files(self):
+        server.save_order(["alpha"])
+        self.assertEqual(
+            os.listdir(os.path.dirname(server.OVERRIDES_PATH)),
+            ["overrides.json"])
 
 
 # ---------------------------------------------------------------- reveal
