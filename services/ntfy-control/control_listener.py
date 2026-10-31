@@ -27,8 +27,8 @@ second copy of the list.
 
 ntfy itself is deliberately not controllable (stopping it would cut off the
 ability to start it again), and so are the launcher (it serves the web UI
-that would start it) and ollama (a *system* unit, so it would need sudo).
-Those are marked `locked` in the shared file and hard-locked here as well.
+that would start it). Those are marked `locked` in the shared file and
+hard-locked here as well.
 Stopping a service also pauses its Uptime Kuma monitor (via kuma_toggle.py)
 so intentional downtime doesn't page; that step is best-effort and never
 fails the action itself. A service with a `stop_guard` (AdGuard: its
@@ -70,7 +70,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 # The second lock, mirroring app/web/server.py: the shared file already
 # marks these `locked`, and this is here so an edit to that file cannot
 # hand the phone a button that stops the thing you would start things with.
-HARD_LOCKED = ("ntfy", "launcher", "ollama")
+HARD_LOCKED = ("ntfy", "launcher")
 
 # A stop_guard's flags become argv words: the same kind of shape gate. The
 # same pattern and check live in app/web/server.py and
@@ -136,6 +136,10 @@ def _parts(block):
         if not isinstance(entry, dict):
             continue
         kind = "container" if "container" in entry else "unit"
+        if kind == "unit" and sys.platform != "linux":
+            # systemd user units only exist on Linux; the same service on
+            # macOS is a LaunchAgent. Matches the launcher's control_parts.
+            continue
         name = entry.get(kind)
         if not isinstance(name, str) or not NAME_RE.match(name):
             continue

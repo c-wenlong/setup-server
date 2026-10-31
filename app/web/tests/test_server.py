@@ -292,8 +292,8 @@ class StateDerivationTest(SandboxTest):
         self.assertEqual(server.derive_state(None, False, False), "planned")
 
     def test_deployed_service_without_setup_is_not_planned(self):
-        # ollama has no setup.sh in the repo but does answer on loopback;
-        # it must read as live, not unbuilt.
+        # An external tile has no setup.sh in the repo but can still answer
+        # on loopback; it must read as live, not unbuilt.
         self.assertEqual(server.derive_state(None, True, True), "active")
         self.assertEqual(server.derive_state(None, True, False), "stopped")
 
@@ -1087,7 +1087,7 @@ class ProbeCacheTest(SandboxTest):
             if svc["env"]:
                 self.assertTrue(svc["env"].endswith(".env"), svc["key"])
             # A planned service has nothing deployed to configure.
-            if svc["setup"] is None and svc["key"] != "ollama":
+            if svc["setup"] is None:
                 self.assertIsNone(svc["env"], "%s is planned" % svc["key"])
 
 
@@ -3319,7 +3319,8 @@ class ControlTestBase(SandboxTest):
             svc("uptime-kuma", {"parts": [{"container": "uptime-kuma"}],
                                 "kuma": None}),
             svc("ntfy", {"locked": "ntfy is how you start things again"}),
-            svc("ollama", {"locked": "needs sudo"}),
+            svc("ollama", {"parts": [{"unit": "ollama.service"}],
+                           "kuma": "ollama"}),
             # Locked by the registry alone, with no in-code backstop, so the
             # `locked` field can be tested on its own terms.
             svc("offlimits", {"locked": "deliberately off limits"}),
@@ -3438,7 +3439,7 @@ class ControlStatusTest(ControlTestBase):
         self.assertFalse(status["controllable"])
         self.assertIn("no UI left", status["reason"])
         self.assertEqual(sorted(server.HARD_LOCKED),
-                         ["launcher", "ntfy", "ollama"])
+                         ["launcher", "ntfy"])
 
     def test_status_appears_on_every_tile(self):
         tiles = {s["key"]: s for s in server.services_payload()["services"]}
@@ -3449,7 +3450,8 @@ class ControlStatusTest(ControlTestBase):
 
     def test_status_appears_on_the_detail_payload(self):
         self.assertTrue(server.service_detail("immich")["control"]["controllable"])
-        self.assertFalse(server.service_detail("ollama")["control"]["controllable"])
+        self.assertFalse(server.service_detail("ntfy")["control"]["controllable"])
+        self.assertTrue(server.service_detail("ollama")["control"]["controllable"])
 
     # ---- a mangled registry degrades, it does not execute
 
@@ -3473,6 +3475,38 @@ class ControlStatusTest(ControlTestBase):
              "control": {"parts": [{"container": "a b c"}]}},
         ]})
         self.assertFalse(self.status("evil")["controllable"])
+
+    def test_unit_parts_do_not_exist_without_systemd(self):
+        # The same service is a LaunchAgent on macOS; a systemctl argv would
+        # only fail there. Container parts still parse — docker CLI exists.
+        self.write_registry({"services": [
+            {"key": "svc", "name": "svc", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "control": {"parts": [{"unit": "svc.service"},
+                                   {"container": "svc-db"}]}},
+        ]})
+        block = server.control_block(server.find_service("svc"))
+        names = [p["name"] for p in server.control_parts(block)]
+        self.assertEqual(names, ["svc.service", "svc-db"])
+        real = sys.platform
+        sys.platform = "darwin"
+        try:
+            self.assertEqual([p["name"] for p in server.control_parts(block)],
+                             ["svc-db"])
+            self.assertEqual(self.status("svc")["controllable"], True)
+        finally:
+            sys.platform = real
+        # And with only a unit part, macOS reports not controllable at all.
+        self.write_registry({"services": [
+            {"key": "svc", "name": "svc", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "control": {"parts": [{"unit": "svc.service"}]}},
+        ]})
+        sys.platform = "darwin"
+        try:
+            self.assertFalse(self.status("svc")["controllable"])
+        finally:
+            sys.platform = real
 
     def test_monitor_name_is_gated_too(self):
         self.assertEqual(server.control_monitors({"kuma": "a; curl evil"}), [])
@@ -3888,11 +3922,21 @@ class ControlRefusalTest(ControlTestBase):
         self.assertEqual(ctx.exception.status, 403)
         self.assertEqual(self.spawned, [])
 
-    def test_ollama_is_refused(self):
+    def test_registry_locked_is_refused(self):
+        # `offlimits` carries control.locked with no in-code backstop —
+        # the shipped field on its own refuses.
         with self.assertRaises(server.DeployError) as ctx:
-            server.start_action("ollama", "stop")
+            server.start_action("offlimits", "stop")
         self.assertEqual(ctx.exception.status, 403)
         self.assertEqual(self.spawned, [])
+
+    def test_ollama_runs_as_a_user_unit_now(self):
+        # Once a system unit needing sudo (hard-locked); a user unit now,
+        # so the same action that used to 403 must run.
+        payload = self.run_action("ollama", "stop")
+        self.assertEqual(payload["status"], "done")
+        self.assertEqual(self.argvs(),
+                         [["systemctl", "--user", "stop", "ollama.service"]])
 
     def test_launcher_is_refused_even_though_the_registry_configures_it(self):
         for verb in server.CONTROL_ACTIONS:
@@ -4266,7 +4310,9 @@ class SharedControlRegistryTest(unittest.TestCase):
                 self.assertIn(primary, self.names(key), key)
 
     def test_locked_services_carry_a_reason_and_no_parts(self):
-        for key in ("ntfy", "ollama"):
+        # ntfy is the only locked key shipped in services.json; launcher is
+        # hard-locked in code alone and ollama is a normal user unit now.
+        for key in ("ntfy",):
             block = self.control(key)
             self.assertTrue(block.get("locked"), key)
             self.assertNotIn("parts", block)
@@ -4372,9 +4418,9 @@ class SharedControlRegistryTest(unittest.TestCase):
         # edited every time a service is deployed, and when someone forgets, the
         # failure points at this test instead of at whatever actually broke.
         self.assertTrue(web)
-        for key in ("code-server", "seafile", "immich"):
+        for key in ("code-server", "seafile", "immich", "ollama"):
             self.assertIn(key, web)          # the core, which never leaves
-        for key in ("launcher", "ntfy", "ollama"):
+        for key in ("launcher", "ntfy"):
             self.assertNotIn(key, web)       # locked, and must stay locked
         for key, svc in self.services.items():
             if key in web:
@@ -4466,13 +4512,13 @@ class SharedControlRegistryTest(unittest.TestCase):
                    generator.guard_shape_ok(raw))
             self.assertEqual(got, (want, want, want), raw)
 
-    def test_neither_front_end_will_touch_the_locked_three(self):
+    def test_neither_front_end_will_touch_the_locked_two(self):
         listener = self._ntfy_control()
         try:
             phone = listener.load_registry()
         finally:
             os.environ.pop("CONTROL_REGISTRY", None)
-        for key in ("ntfy", "ollama", "launcher"):
+        for key in ("ntfy", "launcher"):
             self.assertNotIn(key, phone, key)
             self.assertIn(key, listener.HARD_LOCKED, key)
             self.assertIn(key, server.HARD_LOCKED, key)
@@ -4972,7 +5018,7 @@ class DegradedStateTest(ResourceTestBase):
         self.assertFalse(tile["degraded"])
 
     def test_failed_probe_without_parts_keeps_the_warning(self):
-        # ntfy/ollama have no control parts — nothing can disprove it.
+        # ntfy has no control parts — nothing can disprove it.
         self.registry_with({"parts": []}, key="a",
                            health="http://127.0.0.1:1/h", marker=self.tmp)
         tile = self.tile("a")
@@ -5518,6 +5564,18 @@ class ResourceDiskTest(ResourceTestBase):
             None, marker=os.path.join(self.tmp, "services", "gone"))
         self.assertEqual(server._disk_target(svc, home=self.tmp),
                          os.path.join(self.tmp, "services", "gone"))
+
+    def test_an_explicit_disk_field_beats_the_marker(self):
+        # ollama's marker is a sentinel file; the models dir is the weight.
+        # `disk` names the payload path directly and skips marker logic.
+        models = os.path.join(self.tmp, "dot-ollama")
+        os.makedirs(models)
+        marker = os.path.join(self.tmp, "state.json")
+        svc = self.registry_with(None, marker=marker, disk=models)
+        self.assertEqual(server._disk_target(svc, home=self.tmp), models)
+        # A non-absolute or empty disk falls back to the marker rules.
+        svc = self.registry_with(None, marker=marker, disk="rel/path")
+        self.assertEqual(server._disk_target(svc, home=self.tmp), marker)
 
     def test_a_worker_crash_caches_null_and_frees_the_key(self):
         def boom(path):

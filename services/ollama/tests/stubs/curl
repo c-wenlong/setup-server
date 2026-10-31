@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# curl stub: logs every call. Serves a fake ollama tarball for the download
+# URL (a real .tgz with bin/ollama inside, so setup.sh's tar extract works);
+# answers /api/version unless $STATE_DIR/health_down exists.
+echo "curl $*" >> "$CALLS_LOG"
+
+url="" out="" prev=""
+for a in "$@"; do
+  case "$a" in http*) url="$a" ;; esac
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+
+case "$url" in
+  *ollama.com/download*ollama-linux*)
+    payload="$(mktemp -d)"
+    mkdir -p "$payload/bin"
+    printf '#!/bin/sh\necho "ollama fake 9.9.9"\n' > "$payload/bin/ollama"
+    chmod +x "$payload/bin/ollama"
+    tar -czf "${out:-/dev/stdout}" -C "$payload" bin
+    rm -rf "$payload"
+    ;;
+  */api/version*)
+    [ ! -f "$STATE_DIR/health_down" ] || { echo "curl: (7) connection refused" >&2; exit 7; }
+    echo '{"version":"9.9.9-fake"}'
+    ;;
+  *)
+    exit 0
+    ;;
+esac

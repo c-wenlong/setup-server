@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# launchctl stub (macOS branch; FAKE_OS=Darwin runs it on Linux too): logs and
+# succeeds. $STATE_DIR/launchd_not_loaded exists => `print` says not loaded.
+echo "launchctl $*" >> "$CALLS_LOG"
+if [ "${1:-}" = "print" ] && [ -f "$STATE_DIR/launchd_not_loaded" ]; then
+  echo "Could not find service" >&2
+  exit 113
+fi
+exit 0

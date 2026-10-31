@@ -1,0 +1,22 @@
+{
+  "key": "ollama",
+  "name": "ollama",
+  "tagline": "Models",
+  "group": "ai",
+  "icon": "cpu",
+  "author": "ollama",
+  "url": null,
+  "health": "http://127.0.0.1:11434/api/version",
+  "marker": "~/.ollama/.managed",
+  "disk": "~/.ollama",
+  "env": null,
+  "control": {
+    "parts": [
+      {
+        "unit": "ollama.service"
+      }
+    ],
+    "kuma": "ollama"
+  },
+  "description": "The local LLM runtime everything else on the box talks to: Open WebUI chats through it and n8n workflows call it. Runs as a systemd *user* unit bound to 127.0.0.1:11434 only — never published through Tailscale Serve — so the launcher and the ntfy controller start, stop and restart it like any other service (it used to be a system unit, which is why they could not). Models live in ~/.ollama/models; a loaded one claims roughly 5 GB of the box's 7.7 GB. No web UI of its own, so this tile reports status and never navigates."
+}

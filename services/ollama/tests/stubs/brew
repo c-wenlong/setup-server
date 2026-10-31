@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# brew stub (macOS branch): logs; `--prefix` prints BREW_PREFIX (default
+# $STATE_DIR/brew-prefix); `install` drops a fake ollama binary under it.
+echo "brew $*" >> "$CALLS_LOG"
+prefix="${BREW_PREFIX:-$STATE_DIR/brew-prefix}"
+case "${1:-}" in
+  --prefix) echo "$prefix" ;;
+  install)
+    mkdir -p "$prefix/bin"
+    printf '#!/bin/sh\necho "ollama fake 9.9.9 (brew)"\n' > "$prefix/bin/ollama"
+    chmod +x "$prefix/bin/ollama"
+    ;;
+esac
+exit 0
