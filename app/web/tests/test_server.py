@@ -142,6 +142,13 @@ class SandboxTest(unittest.TestCase):
             "_du_bytes": server._du_bytes,
             "DISK_TTL": server.DISK_TTL,
             "DISK_TIMEOUT": server.DISK_TIMEOUT,
+            "_du_fs_bytes": server._du_fs_bytes,
+            "_docker_df": server._docker_df,
+            "_audit_scan": server._audit_scan,
+            "_start_audit": server._start_audit,
+            "AUDIT_TTL": server.AUDIT_TTL,
+            "_mount_of": server._mount_of,
+            "_disk": server._disk,
             "Popen": subprocess.Popen,
         }
         server.REPO_ROOT = os.path.realpath(self.repo)
@@ -185,6 +192,10 @@ class SandboxTest(unittest.TestCase):
         # 'unmeasurable' up front; the disk tests put the real sampler back
         # over a stubbed _du_bytes.
         server._sample_disk = lambda svc: None
+        # Same reason: api/disk's answer would spawn a worker that `du`s
+        # through the unstubbed-Popen guard a beat after its test ended.
+        # Audit tests put the real spawn back over a stubbed _audit_scan.
+        server._start_audit = lambda: None
 
         self.write_registry(self.REGISTRY)
         server._registry_cache["mtime"] = None
@@ -222,6 +233,9 @@ class SandboxTest(unittest.TestCase):
         server._docker_map_cache["map"] = {}
         server._disk_samples.clear()
         server._disk_inflight.clear()
+        with server._audit_lock:
+            server._audit.update({"at": 0.0, "running": False,
+                                  "result": None, "error": None})
 
     def read_usage_file(self):
         with open(server.USAGE_PATH, encoding="utf-8") as fh:
@@ -987,6 +1001,28 @@ class HttpTest(SandboxTest):
                           "deployed_at",
                           "resources", "receipt", "removable", "updates",
                           "hidden", "github", "pinned", "user_hidden"])
+
+    def test_disk_breakdown_shape(self):
+        status, body = self.get("/api/disk")
+        self.assertEqual(status, 200)
+        doc = json.loads(body)
+        self.assertEqual(sorted(doc), ["apps", "disk", "docker", "home",
+                                       "other_bytes", "scanned_at",
+                                       "scanning"])
+        # No worker is spawned in the sandbox, so the cold answer is
+        # "not measured": keys present, every figure empty, no error.
+        self.assertFalse(doc["scanning"])
+        self.assertEqual(doc["apps"], [])
+        self.assertEqual(doc["home"], [])
+        self.assertIsNone(doc["docker"])
+        self.assertIsNone(doc["scanned_at"])
+        self.assertIsNotNone(doc["disk"])
+        self.assertIn("used", doc["disk"])
+
+    def test_disk_breakdown_fresh_param_still_answers(self):
+        status, body = self.get("/api/disk?fresh=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["scanning"], False)
 
     def test_groups_empty_when_the_registry_has_none(self):
         # An older services.json without a catalog still paints a flat grid.
@@ -5791,6 +5827,419 @@ class ResourceDuBytesTest(ResourceTestBase):
     def test_no_du_binary_is_null(self):
         self.assertIsNone(self.run_with(
             raises=FileNotFoundError("no du")))
+
+
+class DiskAuditScanTest(SandboxTest):
+    """_audit_scan: the storage sheet's numbers, measured synchronously.
+
+    The scan is called directly here (no worker): _du_fs_bytes answers
+    from a dict instead of a real `du`, _docker_df is a stub, and _disk is
+    a fixed figure so `other` arithmetic is exact.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(self.home)
+        self.du = {}
+        self.du_calls = []
+        server._du_fs_bytes = lambda p: (self.du_calls.append(p),
+                                         self.du.get(p))[1]
+        server._du_bytes = lambda p: 0
+        server._docker_df = lambda: None
+        server._mount_of = lambda p: "/"
+        server._disk = lambda p: {"mount": "/", "total": 1000,
+                                  "used": 400, "free": 600}
+
+    def touch(self, relpath):
+        path = os.path.join(self.home, relpath)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write("x")
+        return path
+
+    def test_home_is_split_into_named_rows_and_system_other(self):
+        docs = os.path.join(self.home, "Documents")
+        conf = os.path.join(self.home, ".config")
+        os.makedirs(docs)
+        os.makedirs(conf)
+        self.du = {docs: 100, conf: 50}
+        out = server._audit_scan(home=self.home)
+        rows = {r["name"]: r for r in out["home"]}
+        self.assertEqual(rows["Documents"]["bytes"], 100)
+        self.assertEqual(rows["Documents"]["path"], "~/Documents")
+        self.assertEqual(rows[".config"]["bytes"], 50)
+        self.assertFalse(rows["Documents"]["shared"])
+        # other = used minus everything the walk attributed: 400 - 150.
+        self.assertEqual(out["other_bytes"], 250)
+        self.assertIsNone(out["docker"])
+        self.assertEqual(out["apps"], [])
+
+    def test_services_dir_children_claim_their_own_rows(self):
+        sdir = os.path.join(self.home, "services")
+        sea = os.path.join(sdir, "seafile")
+        os.makedirs(sea)
+        loose = os.path.join(sdir, "stray.txt")
+        with open(loose, "w") as fh:
+            fh.write("x")
+        self.du = {sea: 300, loose: 10}
+        self.write_registry({"services": [
+            {"key": "sea", "name": "Seafile", "marker": sea}]})
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["apps"],
+                         [{"key": "sea", "name": "Seafile", "bytes": 300}])
+        rows = {r["name"]: r for r in out["home"]}
+        # ~/services counted 310; the app claimed 300, so the row keeps
+        # the remaining loose file and flags that something was claimed.
+        self.assertEqual(rows["services"]["bytes"], 10)
+        self.assertTrue(rows["services"]["shared"])
+        self.assertEqual(out["other_bytes"], 90)
+
+    def test_an_app_target_outside_home_counts_against_other(self):
+        ext = os.path.join(self.tmp, "external-models")
+        os.makedirs(ext)
+        docs = os.path.join(self.home, "Documents")
+        os.makedirs(docs)
+        self.du = {docs: 50}
+        server._du_bytes = lambda p: 200
+        self.write_registry({"services": [
+            {"key": "ol", "name": "Ollama", "marker": None, "disk": ext}]})
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["apps"],
+                         [{"key": "ol", "name": "Ollama", "bytes": 200}])
+        # other = 400 - 50 home - 0 docker - 200 outside-home app.
+        self.assertEqual(out["other_bytes"], 150)
+
+    def test_a_not_installed_service_shows_no_row(self):
+        sdir = os.path.join(self.home, "services")
+        os.makedirs(sdir)
+        gone = os.path.join(sdir, "gone")
+        self.write_registry({"services": [
+            {"key": "g", "name": "G", "marker": gone}]})
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["apps"], [])
+
+    def test_a_failed_measurement_is_a_null_row_not_a_missing_one(self):
+        sea = os.path.join(self.home, "services", "sea")
+        os.makedirs(sea)
+        self.du = {sea: None}      # the du of it failed
+        self.write_registry({"services": [
+            {"key": "sea", "name": "Sea", "marker": sea}]})
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["apps"],
+                         [{"key": "sea", "name": "Sea", "bytes": None}])
+
+    def test_symlinked_entries_are_skipped_not_walked(self):
+        target = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(target)
+        os.symlink(target, os.path.join(self.home, "linked"))
+        notes = self.touch("notes.txt")
+        self.du = {notes: 5}
+        out = server._audit_scan(home=self.home)
+        self.assertEqual([r["name"] for r in out["home"]], ["notes.txt"])
+        self.assertNotIn(os.path.join(self.home, "linked"), self.du_calls)
+
+    def test_a_symlinked_service_child_is_never_walked(self):
+        sdir = os.path.join(self.home, "services")
+        sea = os.path.join(sdir, "sea")
+        os.makedirs(sea)
+        os.symlink(os.path.join(self.tmp, "elsewhere"),
+                   os.path.join(sdir, "linked"))
+        self.du = {sea: 30}
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["home"], [{"name": "services",
+                                        "path": "~/services", "bytes": 30,
+                                        "shared": False}])
+        self.assertNotIn(os.path.join(sdir, "linked"), self.du_calls)
+
+    def test_two_services_sharing_a_target_measure_it_once(self):
+        shared = os.path.join(self.home, "services", "shared")
+        os.makedirs(shared)
+        self.du = {shared: 40}
+        self.write_registry({"services": [
+            {"key": "a", "name": "A", "marker": shared},
+            {"key": "b", "name": "B", "marker": shared}]})
+        out = server._audit_scan(home=self.home)
+        self.assertEqual([(a["key"], a["bytes"]) for a in out["apps"]],
+                         [("a", 40), ("b", 40)])
+        # Once inside the services children split; the second app reads it.
+        self.assertEqual(self.du_calls.count(shared), 1)
+
+    def test_a_malformed_registry_entry_cannot_crash_the_scan(self):
+        self.write_registry({"services": [
+            "junk", 42, {"key": None, "marker": None},
+            {"key": "x", "marker": 42}]})
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["apps"], [])
+        self.assertEqual(out["other_bytes"], 400)
+
+    def test_docker_outside_home_is_its_own_section(self):
+        docs = os.path.join(self.home, "Documents")
+        os.makedirs(docs)
+        self.du = {docs: 100}
+        server._docker_df = lambda: {
+            "images": 50, "containers": 10, "volumes": 20,
+            "build_cache": None, "root": "/var/lib/docker"}
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["docker"], {"images": 50, "containers": 10,
+                                         "volumes": 20, "build_cache": None})
+        self.assertEqual(out["other_bytes"], 400 - 100 - 80)
+
+    def test_docker_inside_home_stays_a_home_row(self):
+        local = os.path.join(self.home, ".local")
+        root = os.path.join(local, "share", "docker")
+        os.makedirs(root)
+        self.du = {local: 90}
+        server._docker_df = lambda: {
+            "images": 90, "containers": 0, "volumes": 0,
+            "build_cache": 0, "root": root}
+        out = server._audit_scan(home=self.home)
+        self.assertIsNone(out["docker"])
+        self.assertEqual(out["other_bytes"], 400 - 90)
+
+    def test_docker_on_another_disk_is_not_subtracted(self):
+        docs = os.path.join(self.home, "Documents")
+        os.makedirs(docs)
+        self.du = {docs: 50}
+        server._docker_df = lambda: {
+            "images": 500, "containers": 0, "volumes": 0,
+            "build_cache": 0, "root": "/var/lib/docker"}
+        server._mount_of = lambda p: "/mnt/data" if p == "/var/lib/docker" else "/"
+        out = server._audit_scan(home=self.home)
+        self.assertIsNone(out["docker"])
+        self.assertEqual(out["other_bytes"], 400 - 50)
+
+    def test_an_empty_home_still_answers(self):
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["home"], [])
+        self.assertEqual(out["apps"], [])
+        self.assertEqual(out["other_bytes"], 400)
+
+    def test_a_home_entry_that_fails_du_is_skipped(self):
+        docs = os.path.join(self.home, "Documents")
+        conf = os.path.join(self.home, ".config")
+        os.makedirs(docs)
+        os.makedirs(conf)
+        self.du = {docs: 100}    # .config's du failed
+        out = server._audit_scan(home=self.home)
+        self.assertEqual([r["name"] for r in out["home"]], ["Documents"])
+        self.assertEqual(out["other_bytes"], 400 - 100)
+
+    def test_an_unreadable_home_scans_nothing(self):
+        gone = os.path.join(self.tmp, "not-there")
+        out = server._audit_scan(home=gone)
+        self.assertEqual(out["home"], [])
+        self.assertEqual(out["other_bytes"], 400)
+
+    def test_an_unreadable_services_dir_leaves_no_row(self):
+        sdir = os.path.join(self.home, "services")
+        os.makedirs(sdir)
+        os.chmod(sdir, 0)
+        # tearDown's rmtree has already run by the time cleanups do, so the
+        # mode goes back here and the leftover dir is removed by hand.
+        self.addCleanup(
+            lambda: (os.chmod(sdir, 0o755),
+                     shutil.rmtree(sdir, ignore_errors=True)))
+        out = server._audit_scan(home=self.home)
+        self.assertEqual(out["home"], [])
+        self.assertEqual(out["other_bytes"], 400)
+
+    def test_a_fresh_grid_sample_is_reused_not_rewalked(self):
+        sea = os.path.join(self.home, "services", "sea")
+        os.makedirs(sea)
+        self.du = {sea: 300}
+        with server._disk_lock:
+            server._disk_samples["sea"] = (time.time(), 500)
+        self.write_registry({"services": [
+            {"key": "sea", "name": "Sea", "marker": sea}]})
+        out = server._audit_scan(home=self.home)
+        # The grid's own number wins: one figure for a dir, not two.
+        self.assertEqual(out["apps"], [{"key": "sea", "name": "Sea",
+                                        "bytes": 500}])
+        self.assertEqual(out["other_bytes"], 400 - 300)
+
+    def test_no_disk_answer_leaves_other_null(self):
+        server._disk = lambda p: None
+        out = server._audit_scan(home=self.home)
+        self.assertIsNone(out["other_bytes"])
+
+
+class DockerDfTest(SandboxTest):
+    """_docker_df: `docker system df` + `docker info` through sg_docker.
+
+    _have_docker_group returns True so sg_docker passes the argv through
+    unchanged; subprocess.run is replaced so no daemon is ever asked.
+    """
+
+    def setUp(self):
+        super().setUp()
+        server._have_docker_group = lambda: True
+        self.calls = []
+        real = subprocess.run
+
+        def fake(argv, **kw):
+            self.calls.append(list(argv))
+            result = self.mapping.get(argv[1])
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        subprocess.run = fake
+        self.addCleanup(setattr, subprocess, "run", real)
+        self.mapping = {}
+
+    def test_parses_each_kind_and_the_root(self):
+        self.mapping = {
+            "system": _DuResult(0,
+                '{"Type":"Images","Size":"1.24GB"}\n'
+                '{"Type":"Containers","Size":"200MB"}\n'
+                '{"Type":"Local Volumes","Size":"3MiB"}\n'
+                '{"Type":"Build Cache","Size":"0B"}\n'),
+            "info": _DuResult(0, "/var/lib/docker\n"),
+        }
+        out = server._docker_df()
+        self.assertEqual(out["root"], "/var/lib/docker")
+        self.assertEqual(out["images"], int(1.24e9))
+        self.assertEqual(out["containers"], int(200e6))
+        self.assertEqual(out["volumes"], 3 * 2 ** 20)
+        self.assertEqual(out["build_cache"], 0)
+
+    def test_a_failing_df_is_none(self):
+        self.mapping = {"system": _DuResult(1, ""),
+                        "info": _DuResult(0, "/var/lib/docker\n")}
+        self.assertIsNone(server._docker_df())
+
+    def test_no_docker_binary_is_none(self):
+        self.mapping = {"system": FileNotFoundError("no docker")}
+        self.assertIsNone(server._docker_df())
+
+    def test_a_wedged_daemon_is_none(self):
+        self.mapping = {"system": subprocess.TimeoutExpired("docker", 20)}
+        self.assertIsNone(server._docker_df())
+
+    def test_malformed_lines_and_sizes_degrade_per_row(self):
+        self.mapping = {
+            "system": _DuResult(0,
+                'not-json\n'
+                '{"Type":"Images","Size":"weird"}\n'
+                '{"Type":"Local Volumes","Size":"1..2GB"}\n'
+                '{"Type":"Containers","Size":"12MB"}\n'),
+            "info": _DuResult(0, "\n"),
+        }
+        out = server._docker_df()
+        self.assertIsNone(out["images"])
+        self.assertIsNone(out["volumes"])    # parses, then float() explodes
+        self.assertEqual(out["containers"], int(12e6))
+        self.assertIsNone(out["root"])   # an empty root line is no root
+
+    def test_a_listing_with_no_known_rows_is_none(self):
+        self.mapping = {"system": _DuResult(0, '{"Type":"Stray"}\n'),
+                        "info": _DuResult(0, "/var/lib/docker\n")}
+        self.assertIsNone(server._docker_df())
+
+
+class DiskAuditTest(SandboxTest):
+    """disk_payload + the audit worker: scanning state, TTL, rescan."""
+
+    def setUp(self):
+        super().setUp()
+        server._start_audit = self._saved["_start_audit"]
+        self.scans = []
+        server._audit_scan = self._scan
+
+    def _scan(self, home=None):
+        self.scans.append(home)
+        return {"scanned_at": 1.0, "apps": [], "docker": None,
+                "home": [], "other_bytes": 10}
+
+    def wait_audit(self, tries=200):
+        for _ in range(tries):
+            with server._audit_lock:
+                if not server._audit["running"] and server._audit["at"]:
+                    return dict(server._audit)
+            time.sleep(0.01)
+        self.fail("disk audit never finished")
+
+    def test_cold_payload_kicks_the_worker_and_reports_scanning(self):
+        gate = threading.Event()
+
+        def slow(home=None):
+            self.scans.append(home)
+            gate.wait(5)
+            return {"scanned_at": 1.0, "apps": [], "docker": None,
+                    "home": [], "other_bytes": 10}
+        server._audit_scan = slow
+        p = server.disk_payload()
+        self.assertTrue(p["scanning"])
+        self.assertEqual(p["apps"], [])
+        self.assertIsNone(p["scanned_at"])
+        gate.set()
+        self.wait_audit()
+        p = server.disk_payload()
+        self.assertFalse(p["scanning"])
+        self.assertEqual(p["other_bytes"], 10)
+        self.assertEqual(p["scanned_at"], 1.0)
+        self.assertEqual(len(self.scans), 1)
+
+    def test_a_fresh_result_is_served_without_a_rescan(self):
+        server.disk_payload()
+        self.wait_audit()
+        server.disk_payload()
+        self.assertEqual(len(self.scans), 1)
+
+    def test_fresh_param_forces_a_rescan(self):
+        server.disk_payload()
+        self.wait_audit()
+        server.disk_payload(fresh=True)
+        self.wait_audit()
+        self.assertEqual(len(self.scans), 2)
+
+    def test_the_last_result_is_served_while_a_rescan_runs(self):
+        server.disk_payload()
+        self.wait_audit()
+        gate = threading.Event()
+
+        def slow(home=None):
+            self.scans.append(home)
+            gate.wait(5)
+            return {"scanned_at": 2.0, "apps": [], "docker": None,
+                    "home": [], "other_bytes": 99}
+        server._audit_scan = slow
+        server.AUDIT_TTL = 0.0
+        p = server.disk_payload()
+        self.assertTrue(p["scanning"])
+        self.assertEqual(p["other_bytes"], 10)   # stale still answers
+        gate.set()
+        self.wait_audit()
+        self.assertEqual(server.disk_payload()["other_bytes"], 99)
+        self.wait_audit()   # the TTL=0 poll above spawned one more worker
+
+    def test_a_worker_crash_reports_error_and_still_answers(self):
+        def boom(home=None):
+            raise RuntimeError("walk exploded")
+        server._audit_scan = boom
+        server.disk_payload()
+        self.wait_audit()
+        p = server.disk_payload()
+        self.assertIn("error", p)
+        self.assertEqual(p["apps"], [])
+        self.wait_audit()   # that payload spawned one more failed attempt
+
+    def test_only_one_worker_at_a_time(self):
+        gate = threading.Event()
+        self.scans = []
+
+        def slow(home=None):
+            self.scans.append(home)
+            gate.wait(5)
+            return {"scanned_at": 1.0, "apps": [], "docker": None,
+                    "home": [], "other_bytes": 10}
+        server._audit_scan = slow
+        server.disk_payload()
+        server.disk_payload()          # running: must not spawn a second
+        server.disk_payload(fresh=True)  # not even for an explicit rescan
+        gate.set()
+        self.wait_audit()
+        self.assertEqual(len(self.scans), 1)
 
 
 class ResourceCacheTest(ResourceTestBase):

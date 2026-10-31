@@ -14,7 +14,10 @@ Still not a stats dashboard: the health strip is four numbers (apps running,
 memory, the disk `~/services` lives on, CPU load) read from `/proc` and
 `statvfs` on each poll, so a full disk is the first thing on the page. No
 graphs or history; Uptime Kuma and beszel do that and are linked from the
-sidebar. See [SPEC.md](SPEC.md) for the design rules.
+sidebar. The disk cell's ⓘ opens a **storage sheet**: `api/disk`'s breakdown
+of that disk into per-app data, Docker, the rest of `~` and everything else,
+walked in the background so a page load never waits on a `du`. See
+[SPEC.md](SPEC.md) for the design rules.
 
 ## Architecture
 
@@ -26,6 +29,7 @@ Tailscale Serve ─┤                              ├─▶ 127.0.0.1:8093
                      next to code-server's "/")       ├── static/       static SPA, no build step
                                                       ├── services.json the registry + deploy allowlist
                                                       ├── GET  api/services
+                                                      ├── GET  api/disk          background walk of ~ + docker df
                                                       ├── POST api/services/{key}/deploy  ──▶ <repo>/services/<service>/setup.sh
                                                       ├── PATCH api/services/{key}/env/{var} ──▶ rewrites one line of services/<service>/.env
                                                       ├── POST api/services/{key}/update ──▶ docker pull <moved refs> + setup.sh

@@ -235,6 +235,16 @@ body.is-rail .side-foot { justify-content: center; }
 .h-k { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 500; color: var(--muted); }
 .h-k span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .h-k b { font-weight: 500; white-space: nowrap; }
+.h-k-side { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.h-info {
+  -webkit-appearance: none; appearance: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; margin: -2px -4px 0 0; padding: 0;
+  border: 0; border-radius: 999px; background: none; color: var(--faint); cursor: pointer;
+  transition: color var(--dur) ease;
+}
+.h-info:hover, .h-info:focus-visible { color: var(--accent-fg); outline: none; }
+.h-info svg { width: 14px; height: 14px; }
 .h-v { font-size: 22px; font-weight: 500; letter-spacing: -.02em; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .h-v span { margin-left: 4px; font-size: 13px; font-weight: 500; letter-spacing: 0; color: var(--muted); }
 .h-s { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -477,6 +487,103 @@ button.h-group { cursor: pointer; }
 .h-mi[disabled] svg { color: var(--faint); }
 .h-menu-why { font-size: 11.5px; line-height: 1.35; color: var(--faint); padding: 0 8px 6px 33px; }
 .h-menu hr { border: 0; height: 1px; margin: 4px 2px; background: var(--border); }
+
+/* ---------- storage sheet ---------- */
+
+/* The disk cell's ⓘ and the dialog it opens. Geometry mirrors the deploy
+   sheet (bottom sheet on a phone, centred card above 640px) at the
+   action menu's altitude, so a running job's sheet can sit under it and a
+   toast can still land on top. The wrapper passes clicks through to the
+   scrim, which is what "click outside closes" hits. */
+.dsk-scrim {
+  position: fixed; inset: 0; z-index: 65;
+  background: rgba(10, 10, 14, .42);
+  -webkit-backdrop-filter: saturate(120%) blur(1px);
+  backdrop-filter: saturate(120%) blur(1px);
+}
+.dsk {
+  position: fixed; inset: 0; z-index: 66;
+  display: flex; align-items: flex-end; justify-content: center;
+  pointer-events: none;
+}
+.dsk-card {
+  pointer-events: auto;
+  width: 100%; max-width: 560px;
+  max-height: 92vh; max-height: 92dvh;
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border); border-bottom: 0;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow: var(--menu-shadow);
+}
+@media (min-width: 640px) {
+  .dsk { align-items: center; padding: 24px; }
+  .dsk-card {
+    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    max-height: 84vh;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dsk-scrim { animation: dsk-fade var(--dur) ease both; }
+  .dsk-card { animation: dsk-rise 160ms cubic-bezier(.2, .7, .3, 1) both; }
+  @keyframes dsk-fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes dsk-rise { from { opacity: 0; transform: translateY(10px) scale(.99); }
+                        to   { opacity: 1; transform: none; } }
+}
+.dsk-head {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 18px 18px 12px; border-bottom: 1px solid var(--border);
+}
+.dsk-tt { min-width: 0; flex: 1; }
+.dsk-title { margin: 0; font-size: 17px; font-weight: 500; letter-spacing: var(--tight); }
+.dsk-sub { margin-top: 3px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dsk-x {
+  -webkit-appearance: none; appearance: none;
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; margin: -4px -6px 0 0; padding: 0;
+  border: 0; border-radius: var(--radius-ctl); background: none; color: var(--muted); cursor: pointer;
+  transition: background-color var(--dur) ease, color var(--dur) ease;
+}
+.dsk-x:hover { background: var(--fg-10); color: var(--text); }
+.dsk-x:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+.dsk-x svg { width: 15px; height: 15px; }
+.dsk-body { padding: 14px 18px 8px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.dsk-dist { display: flex; gap: 2px; height: 12px; border-radius: 999px; overflow: hidden; background: var(--fg-06); }
+.dsk-dist i { display: block; height: 100%; min-width: 3px; }
+.dsk-seg-a { background: var(--accent-fg); }
+.dsk-seg-d { background: var(--ok); }
+.dsk-seg-h { background: var(--peach); }
+.dsk-seg-s { background: var(--muted); }
+.dsk-seg-f { background: var(--fg-10); }
+.dsk-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dsk-li { display: inline-flex; align-items: center; gap: 6px; }
+.dsk-li i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.dsk-sect { margin-top: 16px; }
+.dsk-sh { display: flex; align-items: baseline; gap: 8px; padding: 0 2px 6px; border-bottom: 1px solid var(--border); }
+.dsk-st { font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.dsk-sn { margin-left: auto; font-size: 11.5px; color: var(--faint); }
+.dsk-row { display: flex; align-items: center; gap: 10px; min-height: 32px; font-size: 13.5px; }
+.dsk-row + .dsk-row { border-top: 1px solid var(--fg-04); }
+.dsk-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsk-tag { margin-left: 8px; font-size: 11px; color: var(--faint); }
+.dsk-bytes { flex: none; font-variant-numeric: tabular-nums; }
+.dsk-bytes.is-na { color: var(--faint); }
+.dsk-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 26px 16px; text-align: center; color: var(--muted); font-size: 13.5px; }
+.dsk-empty strong, .dsk-empty-t { color: var(--text); font-weight: 500; }
+.dsk-warn {
+  margin-top: 14px; padding: 9px 12px;
+  border: 1px solid var(--warn); border-radius: 8px;
+  background: var(--warn-soft); color: var(--warn-text); font-size: 12.5px;
+}
+.dsk-foot {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 18px calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+}
+.dsk-status { display: inline-flex; align-items: center; gap: 7px; flex: 1; min-width: 0; font-size: 12px; color: var(--faint); }
+.dsk-status .h-glyph { width: 13px; height: 13px; flex: none; }
+.dsk-again { flex: none; }
 
 /* ---------- desktop action bar ---------- */
 

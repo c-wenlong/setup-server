@@ -70,6 +70,14 @@
   var menuHi = -1;
   var toastTimer = null;
 
+  /* The storage sheet behind the disk cell's ⓘ. `data` survives a close
+     so a reopen paints the last answer instantly while api/disk refetches. */
+  var dsk = {
+    el: null, scrim: null, opener: null, sub: null, body: null, foot: null,
+    data: null, err: false, fetching: false, timer: null
+  };
+  var DISK_POLL_MS = 3000;
+
   /* ---------- small helpers ---------- */
 
   function app() { return window.LauncherApp || null; }
@@ -167,6 +175,7 @@
               'M6.4 10.6h11.2a1.4 1.4 0 0 1 1.4 1.4v6.2a1.4 1.4 0 0 1-1.4 1.4H6.4A1.4 1.4 0 0 1 5 18.2V12a1.4 1.4 0 0 1 1.4-1.4Z'],
     warn:    ['M12 3.5 2.5 20h19L12 3.5Z', 'M12 10v4', 'M12 17h.01'],
     caret:   ['m7 10 5 5 5-5'],
+    cross:   ['m6.5 6.5 11 11', 'm17.5 6.5-11 11'],
     ext:     ['M14 5h5v5', 'M19 5l-8 8'],
     pin:     ['M12 17v5', 'M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.3V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.7a2 2 0 0 0-1.1-1.8l-1.8-.9A2 2 0 0 1 15 10.8V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z'],
     grip:    ['M9 5.5h.01', 'M15 5.5h.01', 'M9 12h.01', 'M15 12h.01', 'M9 18.5h.01', 'M15 18.5h.01'],
@@ -640,11 +649,16 @@
     return m;
   }
 
-  function cell(label, flag, value, unit, extra, sub, tone) {
+  function cell(label, flag, value, unit, extra, sub, tone, corner) {
     var c = make('div', 'h-cell' + (tone ? ' is-' + tone : ''));
     var k = make('div', 'h-k');
     k.appendChild(make('span', null, label));
-    if (flag) k.appendChild(make('b', null, flag));
+    if (flag || corner) {
+      var side = make('span', 'h-k-side');
+      if (flag) side.appendChild(make('b', null, flag));
+      if (corner) side.appendChild(corner);
+      k.appendChild(side);
+    }
     c.appendChild(k);
     var v = make('div', 'h-v');
     v.appendChild(document.createTextNode(value));
@@ -693,18 +707,26 @@
         seen ? 'Apps use ' + fmtBytes(appMem) : 'Not reported on this platform'));
     }
 
-    /* Disk */
+    /* Disk: the ⓘ opens the storage sheet, what is on it per app and
+       per bucket, from api/disk. */
     var d = s && s.disk;
     var share = diskShare(d);
+    var info = make('button', 'h-info');
+    info.type = 'button';
+    info.setAttribute('data-disk-info', '1');
+    info.setAttribute('aria-label', 'What is using this disk');
+    info.title = 'What is using this disk';
+    info.appendChild(svg(ICON.info, { width: '2.2' }));
     if (share !== null) {
       var tone = share >= DISK_CRIT ? 'bad' : (share >= DISK_WARN ? 'warn' : null);
       els.health.appendChild(cell('Disk ' + (d.mount || '/'),
         tone === 'bad' ? 'Critical' : (tone === 'warn' ? 'Filling up' : null),
         Math.round(share * 100) + '%', 'full',
         meter([{ cls: tone || 'n', pct: share * 100 }]),
-        fmtBytes(d.free) + ' free of ' + fmtBytes(d.total), tone));
+        fmtBytes(d.free) + ' free of ' + fmtBytes(d.total), tone, info));
     } else {
-      els.health.appendChild(cell('Disk', null, '–', '', null, ready ? 'Not reported' : ' '));
+      els.health.appendChild(cell('Disk', null, '–', '', null,
+        ready ? 'Not reported' : ' ', null, info));
     }
 
     /* CPU load */
@@ -1551,6 +1573,277 @@
     try { items[menuHi].focus({ preventScroll: true }); } catch (e) { items[menuHi].focus(); }
   }
 
+  /* ---------- storage sheet ---------- */
+
+  /* The disk cell's ⓘ opens this dialog: api/disk's split of the same disk
+     the cell measures, what each app owns plus the folders Docker and the
+     OS put on it. The server walks the tree off the request path, so a
+     cold open answers `scanning` and the real numbers land on a poll; the
+     sheet fetches on open, then only while the server is still walking or
+     the user asks for a rescan. */
+  function openDisk(opener) {
+    if (dsk.el) return;
+    closeMenu(false);
+    dsk.opener = opener || null;
+    dsk.err = false;
+    dsk.scrim = make('div', 'dsk-scrim');
+    dsk.scrim.addEventListener('click', function () { closeDisk(true); });
+    var el = make('div', 'dsk');
+    var card = make('div', 'dsk-card');
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-labelledby', 'dsk-title');
+    var head = make('div', 'dsk-head');
+    var titles = make('div', 'dsk-tt');
+    var h = make('h3', 'dsk-title', 'Storage');
+    h.id = 'dsk-title';
+    titles.appendChild(h);
+    dsk.sub = make('p', 'dsk-sub', '');
+    titles.appendChild(dsk.sub);
+    head.appendChild(titles);
+    var x = make('button', 'dsk-x');
+    x.type = 'button';
+    x.setAttribute('aria-label', 'Close storage details');
+    x.title = 'Close';
+    x.appendChild(svg(ICON.cross, { width: '2.2' }));
+    x.addEventListener('click', function () { closeDisk(true); });
+    head.appendChild(x);
+    card.appendChild(head);
+    dsk.body = make('div', 'dsk-body');
+    card.appendChild(dsk.body);
+    dsk.foot = make('div', 'dsk-foot');
+    card.appendChild(dsk.foot);
+    card.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-dsk-rescan], [data-dsk-retry]') : null;
+      if (!b || b.disabled) return;
+      fetchDisk(b.hasAttribute('data-dsk-rescan'));
+    });
+    el.appendChild(card);
+    dsk.el = el;
+    document.body.appendChild(dsk.scrim);
+    document.body.appendChild(el);
+    document.body.classList.add('is-locked');
+    paintDisk();
+    fetchDisk();
+    try { x.focus({ preventScroll: true }); } catch (e) { x.focus(); }
+  }
+
+  function closeDisk(restoreFocus) {
+    if (!dsk.el) return;
+    if (dsk.scrim && dsk.scrim.parentNode) dsk.scrim.parentNode.removeChild(dsk.scrim);
+    if (dsk.el.parentNode) dsk.el.parentNode.removeChild(dsk.el);
+    if (dsk.timer) { clearTimeout(dsk.timer); dsk.timer = null; }
+    dsk.el = null; dsk.scrim = null; dsk.sub = null; dsk.body = null; dsk.foot = null;
+    document.body.classList.remove('is-locked');
+    var opener = dsk.opener;
+    dsk.opener = null;
+    if (!restoreFocus) return;
+    /* A poll rebuilds the health strip under the sheet, so the opener the
+       click caught is often detached; find its replacement by marker. */
+    var back = (opener && document.body.contains(opener)) ? opener
+      : (els.health ? els.health.querySelector('[data-disk-info]') : null);
+    if (back) { try { back.focus({ preventScroll: true }); } catch (e) { back.focus(); } }
+  }
+
+  /* Same fetch shape app.js's request() uses: relative path, no-store,
+     a timeout so a hung box cannot park the sheet on a spinner. */
+  function fetchDisk(fresh) {
+    if (dsk.fetching) return;
+    dsk.fetching = true;
+    var opts = { cache: 'no-store', credentials: 'same-origin',
+                 headers: { 'Accept': 'application/json' } };
+    var timer = null;
+    if (typeof AbortController === 'function') {
+      var ctl = new AbortController();
+      opts.signal = ctl.signal;
+      timer = setTimeout(function () { ctl.abort(); }, 15000);
+    }
+    fetch('api/disk' + (fresh ? '?fresh=1' : ''), opts)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (timer) clearTimeout(timer);
+        dsk.fetching = false;
+        dsk.err = false;
+        dsk.data = j;
+        if (dsk.el) { paintDisk(); scheduleDisk(); }
+      })
+      .catch(function () {
+        if (timer) clearTimeout(timer);
+        dsk.fetching = false;
+        dsk.err = true;
+        if (dsk.el) paintDisk();
+      });
+  }
+
+  function scheduleDisk() {
+    if (dsk.timer) { clearTimeout(dsk.timer); dsk.timer = null; }
+    if (dsk.el && dsk.data && dsk.data.scanning === true) {
+      dsk.timer = setTimeout(function () { fetchDisk(); }, DISK_POLL_MS);
+    }
+  }
+
+  function sumBytes(list) {
+    var n = 0, seen = false;
+    for (var i = 0; i < list.length; i++) {
+      var b = num(list[i] && list[i].bytes);
+      if (b !== null) { n += b; seen = true; }
+    }
+    return seen ? n : null;
+  }
+
+  function paintDisk() {
+    if (!dsk.el) return;
+    var d = dsk.data || {};
+    var disk = (d.disk && typeof d.disk === 'object') ? d.disk : sys() && sys().disk;
+    var total = disk && num(disk.total);
+    var used = disk && num(disk.used);
+    var free = disk && num(disk.free);
+    /* df arithmetic, same as the cell: used+free is the real basis, since
+       reserved blocks sit in neither column. */
+    var basis = (used !== null && free !== null && used + free > 0) ? used + free : null;
+    var share = diskShare(disk);
+    dsk.sub.textContent = disk
+      ? fmtBytes(used) + ' used of ' + fmtBytes(total) + ' on ' + (disk.mount || '/') +
+        (share !== null ? ' (' + Math.round(share * 100) + '% full)' : '')
+      : 'What fills this box’s disk';
+
+    var body = dsk.body;
+    body.textContent = '';
+    var scanning = d.scanning === true;
+
+    if (dsk.err && !dsk.data) {
+      var errBox = make('div', 'dsk-empty');
+      errBox.appendChild(make('strong', null, 'Could not load the breakdown'));
+      errBox.appendChild(make('span', null,
+        'The box did not answer api/disk. The disk cell’s figure is still live.'));
+      var retry = make('button', 'h-btn', 'Try again');
+      retry.type = 'button';
+      retry.setAttribute('data-dsk-retry', '1');
+      errBox.appendChild(retry);
+      body.appendChild(errBox);
+      dsk.foot.textContent = '';
+      return;
+    }
+
+    var apps = Array.isArray(d.apps) ? d.apps : [];
+    var home = Array.isArray(d.home) ? d.home : [];
+    var docker = (d.docker && typeof d.docker === 'object') ? d.docker : null;
+    var other = num(d.other_bytes);
+    var dockerParts = docker ? [
+      { name: 'Images', bytes: num(docker.images) },
+      { name: 'Containers', bytes: num(docker.containers) },
+      { name: 'Volumes', bytes: num(docker.volumes) },
+      { name: 'Build cache', bytes: num(docker.build_cache) }
+    ] : [];
+
+    /* One scale for everything: each figure is a slice of used+free. A
+       bucket the walk could not measure takes no width, so what it shows
+       never overstates. */
+    var segs = [
+      { cls: 'dsk-seg-a', label: 'Apps', bytes: sumBytes(apps) },
+      { cls: 'dsk-seg-d', label: 'Docker', bytes: sumBytes(dockerParts) },
+      { cls: 'dsk-seg-h', label: 'Files', bytes: sumBytes(home) },
+      { cls: 'dsk-seg-s', label: 'System', bytes: other },
+      { cls: 'dsk-seg-f', label: 'Free', bytes: free }
+    ];
+    if (basis) {
+      var bar = make('div', 'dsk-dist');
+      bar.setAttribute('aria-hidden', 'true');
+      var lg = make('div', 'dsk-legend');
+      for (var i = 0; i < segs.length; i++) {
+        var b = segs[i].bytes;
+        if (b === null) continue;
+        if (b > 0) {
+          var f = make('i', segs[i].cls);
+          f.style.width = Math.min(100, b / basis * 100).toFixed(1) + '%';
+          bar.appendChild(f);
+        }
+        var li = make('span', 'dsk-li');
+        li.appendChild(make('i', segs[i].cls));
+        li.appendChild(document.createTextNode(segs[i].label + ' ' + fmtBytes(b)));
+        lg.appendChild(li);
+      }
+      body.appendChild(bar);
+      body.appendChild(lg);
+    }
+
+    var hasRows = apps.length || dockerParts.length || home.length || other !== null;
+    if (!hasRows && scanning) {
+      var skel = make('div', 'dsk-empty');
+      skel.appendChild(make('span', 'dsk-empty-t', 'Measuring the disk…'));
+      skel.appendChild(make('span', null,
+        'The first walk counts every folder, which can take a minute on a full disk.'));
+      body.appendChild(skel);
+    } else {
+      var sApps = null;
+      if (apps.length) {
+        sApps = make('div', 'dsk-sect');
+        sApps.appendChild(dskHead('Apps', 'data each app keeps'));
+        apps.forEach(function (a) {
+          sApps.appendChild(dskRow(a.name || a.key, num(a.bytes)));
+        });
+        body.appendChild(sApps);
+      }
+      if (dockerParts.length) {
+        var sD = make('div', 'dsk-sect');
+        sD.appendChild(dskHead('Docker', 'images, layers and volumes'));
+        dockerParts.forEach(function (p) {
+          sD.appendChild(dskRow(p.name, p.bytes));
+        });
+        body.appendChild(sD);
+      }
+      if (home.length) {
+        var sH = make('div', 'dsk-sect');
+        sH.appendChild(dskHead('Files and folders', 'the rest of your home directory'));
+        home.forEach(function (rw) {
+          sH.appendChild(dskRow(rw.name || rw.path, num(rw.bytes),
+            rw.shared ? 'excluding apps' : null));
+        });
+        body.appendChild(sH);
+      }
+      var sO = make('div', 'dsk-sect');
+      sO.appendChild(dskHead('System and other', 'outside your home directory'));
+      sO.appendChild(dskRow('System files, mounts and other users', other));
+      body.appendChild(sO);
+      if (d.error) body.appendChild(make('p', 'dsk-warn', String(d.error)));
+    }
+
+    var foot = dsk.foot;
+    foot.textContent = '';
+    var st = make('span', 'dsk-status');
+    if (scanning) {
+      st.appendChild(glyph('busy'));
+      st.appendChild(document.createTextNode(num(d.scanned_at) ? 'Rescanning…' : 'Measuring the disk…'));
+    } else {
+      st.appendChild(document.createTextNode(
+        num(d.scanned_at) ? 'Measured ' + (ago(num(d.scanned_at)) || 'just now') : 'Not measured yet'));
+    }
+    foot.appendChild(st);
+    var again = make('button', 'h-btn dsk-again', 'Scan again');
+    again.type = 'button';
+    again.setAttribute('data-dsk-rescan', '1');
+    again.disabled = scanning || dsk.fetching;
+    foot.appendChild(again);
+  }
+
+  function dskHead(title, note) {
+    var h = make('div', 'dsk-sh');
+    h.appendChild(make('span', 'dsk-st', title));
+    if (note) h.appendChild(make('span', 'dsk-sn', note));
+    return h;
+  }
+
+  function dskRow(name, bytes, tag) {
+    var r = make('div', 'dsk-row');
+    var n = make('span', 'dsk-name');
+    n.appendChild(document.createTextNode(name));
+    if (tag) n.appendChild(make('span', 'dsk-tag', tag));
+    r.appendChild(n);
+    r.appendChild(make('span', 'dsk-bytes' + (bytes === null ? ' is-na' : ''),
+      bytes === null ? '–' : fmtBytes(bytes)));
+    return r;
+  }
+
   /* ---------- events ---------- */
 
   function onClick(e) {
@@ -1595,6 +1888,11 @@
         select(ks.length ? ks[0] : null, false);
       }
       paintBar();
+      return;
+    }
+    var info = t.closest('[data-disk-info]');
+    if (info) {
+      openDisk(info);
       return;
     }
     var sort = t.closest('[data-sort]');
@@ -1659,6 +1957,21 @@
   }
 
   document.addEventListener('keydown', function (e) {
+    if (dsk.el) {
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        e.preventDefault(); closeDisk(true); return;
+      }
+      if (e.key === 'Tab') {
+        /* Modal trap: cycle the sheet's own focusables, never the page's. */
+        var items = dsk.el.querySelectorAll('button:not([disabled]), a[href]');
+        if (!items.length) return;
+        e.preventDefault();
+        var at = Array.prototype.indexOf.call(items, document.activeElement);
+        var next = at === -1 ? 0 : (at + (e.shiftKey ? -1 : 1) + items.length) % items.length;
+        try { items[next].focus({ preventScroll: true }); } catch (err) { items[next].focus(); }
+      }
+      return;
+    }
     if (menuEl) {
       var svc = find(state.menu);
       if (e.key === 'Escape' || e.key === 'Esc') { e.preventDefault(); closeMenu(true); return; }
@@ -1788,6 +2101,7 @@
   document.addEventListener('launcher:services', paint);
   window.addEventListener('hashchange', function () {
     closeMenu(false);
+    closeDisk(false);
     paintSide();
     paintBar();
   });

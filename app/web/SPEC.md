@@ -770,3 +770,53 @@ editor edits names and never adds them.
 **UI.** The Source section's `only` state: "Not set up on this box yet",
 which values the `.env` starts empty, and no Export button. Export and
 Delete refuse a repo-only app (409).
+
+## v14: Storage breakdown (2026-11-01)
+
+The health strip's disk cell has always been the one number that takes this
+box down; v14 answers "used by what" without turning the page into a stats
+dashboard.
+
+**API.** `GET api/disk` is a lazy audit of the filesystem `~/services`
+sits on, shaped for the sheet that renders it:
+
+- `disk`: the same `{mount, total, used, free}` `api/services` reports,
+  re-read per request so the header stays live.
+- `scanning`: a walk is in flight.
+- `scanned_at`: epoch of the last finished walk (null until one lands).
+- `apps`: `[{key, name, bytes}]`: every registry service's `_disk_target`
+  measured once, largest first; `bytes` is null when its `du` failed and
+  the row renders a dash. A `du` here crosses filesystem boundaries the
+  same way the grid's per-service figure does, so the two always agree.
+- `docker`: `{images, containers, volumes, build_cache}` from
+  `docker system df`, present only when the daemon's root is outside `~`
+  *and* on this filesystem. A rootless docker lives inside the home rows
+  already; a root on another mount is another disk's problem, and an
+  unverifiable root stays out of the arithmetic rather than guess.
+- `home`: `[{name, path, bytes, shared}]`: one row per top-level entry of
+  `~`, measured with `du -xsk` so a bind mount or a second disk living
+  under home is not billed to this one. `~/services` is split one level
+  deeper so each app claims its own directory; what is left shows as the
+  `~/services` row with `shared: true`. Bytes the apps claimed are
+  subtracted from their home entry, so the sections partition the disk
+  instead of double-counting. Symlinked entries are skipped, never walked.
+- `other_bytes`: `used` minus everything the walk attributed: system
+  files, other users, mounts the home scan cannot see. Null when `statvfs`
+  failed.
+
+A walk of the whole home tree is the one request that could take a
+minute, so like the per-service sampler it never runs inside a request: a
+GET on a cold or stale (>10 min) cache starts one worker and answers
+`scanning` plus whatever the last run left; `?fresh=1` forces a rescan on
+demand. One worker at a time; a crashed walk stores the error and the
+payload stays 200 with an `error` string, since the totals are still
+right and only the breakdown is missing.
+
+**UI.** The ⓘ on the disk cell opens a dialog: scrim click, the X in its
+corner, or Esc all close it, and focus returns to the button. Inside: the
+same used-of-total line the cell shows, a segmented distribution bar with
+a legend (apps, Docker, files, system, free), then a section per bucket:
+each app's data, the docker `df` split, each top-level folder's size, and
+"System and other". It fetches on open and polls only while `scanning`,
+so a first open fills in as the walk lands and a closed sheet costs the
+box nothing. **Scan again** re-walks on demand.
