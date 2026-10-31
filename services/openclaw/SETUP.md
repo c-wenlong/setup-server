@@ -113,6 +113,10 @@ LOCAL_PORT=18790 ./setup.sh       # HTTPS port follows LOCAL_PORT
 HTTPS_PORT=8443 ./setup.sh        # or set it explicitly
 ```
 
+An explicit `HTTPS_PORT` is recorded in `.env` (delete that line to resume
+following `LOCAL_PORT`); the launcher tile reads `.env` for its link, so it
+always points at the real publish port.
+
 Re-running is safe: it reuses `.env`, leaves a configured `allowedOrigins`
 alone, and re-applies the Serve mapping.
 

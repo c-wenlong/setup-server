@@ -105,6 +105,12 @@ OPENCLAW_AUTH_PROFILE_SECRET_DIR="$STATE/auth-secrets"
 OPENCLAW_GATEWAY_TOKEN=$(randhex)
 EOF
   )
+  if [ -n "$HTTPS_PORT_EXPLICIT" ]; then
+    # An explicit publish port stops following LOCAL_PORT, so it must be
+    # recorded — the launcher tile reads this file for the tile URL.
+    printf '\n# Explicitly set at install: the tailnet publish port, which no longer\n# follows LOCAL_PORT. Delete this line to resume following it.\nHTTPS_PORT=%s\n' \
+      "$HTTPS_PORT" >> "$ENV_FILE"
+  fi
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
 fi
@@ -112,6 +118,11 @@ fi
 # Read back: an existing .env is the source of truth for ports and paths, so
 # a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+REQUESTED_HTTPS_PORT="${HTTPS_PORT_EXPLICIT:+$HTTPS_PORT}"
+# Unset first, so a post-source value can only have come from .env — then
+# every assignment form the shell accepts (export, leading whitespace)
+# counts as recorded, not just a literal `HTTPS_PORT=` at column 0.
+unset HTTPS_PORT
 set -a; . "$ENV_FILE"; set +a
 CONFIG_DIR="${OPENCLAW_CONFIG_DIR:?OPENCLAW_CONFIG_DIR missing from $ENV_FILE}"
 WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:?OPENCLAW_WORKSPACE_DIR missing from $ENV_FILE}"
@@ -119,9 +130,25 @@ SECRET_DIR="${OPENCLAW_AUTH_PROFILE_SECRET_DIR:?OPENCLAW_AUTH_PROFILE_SECRET_DIR
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
-# .env holds no HTTPS_PORT, so a default HTTPS port keeps following the local
-# port .env settled on; an explicit HTTPS_PORT is honoured as given.
-[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
+if [ -n "${HTTPS_PORT+x}" ]; then
+  # .env already decided the publish port (an earlier explicit override);
+  # an explicit value on this re-run is as ignored as LOCAL_PORT is.
+  if [ -n "$HTTPS_PORT_EXPLICIT" ] && [ "$HTTPS_PORT" != "$REQUESTED_HTTPS_PORT" ]; then
+    warn "HTTPS_PORT=$REQUESTED_HTTPS_PORT ignored — the existing $ENV_FILE says $HTTPS_PORT. Edit .env and re-run to move the publish port."
+  fi
+elif [ -n "$HTTPS_PORT_EXPLICIT" ]; then
+  # First explicit override on a re-run: apply it and record it so the
+  # launcher tile and teardown see the real publish port. The leading
+  # newline keeps a .env with no trailing newline parseable.
+  HTTPS_PORT="$REQUESTED_HTTPS_PORT"
+  printf '\n# Explicitly set on re-run: the tailnet publish port, which no longer\n# follows LOCAL_PORT. Delete this line to resume following it.\nHTTPS_PORT=%s\n' \
+    "$HTTPS_PORT" >> "$ENV_FILE"
+  ok "Recorded HTTPS_PORT=$HTTPS_PORT in $ENV_FILE"
+else
+  # No recorded publish port: HTTPS keeps following the local port .env settled on.
+  HTTPS_PORT="$LOCAL_PORT"
+fi
+require_numeric HTTPS_PORT
 
 mkdir -p "$STATE" "$CONFIG_DIR" "$WORKSPACE_DIR" "$SECRET_DIR"
 ok "State dirs ready under $STATE"
