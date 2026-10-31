@@ -10,16 +10,6 @@ first, dated by merge.
 
 ### Added
 
-- **Launcher: live favicons for opted-in tiles.** A manifest can declare
-  `favicon` — a path resolved against the tile's `url` (or a full URL,
-  with the same `.env` token and `HOST` substitution) — and the tile's
-  `<img>` then loads the service's own mark straight from the service,
-  so a favicon update in that repo propagates without a re-vendor. On
-  any load failure it falls back to the vendored mark, then the drawn
-  glyph. Wired for quiver-hub, kaichenpedia, gnosia-learn, sources and
-  design-systems; the stale vendored `sources.svg` was refreshed to the
-  current mark.
-
 - **Launcher: restore GitHub apps from the repo.** Every
   `app/web/apps/<key>.json` with no copy on the box shows under From GitHub
   as not installed. Install copies the definition onto the box (keeping
