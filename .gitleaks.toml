@@ -26,6 +26,19 @@ condition = "AND"
 paths = ['''^services/home-assistant/tests/stubs/curl$''']
 regexes = ['''eyJhbGciOiJIUzI1NiJ9\.stub''']
 
+[[allowlists]]
+description = """
+Hermes' live suite asserts the dashboard refuses a bad password by curling \
+with '-u $user:wrong-password'. The "secret" is a shell variable plus the \
+literal words 'wrong-password' — a deliberately invalid credential that \
+exists only so the check can prove it does not authenticate. Scoped to this \
+one literal in this one file; a real password landing here still fails.
+"""
+targetRules = ["curl-auth-user"]
+condition = "AND"
+paths = ['''^services/hermes-agent/tests/run-tests\.sh$''']
+regexes = ['''\$user:wrong-password''']
+
 # ---------------------------------------------------------------------------
 # Note on */.env
 #
