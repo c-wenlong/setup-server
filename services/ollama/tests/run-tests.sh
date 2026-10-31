@@ -40,7 +40,7 @@ teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
   export PATH="$ORIG_PATH"
-  unset FAKE_UID FAKE_OS FAKE_ARCH EXTRA_PATH BREW_PREFIX OLLAMA_PORT \
+  unset FAKE_UID FAKE_OS FAKE_ARCH EXTRA_PATH BREW_PREFIX \
         STATE_DIR CALLS_LOG
 }
 
@@ -73,6 +73,7 @@ check() { # check <description> <condition...>
 out_has()    { grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
+eff_os()     { echo "${FAKE_OS:-$OS}"; }   # FAKE_OS=Darwin exercises the macOS branch from Linux
 
 fake_binary() { # an "already installed" binary, findable on PATH or in ~/.local
   local dir="${1:-$SANDBOX/fakebin}"
@@ -92,25 +93,20 @@ test_preflight_refuses_root() {
   teardown
 }
 
-test_preflight_bad_port() {
-  echo "• preflight rejects a non-numeric port"
-  setup
-  export OLLAMA_PORT=notaport
-  run_deploy
-  check "exits non-zero"       [ "$CODE" -ne 0 ]
-  check "explains the problem" out_has "must be a port number"
-  teardown
-}
-
 test_fresh_install_downloads() {
   echo "• fresh install: official tarball -> ~/.local, user unit, loopback"
   setup
   run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
-  check "downloaded the tarball"  calls_have "curl.*ollama-linux-amd64.tgz\|curl.*ollama-linux-arm64.tgz"
-  check "binary landed"           [ -x "$HOME/.local/bin/ollama" ]
-  check "models dir (marker)"     [ -d "$HOME/.ollama" ]
-  if [ "$OS" = "Linux" ]; then
+  if [ "$(eff_os)" = "Linux" ]; then
+    check "downloaded the tarball"  calls_have "curl.*ollama-linux-amd64.tgz\|curl.*ollama-linux-arm64.tgz"
+    check "binary landed"           [ -x "$HOME/.local/bin/ollama" ]
+  else
+    check "brew installed it"       calls_have "brew install"
+  fi
+  check "models dir"            [ -d "$HOME/.ollama" ]
+  check "installed sentinel"    [ -f "$HOME/.ollama/.managed" ]
+  if [ "$(eff_os)" = "Linux" ]; then
     check "user unit written"       [ -f "$HOME/.config/systemd/user/ollama.service" ]
     check "unit runs our binary"    grep -q "ExecStart=$HOME/.local/bin/ollama serve" "$HOME/.config/systemd/user/ollama.service"
     check "unit binds loopback"     grep -q "OLLAMA_HOST=127.0.0.1:11434" "$HOME/.config/systemd/user/ollama.service"
@@ -135,9 +131,13 @@ test_existing_binary_reused() {
   run_deploy
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "no download"           no_call "ollama-linux"
-  check "unit runs that binary" grep -q "ExecStart=$SANDBOX/fakebin/ollama serve" \
-                                 "$HOME/.config/systemd/user/ollama.service" 2>/dev/null \
-    || grep -q "ExecStart=$SANDBOX/fakebin/ollama serve" "$HOME/Library/LaunchAgents/ai.ollama.serve.plist"
+  if [ "$(eff_os)" = "Linux" ]; then
+    check "unit runs that binary" grep -q "ExecStart=$SANDBOX/fakebin/ollama serve" \
+                                   "$HOME/.config/systemd/user/ollama.service"
+  else
+    check "plist runs that binary" grep -q "$SANDBOX/fakebin/ollama" \
+                                   "$HOME/Library/LaunchAgents/ai.ollama.serve.plist"
+  fi
   teardown
 }
 
@@ -149,9 +149,13 @@ test_our_own_binary_wins() {
   export EXTRA_PATH="$SANDBOX/fakebin"
   run_deploy
   check "exits zero" [ "$CODE" -eq 0 ]
-  check "ours wins"  grep -q "ExecStart=$HOME/.local/bin/ollama serve" \
-                      "$HOME/.config/systemd/user/ollama.service" 2>/dev/null \
-    || grep -q "$HOME/.local/bin/ollama" "$HOME/Library/LaunchAgents/ai.ollama.serve.plist"
+  if [ "$(eff_os)" = "Linux" ]; then
+    check "ours wins"  grep -q "ExecStart=$HOME/.local/bin/ollama serve" \
+                        "$HOME/.config/systemd/user/ollama.service"
+  else
+    check "ours wins"  grep -q "$HOME/.local/bin/ollama" \
+                        "$HOME/Library/LaunchAgents/ai.ollama.serve.plist"
+  fi
   teardown
 }
 
@@ -194,31 +198,20 @@ test_no_system_unit_is_clean_install() {
 }
 
 test_idempotent_rerun() {
-  echo "• re-run: no sudo, unit rewritten and restarted"
+  echo "• re-run for real: second run needs no sudo and no re-migration"
   setup
   fake_binary "$HOME/.local/bin"
-  touch "$STATE_DIR/linger"
+  touch "$STATE_DIR/system_unit" "$STATE_DIR/system_enabled" "$STATE_DIR/system_active"
   run_deploy
-  check "exits zero"      [ "$CODE" -eq 0 ]
-  check "no sudo"         no_call "^sudo "
-  check "no download"     no_call "ollama-linux"
-  check "unit restarted"  calls_have "systemctl --user restart ollama"
-  teardown
-}
-
-test_port_override() {
-  echo "• OLLAMA_PORT=11435 lands in the unit and the health check"
-  setup
-  fake_binary "$HOME/.local/bin"
-  export OLLAMA_PORT=11435
+  check "first run exits zero"  [ "$CODE" -eq 0 ]
+  check "first run retired it"  calls_have "sudo systemctl disable --now ollama.service"
+  : > "$CALLS_LOG"
   run_deploy
-  check "exits zero"        [ "$CODE" -eq 0 ]
-  if [ "$OS" = "Linux" ]; then
-    check "unit has port"   grep -q "OLLAMA_HOST=127.0.0.1:11435" "$HOME/.config/systemd/user/ollama.service"
-  else
-    check "plist has port"  grep -q "127.0.0.1:11435" "$HOME/Library/LaunchAgents/ai.ollama.serve.plist"
-  fi
-  check "probed that port"  calls_have "127.0.0.1:11435/api/version"
+  check "second run exits zero" [ "$CODE" -eq 0 ]
+  check "no sudo second time"   no_call "^sudo "
+  check "no re-migration"       no_call "disable --now"
+  check "no download"           no_call "ollama-linux"
+  check "unit still restarted"  calls_have "systemctl --user restart ollama"
   teardown
 }
 
@@ -233,12 +226,57 @@ test_health_timeout_dies() {
   teardown
 }
 
+# ---------------------------------------------------------------- macOS
+test_darwin_fresh_install() {
+  echo "• macOS (FAKE_OS=Darwin): brew install, LaunchAgent, loopback"
+  setup
+  export FAKE_OS=Darwin
+  run_deploy
+  check "exits zero"            [ "$CODE" -eq 0 ]
+  check "brew installed it"     calls_have "brew install ollama"
+  check "no tarball"            no_call "ollama-linux"
+  check "plist written"         [ -f "$HOME/Library/LaunchAgents/ai.ollama.serve.plist" ]
+  check "plist binds loopback"  grep -q "127.0.0.1:11434" "$HOME/Library/LaunchAgents/ai.ollama.serve.plist"
+  check "LaunchAgent loaded"    calls_have "launchctl bootstrap"
+  check "no systemctl"          no_call "systemctl --user"
+  check "healthy locally"       out_has "healthy locally"
+  teardown
+}
+
+test_darwin_foreign_daemon_refuses() {
+  echo "• macOS: a foreign daemon on :11434 fails the install, no false healthy"
+  setup
+  export FAKE_OS=Darwin
+  touch "$STATE_DIR/launchd_not_loaded"   # our agent is not loaded; still /api/version answers
+  run_deploy
+  check "exits non-zero"     [ "$CODE" -ne 0 ]
+  check "names the squatter" out_has "already served by another ollama"
+  teardown
+}
+
+test_darwin_teardown() {
+  echo "• macOS: teardown boots out the agent and deletes the plist"
+  setup
+  export FAKE_OS=Darwin
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.ollama/models"
+  touch "$HOME/Library/LaunchAgents/ai.ollama.serve.plist"
+  run_teardown
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  check "agent booted out"    calls_have "launchctl bootout"
+  check "plist deleted"       [ ! -e "$HOME/Library/LaunchAgents/ai.ollama.serve.plist" ]
+  check "models kept"         [ -d "$HOME/.ollama/models" ]
+  check "no systemctl"        no_call "systemctl"
+  teardown
+}
+
 # --------------------------------------------------------------- teardown
 test_teardown_stops_and_keeps() {
   echo "• teardown: unit disabled, models + binary kept"
   setup
+  [ "$(eff_os)" = "Linux" ] || { teardown; return; }
   fake_binary "$HOME/.local/bin"
   mkdir -p "$HOME/.ollama/models" "$HOME/.config/systemd/user"
+  touch "$HOME/.ollama/.managed"
   cat > "$HOME/.config/systemd/user/ollama.service" <<'EOF'
 [Service]
 ExecStart=fake
@@ -249,6 +287,7 @@ EOF
   check "unit disabled"         calls_have "systemctl --user disable ollama.service"
   check "unit file KEPT"        [ -f "$HOME/.config/systemd/user/ollama.service" ]
   check "models kept"           [ -d "$HOME/.ollama/models" ]
+  check "installed marker gone" [ ! -e "$HOME/.ollama/.managed" ]
   check "binary kept"           [ -x "$HOME/.local/bin/ollama" ]
   check "points at --purge"     out_has "teardown.sh --purge"
   teardown
@@ -278,9 +317,37 @@ test_purge_wrong_confirmation() {
   teardown
 }
 
+test_teardown_stop_failure_dies() {
+  echo "• teardown: a unit that will not stop fails the run, nothing purged"
+  setup
+  [ "$(eff_os)" = "Linux" ] || { teardown; return; }
+  fake_binary "$HOME/.local/bin"
+  mkdir -p "$HOME/.ollama/models" "$HOME/.config/systemd/user"
+  touch "$HOME/.config/systemd/user/ollama.service" "$STATE_DIR/stop_fails"
+  run_teardown
+  check "exits non-zero"      [ "$CODE" -ne 0 ]
+  check "names the live unit" out_has "did not stop"
+  check "unit file kept"      [ -f "$HOME/.config/systemd/user/ollama.service" ]
+  check "models kept"         [ -d "$HOME/.ollama/models" ]
+  check "never disabled"      no_call "systemctl --user disable"
+  teardown
+}
+
+test_teardown_refuses_live_stock_unit() {
+  echo "• teardown: no user unit but a live stock unit -> refuse, do not 'remove'"
+  setup
+  [ "$(eff_os)" = "Linux" ] || { teardown; return; }
+  touch "$STATE_DIR/system_unit" "$STATE_DIR/system_active"
+  run_teardown
+  check "exits non-zero"     [ "$CODE" -ne 0 ]
+  check "points at setup"    out_has "run ./setup.sh to migrate"
+  teardown
+}
+
 test_purge_deletes_models_and_unit() {
   echo "• --purge 'ollama': models + unit file gone, binary stays"
   setup
+  [ "$(eff_os)" = "Linux" ] || { teardown; return; }
   fake_binary "$HOME/.local/bin"
   mkdir -p "$HOME/.ollama/models" "$HOME/.config/systemd/user"
   touch "$HOME/.config/systemd/user/ollama.service"
@@ -331,8 +398,12 @@ if [ "${1:-}" = "--live" ]; then
   else
     live_check "LaunchAgent loaded"   sh -c "launchctl print gui/$(id -u)/ai.ollama.serve"
   fi
-  live_check "health endpoint"        curl -fsS "http://127.0.0.1:${OLLAMA_PORT:-11434}/api/version" -o /dev/null
-  live_check "marker dir"             test -d "$HOME/.ollama"
+  live_check "health endpoint"        curl -fsS "http://127.0.0.1:11434/api/version" -o /dev/null
+  if [ "$OS" = "Linux" ]; then
+    live_check "marker (unit file)"   test -f "$HOME/.config/systemd/user/ollama.service"
+  else
+    live_check "marker (plist)"       test -f "$HOME/Library/LaunchAgents/ai.ollama.serve.plist"
+  fi
 fi
 
 # ----------------------------------------------------------------- driver

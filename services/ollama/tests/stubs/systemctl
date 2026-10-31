@@ -4,12 +4,20 @@
 #   system_enabled   — exists => `is-enabled ollama.service` exits 0
 #   system_active    — exists => `is-active ollama.service` exits 0
 #   user_stopped     — exists => `--user is-active` reports inactive (teardown tests)
+#   stop_fails       — exists => `--user stop` exits 1 without changing state
 #   disable_fails    — exists => `--user disable` fails
 echo "systemctl $*" >> "$CALLS_LOG"
 
 if [ "${1:-}" = "--user" ]; then
   case " $* " in
-    *" is-active "*) [ -f "$STATE_DIR/user_stopped" ] && { echo inactive; exit 3; } || { echo active; exit 0; } ;;
+    *" is-active "*)
+      if [ -f "$STATE_DIR/user_stopped" ]; then echo inactive; exit 3; else echo active; exit 0; fi
+      ;;
+    *" stop "*)
+      [ ! -f "$STATE_DIR/stop_fails" ] || { echo "Failed to stop." >&2; exit 1; }
+      touch "$STATE_DIR/user_stopped"
+      ;;
+    *" start "*|*" restart "*) rm -f "$STATE_DIR/user_stopped" ;;
     *" disable "*)   [ ! -f "$STATE_DIR/disable_fails" ] || { echo "Failed to disable." >&2; exit 1; } ;;
   esac
   exit 0
@@ -17,9 +25,12 @@ fi
 
 # System-level queries: the stock unit lives at /etc/systemd/system on a real
 # box; here $STATE_DIR/system_unit stands in for the unit file existing at all.
+# `disable --now` (invoked through the sudo stub during migration) retires it,
+# so a second setup run sees the system unit as neither enabled nor active.
 case " $* " in
   *" cat "*)       [ -f "$STATE_DIR/system_unit" ] || { echo "No files found for ollama.service." >&2; exit 1; } ;;
   *" is-enabled "*) [ -f "$STATE_DIR/system_enabled" ] || { echo "disabled"; exit 1; } ;;
   *" is-active "*) [ -f "$STATE_DIR/system_active" ] || { echo "inactive"; exit 3; } ;;
+  *" disable "*)   rm -f "$STATE_DIR/system_enabled" "$STATE_DIR/system_active" ;;
 esac
 exit 0

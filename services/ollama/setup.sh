@@ -20,8 +20,7 @@
 # the user unit is loopback-only by construction.
 #
 # Usage:
-#   ./setup.sh                    # deploy with defaults
-#   OLLAMA_PORT=11435 ./setup.sh  # custom local port
+#   ./setup.sh                  # deploy on 127.0.0.1:11434
 #
 # Idempotent: safe to re-run. Repairs the binary/unit and restarts the
 # service, but never re-invokes sudo once the system unit is disabled, and
@@ -32,7 +31,10 @@
 
 set -euo pipefail
 
-PORT="${OLLAMA_PORT:-11434}"
+# Fixed port: the launcher's health check and seed_kuma's monitor are both
+# pinned to 11434, so a custom port was never supported end-to-end — a
+# second run silently reverted it and the tile read as an outage.
+PORT=11434
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODELS="$HOME/.ollama"
 
@@ -45,7 +47,6 @@ info "Preflight checks ($OS)"
 refuse_root "Run as a regular user, not root (sudo is invoked only to retire a system unit)."
 command -v curl >/dev/null || die "curl is required."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
-case "$PORT" in ''|*[!0-9]*) die "OLLAMA_PORT must be a port number (got: $PORT)" ;; esac
 ok "$OS + curl + user service manager"
 
 # ------------------------------------------------- install / reuse binary
@@ -122,6 +123,12 @@ fi
 
 # ------------------------------------------------------------ service
 mkdir -p "$MODELS"
+# The launcher's installed-marker. ~/.ollama can exist without us (the
+# user pulled models by hand, or the stock system's binary ran once), so
+# the marker is a sentinel only this script writes — pre-migration boxes
+# read 'available', not 'installed', and the launcher controls stay gated
+# to a unit this repo actually created.
+touch "$MODELS/.managed"
 if [ "$OS" = "Linux" ]; then
   UNIT="$HOME/.config/systemd/user/ollama.service"
   info "Installing systemd user service (loopback only)"
@@ -166,7 +173,17 @@ else
 </dict>
 </plist>
 EOF
+  # Was our own agent loaded before we touch it? A re-run may pass the
+  # health probe legitimately; a port that answers with no agent of ours
+  # loaded is a foreign daemon (Ollama.app, `brew services`) and the new
+  # agent would crash-loop on bind while the check still reports healthy.
+  agent_was_loaded=0
+  launchctl print "gui/$(id -u)/ai.ollama.serve" >/dev/null 2>&1 && agent_was_loaded=1
   launchctl bootout "gui/$(id -u)/ai.ollama.serve" 2>/dev/null || true
+  if [ "$agent_was_loaded" -eq 0 ] \
+     && curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/version" -o /dev/null 2>/dev/null; then
+    die "$PORT is already served by another ollama (Ollama.app or brew services). Stop it, then re-run."
+  fi
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
   ok "LaunchAgent loaded (starts at login; logs: ~/Library/Logs/ollama.log)"
 fi

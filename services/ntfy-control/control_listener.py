@@ -136,6 +136,10 @@ def _parts(block):
         if not isinstance(entry, dict):
             continue
         kind = "container" if "container" in entry else "unit"
+        if kind == "unit" and sys.platform != "linux":
+            # systemd user units only exist on Linux; the same service on
+            # macOS is a LaunchAgent. Matches the launcher's control_parts.
+            continue
         name = entry.get(kind)
         if not isinstance(name, str) or not NAME_RE.match(name):
             continue

@@ -54,8 +54,9 @@ also retires the `0.0.0.0` bind for good.
 
 ## What setup.sh does, step by step
 
-1. **Preflight** — refuses root, needs curl + (Linux) systemctl, validates
-   `OLLAMA_PORT` (default `11434`) is numeric.
+1. **Preflight** — refuses root, needs curl + (Linux) systemctl. The port
+   is fixed at `11434`: the launcher's health probe and seed_kuma's monitor
+   both assume it.
 2. **Binary** — reuses `~/.local/bin/ollama`, then `command -v ollama`
    (covers a stock `/usr/local/bin/ollama`); otherwise downloads
    `ollama-linux-<arch>.tgz` into `~/.local`. On macOS it uses

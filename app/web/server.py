@@ -994,6 +994,14 @@ def _disk_target(svc, home=None):
     anywhere else stands alone. Nothing relative is ever handed to du.
     """
     marker = svc.get("marker")
+    disk = svc.get("disk")
+    if isinstance(disk, str) and disk:
+        # An explicit data dir for services whose marker is a control
+        # artifact rather than the payload — ollama's marker is a sentinel,
+        # the disk that matters is the models dir.
+        path = os.path.expanduser(disk)
+        if os.path.isabs(path):
+            return path
     if not isinstance(marker, str) or not marker:
         return None
     path = os.path.expanduser(marker)
@@ -3659,6 +3667,11 @@ def control_parts(block):
         if not isinstance(entry, dict):
             continue
         kind = "container" if "container" in entry else "unit"
+        if kind == "unit" and sys.platform != "linux":
+            # Unit parts are systemd user units; on macOS the same service
+            # is a LaunchAgent and there is no systemctl to run. Docker
+            # parts still work — docker CLI exists there.
+            continue
         name = entry.get(kind)
         if not isinstance(name, str) or not _CONTROL_NAME_RE.match(name):
             continue

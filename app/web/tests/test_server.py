@@ -3347,6 +3347,38 @@ class ControlStatusTest(ControlTestBase):
         ]})
         self.assertFalse(self.status("evil")["controllable"])
 
+    def test_unit_parts_do_not_exist_without_systemd(self):
+        # The same service is a LaunchAgent on macOS; a systemctl argv would
+        # only fail there. Container parts still parse — docker CLI exists.
+        self.write_registry({"services": [
+            {"key": "svc", "name": "svc", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "control": {"parts": [{"unit": "svc.service"},
+                                   {"container": "svc-db"}]}},
+        ]})
+        block = server.control_block(server.find_service("svc"))
+        names = [p["name"] for p in server.control_parts(block)]
+        self.assertEqual(names, ["svc.service", "svc-db"])
+        real = sys.platform
+        sys.platform = "darwin"
+        try:
+            self.assertEqual([p["name"] for p in server.control_parts(block)],
+                             ["svc-db"])
+            self.assertEqual(self.status("svc")["controllable"], True)
+        finally:
+            sys.platform = real
+        # And with only a unit part, macOS reports not controllable at all.
+        self.write_registry({"services": [
+            {"key": "svc", "name": "svc", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None, "setup": None,
+             "control": {"parts": [{"unit": "svc.service"}]}},
+        ]})
+        sys.platform = "darwin"
+        try:
+            self.assertFalse(self.status("svc")["controllable"])
+        finally:
+            sys.platform = real
+
     def test_monitor_name_is_gated_too(self):
         self.assertEqual(server.control_monitors({"kuma": "a; curl evil"}), [])
         self.assertEqual(server.control_monitors({"kuma": None}), [])
@@ -5403,6 +5435,18 @@ class ResourceDiskTest(ResourceTestBase):
             None, marker=os.path.join(self.tmp, "services", "gone"))
         self.assertEqual(server._disk_target(svc, home=self.tmp),
                          os.path.join(self.tmp, "services", "gone"))
+
+    def test_an_explicit_disk_field_beats_the_marker(self):
+        # ollama's marker is a sentinel file; the models dir is the weight.
+        # `disk` names the payload path directly and skips marker logic.
+        models = os.path.join(self.tmp, "dot-ollama")
+        os.makedirs(models)
+        marker = os.path.join(self.tmp, "state.json")
+        svc = self.registry_with(None, marker=marker, disk=models)
+        self.assertEqual(server._disk_target(svc, home=self.tmp), models)
+        # A non-absolute or empty disk falls back to the marker rules.
+        svc = self.registry_with(None, marker=marker, disk="rel/path")
+        self.assertEqual(server._disk_target(svc, home=self.tmp), marker)
 
     def test_a_worker_crash_caches_null_and_frees_the_key(self):
         def boom(path):

@@ -39,10 +39,13 @@ curl -v http://127.0.0.1:11434/api/version
 ## Another service can't reach ollama
 
 - Use `http://127.0.0.1:11434`, not the tailnet name — it is not published.
-- A *containerised* caller (Docker with bridge networking) cannot use
-  127.0.0.1 to reach the host — that caller needs `host.docker.internal`
-  or host networking, exactly how open-webui's compose does it. The bind
-  itself stays loopback either way.
+- A *containerised* caller (Docker with bridge networking) cannot reach a
+  host service bound to loopback at all — `host.docker.internal` resolves
+  to the bridge gateway, and the host only answers :11434 on 127.0.0.1,
+  which the gateway is not. On Linux the caller needs `network_mode: host`
+  (then `http://127.0.0.1:11434` works) or a small proxy inside the
+  container; on Docker Desktop for Mac `host.docker.internal` does reach
+  the host loopback. The bind itself stays loopback either way.
 - `ollama list` empty → models were never pulled *as this user*. The old
   system unit's models live in `/usr/share/ollama/.ollama` owned by the
   `ollama` user — they are not shared.

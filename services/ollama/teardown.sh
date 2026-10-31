@@ -74,10 +74,23 @@ if [ "$OS" = "Linux" ]; then
   if [ -f "$UNIT" ] || [ -L "$UNIT" ]; then
     info "Disabling $UNIT_NAME"
     systemctl --user stop "$UNIT_NAME" 2>/dev/null || true
+    # A failed stop must not read as removed: verify the unit is actually
+    # inactive before disabling or purging anything.
+    if systemctl --user is-active --quiet "$UNIT_NAME" 2>/dev/null; then
+      die "$UNIT_NAME did not stop — check 'systemctl --user status $UNIT_NAME' and re-run."
+    fi
     systemctl --user disable "$UNIT_NAME" >/dev/null 2>&1 \
       || die "systemctl --user disable $UNIT_NAME failed. Try it by hand and re-run."
     ok "$UNIT_NAME stopped and disabled"
   else
+    # Nothing of ours — but a live stock system unit would make a reported
+    # 'removed' a lie (and the launcher would still pause its monitor).
+    # Point at setup.sh's migration instead of claiming success.
+    if systemctl cat ollama.service >/dev/null 2>&1 \
+       && { systemctl is-enabled ollama.service >/dev/null 2>&1 \
+            || systemctl is-active ollama.service >/dev/null 2>&1; }; then
+      die "No user unit, but the stock system unit (systemctl cat ollama.service) is still live — run ./setup.sh to migrate it first."
+    fi
     ok "No $UNIT (already removed)"
   fi
   if [ "$PURGE" -eq 1 ]; then
@@ -109,6 +122,10 @@ fi
 if [ "$PURGE_MODELS" -eq 1 ]; then
   rm -rf -- "$MODELS"
   ok "Deleted $MODELS (pulled models)"
+else
+  # Removed means the launcher's installed-marker goes even though the
+  # models stay — the tile reads 'available' again, not 'installed'.
+  rm -f -- "$MODELS/.managed"
 fi
 
 # ------------------------------------------------------------- summary

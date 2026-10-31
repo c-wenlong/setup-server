@@ -7,7 +7,8 @@
   "author": "ollama",
   "url": null,
   "health": "http://127.0.0.1:11434/api/version",
-  "marker": "~/.ollama",
+  "marker": "~/.ollama/.managed",
+  "disk": "~/.ollama",
   "env": null,
   "control": {
     "parts": [
