@@ -25,7 +25,7 @@
   box-shadow: var(--shadow);
 }
 
-.vw-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vw-wrap:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
 
 /* ---------- table ---------- */
 
@@ -40,9 +40,7 @@
   padding: 9px 12px;
   text-align: left;
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .07em;
-  text-transform: uppercase;
+  font-weight: 500;
   color: var(--faint);
   white-space: nowrap;
   border-bottom: 1px solid var(--border);
@@ -80,14 +78,14 @@
 
 .vw-sum dt {
   font-size: 12px;
-  font-weight: 540;
+  font-weight: 500;
   color: var(--faint);
 }
 
 .vw-sum dd {
   margin: 0;
   font-size: 15px;
-  font-weight: 550;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   letter-spacing: -.01em;
   color: var(--text);

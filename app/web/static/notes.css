@@ -30,12 +30,12 @@
 
 .nt-count {
   font-size: 11px;
-  font-weight: 550;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1.5;
   color: var(--faint);
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-chip);
   padding: 0 7px;
 }
 
@@ -50,12 +50,12 @@
   padding: 0 10px;
   font-family: inherit;
   font-size: 13.5px;
-  font-weight: 550;
+  font-weight: 500;
   letter-spacing: -.005em;
-  color: var(--accent);
+  color: var(--accent-fg);
   background: none;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--radius-ctl);
   cursor: pointer;
   transition: background-color var(--dur) ease, opacity var(--dur) ease;
 }
@@ -147,7 +147,7 @@
   cursor: pointer;
   transition: color var(--dur) ease;
 }
-.nt-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 8px; }
+.nt-row:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: -3px; border-radius: 8px; }
 
 .nt-chev {
   flex: none;
@@ -157,7 +157,7 @@
   transition: transform var(--dur) ease, color var(--dur) ease;
 }
 .nt-chev svg { width: 15px; height: 15px; display: block; }
-.nt-item.is-open .nt-chev { transform: rotate(90deg); color: var(--accent); }
+.nt-item.is-open .nt-chev { transform: rotate(90deg); color: var(--accent-fg); }
 
 .nt-line {
   flex: 1 1 auto;
@@ -186,7 +186,7 @@
 @media (hover: hover) and (pointer: fine) {
   .nt-item:hover { background: var(--surface); }
   .nt-row:hover .nt-chev { color: var(--muted); }
-  .nt-item.is-open:hover .nt-chev { color: var(--accent); }
+  .nt-item.is-open:hover .nt-chev { color: var(--accent-fg); }
 }
 
 
@@ -250,15 +250,15 @@
   padding: 0 9px;
   font-family: inherit;
   font-size: 12.5px;
-  font-weight: 540;
+  font-weight: 500;
   color: var(--muted);
   background: none;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-ctl);
   cursor: pointer;
   transition: color var(--dur) ease, background-color var(--dur) ease;
 }
-.nt-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.nt-tool:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: -3px; }
 .nt-tool[disabled] { opacity: .5; cursor: default; }
 
 /* Delete is quiet at rest and red only once it is armed. The red belongs to
@@ -304,7 +304,7 @@
 
 .nt-label {
   font-size: 12.5px;
-  font-weight: 540;
+  font-weight: 500;
   color: var(--muted);
 }
 
@@ -321,13 +321,13 @@
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 11px;
+  border-radius: 6px;
   transition: border-color var(--dur) ease, box-shadow var(--dur) ease;
 }
 .nt-input::placeholder { color: var(--faint); }
 .nt-input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--accent-fg);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .nt-input[disabled] { opacity: .6; }
@@ -400,7 +400,7 @@
 .nt-empty-h {
   margin: 0;
   font-size: 14px;
-  font-weight: 560;
+  font-weight: 500;
   letter-spacing: -.005em;
   color: var(--text);
 }
@@ -423,11 +423,11 @@
   padding: 0 10px;
   font-family: inherit;
   font-size: 13.5px;
-  font-weight: 550;
-  color: var(--accent);
+  font-weight: 500;
+  color: var(--accent-fg);
   background: none;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--radius-ctl);
   cursor: pointer;
   transition: background-color var(--dur) ease;
 }
