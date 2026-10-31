@@ -4200,27 +4200,43 @@ def start_action(key, action):
 
 # ------------------------------------------------------------------ updates
 #
-# "Is there a newer image for what this service runs?" For each container
-# part, the ref the container was created from (`.Config.Image`, such as
-# ghcr.io/openhands/agent-canvas:latest) is looked up on its registry with one
-# manifest HEAD, and the digest that comes back is compared with the
-# RepoDigests of the image the container is actually running. A different
-# digest means the tag has moved since this container was made: exactly what
-# `docker pull <ref>` plus a re-run of setup.sh (the upgrade recipe in every
-# service's SETUP.md) picks up.
+# "Is there a newer image for what this service runs?" Two checks per
+# container part:
 #
-# That covers floating tags (latest, release, main, 13.0-latest) and a pinned
-# tag upstream rebuilt. It deliberately does not go looking for newer version
-# tags: a version pinned in .env is a choice, bumped by hand with the .env
-# editor and a redeploy.
+# 1. Tag moved? The ref the container was created from (`.Config.Image`, such
+#    as ghcr.io/openhands/agent-canvas:latest) is looked up on its registry
+#    with one manifest HEAD, and the digest that comes back is compared with
+#    the RepoDigests of the image the container is actually running. A
+#    different digest means the tag has moved since this container was made:
+#    exactly what `docker pull <ref>` plus a re-run of setup.sh picks up.
+#    That covers floating tags (latest, release, main, 13.0-latest) and a
+#    pinned tag upstream rebuilt.
+#
+# 2. Newer version? A version tag (1.23.16) never moves, so check 1 stays
+#    silent forever on pinned services. When the compose file binds the tag
+#    to a variable the .env owns (repo:${APP_RELEASE:-v1.4.2}, or the whole
+#    ref ${KUMA_IMAGE:-repo:1.23.16}), the repo's tags/list is scanned for a
+#    newer tag in the same line — same tag shape, same major (0.x tightens
+#    to major.minor; year-led calver like 2026.9.1 or RELEASE.2024-… takes
+#    any newer date). `latest` holds that tag; the update writes it into the
+#    variable and the compose substitution moves every image that reads it,
+#    so a matched set (Plane's nine containers on APP_RELEASE) stays
+#    matched: a tag is only proposed when every repo the variable feeds
+#    publishes it.
 #
 #   {"openhands": {"checked_at": "...Z", "available": true,
 #                  "images": [{"container": "openhands-agent-canvas",
 #                              "image": "ghcr.io/openhands/agent-canvas:latest",
-#                              "status": "update", "error": null}]}}
+#                              "status": "update", "error": null,
+#                              "latest": null, "env_var": null,
+#                              "latest_error": null}]}}
 #
 # status: current | update | pinned (by digest, cannot move) | local (built on
 # this box, nothing to pull) | error (the registry did not answer).
+# latest/env_var: set together when a newer in-line tag exists and .env can
+# carry it. latest_error: the tags/list read failed; the last known proposal
+# is carried over from the stored entry instead, so a flaky registry does not
+# flap the badge.
 
 _updates_lock = threading.Lock()
 # key -> monotonic start of the check whose result is stored (record_updates).
@@ -4334,6 +4350,122 @@ def _registry_error(exc):
     return "check failed"
 
 
+TAG_LIST_MAX_PAGES = 10          # bound the sweep's GETs per repo
+
+
+def _next_page(link, base):
+    """`Link: <url>; rel="next"` -> the url, or None. HTTPS only.
+
+    The spec allows relative next links (`</v2/o/a/tags/list?last=x&n=2>`),
+    so they are resolved against the page they came from: a relative link
+    cannot change host, and remote_tags' same-host gate still decides
+    whether the resolved url is followed.
+    """
+    if not link:
+        return None
+    hit = re.search(r'<([^>]+)>\s*;\s*rel="?next"?', link)
+    if not hit:
+        return None
+    url = urllib.parse.urljoin(base, hit.group(1))
+    return url if url.startswith("https://") else None
+
+
+def remote_tags(host, repo):
+    """Every tag host publishes for repo. Raises on any failure.
+
+    A GET, with the same anonymous-token dance as remote_digest, following
+    the registry's own pagination (Link: rel="next") for the few repos that
+    keep every release tag ever cut. The page cap and the same-host rule on
+    next links keep a hostile or broken registry from turning one service's
+    check into an unbounded crawl.
+    """
+    url = "https://%s/v2/%s/tags/list" % (host, urllib.parse.quote(repo))
+    headers = {"Accept": "application/json"}
+    tags = []
+    for _page in range(TAG_LIST_MAX_PAGES):
+        doc = None
+        for attempt in (0, 1):
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=REGISTRY_TIMEOUT) as resp:
+                    doc = (json.loads(resp.read(1 << 20).decode("utf-8")),
+                           resp.headers.get("Link"))
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401 and attempt == 0:
+                    token = _registry_token(
+                        exc.headers.get("WWW-Authenticate") or "", repo)
+                    if token:
+                        headers["Authorization"] = "Bearer " + token
+                        continue
+                raise
+            break
+        body, link = doc
+        values = body.get("tags") if isinstance(body, dict) else None
+        if isinstance(values, list):
+            tags.extend(t for t in values if isinstance(t, str))
+        nxt = _next_page(link, url)
+        if not nxt or not nxt.startswith("https://%s/" % host):
+            return tags
+        url = nxt
+    return tags
+
+
+_TAG_NUM_RE = re.compile(r"(\d+)")
+
+
+def _tag_shape(tag):
+    """A tag as alternating literal / digit-group segments.
+
+    'v1.4.2' and 'v1.10.0' share a shape; '1.4.2' and 'v1.4.2-alpine' do not.
+    Candidates must match on every literal byte and on segment count, so a
+    proposed tag can never come from a different tagging scheme (a
+    pre-release suffix, an extra component, a dropped prefix).
+    """
+    return tuple(_TAG_NUM_RE.split(tag))
+
+
+def _tag_version(shape):
+    return tuple(int(seg) for seg in shape[1::2])
+
+
+def _same_line(current, candidate):
+    """Same release line for two same-shape tags, on their numeric parts.
+
+    The leading number is the line: 1.23.16 tracks 1.x.y, never 2.x. Two
+    tightenings and one loosening: a 0.x tag pins major.minor (0.107.79 ->
+    0.107.x, since 0.x minors are feature releases), and a year-led tag
+    (2026.9.1, RELEASE.2024-…) treats its first number as a calendar year
+    rather than a boundary, so dated releases all count as one line.
+    """
+    cur, cand = _tag_version(current), _tag_version(candidate)
+    if len(cur) != len(cand) or not cur:
+        return False
+    if cur[0] >= 1000:
+        return True
+    if cur[0] != cand[0]:
+        return False
+    return cur[0] != 0 or len(cur) == 1 or cur[1] == cand[1]
+
+
+def candidate_tags(current_tag, tags):
+    """The in-line newer tags for current_tag out of a remote tag list."""
+    current = _tag_shape(current_tag)
+    base = _tag_version(current)
+    if not base:
+        return []
+    out = []
+    for tag in tags:
+        if tag == current_tag or not _IMAGE_REF_RE.match(tag):
+            continue
+        shape = _tag_shape(tag)
+        if (len(shape) != len(current) or shape[::2] != current[::2]
+                or not _same_line(current, shape)):
+            continue
+        if _tag_version(shape) > base:
+            out.append(tag)
+    return out
+
+
 class DockerUnavailable(Exception):
     """docker did not answer, which is not the same as "nothing running"."""
 
@@ -4418,6 +4550,91 @@ def running_images(svc):
              "digests": digests.get(r["image_id"], [])} for r in rows]
 
 
+# ${VAR}, ${VAR:-default}, ${VAR:?required} and $VAR, as compose accepts them
+# on an image: line. A default may itself hold ':' and '/' (an image ref),
+# so it runs to the closing brace rather than the first colon.
+_ENV_REF_RE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([-?])([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_COMPOSE_IMAGE_RE = re.compile(r"^\s*image\s*:\s*(\S+)")
+
+
+def _resolve_image_template(template, env):
+    """One compose `image:` value with its variables applied, or None.
+
+    Values come from the service's .env first, then the `:-` default. A line
+    that cannot fully resolve (an unset `:?` requirement or bare $VAR, an
+    env value containing markup of its own) produces no binding: a wrong
+    guess would write the wrong variable later, which is worse than no
+    version check at all.
+    """
+    out = []
+    pos = 0
+    for m in _ENV_REF_RE.finditer(template):
+        name = m.group(1) or m.group(4)
+        if name in env:
+            value = env[name]
+        elif m.group(2) == "-":
+            value = m.group(3)
+        else:
+            return None
+        if "${" in value or "$" in value:
+            return None
+        out.append(template[pos:m.start()])
+        out.append(value)
+        pos = m.end()
+    out.append(template[pos:])
+    return "".join(out)
+
+
+def _image_var_map(svc):
+    """(host, repo, tag) -> env var that carries the tag, from compose.
+
+    The compose files here bind a version two ways: the tag alone
+    (repo:${APP_RELEASE:-v1.4.2}) or the whole ref (${KUMA_IMAGE:-…:1.23.16}).
+    The last variable on an image: line is always the tag one — a registry
+    or repo variable sits earlier. A line binds only when it resolves to
+    exactly what a container reports AND the variable's .env value equals
+    the resolved ref or just the tag, so a stale or repurposed variable can
+    never be attached to an image it does not feed.
+    """
+    try:
+        script = resolve_script(svc)
+    except DeployError:
+        return {}
+    path = os.path.join(os.path.dirname(script), "docker-compose.yml")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return {}
+    try:
+        env = read_env(svc)
+    except DeployError:
+        env = {}
+    out = {}
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        hit = _COMPOSE_IMAGE_RE.match(line)
+        if not hit:
+            continue
+        template = hit.group(1).strip("'\"")
+        names = [m.group(1) or m.group(4)
+                 for m in _ENV_REF_RE.finditer(template)]
+        if not names:
+            continue
+        resolved = _resolve_image_template(template, env)
+        if resolved is None:
+            continue
+        parsed = parse_image_ref(resolved)
+        if parsed is None:
+            continue
+        value = env.get(names[-1])
+        if value is not None and (value == resolved or value == parsed[2]):
+            out[parsed] = names[-1]
+    return out
+
+
 def check_service_updates(svc):
     """A fresh updates entry for one service, or None with nothing to check.
 
@@ -4425,7 +4642,8 @@ def check_service_updates(svc):
     stored before.
 
     One registry call per distinct ref, not per container: Plane runs six
-    containers off one release tag.
+    containers off one release tag. The version scan likewise reads each
+    repo's tags/list once, however many containers share it.
     """
     rows = running_images(svc)
     if not rows:
@@ -4434,7 +4652,8 @@ def check_service_updates(svc):
     images = []
     for row in rows:
         entry = {"container": row["container"], "image": row["image"],
-                 "status": "current", "error": None}
+                 "status": "current", "error": None,
+                 "latest": None, "env_var": None, "latest_error": None}
         parsed = parse_image_ref(row["image"])
         if parsed is None:
             entry["status"] = "pinned"
@@ -4452,9 +4671,68 @@ def check_service_updates(svc):
             elif digest not in row["digests"]:
                 entry["status"] = "update"
         images.append(entry)
+    _fill_version_proposals(svc, rows, images)
     return {"checked_at": _now_iso(),
-            "available": any(i["status"] == "update" for i in images),
+            "available": any(i["status"] == "update" or i["latest"]
+                             for i in images),
             "images": images}
+
+
+def _fill_version_proposals(svc, rows, images):
+    """Set latest/env_var/latest_error on each image from the tag scan.
+
+    Per env var: the newest in-line tag that every image reading the
+    variable publishes. An intersection, not a union — a shared variable
+    (Plane's APP_RELEASE over five repos) only bumps to a tag that exists on
+    all of them, or the update would pull a release that is only half out.
+    A repo that will not answer marks the variable's images latest_error and
+    proposes nothing; record_updates then keeps what the last good scan
+    found rather than dropping it.
+    """
+    bindings = _image_var_map(svc)
+    if not bindings:
+        return
+    by_var = {}
+    for row in rows:
+        parsed = parse_image_ref(row["image"])
+        var = bindings.get(parsed) if parsed else None
+        if var is not None:
+            by_var.setdefault(var, []).append((row["container"], parsed))
+    if not by_var:
+        return
+    # Every repo the variable feeds per the compose file, including an
+    # image whose container is not running right now: setup.sh recreates it
+    # on the bumped value all the same, so a shared variable may only name
+    # a tag all of its repos publish.
+    var_refs = {}
+    for ref, var in bindings.items():
+        var_refs.setdefault(var, set()).add(ref)
+    listing = {}
+    for var, uses in by_var.items():
+        common = None
+        error = None
+        for host, repo, tag in var_refs[var]:
+            if (host, repo) not in listing:
+                try:
+                    listing[(host, repo)] = remote_tags(host, repo)
+                except Exception as exc:
+                    listing[(host, repo)] = exc
+            found = listing[(host, repo)]
+            if isinstance(found, Exception):
+                error = _registry_error(found)
+                common = None
+                break
+            here = set(candidate_tags(tag, found))
+            common = here if common is None else common & here
+        proposal = (max(common, key=lambda t: _tag_version(_tag_shape(t)))
+                    if common else None)
+        for name, _parsed in uses:
+            image = next(i for i in images if i["container"] == name)
+            image["env_var"] = var
+            if error is not None:
+                image["latest_error"] = error
+            elif proposal is not None:
+                image["latest"] = proposal
 
 
 def _valid_update_entry(entry):
@@ -4471,10 +4749,17 @@ def _valid_update_entry(entry):
                 "status": image["status"],
                 "error": image.get("error")
                 if isinstance(image.get("error"), str) else None,
+                "latest": image.get("latest")
+                if isinstance(image.get("latest"), str) else None,
+                "env_var": image.get("env_var")
+                if isinstance(image.get("env_var"), str) else None,
+                "latest_error": image.get("latest_error")
+                if isinstance(image.get("latest_error"), str) else None,
             })
     checked = entry.get("checked_at")
     return {"checked_at": checked if isinstance(checked, str) else None,
-            "available": any(i["status"] == "update" for i in images),
+            "available": any(i["status"] == "update" or i["latest"]
+                             for i in images),
             "images": images}
 
 
@@ -4518,9 +4803,36 @@ def record_updates(key, entry, started=None):
                 return True
             data.pop(key, None)
         else:
+            _carry_version_proposals(data.get(key), entry)
             data[key] = entry
         _write_json_atomically(UPDATES_PATH, data, ".updates.")
         return True
+
+
+def _carry_version_proposals(old, new):
+    """Keep a stored latest+env_var when the new scan could not re-check it.
+
+    A tags/list failure (latest_error) means "unknown", not "gone": the
+    container still runs the same ref and the last good answer stays valid,
+    so the badge does not flap every time a registry hiccups. The carry only
+    fires for the same container on the same image ref — a redeployed
+    container gets a fresh answer, or honestly no proposal.
+    """
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return
+    previous = {i.get("container"): i for i in old.get("images") or []
+                if isinstance(i, dict)}
+    for image in new.get("images") or []:
+        before = previous.get(image.get("container"))
+        if (image.get("latest_error") and not image.get("latest")
+                and isinstance(before, dict)
+                and before.get("image") == image.get("image")
+                and before.get("latest")):
+            image["latest"] = before["latest"]
+            image["env_var"] = before.get("env_var")
+    new["available"] = any(
+        i["status"] == "update" or i.get("latest")
+        for i in new.get("images") or [])
 
 
 def check_and_record(svc):
@@ -4633,11 +4945,16 @@ def plan_update(svc, script, refs):
 
 
 def start_update(key):
-    """POST .../update: queue pull-and-redeploy for the refs that moved.
+    """POST .../update: queue pull-and-redeploy for whatever the check found.
 
-    Only refs the last check marked `update` are pulled, and each is
-    re-validated before it goes near an argv: the request carries the key and
-    nothing else.
+    Two kinds of waiters: a moved floating tag (pull the same ref again) and
+    a newer version tag (write the proposed tag into its .env variable
+    first, then pull the ref it resolves to). Only what the last check
+    marked is touched, and each ref and tag is re-validated before it goes
+    near an argv or the env file: the request carries the key and nothing
+    else. The env write lands between the slot claim and the steps running,
+    so a refused registration leaves .env alone and a failed write releases
+    the slot cleanly instead of leaving it running forever.
     """
     svc = find_service(key)
     if svc is None:
@@ -4647,22 +4964,89 @@ def start_update(key):
         raise DeployError(403, status["reason"])
     script = resolve_script(svc)
     entry = load_updates().get(key) or {}
+    try:
+        env = read_env(svc)
+    except DeployError:
+        env = {}
     refs = []
+    bumps = {}                     # env var -> value, written pre-job
     for image in entry.get("images") or []:
         ref = image.get("image")
-        if (image.get("status") == "update" and parse_image_ref(ref)
+        bumped = _bumped_ref(image)
+        if bumped is not None:
+            # A version bump supersedes a moved tag: once .env names the new
+            # tag, pulling the old one fetches an image nothing will run.
+            if bumped not in refs:
+                refs.append(bumped)
+            value = _bumped_value(image, env)
+            if value is not None:
+                bumps[image["env_var"]] = value
+        elif (image.get("status") == "update" and parse_image_ref(ref)
                 and ref not in refs):
             refs.append(ref)
     if not refs:
         raise DeployError(409, "no update is waiting for this service; "
                                "check again first")
-    steps = plan_update(svc, script, refs)
+    # The slot is claimed before .env changes: an update refused at
+    # registration can never leave a new version behind for the job that is
+    # already running (or a later deploy) to pick up.
     job = register_job(key, "update")
-    job["source"] = deploy_source(svc, script)
+    try:
+        job["source"] = deploy_source(svc, script)
+        for var, value in bumps.items():
+            update_env_var(key, var, {"value": value})
+        steps = plan_update(svc, script, refs)
+    except Exception:
+        _finish(job, 1)
+        raise
     log("update %s started: %s (%s)" % (key, job["id"], ", ".join(refs)))
     threading.Thread(target=_run_steps, args=(job, steps),
                      daemon=True).start()
     return job["id"]
+
+
+def _bumped_ref(image):
+    """The stored image's ref with its proposed tag, or None.
+
+    `latest` is data from a registry response, so the constructed ref goes
+    through the same shape gate as any other ref before it can reach a
+    `docker pull` argv.
+    """
+    ref, tag = image.get("image"), image.get("latest")
+    if not image.get("env_var") or not isinstance(tag, str):
+        return None
+    parsed = parse_image_ref(ref)
+    if parsed is None or not ref.endswith(":" + parsed[2]):
+        return None
+    bumped = ref[:len(ref) - len(parsed[2])] + tag
+    if bumped == ref or not _IMAGE_REF_RE.match(bumped) \
+            or parse_image_ref(bumped) is None:
+        return None
+    return bumped
+
+
+def _bumped_value(image, env):
+    """What the env var should hold for _bumped_ref, or None to not write.
+
+    The variable only gets written while it still holds the value the check
+    saw: an == comparison against the container's tag (bare-tag variables
+    like APP_RELEASE) or the same ref on the same registry ending in it
+    (whole-ref variables like KUMA_IMAGE — a registry swap means the
+    proposed tag was never checked there). Anything else — hand-edited,
+    already bumped — is left alone; pulling the proposed ref is still safe.
+    """
+    var = image.get("env_var")
+    parsed = parse_image_ref(image.get("image") or "")
+    latest = image.get("latest")
+    if var not in env or parsed is None or not isinstance(latest, str):
+        return None
+    current = env[var]
+    if current == parsed[2]:
+        return latest
+    other = parse_image_ref(current)
+    if other is not None and other == parsed:
+        return current[:len(current) - len(parsed[2])] + latest
+    return None
 
 
 def _after_update(job):
