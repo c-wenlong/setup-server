@@ -4287,14 +4287,20 @@ def _registry_error(exc):
 TAG_LIST_MAX_PAGES = 10          # bound the sweep's GETs per repo
 
 
-def _next_page(link):
-    """`Link: <url>; rel="next"` -> the url, or None. HTTPS only."""
+def _next_page(link, base):
+    """`Link: <url>; rel="next"` -> the url, or None. HTTPS only.
+
+    The spec allows relative next links (`</v2/o/a/tags/list?last=x&n=2>`),
+    so they are resolved against the page they came from: a relative link
+    cannot change host, and remote_tags' same-host gate still decides
+    whether the resolved url is followed.
+    """
     if not link:
         return None
     hit = re.search(r'<([^>]+)>\s*;\s*rel="?next"?', link)
     if not hit:
         return None
-    url = hit.group(1)
+    url = urllib.parse.urljoin(base, hit.group(1))
     return url if url.startswith("https://") else None
 
 
@@ -4331,7 +4337,7 @@ def remote_tags(host, repo):
         values = body.get("tags") if isinstance(body, dict) else None
         if isinstance(values, list):
             tags.extend(t for t in values if isinstance(t, str))
-        nxt = _next_page(link)
+        nxt = _next_page(link, url)
         if not nxt or not nxt.startswith("https://%s/" % host):
             return tags
         url = nxt
@@ -4628,11 +4634,18 @@ def _fill_version_proposals(svc, rows, images):
             by_var.setdefault(var, []).append((row["container"], parsed))
     if not by_var:
         return
+    # Every repo the variable feeds per the compose file, including an
+    # image whose container is not running right now: setup.sh recreates it
+    # on the bumped value all the same, so a shared variable may only name
+    # a tag all of its repos publish.
+    var_refs = {}
+    for ref, var in bindings.items():
+        var_refs.setdefault(var, set()).add(ref)
     listing = {}
     for var, uses in by_var.items():
         common = None
         error = None
-        for _name, (host, repo, tag) in uses:
+        for host, repo, tag in var_refs[var]:
             if (host, repo) not in listing:
                 try:
                     listing[(host, repo)] = remote_tags(host, repo)
@@ -4873,8 +4886,9 @@ def start_update(key):
     first, then pull the ref it resolves to). Only what the last check
     marked is touched, and each ref and tag is re-validated before it goes
     near an argv or the env file: the request carries the key and nothing
-    else. The env write lands before the job queues, so a failure there is a
-    refusal, not a half-updated .env beside a running job.
+    else. The env write lands between the slot claim and the steps running,
+    so a refused registration leaves .env alone and a failed write releases
+    the slot cleanly instead of leaving it running forever.
     """
     svc = find_service(key)
     if svc is None:
@@ -4907,11 +4921,18 @@ def start_update(key):
     if not refs:
         raise DeployError(409, "no update is waiting for this service; "
                                "check again first")
-    for var, value in bumps.items():
-        update_env_var(key, var, {"value": value})
-    steps = plan_update(svc, script, refs)
+    # The slot is claimed before .env changes: an update refused at
+    # registration can never leave a new version behind for the job that is
+    # already running (or a later deploy) to pick up.
     job = register_job(key, "update")
-    job["source"] = deploy_source(svc, script)
+    try:
+        job["source"] = deploy_source(svc, script)
+        for var, value in bumps.items():
+            update_env_var(key, var, {"value": value})
+        steps = plan_update(svc, script, refs)
+    except Exception:
+        _finish(job, 1)
+        raise
     log("update %s started: %s (%s)" % (key, job["id"], ", ".join(refs)))
     threading.Thread(target=_run_steps, args=(job, steps),
                      daemon=True).start()
@@ -4943,9 +4964,10 @@ def _bumped_value(image, env):
 
     The variable only gets written while it still holds the value the check
     saw: an == comparison against the container's tag (bare-tag variables
-    like APP_RELEASE) or a ref ending in it (whole-ref variables like
-    KUMA_IMAGE). Anything else — hand-edited, already bumped — is left
-    alone; pulling the proposed ref is still safe.
+    like APP_RELEASE) or the same ref on the same registry ending in it
+    (whole-ref variables like KUMA_IMAGE — a registry swap means the
+    proposed tag was never checked there). Anything else — hand-edited,
+    already bumped — is left alone; pulling the proposed ref is still safe.
     """
     var = image.get("env_var")
     parsed = parse_image_ref(image.get("image") or "")
@@ -4956,8 +4978,7 @@ def _bumped_value(image, env):
     if current == parsed[2]:
         return latest
     other = parse_image_ref(current)
-    if (other is not None and other[1] == parsed[1]
-            and other[2] == parsed[2]):
+    if other is not None and other == parsed:
         return current[:len(current) - len(parsed[2])] + latest
     return None
 

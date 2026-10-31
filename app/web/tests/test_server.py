@@ -7062,6 +7062,24 @@ class VersionPinTest(UpdateTestBase):
         self.assertEqual([i["env_var"] for i in entry["images"]],
                          ["APP_RELEASE", "APP_RELEASE"])
 
+    def test_a_missing_container_still_counts_toward_the_release(self):
+        # pin-b is in the compose file but not running: its repo still gates
+        # the shared variable, since setup.sh would recreate it on the bump.
+        self.set_parts("pin-a", "pin-b")
+        self.make_env("services/pin/.env", "APP_RELEASE=v1.0.0\n")
+        self.write_compose(
+            "services:\n"
+            "  a:\n    image: ex.io/a:${APP_RELEASE:-v0.9.0}\n"
+            "  b:\n    image: ex.io/b:${APP_RELEASE:-v0.9.0}\n")
+        self.box({"pin-a": ("ex.io/a:v1.0.0", IMG)},
+                 {IMG: ["ex.io/a@" + OLD]},
+                 {("ex.io", "a", "v1.0.0"): OLD},
+                 {("ex.io", "a"): ["v1.0.0", "v1.1.0"],
+                  ("ex.io", "b"): ["v1.0.0"]})
+        entry = server.check_service_updates(server.find_service("pin"))
+        self.assertFalse(entry["available"])
+        self.assertEqual(entry["images"][0]["latest"], None)
+
     def test_tag_list_failure_is_soft_and_keeps_the_last_answer(self):
         import urllib.error
         self.pin_box({("ex.io", "app"): ["1.4.2", "1.5.0"]})
@@ -7119,6 +7137,32 @@ class VersionPinTest(UpdateTestBase):
         self.assertEqual(payload["status"], "done", payload["log"])
         self.assertIn("PIN_VERSION=9.9.9", self.read_env_text())
         self.assertIn(["docker", "pull", "ex.io/app:1.5.0"], self.argvs())
+
+    def test_a_swapped_registry_is_left_alone_but_still_pulls(self):
+        # The var now points at another registry hosting the same repo/tag:
+        # only ex.io was scanned, so that value is the user's to keep.
+        self.make_env("services/pin/.env", "PIN_IMAGE=other.io/app:1.4.2\n")
+        self.write_compose(
+            "services:\n  app:\n    image: ${PIN_IMAGE:-ex.io/app:0.0.1}\n")
+        self.seed([{"container": "pin-app", "image": "ex.io/app:1.4.2",
+                    "status": "current", "latest": "1.5.0",
+                    "env_var": "PIN_IMAGE"}])
+        payload = self.run_update()
+        self.assertEqual(payload["status"], "done", payload["log"])
+        self.assertIn("PIN_IMAGE=other.io/app:1.4.2", self.read_env_text())
+        self.assertIn(["docker", "pull", "ex.io/app:1.5.0"], self.argvs())
+
+    def test_a_refused_update_never_touches_env(self):
+        # A running job takes the slot; the refused update must not have
+        # written the proposed version behind that job's back.
+        self.seed([{"container": "pin-app", "image": "ex.io/app:1.4.2",
+                    "status": "current", "latest": "1.5.0",
+                    "env_var": "PIN_VERSION"}])
+        server.register_job("pin", "update")
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_update("pin")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("PIN_VERSION=1.4.2", self.read_env_text())
 
     def test_a_tampered_latest_never_reaches_argv_or_env(self):
         self.seed([{"container": "pin-app", "image": "ex.io/app:1.4.2",
@@ -7252,6 +7296,26 @@ class RemoteTagsTest(unittest.TestCase):
         self.install("https://ghcr.io/token", {
             first: ('<https://evil.example/v2/o/a/tags/list>; rel="next"',
                     ["1.0"]),
+        })
+        self.assertEqual(server.remote_tags("ghcr.io", "o/a"), ["1.0"])
+
+    def test_a_relative_next_link_stays_on_the_host(self):
+        first = "https://ghcr.io/v2/o/a/tags/list"
+        second = "https://ghcr.io/v2/o/a/tags/list?last=1.1&n=2"
+        self.install("https://ghcr.io/token", {
+            first: ('</v2/o/a/tags/list?last=1.1&n=2>; rel="next"',
+                    ["1.0", "1.1"]),
+            second: (None, ["1.2"]),
+        })
+        self.assertEqual(server.remote_tags("ghcr.io", "o/a"),
+                         ["1.0", "1.1", "1.2"])
+        gets = [r for r in self.requests if not isinstance(r, str)]
+        self.assertIn(second, [r.full_url for r in gets])
+
+    def test_a_scheme_relative_link_off_the_host_is_not_followed(self):
+        first = "https://ghcr.io/v2/o/a/tags/list"
+        self.install("https://ghcr.io/token", {
+            first: ('<//evil.example/v2/o/a/tags/list>; rel="next"', ["1.0"]),
         })
         self.assertEqual(server.remote_tags("ghcr.io", "o/a"), ["1.0"])
 
