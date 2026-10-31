@@ -12,11 +12,11 @@ first, dated by merge.
 
 - **Launcher: live favicons for opted-in tiles.** A manifest can declare
   `favicon` — a path resolved against the tile's `url` (or a full URL,
-  with the same `.env` token and `HOST` substitution) — and the tile's
-  `<img>` then loads the service's own mark straight from the service,
-  so a favicon update in that repo propagates without a re-vendor. On
-  any load failure it falls back to the vendored mark, then the drawn
-  glyph. Wired for quiver-hub, kaichenpedia, gnosia-learn, sources and
+  with the same `.env` token and `HOST` substitution) — and the tile
+  paints its vendored mark or glyph first, then upgrades in place to the
+  service's own favicon once it loads, so an icon update in that repo
+  propagates without a re-vendor and a down service never blanks its
+  tile. Wired for quiver-hub, kaichenpedia, gnosia-learn, sources and
   design-systems; the stale vendored `sources.svg` was refreshed to the
   current mark.
 

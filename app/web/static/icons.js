@@ -7,8 +7,8 @@
  *      backend (a path in app.json is joined onto the tile's url). The
  *      tile shows whatever the service serves today, so a favicon update
  *      in that repo propagates here instead of waiting for a re-vendor.
- *      A load failure (service down, not installed, path moved) steps
- *      down to source 2, then 3 — see liveImg().
+ *      The tile first paints source 2 or 3, then upgrades in place once
+ *      the live image has provably loaded — see liveImg().
  *   2. Vendored brand marks in static/icons/ — real app logos, in their own
  *      colours, keyed by service `key` (immich -> icons/immich.svg). Returned
  *      as an <img>. Files are local; nothing here touches the network, so the
@@ -418,10 +418,10 @@
     return img;
   }
 
-  /* The drawn glyph as a data URI — the rung below the vendored file inside
-     a live-favicon <img>, where falling back has to mean swapping src, not
-     the element. `currentColor` does not exist inside an SVG-as-image, so
-     a fixed mid-grey stands in: readable on both tile themes. */
+  /* The drawn glyph as a data URI, for the rung below the vendored mark
+     inside a live-favicon <img>. `currentColor` does not exist inside an
+     SVG-as-image, so a fixed mid-grey stands in: readable on both tile
+     themes. */
   function glyphDataUri(name) {
     var node = svg(name);
     node.setAttribute('stroke', '#8a8a8a');
@@ -431,41 +431,41 @@
            encodeURIComponent(new XMLSerializer().serializeToString(node));
   }
 
-  /* Live favicon first; on error, the vendored mark for `key`; if that
-     fails too (or there is none), the drawn glyph. All inside one <img>,
-     so a detached node degrades exactly like a mounted one and callers
-     keep holding the same element. */
+  /* Local rung first — vendored mark, else the drawn glyph — so the tile
+     paints instantly and can never sit blank while a request hangs. The
+     live favicon is preloaded detached and swapped in only on `load`,
+     which means it decoded: a 404, a stalled service or a 200 that is
+     really HTML (SPA fallback) all leave the good icon in place. */
   function liveImg(key, name, url) {
-    var img = document.createElement('img');
-    img.setAttribute('src', url);
-    img.setAttribute('alt', '');
-    img.setAttribute('loading', 'lazy');
-    img.setAttribute('decoding', 'async');
-    img.setAttribute('width', '24');
-    img.setAttribute('height', '24');
-    img.setAttribute('aria-hidden', 'true');
-    img.style.objectFit = 'contain';
     var entry = brandEntry(key);
-    var fellToBrand = false;
-    var glyph = null;
-    img.addEventListener('error', function () {
-      if (!fellToBrand && entry) {
-        fellToBrand = true;
-        img.setAttribute('src', fileFor(entry));
-        /* The vendored rung does have a per-theme variant; register it so a
-           scheme flip still repaints, same as a brand-first tile. */
-        if (entry.dark) themed.push({ el: img, entry: entry });
-        return;
-      }
-      if (glyph === null) glyph = glyphDataUri(name);
-      /* Re-arming the same failed src would re-fire this handler forever. */
-      if (img.getAttribute('src') !== glyph) img.setAttribute('src', glyph);
+    var img;
+    if (entry) {
+      img = brandImg(entry);
+    } else {
+      img = document.createElement('img');
+      img.setAttribute('src', glyphDataUri(name));
+      img.setAttribute('alt', '');
+      img.setAttribute('loading', 'lazy');
+      img.setAttribute('decoding', 'async');
+      img.setAttribute('width', '24');
+      img.setAttribute('height', '24');
+      img.setAttribute('aria-hidden', 'true');
+      img.style.objectFit = 'contain';
+    }
+    var probe = document.createElement('img');
+    probe.addEventListener('load', function () {
+      img.setAttribute('src', url);
+      /* The live mark has no -dark pair; stop tracking this node so a
+         theme flip cannot swap its src back to the vendored rung. */
+      themed = themed.filter(function (r) { return r.el !== img; });
     });
+    probe.setAttribute('src', url);
     return img;
   }
 
-  /* Resolution order: the service's live favicon when the registry opts in,
-     else the vendored brand mark for `key`, else the hand-drawn glyph for
+  /* Resolution order: when the registry opts in, the local rung (vendored
+     mark or drawn glyph) upgraded to the service's live favicon on load;
+     else the vendored brand mark for `key`; else the hand-drawn glyph for
      the semantic `name`, else the `box` glyph. */
   function iconFor(key, name, liveUrl) {
     if (liveUrl) return liveImg(key, name, liveUrl);
