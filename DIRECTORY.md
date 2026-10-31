@@ -65,7 +65,7 @@ Supporting services (no Tailscale Serve entry):
 | Port | Service | Notes |
 |---|---|---|
 | 22 | OpenSSH | LAN + tailnet; primary access is Tailscale SSH |
-| 11434 | ollama | ⚠️ binds `*` (LAN-exposed) via systemd override; models: qwen3:8b, qwen3:4b, nomic-embed-text. Loose end: tighten to 127.0.0.1 (Open WebUI + n8n only need loopback) |
+| 11434 | [ollama](services/ollama/) | Local LLM runtime — loopback only, a systemd *user* unit since the launcher-controls migration (the stock system unit, which an override bound to `*:11434`, is retired). Models in `~/.ollama/models`; pulled by hand with `ollama pull` |
 | 22000 | syncthing (BEP sync, tcp+udp) | Bound to `100.77.77.77` only (tailnet IP, not loopback, not LAN) — peers dial it directly. See the :8384 row above |
 | 7250 | gnosia-learn-studio | Loopback only, deliberately — the app proxies `/studio/api/*` to it and stamps the signed-in owner itself, so it has no Serve entry and no auth of its own beyond that boundary. Spawns `claude` per diagram job; `STUDIO_DAILY_USD` in `services/gnosia-learn/.env` caps spend when set |
 | — | [deployd](services/deployd/) | systemd user timer + oneshot, polls every 60s. Managed from the launcher's **Deploys** page (`#/deploys`), not an app row. The tailnet-only answer to GitHub webhooks: pulls this checkout ff-only (deploy config self-updates), scans `services/*/app.json` for `deploy` blocks (`repo`/`ref`/`cmd`), `git ls-remote`s each watched ref and runs the cmd when the sha moves. State + per-service output tails in `~/services/deployd/state/`; a failed cmd backs off 15 min per sha. Replaces per-service deploy timers — quiver-hub is registered first; design-systems/sources/kaichenpedia/gnosia-learn migrated onto it |
@@ -116,8 +116,9 @@ Supporting services (no Tailscale Serve entry):
 
 ## Loose ends / TODO (as of 2026-09-12)
 
-- **ollama on `*:11434`** — LAN-exposed via systemd override; tighten to
-  127.0.0.1 (Open WebUI + n8n only need loopback). Needs sudo.
+- **Old system-unit models** — a pre-migration stock install kept models in
+  `/usr/share/ollama/.ollama` (owned by the `ollama` user). setup.sh does not
+  migrate them; re-pull as your user or `sudo cp -a` them over if needed.
 - **Tailscale exit node** — not yet advertised (`tailscale set
   --advertise-exit-node` + one-time admin-console approval).
 - **Launcher state is not in git and not backed up** —
@@ -129,10 +130,9 @@ Supporting services (no Tailscale Serve entry):
   be in the backup job alongside the Immich library and database.
 - **Launcher can start/stop/restart services**, sharing one allowlist with
   ntfy-control: the `control` block per service in `app/web/services.json`,
-  read by both. `ntfy`, `ollama` and `launcher` are locked out server-side
+  read by both. `ntfy` and `launcher` are locked out server-side
   (checked before the registry, so editing services.json cannot re-enable
-  them) — stopping ntfy or the launcher removes the only way to start them
-  again, and ollama is a system unit that would need sudo.
+  them) — stopping either removes the only way to start them again.
 - **Immich RAM ceiling** — deployed 2026-09-10 with machine learning OFF
   (`IMMICH_ML=off`, the default): 7.7 GB total, and ollama claims ~5 GB with a
   model loaded, against Immich's documented 6 GB minimum / 8 GB recommended.

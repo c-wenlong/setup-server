@@ -751,10 +751,10 @@ def derive_state(setup, installed, active):
     """Map (setup, installed, active) onto the four tile states.
 
     Deliberate ordering note: the spec's table says `planned` means "no
-    setup in repo", but it also requires ollama — which has no setup.sh here
-    and yet answers on :11434 — to show live status rather than look
-    unbuilt. Evidence of being deployed therefore wins over the absence of a
-    setup script: `planned` only applies when nothing is installed or
+    setup in repo", but an external tile like manimkc has no setup.sh here
+    and yet answers on its port — it must show live status rather than look
+    unbuilt. Evidence of being deployed therefore wins over the absence of
+    a setup script: `planned` only applies when nothing is installed or
     answering. Every other row of the table is unchanged.
     """
     if active:
@@ -1289,7 +1289,7 @@ def services_payload():
             active = bool(probes.get(health, False))
             # A failed probe is only alarming while the thing still runs:
             # live parts mean "up but not answering". None (nothing to
-            # check with — ntfy, ollama) keeps the warning it cannot
+            # check with — ntfy) keeps the warning it cannot
             # disprove rather than muting a real outage.
             degraded = (not active
                         and control_running(svc, resources) is not False)
@@ -3521,14 +3521,12 @@ _CONTROL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 # The second lock. services.json already marks these `locked`, and this is
 # here so that an edit to that file cannot undo it: a config mistake must not
 # be able to hand the web UI a button that turns off the thing serving the web
-# UI, the thing you would use to turn it back on, or something needing sudo.
+# UI, or the thing you would use to turn it back on.
 HARD_LOCKED = {
     "launcher": "the launcher cannot stop itself — there would be no UI left "
                 "to start it from",
     "ntfy": "stopping ntfy would remove the only way to start anything again "
             "from the phone",
-    "ollama": "ollama is a system unit, so controlling it needs sudo — this "
-              "endpoint deliberately has no sudo path",
 }
 
 

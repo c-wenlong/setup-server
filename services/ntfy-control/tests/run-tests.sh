@@ -97,7 +97,7 @@ registry_keys() {
   python3 -c '
 import json, sys
 doc = json.load(open(sys.argv[1]))
-locked = ("ntfy", "launcher", "ollama")
+locked = ("ntfy", "launcher")
 print(" ".join(sorted(
     s["key"] for s in doc["services"]
     if isinstance(s.get("control"), dict)
@@ -337,7 +337,7 @@ test_handle_pick_empty() {
   done <<EOF
 $(python3 - "$SERVICE_DIR/../../app/web/services.json" <<'PYEOF'
 import json, sys
-HARD_LOCKED = {"launcher", "ntfy", "ollama"}
+HARD_LOCKED = {"launcher", "ntfy"}
 doc = json.load(open(sys.argv[1]))
 for svc in doc.get("services") or []:
     key, block = svc.get("key"), svc.get("control")
@@ -388,13 +388,14 @@ test_handle_rejects_unknown() {
   run_handle "stop ntfy"
   check "ntfy not stoppable"      calls_have "unknown service 'ntfy'"
   check "no docker stop"          no_call "docker stop"
-  # The other two deliberate lock-outs, refused by the same allowlist:
-  # ollama is a *system* unit (sudo), and the launcher serves the web UI you
-  # would have to use to start it again.
+  # The other deliberate lock-out: the launcher serves the web UI you would
+  # have to use to start it again. (ollama used to sit on this list as a
+  # system unit needing sudo; it is a user unit now, so "stop ollama" is
+  # honoured like any other service.)
   : > "$CALLS_LOG"
   run_handle "stop ollama"
-  check "ollama not stoppable"    calls_have "unknown service 'ollama'"
-  check "no systemctl stop"       no_call "systemctl --user stop"
+  check "ollama IS stoppable now"  calls_have "ollama: stop ok"
+  check "systemctl stop ran"       calls_have "systemctl --user stop ollama.service"
   : > "$CALLS_LOG"
   run_handle "restart launcher"
   check "launcher not stoppable"  calls_have "unknown service 'launcher'"

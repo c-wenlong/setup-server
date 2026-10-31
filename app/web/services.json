@@ -57,9 +57,9 @@
     "                      guarded: it is the usual fix for a stuck service.",
     "            locked  - present means NOT controllable, and the string is",
     "                      the reason both UIs show and the API refuses with.",
-    "          Absent control entirely also means not controllable. Three keys",
+    "          Absent control entirely also means not controllable. Two keys",
     "          are additionally hard-locked in server.py so that editing this",
-    "          file cannot re-enable them: launcher, ntfy, ollama.",
+    "          file cannot re-enable them: launcher, ntfy.",
     "group    - bucket id from the file-level `groups` list. The launcher",
     "          paints a heading per bucket and sorts inside it. Unknown or",
     "          missing ids fall through to Other at the end.",
@@ -671,13 +671,18 @@
       "author": "ollama",
       "url": null,
       "health": "http://127.0.0.1:11434/api/version",
-      "marker": "/usr/local/bin/ollama",
-      "setup": null,
+      "marker": "~/.ollama",
+      "setup": "services/ollama/setup.sh",
       "env": null,
       "control": {
-        "locked": "ollama is a system unit, so controlling it needs sudo — this endpoint deliberately has no sudo path"
+        "parts": [
+          {
+            "unit": "ollama.service"
+          }
+        ],
+        "kuma": "ollama"
       },
-      "description": "The local LLM runtime everything else talks to: Open WebUI chats through it and n8n workflows call it. Models pulled here are qwen3:8b, qwen3:4b and nomic-embed-text, and a loaded one claims roughly 5 GB of the box's 7.7 GB. No web UI of its own, so this tile reports status and never navigates. Known loose end: a systemd override binds it to *:11434, so it is LAN-reachable and not only tailnet-reachable."
+      "description": "The local LLM runtime everything else on the box talks to: Open WebUI chats through it and n8n workflows call it. Runs as a systemd *user* unit bound to 127.0.0.1:11434 only — never published through Tailscale Serve — so the launcher and the ntfy controller start, stop and restart it like any other service (it used to be a system unit, which is why they could not). Models live in ~/.ollama/models; a loaded one claims roughly 5 GB of the box's 7.7 GB. No web UI of its own, so this tile reports status and never navigates."
     },
     {
       "key": "adguard",

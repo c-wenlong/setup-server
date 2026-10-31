@@ -72,6 +72,7 @@ one-shot deploy.
 | <a href="https://docs.n8n.io/"><img src="app/web/static/icons/n8n.svg" width="20" alt="n8n"></a> [n8n](services/n8n/) | Workflow automation (self-hosted Zapier) wired to local services (Docker) | `cd services/n8n && ./setup.sh` |
 | <a href="https://trigger.dev/docs/self-hosting/overview"><img src="app/web/static/icons/trigger-dev.svg" width="20" alt="Trigger.dev"></a> [trigger-dev](services/trigger-dev/) | Background jobs and cron (Trigger.dev v4): TypeScript tasks, dashboard, local registry; slim stack, tailnet-only | `cd services/trigger-dev && ./setup.sh` |
 | <a href="https://github.com/c-wenlong/manimkc"><img src="app/web/static/icons/manimkc.png" width="20" alt="manimkc"></a> manimkc | Narrated ManimGL explainer videos from a JSON brief (HTTP job server; lives in the [manimkc repo](https://github.com/c-wenlong/manimkc) at `server/`) | `~/dev/manimkc/server/setup.sh` |
+| <a href="https://ollama.com/"><picture><source media="(prefers-color-scheme: dark)" srcset="app/web/static/icons/ollama-dark.svg"><img src="app/web/static/icons/ollama.svg" width="20" alt="ollama"></picture></a> [ollama](services/ollama/) | Local LLM runtime (llama-server-style API on `127.0.0.1:11434`) that Open WebUI and n8n call — systemd user unit, loopback-only, no Serve publish | `cd services/ollama && ./setup.sh` |
 
 ### Knowledge & media
 
