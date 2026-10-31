@@ -395,6 +395,11 @@
       lastError = null;
       notifyServices();
 
+      /* The real catalog can land after an open detail page already built
+         its Category select from DEFAULT_GROUPS — rebuild it now that the
+         resolved list is here. */
+      if (detailKey) paintGroupSelect();
+
       /* Keep an open detail page's status line live too, without refetching
          the detail itself — that would fight whatever is being typed. */
       if (detailKey && detailSvc) {
@@ -1609,22 +1614,40 @@
   /* --- editing --- */
 
   /* Rebuild the Category select from the resolved groups catalog — the same
-     list the grid's filter pills read. The leading empty option is the reset
-     path: PATCHing '' clears the override and the tile drops back to the
-     bucket services.json ships, exactly like clearing a renamed title. */
-  function paintGroupOptions() {
+     list the grid's filter pills read — then select the effective bucket.
+     The leading empty option is the reset path: PATCHing '' clears the
+     override and the tile drops back to the bucket services.json ships,
+     exactly like clearing a renamed title. The effective id may be one the
+     catalog no longer lists (a registry shrink after an override was
+     saved); it is appended so the select shows what the box serves. */
+  function paintGroupSelect() {
     if (!elDGroup) return;
     elDGroup.textContent = '';
     var reset = document.createElement('option');
     reset.value = '';
     text(reset, 'Shipped default');
     elDGroup.appendChild(reset);
-    for (var i = 0; i < groups.length; i++) {
+    var i;
+    for (i = 0; i < groups.length; i++) {
       var opt = document.createElement('option');
       opt.value = groups[i].id;
       text(opt, groups[i].label || groups[i].id);
       elDGroup.appendChild(opt);
     }
+    if (savedGroup) {
+      var found = false;
+      for (i = 0; i < elDGroup.options.length; i++) {
+        if (elDGroup.options[i].value === savedGroup) { found = true; break; }
+      }
+      if (!found) {
+        var extra = document.createElement('option');
+        extra.value = savedGroup;
+        text(extra, savedGroup);
+        elDGroup.appendChild(extra);
+      }
+    }
+    elDGroup.value = savedGroup;
+    elDGroup.disabled = groups.length === 0;
   }
 
   /* Descriptions are paragraphs, not one-liners: grow the box to the text
@@ -1686,22 +1709,27 @@
       }
 
       var d = res.data;
-      if (typeof d.name === 'string') savedName = d.name;
-      if (typeof d.description === 'string') savedDesc = d.description;
-      /* The detail payload always carries the effective group; a group PATCH
-         returns the shipped id when the override was dropped. */
-      if (typeof d.group === 'string' || d.group === null) {
-        savedGroup = (typeof d.group === 'string' && d.group) || '';
-      }
+      var effGroup = (typeof d.group === 'string' && d.group) || '';
 
-      /* keep the grid honest even if the edit landed as we navigated away */
+      /* keep the grid honest even if the edit landed as we navigated away —
+         but update that tile from the reply itself, never from the saved_*
+         mirrors: those belong to whatever detail is open NOW, and a late
+         reply for service A must not overwrite what B's page shows. */
       var listed = find(key);
-      if (listed && savedName) { listed.name = savedName; }
-      if (listed && typeof d.description === 'string') listed.description = savedDesc;
-      if (listed) listed.group = savedGroup || null;
+      if (listed && typeof d.name === 'string' && d.name) { listed.name = d.name; }
+      if (listed && typeof d.description === 'string') listed.description = d.description;
+      if (listed && (typeof d.group === 'string' || d.group === null)) {
+        listed.group = effGroup || null;
+      }
       if (loaded) notifyServices();
 
       if (!live) return;
+
+      /* The detail payload always carries the effective fields; a group
+         PATCH returns the shipped id when the override was dropped. */
+      if (typeof d.name === 'string') savedName = d.name;
+      if (typeof d.description === 'string') savedDesc = d.description;
+      if (typeof d.group === 'string' || d.group === null) savedGroup = effGroup;
 
       if (document.activeElement !== elDName) elDName.value = savedName;
       if (elDGroup && document.activeElement !== elDGroup) elDGroup.value = savedGroup;
@@ -1710,6 +1738,12 @@
         detailSvc.name = savedName || detailSvc.name;
         detailSvc.group = savedGroup || null;
         paintHead(detailSvc);
+      }
+
+      /* A second pick made while this PATCH was in flight outranks the
+         reply: the select still holds it, so send it now. */
+      if (elDGroup && elDGroup.value !== savedGroup) {
+        patchField('group', elDGroup.value, elDGroup);
       }
 
       var restored = value === '';
@@ -1855,24 +1889,7 @@
     elDDesc.value = savedDesc;
     elDName.disabled = false;
     elDDesc.disabled = false;
-    paintGroupOptions();
-    if (elDGroup) {
-      /* The effective bucket may be an id the groups catalog no longer
-         lists (a registry shrink after an override was saved) — keep it
-         selectable so the select shows what the box actually serves. */
-      var found = false;
-      for (var i = 0; i < elDGroup.options.length; i++) {
-        if (elDGroup.options[i].value === savedGroup) { found = true; break; }
-      }
-      if (savedGroup && !found) {
-        var extra = document.createElement('option');
-        extra.value = savedGroup;
-        text(extra, savedGroup);
-        elDGroup.appendChild(extra);
-      }
-      elDGroup.value = savedGroup;
-      elDGroup.disabled = groups.length === 0;
-    }
+    paintGroupSelect();
     autoGrow(elDDesc);
 
     paintEnv(d.env, view.key);
