@@ -436,7 +436,7 @@
 
     if (full && entry.source && entry.source !== 'manifest') {
       var src = make('span', 'dep-src dep-src-' + entry.source);
-      text(src, entry.source === 'override' ? 'override' : 'state-only');
+      text(src, entry.source === 'override' ? 'Override' : 'State-only');
       src.title = entry.source === 'override'
         ? 'Defined by state/pollers.json on top of the repo manifest'
         : 'Defined only in state/pollers.json — no repo manifest';

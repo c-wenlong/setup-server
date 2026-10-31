@@ -12,7 +12,7 @@
   height: 30px;
   margin-top: -2px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--radius-ctl);
   background: var(--surface-2);
   color: var(--muted);
   font: inherit;
@@ -42,7 +42,7 @@
   width: 100%;
   padding: 9px 10px;
   border: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: none;
   color: var(--text);
   font: inherit;
@@ -51,7 +51,7 @@
 }
 .nap-repo:hover, .nap-repo:focus-visible { background: var(--surface-2); outline: none; }
 .nap-repo-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.nap-repo-name { font-size: 13.5px; font-weight: 560; overflow-wrap: anywhere; }
+.nap-repo-name { font-size: 13.5px; font-weight: 500; overflow-wrap: anywhere; }
 .nap-repo-meta {
   font-size: 12px;
   color: var(--muted);
@@ -62,12 +62,10 @@
 .nap-tag {
   flex: none;
   font-size: 10.5px;
-  font-weight: 620;
-  letter-spacing: .03em;
-  text-transform: uppercase;
+  font-weight: 500;
   color: var(--faint);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-chip);
   padding: 1px 6px;
 }
 
@@ -112,7 +110,7 @@
 .nap-adv summary {
   cursor: pointer;
   font-size: 12.5px;
-  font-weight: 560;
+  font-weight: 500;
   color: var(--muted);
   padding: 2px 0;
 }

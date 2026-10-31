@@ -137,7 +137,7 @@
         dark ? 'dark' : 'light');
     } catch (e) { /* nothing to paint onto */ }
     var meta = document.getElementById('theme-color');
-    if (meta) meta.setAttribute('content', dark ? '#000000' : '#f5f5f6');
+    if (meta) meta.setAttribute('content', dark ? '#000000' : '#f7f6f5');
     paintThemeButton();
     if (window.ICONS && typeof window.ICONS.repaint === 'function') {
       try { window.ICONS.repaint(); } catch (e) { /* icons stay as they are */ }

@@ -25,7 +25,7 @@
   padding: 9px 11px;
   background: var(--surface, #fff);
   border: 1px solid var(--border, #e2e2e6);
-  border-radius: 11px;
+  border-radius: 8px;
   box-shadow: var(--shadow-up, 0 6px 22px rgba(18, 18, 24, .1));
 
   /* Decoration: it must never eat a hover, a tap, or a mouseout. */

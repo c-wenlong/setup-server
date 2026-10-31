@@ -3,7 +3,7 @@
 
 .ghs { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 .ghs-line, .ghs-status, .ghs-err { margin: 0; font-size: 13px; line-height: 1.5; color: var(--muted); }
-.ghs-line a { color: var(--text); font-weight: 560; }
+.ghs-line a { color: var(--text); font-weight: 500; }
 .ghs code {
   font-family: var(--mono);
   font-size: 12px;
