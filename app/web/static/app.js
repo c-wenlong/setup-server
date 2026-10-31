@@ -2069,6 +2069,27 @@
         return false;
       });
     },
+    /* Same optimistic PATCH as pin, stored in the same overrides entry.
+       user_hidden is served separately from the manifest `hidden` flag so
+       machinery stays invisible while a shelved app can be brought back. */
+    hide: function (key, on) {
+      var svc = find(key);
+      if (!svc) return Promise.resolve(false);
+      svc.user_hidden = !!on;
+      notifyServices();
+      return request('api/services/' + encodeURIComponent(key), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hidden: !!on })
+      }).then(function (res) {
+        if (!res.ok) { svc.user_hidden = !on; notifyServices(); }
+        return res.ok;
+      }, function () {
+        svc.user_hidden = !on;
+        notifyServices();
+        return false;
+      });
+    },
     saveOrder: function (list) {
       if (!Array.isArray(list)) return Promise.resolve(false);
       var prev = rowOrder;

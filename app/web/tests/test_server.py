@@ -823,7 +823,7 @@ class ServiceJobFieldTest(SandboxTest):
     def test_no_field_beyond_the_contract_was_added(self):
         # The whole list contract in one assertion: the original eight, then
         # job and control, then the three v3 keys, then the v5 receipt, then
-        # v9's hidden.
+        # v9's hidden, and the user-hidden shelf flag after pinned.
         # Anything else appearing here is a key the frontend was never told
         # about.
         server.start_deploy("alpha")
@@ -831,7 +831,7 @@ class ServiceJobFieldTest(SandboxTest):
             self.assertEqual(list(tile), self.EIGHT + [
                 "degraded", "job", "control", "usage", "deployed_at",
                 "resources", "receipt", "removable", "updates", "hidden",
-                "github", "pinned"])
+                "github", "pinned", "user_hidden"])
 
     # ---- restart
 
@@ -969,7 +969,8 @@ class HttpTest(SandboxTest):
                                        "icon", "installed", "job", "key",
                                        "name", "pinned", "receipt", "removable",
                                        "resources",
-                                       "state", "tagline", "updates", "url", "usage"])
+                                       "state", "tagline", "updates", "url",
+                                       "usage", "user_hidden"])
         self.assertEqual(svc["url"], "https://box.ts.net:1/")
         self.assertEqual(svc["author"], "c-wenlong")
         self.assertIsNone(svc["job"])
@@ -985,7 +986,7 @@ class HttpTest(SandboxTest):
                           "active", "degraded", "job", "control", "usage",
                           "deployed_at",
                           "resources", "receipt", "removable", "updates",
-                          "hidden", "github", "pinned"])
+                          "hidden", "github", "pinned", "user_hidden"])
 
     def test_groups_empty_when_the_registry_has_none(self):
         # An older services.json without a catalog still paints a flat grid.
@@ -1523,6 +1524,51 @@ class OverridesTest(SandboxTest):
         self.assertTrue(self.tile("alpha")["pinned"])
         self.assertEqual(self.read_overrides_file()["services"]["alpha"],
                          {"name": "Photos", "pinned": True})
+
+    # ---- user-hidden
+
+    def test_hide_roundtrips_through_the_list_payload(self):
+        self.assertFalse(self.tile("alpha")["user_hidden"])
+        server.patch_service("alpha", {"hidden": True})
+        self.assertTrue(self.tile("alpha")["user_hidden"])
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"hidden": True})
+        server.patch_service("alpha", {"hidden": False})
+        self.assertFalse(self.tile("alpha")["user_hidden"])
+        # an unhidden-only entry is no entry at all
+        self.assertEqual(self.read_overrides_file()["services"], {})
+
+    def test_user_hidden_is_separate_from_the_manifest_flag(self):
+        # `hidden` on the tile stays the shipped machinery flag; the user's
+        # shelf is served under its own key so deployd can never be unshelved
+        # back onto the grid.
+        server.patch_service("alpha", {"hidden": True})
+        tile = self.tile("alpha")
+        self.assertFalse(tile["hidden"])
+        self.assertTrue(tile["user_hidden"])
+
+    def test_hide_alongside_a_rename_keeps_both(self):
+        server.patch_service("alpha", {"name": "Photos", "hidden": True})
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"name": "Photos", "hidden": True})
+
+    def test_unhide_when_never_hidden_is_a_tidy_noop(self):
+        server.patch_service("alpha", {"hidden": False})
+        self.assertEqual(self.read_overrides_file()["services"], {})
+
+    def test_user_hidden_must_be_a_boolean(self):
+        for bad in ("yes", 1, [True], {"h": 1}):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.patch_service("alpha", {"hidden": bad})
+            self.assertEqual(ctx.exception.status, 400)
+        self.assertFalse(os.path.exists(server.OVERRIDES_PATH))
+
+    def test_a_rename_does_not_wipe_the_hide(self):
+        server.patch_service("alpha", {"hidden": True})
+        server.patch_service("alpha", {"name": "Photos"})
+        self.assertTrue(self.tile("alpha")["user_hidden"])
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"name": "Photos", "hidden": True})
 
     # ---- validation
 

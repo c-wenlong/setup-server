@@ -54,6 +54,7 @@ body::before {
   grid-template-columns: var(--side-w) minmax(0, 1fr);
   min-height: 100vh;
   min-height: 100dvh;
+  transition: grid-template-columns .22s cubic-bezier(.4, 0, .2, 1);
 }
 body.is-rail .shell { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
 
@@ -277,6 +278,13 @@ button.h-group { cursor: pointer; }
 .h-g-car svg { width: 14px; height: 14px; }
 .h-group[aria-expanded="false"] .h-g-car { transform: rotate(-90deg); }
 
+/* Foldable sections keep their rows painted inside a 1fr/0fr grid track:
+   flipping the class animates to and from zero height without measuring
+   anything, and the inner wrapper clips while it happens. */
+.h-fold { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .22s cubic-bezier(.4, 0, .2, 1); }
+.h-fold.is-folded { grid-template-rows: 0fr; }
+.h-fold-in { min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 1px; }
+
 .h-cols, .h-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 48px 168px 56px 84px 132px;
@@ -313,15 +321,15 @@ button.h-group { cursor: pointer; }
 .h-row.is-drag { opacity: .4; }
 .h-row.is-drop-above { box-shadow: inset 0 2px 0 var(--accent-fg); }
 .h-row.is-drop-below { box-shadow: inset 0 -2px 0 var(--accent-fg); }
-.h-pin {
+.h-pin, .h-eye {
   -webkit-appearance: none; appearance: none;
   flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--radius-ctl);
   background: transparent; color: var(--faint); cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
 }
-.h-pin svg { width: 14px; height: 14px; }
-.h-pin:hover { background: var(--fg-10); color: var(--text); }
-.h-pin.is-on { color: var(--accent-fg); }
+.h-pin svg, .h-eye svg { width: 14px; height: 14px; }
+.h-pin:hover, .h-eye:hover { background: var(--fg-10); color: var(--text); }
+.h-pin.is-on, .h-eye.is-on { color: var(--accent-fg); }
 .h-pin.is-on svg { fill: var(--accent-fg); }
 .h-ic {
   width: 26px; height: 26px; flex: none; border-radius: 7px; overflow: hidden;
@@ -384,7 +392,7 @@ button.h-group { cursor: pointer; }
 .h-g-ok   { color: var(--ok); }
 .h-g-part { color: var(--warn); }
 .h-g-bad  { color: var(--bad); }
-.h-g-ring, .h-g-dots, .h-g-dash { color: var(--faint); }
+.h-g-ring, .h-g-dots, .h-g-dash, .h-g-hid { color: var(--faint); }
 .h-g-dash { opacity: .6; }
 .h-g-busy { color: var(--accent-fg); }
 .h-glyph .spin { transform-origin: 7px 7px; animation: h-spin .9s linear infinite; }
@@ -588,5 +596,5 @@ body.is-rail .abar { left: var(--rail-w); }
 
 @media (prefers-reduced-motion: reduce) {
   .h-glyph .spin { animation: none; }
-  .side, .toast, .h-row, .h-pill, .nav-link, .h-g-car { transition: none; }
+  .side, .toast, .h-row, .h-pill, .nav-link, .h-g-car, .h-fold, .shell { transition: none; }
 }

@@ -14,7 +14,8 @@ Serves static/ as static files and a small JSON API:
     POST   api/services/{key}/update   202 -> pull newer images + setup.sh job
     POST   api/services/{key}/updates/check   re-check its images now
     GET    api/services/{key}      detail: identity, meta, env var NAMES
-    PATCH  api/services/{key}      {name?, description?, pinned?} -> overrides.json
+    PATCH  api/services/{key}      {name?, description?, pinned?, hidden?}
+                                   -> overrides.json
     POST   api/order               {"order": [key...]}  -> overrides.json order
     POST   api/services/{key}/env/{var}/reveal   one value, deliberately POST
     PATCH  api/services/{key}/env/{var}   {"value"} -> rewrites that line in .env
@@ -303,7 +304,7 @@ def resolve_registry_path(raw, label):
 
 # ------------------------------------------------------------------ overrides
 
-# UI edits (name, description, pinned, row order) layered over the shipped
+# UI edits (name, description, pinned, hidden, row order) layered over the shipped
 # registry. Kept in one small JSON file so "reset to defaults" is
 # `rm overrides.json`, and so a redeploy of the repo never clobbers them.
 _overrides_lock = threading.Lock()
@@ -339,6 +340,8 @@ def load_overrides():
                 if isinstance(entry.get(f), str)}
         if entry.get("pinned") is True:
             kept["pinned"] = True
+        if entry.get("hidden") is True:
+            kept["hidden"] = True
         if kept:
             clean[key] = kept
     return clean
@@ -1596,6 +1599,12 @@ def services_payload():
             # table. From overrides.json like a rename, so it survives
             # redeploys and travels across devices.
             "pinned": oentry.get("pinned") is True,
+            # The user shelved this row under the home list's Hidden
+            # section. Distinct from `hidden` above, which is the shipped
+            # manifest flag that keeps machinery (deployd) off the grid
+            # entirely — a user-hidden service is still controllable and
+            # can be brought back.
+            "user_hidden": oentry.get("hidden") is True,
         })
     return {"host": host, "groups": load_groups(), "services": services,
             # The user's explicit row arrangement, verbatim keys. Empty when
@@ -2824,7 +2833,13 @@ def patch_service(key, body):
             raise DeployError(400, "pinned must be a boolean")
         pin = body["pinned"]
 
-    if edits or pin is not None:
+    hid = None
+    if "hidden" in body:
+        if not isinstance(body["hidden"], bool):
+            raise DeployError(400, "hidden must be a boolean")
+        hid = body["hidden"]
+
+    if edits or pin is not None or hid is not None:
         defaults = {"name": svc.get("name") or "",
                     "description": svc.get("description") or ""}
         # Read-modify-write under one lock so two concurrent PATCHes (two
@@ -2841,14 +2856,19 @@ def patch_service(key, body):
                 entry["pinned"] = True
             elif pin is False:
                 entry.pop("pinned", None)
+            if hid is True:
+                entry["hidden"] = True
+            elif hid is False:
+                entry.pop("hidden", None)
             if entry:
                 data[key] = entry
             else:
                 data.pop(key, None)
             _write_overrides(data)
         log("patched %s: %s" % (
-            key, ", ".join(sorted(edits) + (["pinned"] if pin is not None
-                                           else []))))
+            key, ", ".join(sorted(edits) +
+                           (["pinned"] if pin is not None else []) +
+                           (["hidden"] if hid is not None else []))))
     return service_detail(key)
 
 
