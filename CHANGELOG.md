@@ -96,6 +96,12 @@ first, dated by merge.
 
 ### Changed
 
+- **Launcher: new logo.** `icons/launcher.svg` (three fused white tiles
+  sliding right with fading echoes, on near-black) replaces the temporary
+  tiles-and-dot mark, with `favicon.png`, `launcher.png` and
+  `apple-touch-icon.png` re-rendered from it. Paths, sizes and colour
+  modes are unchanged.
+
 - **self-learn renamed to gnosia-learn**, matching upstream's rename of
   the app to Gnosia: the service dir, launcher key and icon, systemd
   units and LaunchAgents (`self-learn*` → `gnosia-learn*`,
