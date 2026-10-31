@@ -851,6 +851,21 @@ _resources_lock = threading.Lock()
 _cpu_samples = {}          # cgroup path -> (wall seconds, usage_usec)
 _cpu_lock = threading.Lock()
 
+# Disk use, unlike RAM/CPU, cannot come from sysfs: it is `du` over the
+# service's data dir — a subprocess and a full tree walk, seconds to minutes
+# on a big one. So it never runs inside the resources path: a request starts
+# a daemon thread and answers null (or the stale value while a refresh runs),
+# and a later poll picks the number up — the same shape as cpu_pct, which is
+# also null until a second sample exists.
+DISK_TTL = 300.0           # disk use drifts on the scale of minutes
+DISK_TIMEOUT = 60.0        # du on a multi-GB tree must not hang its worker
+DISK_MAX_WORKERS = 2       # a cold catalogue must not storm the disk
+
+_disk_samples = {}         # key -> (sampled_at, bytes|None)
+_disk_inflight = set()     # keys whose du worker is running or queued
+_disk_lock = threading.Lock()
+_disk_slots = threading.BoundedSemaphore(DISK_MAX_WORKERS)
+
 # Container ids as `docker ps --no-trunc` prints them. Anything else is
 # dropped rather than pasted into a path this then opens — the same instinct
 # as _CONTROL_NAME_RE.
@@ -859,8 +874,8 @@ _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
 
 def _null_resources(now):
     """The all-null block. Shape is identical to a measured one, always."""
-    return {"rss_bytes": None, "cpu_pct": None, "sampled_at": now,
-            "parts": []}
+    return {"rss_bytes": None, "cpu_pct": None, "disk_bytes": None,
+            "sampled_at": now, "parts": []}
 
 
 def _read_docker_names():
@@ -1026,7 +1041,92 @@ def _has_container_part(svc):
                for p in control_parts(control_block(svc)))
 
 
-def _measure_resources(svc, now, docker_map=None, timer_states=None):
+def _disk_target(svc, home=None):
+    """The path `du` should measure for `svc`, or None.
+
+    The marker is that path when it is a directory (or absent: an
+    undeployed service reads zero, which is honest). A marker that is a
+    FILE under ~/services — the ghapp shape, where
+    `~/services/apps/<key>/deployed.json` is the marker and the directory
+    around it holds the state — is measured by its parent, including after
+    remove() deletes the marker file but keeps the dir's files. A file
+    anywhere else stands alone. Nothing relative is ever handed to du.
+    """
+    marker = svc.get("marker")
+    if not isinstance(marker, str) or not marker:
+        return None
+    path = os.path.expanduser(marker)
+    if not os.path.isabs(path):
+        return None
+    services = os.path.join(home or os.path.expanduser("~"), "services")
+    parent = os.path.dirname(path)
+    if os.path.isfile(path):
+        if parent == services or parent.startswith(services + os.sep):
+            return parent
+    elif not os.path.exists(path) \
+            and parent.startswith(services + os.sep) \
+            and os.path.isdir(parent):
+        # A file marker deleted while its dir remains — ghapp's remove()
+        # drops deployed.json but keeps src/.env/data — still occupies disk;
+        # measure the parent rather than report 0. A missing *directory*
+        # marker (whose parent is ~/services itself) stays zero.
+        return parent
+    return path
+
+
+def _du_bytes(path):
+    """Bytes `du -sk` reports for path, or None when it cannot answer."""
+    try:
+        out = subprocess.run(["du", "-sk", path], capture_output=True,
+                             text=True, timeout=DISK_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        return int(out.stdout.split(None, 1)[0]) * 1024
+    except (ValueError, IndexError):
+        return None
+
+
+def _du_worker(key, target):
+    try:
+        with _disk_slots:
+            value = _du_bytes(target) if os.path.exists(target) else 0
+    except Exception:        # _du_bytes guards du itself; anything else is
+        value = None         # a surprise — cache it as a failed sample and
+    finally:                 # free the key either way so polling retries
+        with _disk_lock:
+            _disk_samples[key] = (time.time(), value)
+            _disk_inflight.discard(key)
+
+
+def _sample_disk(svc):
+    """Bytes the service's data dir holds, or None until measured.
+
+    Never blocks: a cold or expired key starts a daemon thread running
+    `du -sk` and this call answers the stale value (null on the very first
+    request); a later poll picks the number up, so the cell does not blink
+    out while a refresh is walking the tree.
+    """
+    key = svc.get("key")
+    target = _disk_target(svc)
+    if key is None or target is None:
+        return None
+    with _disk_lock:
+        hit = _disk_samples.get(key)
+        if hit and time.time() - hit[0] < DISK_TTL:
+            return hit[1]
+        if key in _disk_inflight:
+            return hit[1] if hit else None
+        _disk_inflight.add(key)
+    threading.Thread(target=_du_worker, args=(key, target), daemon=True,
+                     name="du-%s" % key).start()
+    return hit[1] if hit else None
+
+
+def _measure_resources(svc, now, docker_map=None, timer_states=None,
+                       disk=None):
     """One sysfs pass over a service's control parts. Caller holds the lock.
 
     `docker_map` is the name -> id map and `timer_states` the
@@ -1034,7 +1134,9 @@ def _measure_resources(svc, now, docker_map=None, timer_states=None):
     lock (see service_resources) because each can block on a wedged
     subprocess. Left None, they are fetched here on first use, which is
     what the tests do and what a service without such parts never
-    triggers.
+    triggers. `disk` is the caller's _sample_disk reading; fetched lazily
+    here the same way, where the lazy call only ever starts a worker —
+    it is never the slow part.
     """
     measured = []
     total_rss = None
@@ -1079,7 +1181,9 @@ def _measure_resources(svc, now, docker_map=None, timer_states=None):
                          "rss_bytes": rss, "cpu_pct": cpu})
     if total_cpu is not None:
         total_cpu = max(0.0, min(100.0, total_cpu))
-    return {"rss_bytes": total_rss, "cpu_pct": total_cpu,
+    if disk is None:
+        disk = _sample_disk(svc)
+    return {"rss_bytes": total_rss, "cpu_pct": total_cpu, "disk_bytes": disk,
             "sampled_at": now, "parts": measured}
 
 
@@ -1108,6 +1212,10 @@ def service_resources(svc):
         # a stalled user bus, which must not stall every other service's
         # sample behind _resources_lock.
         timer_states = _timer_states(svc)
+        # Disk joins the lock-free side too, but only kicks off its worker:
+        # a `du` walk can take minutes on a big dir, so this call returns
+        # the last sample (or null) and a later poll picks the fresh one up.
+        disk = _sample_disk(svc)
         # That call may have blocked for seconds against a wedged daemon. The
         # sample's clock is the moment the cgroups are actually read, never
         # the moment the request arrived: a stale stamp shrinks the wall delta
@@ -1121,7 +1229,8 @@ def service_resources(svc):
             hit = _resources_cache.get(key)
             if hit and now - hit[0] < RESOURCE_TTL:
                 return hit[1]
-            payload = _measure_resources(svc, now, docker_map, timer_states)
+            payload = _measure_resources(svc, now, docker_map, timer_states,
+                                         disk)
             _resources_cache[key] = (now, payload)
             return payload
     except Exception as exc:

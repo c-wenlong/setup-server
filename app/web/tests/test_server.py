@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -130,6 +131,11 @@ class SandboxTest(unittest.TestCase):
             "_now_iso": server._now_iso,
             "_have_docker_group": server._have_docker_group,
             "_which": server._which,
+            "_sample_disk": server._sample_disk,
+            "_disk_target": server._disk_target,
+            "_du_bytes": server._du_bytes,
+            "DISK_TTL": server.DISK_TTL,
+            "DISK_TIMEOUT": server.DISK_TIMEOUT,
             "Popen": subprocess.Popen,
         }
         server.REPO_ROOT = os.path.realpath(self.repo)
@@ -167,6 +173,11 @@ class SandboxTest(unittest.TestCase):
         # unstubbed-Popen guard, let alone the daemon; the resource tests
         # restore the real function and stub Popen underneath it.
         server.docker_name_map = lambda: {}
+        # The disk path's worker would `du` through the unstubbed-Popen
+        # guard a beat after its test ended, so it is stubbed to
+        # 'unmeasurable' up front; the disk tests put the real sampler back
+        # over a stubbed _du_bytes.
+        server._sample_disk = lambda svc: None
 
         self.write_registry(self.REGISTRY)
         server._registry_cache["mtime"] = None
@@ -202,6 +213,8 @@ class SandboxTest(unittest.TestCase):
         server._cpu_samples.clear()
         server._docker_map_cache["at"] = 0.0
         server._docker_map_cache["map"] = {}
+        server._disk_samples.clear()
+        server._disk_inflight.clear()
 
     def read_usage_file(self):
         with open(server.USAGE_PATH, encoding="utf-8") as fh:
@@ -5133,6 +5146,7 @@ class ResourceReadingTest(ResourceTestBase):
         svc = self.registry_with(None)
         out = self.measure(svc, 100.0)
         self.assertEqual(out, {"rss_bytes": None, "cpu_pct": None,
+                               "disk_bytes": None,
                                "sampled_at": 100.0, "parts": []})
 
     def test_parts_follow_control_parts_in_order_and_kind(self):
@@ -5149,7 +5163,8 @@ class ResourceReadingTest(ResourceTestBase):
         svc = self.registry_with({"parts": [{"unit": "gone.service"}]})
         out = self.measure(svc, 100.0)
         self.assertEqual(sorted(out),
-                         ["cpu_pct", "parts", "rss_bytes", "sampled_at"])
+                         ["cpu_pct", "disk_bytes", "parts",
+                          "rss_bytes", "sampled_at"])
         self.assertEqual(sorted(out["parts"][0]),
                          ["cpu_pct", "kind", "name", "rss_bytes", "running"])
 
@@ -5350,6 +5365,258 @@ class ResourceCpuTest(ResourceTestBase):
         self.assertIsNone(self.measure(svc, 1001.0)["parts"][0]["cpu_pct"])
 
 
+class _DuResult:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+class ResourceDiskTest(ResourceTestBase):
+    """disk_bytes: `du -sk` of the service's data dir, on a worker thread.
+
+    A request never walks the tree: the first poll starts the worker and
+    answers null, later polls read the cached sample, and a refresh keeps
+    serving the stale figure until the new one lands.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # SandboxTest stubbed the sampler to 'unmeasurable'; these tests put
+        # the real one back over a stubbed _du_bytes, so the worker thread
+        # it starts can never reach the unstubbed-Popen guard.
+        server._sample_disk = self._saved["_sample_disk"]
+        self.du_calls = []
+        server._du_bytes = lambda path: (self.du_calls.append(path),
+                                         500000)[1]
+
+    def wait_disk(self, key, tries=200):
+        # A refresh keeps the old entry visible while its worker runs, so
+        # "landed" means a sample is present AND nothing is in flight —
+        # not merely that the key exists.
+        for _ in range(tries):
+            with server._disk_lock:
+                if (key in server._disk_samples
+                        and key not in server._disk_inflight):
+                    return server._disk_samples[key][1]
+            time.sleep(0.01)
+        self.fail("disk sample never landed for %s" % key)
+
+    def test_first_call_is_null_and_the_worker_fills_the_cache(self):
+        svc = self.registry_with(None, marker=self.tmp)
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertEqual(self.wait_disk("svc"), 500000)
+        self.assertEqual(server._sample_disk(svc), 500000)
+        self.assertEqual(self.du_calls, [self.tmp])
+
+    def test_the_number_lands_in_the_payload(self):
+        svc = self.registry_with({"parts": []}, marker=self.tmp)
+        self.assertIsNone(self.measure(svc, 100.0)["disk_bytes"])
+        self.assertEqual(self.wait_disk("svc"), 500000)
+        self.assertEqual(self.measure(svc, 101.0)["disk_bytes"], 500000)
+
+    def test_a_missing_dir_is_zero_and_never_calls_du(self):
+        svc = self.registry_with(None, marker=os.path.join(self.tmp, "gone"))
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertEqual(self.wait_disk("svc"), 0)
+        self.assertEqual(self.du_calls, [])
+
+    def test_no_marker_is_null_and_starts_no_worker(self):
+        svc = self.registry_with(None)
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertEqual(self.du_calls, [])
+
+    def test_a_failed_du_is_null_not_zero(self):
+        server._du_bytes = lambda path: (self.du_calls.append(path),
+                                         None)[1]
+        svc = self.registry_with(None, marker=self.tmp)
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertIsNone(self.wait_disk("svc"))
+        # null still caches: a service du cannot read must not spawn a
+        # worker on every poll.
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertEqual(self.du_calls, [self.tmp])
+
+    def test_a_stale_value_is_served_while_the_refresh_runs(self):
+        svc = self.registry_with(None, marker=self.tmp)
+        server._sample_disk(svc)
+        self.assertEqual(self.wait_disk("svc"), 500000)
+        server.DISK_TTL = 0.0
+        server._du_bytes = lambda path: (self.du_calls.append(path),
+                                         time.sleep(0.5), 700000)[2]
+        # Expired: the refresh starts, but the old figure answers until it
+        # lands rather than blinking back to null.
+        self.assertEqual(server._sample_disk(svc), 500000)
+        self.assertEqual(self.wait_disk("svc"), 700000)
+        self.assertEqual(server._sample_disk(svc), 700000)
+        # DISK_TTL=0 means that last call spawned one more worker; let it
+        # land so no thread carrying the dead sandbox outlives the test.
+        self.wait_disk("svc")
+
+    def test_one_worker_at_a_time_per_key(self):
+        server._du_bytes = lambda path: (self.du_calls.append(path),
+                                         time.sleep(0.2), 1)[2]
+        svc = self.registry_with(None, marker=self.tmp)
+        server._sample_disk(svc)
+        server._sample_disk(svc)   # inflight: must not spawn a second
+        self.assertEqual(self.wait_disk("svc"), 1)
+        self.assertEqual(self.du_calls, [self.tmp])
+
+    def test_the_sample_is_per_service(self):
+        a = self.registry_with(None, key="a", marker=self.tmp)
+        server._sample_disk(a)
+        self.assertEqual(self.wait_disk("a"), 500000)
+        b = self.registry_with(None, key="b",
+                               marker=os.path.join(self.tmp, "gone"))
+        server._sample_disk(b)
+        self.assertEqual(self.wait_disk("b"), 0)
+
+    def test_marker_target_resolution(self):
+        apps = os.path.join(self.tmp, "services", "apps", "app")
+        os.makedirs(apps)
+        marker = os.path.join(apps, "deployed.json")
+        with open(marker, "w") as fh:
+            fh.write("{}")
+        svc = self.registry_with(None, marker=marker)
+        # ghapp shape: the json is the marker, the app dir holds the state.
+        self.assertEqual(server._disk_target(svc, home=self.tmp), apps)
+
+    def test_a_file_marker_outside_services_stands_alone(self):
+        marker = os.path.join(self.tmp, "state.json")
+        with open(marker, "w") as fh:
+            fh.write("{}")
+        svc = self.registry_with(None, marker=marker)
+        self.assertEqual(server._disk_target(svc, home=self.tmp), marker)
+
+    def test_relative_and_missing_markers_have_no_target(self):
+        for marker in (None, "", "relative/path"):
+            self.assertIsNone(server._disk_target(
+                self.registry_with(None, marker=marker), home=self.tmp))
+        # An absolute-but-never-created path is still a target: du reports
+        # it as zero by way of the worker's exists check, not by running.
+        svc = self.registry_with(None, marker=os.path.join(self.tmp, "gone"))
+        self.assertEqual(server._disk_target(svc, home=self.tmp),
+                         os.path.join(self.tmp, "gone"))
+
+    def test_a_removed_app_marker_still_measures_its_kept_dir(self):
+        # ghapp's remove() deletes deployed.json but keeps src/.env/data:
+        # the dir still occupies disk, so it stays the du target.
+        apps = os.path.join(self.tmp, "services", "apps", "app")
+        os.makedirs(os.path.join(apps, "data"))
+        marker = os.path.join(apps, "deployed.json")
+        svc = self.registry_with(None, marker=marker)
+        self.assertEqual(server._disk_target(svc, home=self.tmp), apps)
+
+    def test_a_removed_marker_with_no_dir_left_stays_zero(self):
+        marker = os.path.join(self.tmp, "services", "apps", "app",
+                              "deployed.json")
+        svc = self.registry_with(None, marker=marker)
+        self.assertEqual(server._disk_target(svc, home=self.tmp), marker)
+
+    def test_a_missing_dir_marker_is_not_promoted_to_services(self):
+        # `~/services/<name>` gone must not du all of ~/services.
+        svc = self.registry_with(
+            None, marker=os.path.join(self.tmp, "services", "gone"))
+        self.assertEqual(server._disk_target(svc, home=self.tmp),
+                         os.path.join(self.tmp, "services", "gone"))
+
+    def test_a_worker_crash_caches_null_and_frees_the_key(self):
+        def boom(path):
+            self.du_calls.append(path)
+            raise RuntimeError("du exploded")
+
+        server._du_bytes = boom
+        svc = self.registry_with(None, marker=self.tmp)
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertIsNone(self.wait_disk("svc"))
+        # The failed sample is cached for the TTL rather than respawning a
+        # worker on every poll, but the inflight key is released...
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertEqual(self.du_calls, [self.tmp])
+        # ...so once it expires the next poll tries again instead of
+        # serving the stale value forever.
+        server.DISK_TTL = 0.0
+        server._du_bytes = lambda path: (self.du_calls.append(path),
+                                         700000)[1]
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertEqual(self.wait_disk("svc"), 700000)
+        server.DISK_TTL = 300.0   # that last call spawned a refresh; let
+        self.wait_disk("svc")     # it land inside the test
+
+    def test_workers_share_a_bounded_slot_pool(self):
+        gate = threading.Event()
+        started = []
+        real_lock = threading.Lock()
+
+        def blocking(path):
+            with real_lock:
+                started.append(path)
+            gate.wait(5)
+            return 1
+
+        server._du_bytes = blocking
+        dirs = []
+        svcs = []
+        for name in ("a", "b", "c"):
+            target = os.path.join(self.tmp, name)
+            os.makedirs(target)
+            dirs.append(target)
+            svcs.append(self.registry_with(None, key=name, marker=target))
+        try:
+            for svc in svcs:
+                server._sample_disk(svc)
+            deadline = time.time() + 5
+            while len(started) < server.DISK_MAX_WORKERS \
+                    and time.time() < deadline:
+                time.sleep(0.01)
+            # Two workers hold the slots; the third is queued behind them.
+            self.assertEqual(len(started), server.DISK_MAX_WORKERS)
+            with server._disk_lock:
+                self.assertEqual(len(server._disk_inflight), 3)
+        finally:
+            gate.set()
+        for name in ("a", "b", "c"):
+            self.assertEqual(self.wait_disk(name), 1)
+        self.assertEqual(sorted(started), sorted(dirs))
+
+
+class ResourceDuBytesTest(ResourceTestBase):
+    """The du call itself — argv, parse, every failure being null."""
+
+    def run_with(self, result=None, raises=None):
+        real = subprocess.run
+        self.seen = []
+
+        def fake(argv, **kw):
+            self.seen.append(argv)
+            if raises is not None:
+                raise raises
+            return result
+
+        subprocess.run = fake
+        self.addCleanup(setattr, subprocess, "run", real)
+        return server._du_bytes("/some/path")
+
+    def test_argv_and_parse(self):
+        self.assertEqual(self.run_with(_DuResult(0, "4096\t/some/path\n")),
+                         4096 * 1024)
+        self.assertEqual(self.seen, [["du", "-sk", "/some/path"]])
+
+    def test_nonzero_exit_is_null(self):
+        self.assertIsNone(self.run_with(_DuResult(1, "")))
+
+    def test_garbage_output_is_null(self):
+        self.assertIsNone(self.run_with(_DuResult(0, "not-a-number\n")))
+        self.assertIsNone(self.run_with(_DuResult(0, "")))
+
+    def test_a_wedged_du_is_null(self):
+        self.assertIsNone(self.run_with(
+            raises=subprocess.TimeoutExpired("du", 60)))
+
+    def test_no_du_binary_is_null(self):
+        self.assertIsNone(self.run_with(
+            raises=FileNotFoundError("no du")))
+
+
 class ResourceCacheTest(ResourceTestBase):
     """The TTL that stops a grid full of tiles hammering sysfs."""
 
@@ -5419,12 +5686,13 @@ class ResourceCacheTest(ResourceTestBase):
 
     def test_a_broken_measurement_is_nulls_not_a_500(self):
         boom = server._measure_resources
-        server._measure_resources = lambda svc, now, docker_map: (
+        server._measure_resources = lambda svc, now, *a: (
             _ for _ in ()).throw(RuntimeError("sysfs on fire"))
         self.addCleanup(setattr, server, "_measure_resources", boom)
         out = server.service_resources(self.svc)
         self.assertEqual(sorted(out),
-                         ["cpu_pct", "parts", "rss_bytes", "sampled_at"])
+                         ["cpu_pct", "disk_bytes", "parts",
+                          "rss_bytes", "sampled_at"])
         self.assertEqual(out["parts"], [])
         self.assertIsNone(out["rss_bytes"])
 
@@ -5472,7 +5740,8 @@ class ResourcePayloadTest(ResourceTestBase):
                              ["last_launched", "last_opened", "last_used"])
             self.assertIn("deployed_at", tile)
             self.assertEqual(sorted(tile["resources"]),
-                             ["cpu_pct", "parts", "rss_bytes", "sampled_at"])
+                             ["cpu_pct", "disk_bytes", "parts",
+                              "rss_bytes", "sampled_at"])
         tiles = {t["key"]: t for t in doc["services"]}
         self.assertEqual(tiles["svc"]["resources"]["rss_bytes"], 4096)
         self.assertEqual(tiles["bare"]["resources"]["parts"], [])

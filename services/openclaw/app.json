@@ -1,0 +1,22 @@
+{
+  "key": "openclaw",
+  "name": "OpenClaw",
+  "tagline": "Agent gateway",
+  "group": "ai",
+  "icon": "chat",
+  "author": "openclaw",
+  "url": "https://HOST:18789/",
+  "health": "http://127.0.0.1:18789/healthz",
+  "marker": "~/services/openclaw",
+  "env": ".env",
+  "description": "Self-hosted AI assistant gateway: the Control UI plus every chat channel (Telegram, WhatsApp, Discord, Slack) in one container. Official GHCR image rather than a host Node install — the box runs Node 22 and OpenClaw wants 24+. State, workspace and auth profiles live under ~/services/openclaw; a gateway token is generated into .env and the Control UI asks for it on first open. Host ~/.claude and ~/.codex are mounted in when present so the bundled Claude/Codex providers can reuse their logins; setup.sh never creates or overwrites them.",
+  "control": {
+    "parts": [
+      {
+        "container": "openclaw-gateway"
+      }
+    ],
+    "kuma": "openclaw",
+    "_comment": "The cli sidecar is behind a compose profile and never runs long, so it is not a part."
+  }
+}

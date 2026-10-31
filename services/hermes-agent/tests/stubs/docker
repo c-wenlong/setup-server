@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
+#   compose_up         — touched by `compose ... up`
+#   docker_run_fails   — exists => `docker run --entrypoint sh` (purge cleanup) fails
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    for a in "$@"; do
+      [ "$a" = "-a" ] && echo "hermes-agent"
+    done
+    ;;
+
+  inspect)
+    # Only the live suite inspects containers; keep the mocked answer sane.
+    echo running
+    ;;
+
+  run)
+    # teardown --purge's cleanup of container-owned files:
+    #   docker run --rm --pull never --user 0 -v DIR:/x --entrypoint sh IMAGE -c SCRIPT
+    # Only --user 0/root makes the in-container find root: the image's own
+    # USER is not guaranteed to be. Without it we run the script as-is, so a
+    # cleaner that forgot the flag fails exactly like the real one would.
+    mount_host=""; entry=""; script=""; as_root=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
+        --entrypoint) entry="$2"; shift 2 ;;
+        --user) case "$2" in 0|root) as_root=1 ;; esac; shift 2 ;;
+        -c) script="$2"; shift 2; break ;;
+        *) shift ;;
+      esac
+    done
+    [ "$entry" = "sh" ] || exit 0
+    [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+    [ -n "$mount_host" ] && [ -n "$script" ] || exit 1
+    [ "$as_root" -eq 1 ] && chmod -R u+rwX "$mount_host" 2>/dev/null
+    sh -c "${script//\/x/$mount_host}" "$@"
+    exit $?
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        for a in "$@"; do
+          case "$a" in
+            up)   touch "$STATE_DIR/compose_up" ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0
