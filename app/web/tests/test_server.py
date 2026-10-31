@@ -51,6 +51,11 @@ def _forbidden_remote_digest(host, repo, tag):
                          % (host, repo, tag))
 
 
+def _forbidden_remote_tags(host, repo):
+    raise AssertionError("a tag listing escaped the sandbox: %s/%s"
+                         % (host, repo))
+
+
 class FakeProc:
     """A subprocess that never exits: the reaper thread parks on the event,
     so every started job stays 'running' for the duration of the test."""
@@ -117,6 +122,7 @@ class SandboxTest(unittest.TestCase):
             "INSTANCES_DIR": server.INSTANCES_DIR,
             "UPDATES_PATH": server.UPDATES_PATH,
             "remote_digest": server.remote_digest,
+            "remote_tags": server.remote_tags,
             "DEPLOYD_HOME": server.DEPLOYD_HOME,
             "deployd_timer": server.deployd_timer,
             "_timer_active": server._timer_active,
@@ -153,6 +159,7 @@ class SandboxTest(unittest.TestCase):
         # No test may reach a real registry: the check's one network call is
         # stubbed to fail loudly unless a test installs its own answer.
         server.remote_digest = _forbidden_remote_digest
+        server.remote_tags = _forbidden_remote_tags
         server._update_started.clear()
         # deployd's service home under the sandbox too; and its timer probe
         # defaults to "unknowable" so no test can reach a real systemctl
@@ -6869,6 +6876,261 @@ class UpdateCheckTest(UpdateTestBase):
         self.assertFalse(server.service_detail("oh")["updates"]["checkable"])
 
 
+class CandidateTagsTest(unittest.TestCase):
+    """The same-shape / same-line filter behind every version proposal."""
+
+    def test_table(self):
+        table = [
+            # pinned semver tracks its own major only
+            ("1.23.16", ["1.23.17", "2.5.8", "1.30.0"],
+             ["1.23.17", "1.30.0"]),
+            # 0.x tightens to major.minor: minors are feature releases
+            ("v0.107.79", ["v0.107.80", "v0.108.0", "v1.0.0"],
+             ["v0.107.80"]),
+            # numeric, not lexical: .10 sorts after .4
+            ("v1.4.2", ["v1.4.3", "v1.10.0", "v2.0.0"], ["v1.4.3", "v1.10.0"]),
+            ("version-6.4.2", ["version-6.5.0", "version-7.0.0"],
+             ["version-6.5.0"]),
+            # year-led tags take any newer date in their scheme
+            ("2026.9.1", ["2026.10.1", "2027.1.1"], ["2026.10.1", "2027.1.1"]),
+            ("RELEASE.2024-12-18T13-15-44Z",
+             ["RELEASE.2025-01-01T00-00-00Z", "RELEASE.2024-12-18T13-15-44Z"],
+             ["RELEASE.2025-01-01T00-00-00Z"]),
+            # a floating tag keeps its own line: same first number only
+            ("15-alpine", ["16-alpine", "15.1-alpine"], []),
+            ("latest", ["1.0", "latest"], []),
+            # different scheme entirely: no digits in same places, suffixes
+            ("1.4.2", ["1.4.3-rc.1", "v1.4.3"], []),
+            ("12.0", ["12.1", "13.0"], ["12.1"]),
+            # a bare 0 must not crash the minor check on a missing segment
+            ("0", ["0", "1"], []),
+        ]
+        for current, tags, want in table:
+            self.assertEqual(
+                server.candidate_tags(current, tags), want, current)
+
+
+class VersionPinTest(UpdateTestBase):
+    """A service whose compose file binds its tag to an .env variable."""
+
+    def setUp(self):
+        super().setUp()
+        self.marker2 = os.path.join(self.tmp, "installed-pin")
+        os.makedirs(self.marker2)
+        self.make_script("services/pin/setup.sh")
+        self.make_env("services/pin/.env", "PIN_VERSION=1.4.2\n")
+        self.write_compose(
+            "services:\n  app:\n    image: ex.io/app:${PIN_VERSION:-1.0.0}\n")
+        with open(server.REGISTRY_PATH) as fh:
+            doc = json.load(fh)
+        doc["services"].append(
+            {"key": "pin", "name": "Pin", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": self.marker2,
+             "setup": "services/pin/setup.sh", "env": "services/pin/.env",
+             "control": {"parts": [{"container": "pin-app"}], "kuma": None}})
+        self.write_registry(doc)
+        self.tag_lookups = []
+
+    def write_compose(self, text):
+        return self.make_env("services/pin/docker-compose.yml", text)
+
+    def set_parts(self, *names):
+        with open(server.REGISTRY_PATH) as fh:
+            doc = json.load(fh)
+        for svc in doc["services"]:
+            if svc["key"] == "pin":
+                svc["control"]["parts"] = [{"container": n} for n in names]
+        self.write_registry(doc)
+
+    def box(self, containers, images, digests, tags):
+        self.stub_docker(containers, images)
+        self.answer(digests)
+
+        def fake_tags(host, repo):
+            self.tag_lookups.append((host, repo))
+            value = tags[(host, repo)]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        server.remote_tags = fake_tags
+
+    def pin_box(self, tags):
+        self.box({"pin-app": ("ex.io/app:1.4.2", IMG)},
+                 {IMG: ["ex.io/app@" + OLD]},
+                 {("ex.io", "app", "1.4.2"): OLD},
+                 tags)
+
+    def seed(self, images):
+        os.makedirs(os.path.dirname(server.UPDATES_PATH), exist_ok=True)
+        with open(server.UPDATES_PATH, "w") as fh:
+            json.dump({"pin": {"checked_at": "2026-01-01T00:00:00.000Z",
+                               "available": True, "images": images}}, fh)
+
+    def run_update(self, failures=None):
+        self.record_popen(failures)
+        job_id = server.start_update("pin")
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            with server._jobs_lock:
+                status = server._jobs[job_id]["status"]
+            if status != "running":
+                return server.job_payload(job_id)
+            time.sleep(0.01)
+        self.fail("update never finished")
+
+    def read_env_text(self):
+        with open(os.path.join(self.repo, "services/pin/.env")) as fh:
+            return fh.read()
+
+    def test_newer_in_line_tag_is_a_proposal(self):
+        self.pin_box({("ex.io", "app"):
+                      ["1.4.2", "1.4.3", "1.5.0", "2.0.0", "v9.9.9"]})
+        entry = server.check_service_updates(server.find_service("pin"))
+        self.assertTrue(entry["available"])
+        image = entry["images"][0]
+        self.assertEqual(image["status"], "current")
+        self.assertEqual(image["latest"], "1.5.0")
+        self.assertEqual(image["env_var"], "PIN_VERSION")
+        self.assertIsNone(image["latest_error"])
+        self.assertEqual(self.tag_lookups, [("ex.io", "app")])
+
+    def test_no_binding_means_no_lookup(self):
+        # `oh` has no env and no compose: the version scan must not fire.
+        self.standard_box()
+        server.check_service_updates(server.find_service("oh"))
+        self.assertEqual(self.tag_lookups, [])
+
+    def test_nothing_newer_proposes_nothing(self):
+        self.pin_box({("ex.io", "app"): ["1.4.2", "1.4.1"]})
+        entry = server.check_service_updates(server.find_service("pin"))
+        self.assertFalse(entry["available"])
+        self.assertIsNone(entry["images"][0]["latest"])
+        self.assertEqual(entry["images"][0]["env_var"], "PIN_VERSION")
+
+    def test_compose_binding_skips_what_cannot_resolve(self):
+        self.write_compose(
+            "services:\n"
+            "  app:\n"
+            "    image: ex.io/app:${PIN_VERSION}\n"
+            "  aux:\n"
+            "    image: ex.io/aux:${MISSING:?required}\n"
+            "  off:\n"
+            "    # image: ex.io/off:${PIN_VERSION}\n"
+            "    image: ex.io/hard:2.0\n")
+        self.assertEqual(
+            server._image_var_map(server.find_service("pin")),
+            {("ex.io", "app", "1.4.2"): "PIN_VERSION"})
+
+    def test_last_variable_on_the_line_is_the_tag_var(self):
+        self.make_env("services/pin/.env",
+                      "REGISTRY_URL=docker.io\nPIN_VERSION=1.4.2\n")
+        self.write_compose(
+            "services:\n  app:\n    image: "
+            "${REGISTRY_URL:-ex.io}/app:${PIN_VERSION:-0.0.1}\n")
+        self.assertEqual(
+            server._image_var_map(server.find_service("pin")),
+            {("registry-1.docker.io", "library/app", "1.4.2"):
+             "PIN_VERSION"})
+
+    def test_shared_var_bumps_only_when_every_repo_has_the_tag(self):
+        self.set_parts("pin-a", "pin-b")
+        self.make_env("services/pin/.env", "APP_RELEASE=v1.0.0\n")
+        self.write_compose(
+            "services:\n"
+            "  a:\n    image: ex.io/a:${APP_RELEASE:-v0.9.0}\n"
+            "  b:\n    image: ex.io/b:${APP_RELEASE:-v0.9.0}\n")
+        digests = {("ex.io", "a", "v1.0.0"): OLD,
+                   ("ex.io", "b", "v1.0.0"): OLD}
+        containers = {"pin-a": ("ex.io/a:v1.0.0", IMG),
+                      "pin-b": ("ex.io/b:v1.0.0", IMG)}
+        repodigests = {IMG: ["ex.io/a@" + OLD, "ex.io/b@" + OLD]}
+        # Half a release: only repo a carries v1.1.0.
+        self.box(containers, repodigests, digests,
+                 {("ex.io", "a"): ["v1.0.0", "v1.1.0"],
+                  ("ex.io", "b"): ["v1.0.0"]})
+        entry = server.check_service_updates(server.find_service("pin"))
+        self.assertFalse(entry["available"])
+        self.assertEqual([i["latest"] for i in entry["images"]], [None, None])
+        # Once both repos have it, the one variable moves both containers.
+        self.box(containers, repodigests, digests,
+                 {("ex.io", "a"): ["v1.0.0", "v1.1.0"],
+                  ("ex.io", "b"): ["v1.0.0", "v1.1.0"]})
+        entry = server.check_service_updates(server.find_service("pin"))
+        self.assertTrue(entry["available"])
+        self.assertEqual([i["latest"] for i in entry["images"]],
+                         ["v1.1.0", "v1.1.0"])
+        self.assertEqual([i["env_var"] for i in entry["images"]],
+                         ["APP_RELEASE", "APP_RELEASE"])
+
+    def test_tag_list_failure_is_soft_and_keeps_the_last_answer(self):
+        import urllib.error
+        self.pin_box({("ex.io", "app"): ["1.4.2", "1.5.0"]})
+        server.check_and_record(server.find_service("pin"))
+        self.assertTrue(server.load_updates()["pin"]["available"])
+
+        self.pin_box({("ex.io", "app"): urllib.error.URLError("down")})
+        server.check_and_record(server.find_service("pin"))
+        image = server.load_updates()["pin"]["images"][0]
+        self.assertEqual(image["latest"], "1.5.0")        # carried over
+        self.assertEqual(image["latest_error"], "registry unreachable")
+        self.assertTrue(server.load_updates()["pin"]["available"])
+
+    def test_a_successful_scan_drops_a_carried_proposal(self):
+        self.pin_box({("ex.io", "app"): ["1.4.2", "1.5.0"]})
+        server.check_and_record(server.find_service("pin"))
+        # Registry answers cleanly and has nothing newer any more (the box
+        # was updated by hand): the proposal must not linger.
+        self.pin_box({("ex.io", "app"): ["1.4.2"]})
+        server.check_and_record(server.find_service("pin"))
+        image = server.load_updates()["pin"]["images"][0]
+        self.assertIsNone(image["latest"])
+        self.assertIsNone(image["latest_error"])
+        self.assertFalse(server.load_updates()["pin"]["available"])
+
+    def test_tag_var_update_writes_just_the_tag(self):
+        self.seed([{"container": "pin-app", "image": "ex.io/app:1.4.2",
+                    "status": "current", "latest": "1.5.0",
+                    "env_var": "PIN_VERSION"}])
+        payload = self.run_update()
+        self.assertEqual(payload["status"], "done", payload["log"])
+        self.assertIn("PIN_VERSION=1.5.0", self.read_env_text())
+        argvs = self.argvs()
+        self.assertIn(["docker", "pull", "ex.io/app:1.5.0"], argvs)
+        self.assertNotIn(["docker", "pull", "ex.io/app:1.4.2"], argvs)
+
+    def test_whole_ref_var_update_writes_the_whole_ref(self):
+        self.make_env("services/pin/.env", "PIN_IMAGE=ex.io/app:1.4.2\n")
+        self.write_compose(
+            "services:\n  app:\n    image: ${PIN_IMAGE:-ex.io/app:0.0.1}\n")
+        self.seed([{"container": "pin-app", "image": "ex.io/app:1.4.2",
+                    "status": "current", "latest": "1.5.0",
+                    "env_var": "PIN_IMAGE"}])
+        payload = self.run_update()
+        self.assertEqual(payload["status"], "done", payload["log"])
+        self.assertIn("PIN_IMAGE=ex.io/app:1.5.0", self.read_env_text())
+        self.assertIn(["docker", "pull", "ex.io/app:1.5.0"], self.argvs())
+
+    def test_a_diverged_variable_is_left_alone_but_still_pulls(self):
+        self.seed([{"container": "pin-app", "image": "ex.io/app:1.4.2",
+                    "status": "current", "latest": "1.5.0",
+                    "env_var": "PIN_VERSION"}])
+        self.make_env("services/pin/.env", "PIN_VERSION=9.9.9\n")
+        payload = self.run_update()
+        self.assertEqual(payload["status"], "done", payload["log"])
+        self.assertIn("PIN_VERSION=9.9.9", self.read_env_text())
+        self.assertIn(["docker", "pull", "ex.io/app:1.5.0"], self.argvs())
+
+    def test_a_tampered_latest_never_reaches_argv_or_env(self):
+        self.seed([{"container": "pin-app", "image": "ex.io/app:1.4.2",
+                    "status": "current", "latest": "1.5.0; rm -rf ~",
+                    "env_var": "PIN_VERSION"}])
+        with self.assertRaises(server.DeployError) as ctx:
+            server.start_update("pin")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.spawned, [])
+        self.assertIn("PIN_VERSION=1.4.2", self.read_env_text())
+
+
 class FakeResponse:
     def __init__(self, headers=None, body=b""):
         self.headers = headers or {}
@@ -6930,6 +7192,82 @@ class RemoteDigestTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError):
             server.remote_digest("ghcr.io", "o/a", "latest")
         self.assertFalse(any(isinstance(r, str) for r in self.requests))
+
+
+class RemoteTagsTest(unittest.TestCase):
+    """remote_tags: anonymous token dance, pagination, page boundaries."""
+
+    def setUp(self):
+        import urllib.request
+        self.saved = urllib.request.urlopen
+        self.requests = []
+
+    def tearDown(self):
+        import urllib.request
+        urllib.request.urlopen = self.saved
+
+    def install(self, realm, pages):
+        """pages: url -> (Link header, tags). Strings are token fetches."""
+        import urllib.error
+        import urllib.request
+        import email.message
+
+        def fake(req, timeout=None):
+            self.requests.append(req)
+            if isinstance(req, str):
+                return FakeResponse(body=json.dumps({"token": "tok"}).encode())
+            if req.get_header("Authorization") != "Bearer tok":
+                hdrs = email.message.Message()
+                hdrs["WWW-Authenticate"] = (
+                    'Bearer realm="%s",service="ghcr.io",'
+                    'scope="repository:o/a:pull"' % realm)
+                raise urllib.error.HTTPError(req.full_url, 401, "no", hdrs, None)
+            link, tags = pages[req.full_url]
+            return FakeResponse({"Link": link},
+                                json.dumps({"name": "o/a",
+                                            "tags": tags}).encode())
+        urllib.request.urlopen = fake
+
+    def test_one_page_with_token(self):
+        first = "https://ghcr.io/v2/o/a/tags/list"
+        self.install("https://ghcr.io/token",
+                     {first: (None, ["1.0", "1.1"])})
+        self.assertEqual(server.remote_tags("ghcr.io", "o/a"), ["1.0", "1.1"])
+        gets = [r for r in self.requests if not isinstance(r, str)]
+        self.assertEqual([r.full_url for r in gets], [first, first])
+        self.assertEqual(gets[0].get_method(), "GET")
+
+    def test_pagination_follows_next_links(self):
+        first = "https://ghcr.io/v2/o/a/tags/list"
+        second = "https://ghcr.io/v2/o/a/tags/list?last=1.1&n=2"
+        self.install("https://ghcr.io/token", {
+            first: ('<%s>; rel="next"' % second, ["1.0", "1.1"]),
+            second: (None, ["1.2"]),
+        })
+        self.assertEqual(server.remote_tags("ghcr.io", "o/a"),
+                         ["1.0", "1.1", "1.2"])
+
+    def test_a_next_link_off_the_host_is_not_followed(self):
+        first = "https://ghcr.io/v2/o/a/tags/list"
+        self.install("https://ghcr.io/token", {
+            first: ('<https://evil.example/v2/o/a/tags/list>; rel="next"',
+                    ["1.0"]),
+        })
+        self.assertEqual(server.remote_tags("ghcr.io", "o/a"), ["1.0"])
+
+    def test_page_cap_stops_an_endless_list(self):
+        urls = {}
+        for i in range(server.TAG_LIST_MAX_PAGES + 2):
+            url = "https://ghcr.io/v2/o/a/tags/list?n=1&last=t%d" % i
+            urls[url] = ('<https://ghcr.io/v2/o/a/tags/list?n=1&last=t%d>; '
+                         'rel="next"' % (i + 1), ["t%d" % i])
+        first = "https://ghcr.io/v2/o/a/tags/list"
+        urls[first] = ('<%s>; rel="next"'
+                       % "https://ghcr.io/v2/o/a/tags/list?n=1&last=t0",
+                       ["t"])
+        self.install("https://ghcr.io/token", urls)
+        tags = server.remote_tags("ghcr.io", "o/a")
+        self.assertEqual(len(tags), server.TAG_LIST_MAX_PAGES)
 
 
 class UpdateJobTest(UpdateTestBase):
