@@ -77,7 +77,7 @@ compose_hasF()     { sed 's/#.*//' "$SVC/docker-compose.yml" | grep -qF -- "$1";
 no_wildcard_bind() { ! compose_has "^[[:space:]]*-[[:space:]]*'0\\.0\\.0\\.0:"; }
 no_host_net()      { ! compose_has 'network_mode: *host'; }
 
-data_dir() { sed -n 's/^HERMES_DATA=//p' "$SVC/.env"; }
+data_dir() { sed -n 's/^HERMES_DATA=//p' "$SVC/.env" | tr -d '"'; }
 
 # ----------------------------------------------------------------- tests
 test_preflight_root() {
@@ -434,6 +434,7 @@ test_teardown_purge_container_owned() {
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "used the pinned image"       calls_have "nousresearch/hermes-agent:v0.22.5"
   check "never pulled for it"         calls_have "pull never"
+  check "runs it as root"             calls_have "--user 0"
   check "mounted the data dir"        calls_have "-v $dir:/x"
   check "no sudo"                     no_call "^sudo"
   check "data dir gone"               [ ! -e "$dir" ]
@@ -679,7 +680,7 @@ test_live() {
     FAIL=$((FAIL + 1))
     return
   fi
-  local ts port https_port api_port url user pass
+  local ts port https_port api_port url user pass api_key
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
@@ -687,6 +688,7 @@ test_live() {
   api_port="$(sed -n 's/^API_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
   user="$(sed -n 's/^HERMES_DASHBOARD_USERNAME=//p' "$SERVICE_DIR/.env")"
   pass="$(sed -n 's/^HERMES_DASHBOARD_PASSWORD=//p' "$SERVICE_DIR/.env")"
+  api_key="$(sed -n 's/^API_SERVER_KEY=//p' "$SERVICE_DIR/.env")"
   url="https://$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
 
   live_check "hermes-agent container running"    sh -c "docker inspect -f '{{.State.Status}}' hermes-agent | grep -qx running"
@@ -701,10 +703,19 @@ test_live() {
   # bounce to login or get a 401/403, and the .env credentials get through.
   live_check "dashboard rejects anonymous" \
     sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 '$url:$https_port/'); [ \"\$code\" != 200 ]"
+  live_check "dashboard rejects a wrong password" \
+    sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -u '$user:wrong-password' '$url:$https_port/'); [ \"\$code\" != 200 ]"
   live_check "dashboard credentials in .env authenticate" \
     sh -c "curl -fsS -o /dev/null --max-time 30 -u '$user:$pass' '$url:$https_port/'"
 
-  live_check "data dir exists"                   sh -c "test -d \"\$(sed -n 's/^HERMES_DATA=//p' '$SERVICE_DIR/.env')\""
+  # The API is key-gated: /v1/models answers 401 without a Bearer key and
+  # 200 with the one in .env. (Verified against the running container.)
+  live_check "API rejects a request without the key" \
+    sh -c "code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 'http://127.0.0.1:$api_port/v1/models'); [ \"\$code\" = 401 ] || [ \"\$code\" = 403 ]"
+  live_check "API accepts the .env key" \
+    sh -c "curl -fsS -o /dev/null --max-time 30 -H 'Authorization: Bearer $api_key' 'http://127.0.0.1:$api_port/v1/models'"
+
+  live_check "data dir exists"                   sh -c "test -d \"\$(sed -n 's/^HERMES_DATA=//p' '$SERVICE_DIR/.env' | tr -d '\"')\""
 
   # The native gateway, when present, must still be up — this deploy shares
   # nothing with it and must not have stopped it.

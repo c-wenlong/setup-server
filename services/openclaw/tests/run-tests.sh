@@ -209,6 +209,22 @@ test_origins_already_set() {
   teardown
 }
 
+test_origins_stale_port_warns() {
+  echo "• allowedOrigins set for a different port: warns, never rewrites it"
+  setup
+  # User-configured origins for :18789, but the publish moved to :8443 — every
+  # health check still passes, so the script has to say why browsers 403.
+  touch "$STATE_DIR/operator" "$STATE_DIR/origins_stale" "$STATE_DIR/proxies_set"
+  export HTTPS_PORT=8443
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "no allowedOrigins in batch"    config_set_lacks 'allowedOrigins'
+  check "names the missing origin"      out_has 'lacks https://test-host.tailfake.ts.net:8443'
+  check "says how to fix it"            out_has 'config set'
+  check "still published :8443"         calls_have "tailscale serve --bg --https=8443"
+  teardown
+}
+
 test_port_override() {
   echo "• LOCAL_PORT/HTTPS_PORT overrides: honoured fresh, ignored on a re-run"
   setup
@@ -459,6 +475,7 @@ test_teardown_purge_container_owned() {
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "used the pinned image"       calls_have "ghcr.io/openclaw/openclaw:2026.10.7"
   check "never pulled for it"         calls_have "pull never"
+  check "runs it as root"             calls_have "--user 0"
   check "mounted the state dir"       calls_have "-v $dir:/x"
   check "no sudo"                     no_call "^sudo"
   check "state dir gone"              [ ! -e "$dir" ]
@@ -496,6 +513,25 @@ test_teardown_purge_refuses_odd_paths() {
   check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ]
   check "  .env kept"                 [ -f "$SVC/.env" ]
   rm -f "$HOME/services/openclaw"
+  teardown
+}
+
+test_teardown_purge_refuses_a_moved_dir() {
+  echo "• teardown --purge: a state dir moved outside ~/services/openclaw refuses, .env kept"
+  deployed
+  sed -i.bak "s#^OPENCLAW_CONFIG_DIR=.*#OPENCLAW_CONFIG_DIR=$HOME/outside#" "$SVC/.env"
+  mkdir -p "$HOME/outside"
+  run_teardown --purge "openclaw"
+  check "exits non-zero"           [ "$CODE" -ne 0 ]
+  check "names the moved var"      out_has "OPENCLAW_CONFIG_DIR"
+  check "moved dir kept"           [ -d "$HOME/outside" ]
+  check "state kept"               [ -e "$HOME/services/openclaw" ]
+  check ".env kept"                [ -f "$SVC/.env" ]
+  check "nothing stopped"          [ ! -f "$STATE_DIR/compose_down" ]
+  rm -rf "$HOME/outside"
+  sed -i.bak "s#^OPENCLAW_WORKSPACE_DIR=.*#OPENCLAW_WORKSPACE_DIR=/tmp#" "$SVC/.env"
+  run_teardown --purge "openclaw"
+  check "workspace move refused"   [ "$CODE" -ne 0 ]
   teardown
 }
 
@@ -695,7 +731,7 @@ test_live() {
   live_check "tailscale serve maps :$https_port"  sh -c "'$ts' serve status | grep -A2 ':$https_port' | grep -q 'proxy http://127.0.0.1:$port'"
   live_check "tailnet healthz responds"           curl -fsS -o /dev/null --max-time 30 "$url:$https_port/healthz"
   live_check "tailnet Control UI responds"        curl -fsS -o /dev/null --max-time 30 "$url:$https_port/"
-  live_check "state dir exists"                   sh -c "test -d \"\$(sed -n 's/^OPENCLAW_CONFIG_DIR=//p' '$SERVICE_DIR/.env')\""
+  live_check "state dir exists"                   sh -c "test -d \"\$(sed -n 's/^OPENCLAW_CONFIG_DIR=//p' '$SERVICE_DIR/.env' | tr -d '\"')\""
 }
 
 # ------------------------------------------------------------------ main
@@ -713,6 +749,7 @@ test_fresh_deploy
 test_no_agent_dirs_no_overlay
 test_codex_also_mounted
 test_origins_already_set
+test_origins_stale_port_warns
 test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot
@@ -726,6 +763,7 @@ test_teardown_preflight
 test_teardown_purge
 test_teardown_purge_container_owned
 test_teardown_purge_refuses_odd_paths
+test_teardown_purge_refuses_a_moved_dir
 test_teardown_every_port_pointing_here
 test_teardown_units_left_alone
 test_teardown_serve_status_fails

@@ -3,7 +3,9 @@
 #   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
 #   compose_up         — touched by `compose ... up`
 #   origins_set        — exists => `config get gateway.controlUi.allowedOrigins`
-#                        answers non-empty (a user already configured origins)
+#                        answers an array already holding the needed origin
+#   origins_stale      — exists => same, but the array lacks the needed origin
+#                        (user-configured for a different port)
 #   proxies_set        — exists => `config get gateway.trustedProxies` answers
 #                        non-empty (a user already configured proxies)
 #   config_sets        — the argv of every `config set --batch-json` call
@@ -28,13 +30,16 @@ case "$1" in
 
   run)
     # teardown --purge's cleanup of container-owned files:
-    #   docker run --rm --pull never -v DIR:/x --entrypoint sh IMAGE -c SCRIPT
-    # The real container is root, so it can delete what the host user cannot.
-    mount_host=""; entry=""; script=""
+    #   docker run --rm --pull never --user 0 -v DIR:/x --entrypoint sh IMAGE -c SCRIPT
+    # Only --user 0/root makes the in-container find root: the image's own
+    # USER is not guaranteed to be. Without it we run the script as-is, so a
+    # cleaner that forgot the flag fails exactly like the real one would.
+    mount_host=""; entry=""; script=""; as_root=0
     while [ $# -gt 0 ]; do
       case "$1" in
         -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
         --entrypoint) entry="$2"; shift 2 ;;
+        --user) case "$2" in 0|root) as_root=1 ;; esac; shift 2 ;;
         -c) script="$2"; shift 2; break ;;
         *) shift ;;
       esac
@@ -42,7 +47,7 @@ case "$1" in
     [ "$entry" = "sh" ] || exit 0
     [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
     [ -n "$mount_host" ] && [ -n "$script" ] || exit 1
-    chmod -R u+rwX "$mount_host" 2>/dev/null
+    [ "$as_root" -eq 1 ] && chmod -R u+rwX "$mount_host" 2>/dev/null
     sh -c "${script//\/x/$mount_host}" "$@"
     exit $?
     ;;
@@ -64,8 +69,10 @@ case "$1" in
         #     dist/index.js config get|set ...
         case "$joined" in
           *" config get "*allowedOrigins*)
-            if [ -f "$STATE_DIR/origins_set" ]; then
+            if [ -f "$STATE_DIR/origins_stale" ]; then
               echo '["https://example.ts.net:18789"]'
+            elif [ -f "$STATE_DIR/origins_set" ]; then
+              echo '["https://test-host.tailfake.ts.net:18789"]'
             fi
             ;;
           *" config get "*trustedProxies*)

@@ -71,6 +71,20 @@ A bare `config set` from `docker compose run` fails with a
 through `docker exec` once it is running (setup.sh only uses the throwaway
 container pre-start, when no gateway holds the lock).
 
+## Browser refused on the published URL, but curl checks pass
+
+`controlUi.allowedOrigins` was seeded at first deploy and setup.sh never
+rewrites a list that already exists. If the publish later moved to a
+different `HTTPS_PORT`, the new origin is missing and browsers are rejected
+while every `/healthz` check stays green. setup.sh warns when it sees this.
+Check and repair (keep the entries already there):
+
+```bash
+docker exec openclaw-gateway node dist/index.js config get gateway.controlUi.allowedOrigins
+docker exec openclaw-gateway node dist/index.js config set --batch-json \
+  '[{"path":"gateway.controlUi.allowedOrigins","value":["<new origin>","<old entries>"]}]'
+```
+
 ## HTTPS URL doesn't load from a client
 
 - Confirm the publish exists and points at this service:
@@ -107,6 +121,9 @@ cd services/openclaw
 
 `--purge` deletes `~/services/openclaw` (gateway config, sessions, agent
 workspace, auth profiles) and `.env`, after stopping the container and
-unpublishing only the Serve ports that point at this service. Without
+unpublishing only the Serve ports that point at this service. If
+`.env` moved one of the `OPENCLAW_*_DIR` paths outside `~/services/openclaw`,
+purge refuses and keeps `.env` — move the dir back inside or remove it by
+hand first, so nothing the record points at is left behind. Without
 `--purge`, teardown stops the container and keeps all state — `./setup.sh`
 brings the same deployment back.

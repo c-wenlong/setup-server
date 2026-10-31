@@ -191,6 +191,18 @@ OPENCLAW_IMAGE=""
 if [ "$PURGE" -eq 1 ]; then
   STATE_ROOT="$HOME/services/$NAME"
   case "$STATE_ROOT" in */) STATE_ROOT="${STATE_ROOT%/}" ;; esac
+  # Every configured state dir must sit inside ~/services/openclaw: a path
+  # moved elsewhere in .env would survive the purge while .env (the only
+  # record of where it went) is deleted. Refuse before anything changes.
+  for v in OPENCLAW_CONFIG_DIR OPENCLAW_WORKSPACE_DIR OPENCLAW_AUTH_PROFILE_SECRET_DIR; do
+    d="$(env_get "$v")"
+    [ -n "$d" ] || die "$v missing from $ENV_FILE — refusing to guess what to delete."
+    case "$d" in *..*|*:*) die "$v=$d is not a plain absolute path — refusing." ;; esac
+    case "$d" in
+      "$STATE_ROOT"|"$STATE_ROOT"/?*) ;;
+      *) die "$v=$d is outside $STATE_ROOT — purge would delete $STATE_ROOT and lose track of the rest. Move it back inside or remove it by hand, then re-run. Nothing was changed." ;;
+    esac
+  done
   dir_state "state dir" "$STATE_ROOT"
   [ "$DIR_STATE" != "hidden" ] \
     || die "$HIDDEN_DIR cannot be searched, so teardown cannot tell whether ~/services/$NAME is there (and will not delete .env while it might be). Run: sudo rm -rf $STATE_ROOT   then ./teardown.sh --purge again. Nothing was changed."
@@ -229,23 +241,30 @@ fi
 # header ends an HTTPS block, so a TCP forward listed after it is not
 # mistaken for one of its handlers.
 info "Unpublishing Tailscale Serve ports that point at $TARGET"
-SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
-  function flush() {
-    if (port != "") {
-      if (n > 0 && mine == n) print "off " port
-      else if (mine > 0) print "mixed " port
+# stdin: `tailscale serve status` text -> "off PORT" or "mixed PORT" per HTTPS
+# port. Reused before every write: Serve is shared state, and a port that was
+# all ours when the plan was made can gain another handler (or lose ours)
+# while teardown waits on a --purge confirmation or a retry sleep.
+serve_plan() {
+  awk -v t="$TARGET" '
+    function flush() {
+      if (port != "") {
+        if (n > 0 && mine == n) print "off " port
+        else if (mine > 0) print "mixed " port
+      }
+      port = ""; n = 0; mine = 0
     }
-    port = ""; n = 0; mine = 0
-  }
-  /^[[:space:]]*$/ || /^(\|-- )?tcp:\/\// { flush(); next }
-  index($0, "https://") == 1 {
-    flush()
-    u = $1; sub(/\/$/, "", u)
-    port = match(u, /:[0-9]+$/) ? substr(u, RSTART + 1) : "443"
-    next
-  }
-  port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
-  END { flush() }')"
+    /^[[:space:]]*$/ || /^(\|-- )?tcp:\/\// { flush(); next }
+    index($0, "https://") == 1 {
+      flush()
+      u = $1; sub(/\/$/, "", u)
+      port = match(u, /:[0-9]+$/) ? substr(u, RSTART + 1) : "443"
+      next
+    }
+    port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
+    END { flush() }'
+}
+SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | serve_plan)"
 unpublished=0
 kept=0
 while read -r verdict port; do
@@ -254,13 +273,26 @@ while read -r verdict port; do
     # tailscaled serializes Serve-config writes; a concurrent teardown or
     # publish fails with "etag mismatch", so retry the off a few times.
     tries=0
-    until "$TAILSCALE" serve --https="$port" off >/dev/null 2>&1; do
+    while :; do
+      fresh="$("$TAILSCALE" serve status 2>&1)" \
+        || die "Could not re-read Tailscale Serve status: $fresh"
+      now="$(printf '%s\n' "$fresh" | serve_plan | { grep -E " $port\$" || true; } | awk '{print $1; exit}')"
+      if [ -z "$now" ]; then
+        info "HTTPS :$port was unpublished already (a concurrent teardown?)"
+        break
+      elif [ "$now" != "off" ]; then
+        warn "HTTPS :$port picked up another handler since the plan was made, so it is left on. Drop this service's path from it by hand."
+        kept=$((kept + 1))
+        break
+      elif "$TAILSCALE" serve --https="$port" off >/dev/null 2>&1; then
+        ok "Tailscale Serve: HTTPS :$port off"
+        unpublished=$((unpublished + 1))
+        break
+      fi
       tries=$((tries + 1))
       [ "$tries" -lt 5 ] || die "Tailscale Serve: could not unpublish HTTPS :$port (config busy — re-run teardown.sh)"
       sleep 2
     done
-    ok "Tailscale Serve: HTTPS :$port off"
-    unpublished=$((unpublished + 1))
   else
     warn "HTTPS :$port also serves something else, so it is left on. Drop this service's path from it by hand."
     kept=$((kept + 1))
@@ -306,7 +338,9 @@ if [ "$PURGE" -eq 1 ]; then
     rm -rf -- "$PURGE_DIR" 2>/dev/null || true
     if [ -e "$PURGE_DIR" ]; then
       info "Some files are owned by the container; clearing them with $OPENCLAW_IMAGE"
-      docker run --rm --pull never -v "$PURGE_DIR:/x" --entrypoint sh "$OPENCLAW_IMAGE" \
+      # --user 0: the image's default USER is not guaranteed root, and only
+      # root can delete files owned by every uid the image wrote as.
+      docker run --rm --pull never --user 0 -v "$PURGE_DIR:/x" --entrypoint sh "$OPENCLAW_IMAGE" \
         -c 'find /x -mindepth 1 -delete' >/dev/null 2>&1 \
         || die "Could not clear container-owned files in $PURGE_DIR. Run: sudo rm -rf $PURGE_DIR   then ./teardown.sh --purge again. .env was kept."
       rm -rf -- "$PURGE_DIR" 2>/dev/null || true
