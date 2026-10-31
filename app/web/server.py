@@ -800,10 +800,12 @@ _cpu_lock = threading.Lock()
 # also null until a second sample exists.
 DISK_TTL = 300.0           # disk use drifts on the scale of minutes
 DISK_TIMEOUT = 60.0        # du on a multi-GB tree must not hang its worker
+DISK_MAX_WORKERS = 2       # a cold catalogue must not storm the disk
 
 _disk_samples = {}         # key -> (sampled_at, bytes|None)
-_disk_inflight = set()     # keys whose du worker is still running
+_disk_inflight = set()     # keys whose du worker is running or queued
 _disk_lock = threading.Lock()
+_disk_slots = threading.BoundedSemaphore(DISK_MAX_WORKERS)
 
 # Container ids as `docker ps --no-trunc` prints them. Anything else is
 # dropped rather than pasted into a path this then opens — the same instinct
@@ -987,8 +989,9 @@ def _disk_target(svc, home=None):
     undeployed service reads zero, which is honest). A marker that is a
     FILE under ~/services — the ghapp shape, where
     `~/services/apps/<key>/deployed.json` is the marker and the directory
-    around it holds the state — is measured by its parent. A file anywhere
-    else stands alone. Nothing relative is ever handed to du.
+    around it holds the state — is measured by its parent, including after
+    remove() deletes the marker file but keeps the dir's files. A file
+    anywhere else stands alone. Nothing relative is ever handed to du.
     """
     marker = svc.get("marker")
     if not isinstance(marker, str) or not marker:
@@ -996,11 +999,19 @@ def _disk_target(svc, home=None):
     path = os.path.expanduser(marker)
     if not os.path.isabs(path):
         return None
+    services = os.path.join(home or os.path.expanduser("~"), "services")
+    parent = os.path.dirname(path)
     if os.path.isfile(path):
-        services = os.path.join(home or os.path.expanduser("~"), "services")
-        parent = os.path.dirname(path)
         if parent == services or parent.startswith(services + os.sep):
             return parent
+    elif not os.path.exists(path) \
+            and parent.startswith(services + os.sep) \
+            and os.path.isdir(parent):
+        # A file marker deleted while its dir remains — ghapp's remove()
+        # drops deployed.json but keeps src/.env/data — still occupies disk;
+        # measure the parent rather than report 0. A missing *directory*
+        # marker (whose parent is ~/services itself) stays zero.
+        return parent
     return path
 
 
@@ -1020,10 +1031,15 @@ def _du_bytes(path):
 
 
 def _du_worker(key, target):
-    value = _du_bytes(target) if os.path.exists(target) else 0
-    with _disk_lock:
-        _disk_samples[key] = (time.time(), value)
-        _disk_inflight.discard(key)
+    try:
+        with _disk_slots:
+            value = _du_bytes(target) if os.path.exists(target) else 0
+    except Exception:        # _du_bytes guards du itself; anything else is
+        value = None         # a surprise — cache it as a failed sample and
+    finally:                 # free the key either way so polling retries
+        with _disk_lock:
+            _disk_samples[key] = (time.time(), value)
+            _disk_inflight.discard(key)
 
 
 def _sample_disk(svc):

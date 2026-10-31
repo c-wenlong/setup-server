@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -5366,6 +5367,87 @@ class ResourceDiskTest(ResourceTestBase):
         svc = self.registry_with(None, marker=os.path.join(self.tmp, "gone"))
         self.assertEqual(server._disk_target(svc, home=self.tmp),
                          os.path.join(self.tmp, "gone"))
+
+    def test_a_removed_app_marker_still_measures_its_kept_dir(self):
+        # ghapp's remove() deletes deployed.json but keeps src/.env/data:
+        # the dir still occupies disk, so it stays the du target.
+        apps = os.path.join(self.tmp, "services", "apps", "app")
+        os.makedirs(os.path.join(apps, "data"))
+        marker = os.path.join(apps, "deployed.json")
+        svc = self.registry_with(None, marker=marker)
+        self.assertEqual(server._disk_target(svc, home=self.tmp), apps)
+
+    def test_a_removed_marker_with_no_dir_left_stays_zero(self):
+        marker = os.path.join(self.tmp, "services", "apps", "app",
+                              "deployed.json")
+        svc = self.registry_with(None, marker=marker)
+        self.assertEqual(server._disk_target(svc, home=self.tmp), marker)
+
+    def test_a_missing_dir_marker_is_not_promoted_to_services(self):
+        # `~/services/<name>` gone must not du all of ~/services.
+        svc = self.registry_with(
+            None, marker=os.path.join(self.tmp, "services", "gone"))
+        self.assertEqual(server._disk_target(svc, home=self.tmp),
+                         os.path.join(self.tmp, "services", "gone"))
+
+    def test_a_worker_crash_caches_null_and_frees_the_key(self):
+        def boom(path):
+            self.du_calls.append(path)
+            raise RuntimeError("du exploded")
+
+        server._du_bytes = boom
+        svc = self.registry_with(None, marker=self.tmp)
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertIsNone(self.wait_disk("svc"))
+        # The failed sample is cached for the TTL rather than respawning a
+        # worker on every poll, but the inflight key is released...
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertEqual(self.du_calls, [self.tmp])
+        # ...so once it expires the next poll tries again instead of
+        # serving the stale value forever.
+        server.DISK_TTL = 0.0
+        server._du_bytes = lambda path: (self.du_calls.append(path),
+                                         700000)[1]
+        self.assertIsNone(server._sample_disk(svc))
+        self.assertEqual(self.wait_disk("svc"), 700000)
+        server.DISK_TTL = 300.0   # that last call spawned a refresh; let
+        self.wait_disk("svc")     # it land inside the test
+
+    def test_workers_share_a_bounded_slot_pool(self):
+        gate = threading.Event()
+        started = []
+        real_lock = threading.Lock()
+
+        def blocking(path):
+            with real_lock:
+                started.append(path)
+            gate.wait(5)
+            return 1
+
+        server._du_bytes = blocking
+        dirs = []
+        svcs = []
+        for name in ("a", "b", "c"):
+            target = os.path.join(self.tmp, name)
+            os.makedirs(target)
+            dirs.append(target)
+            svcs.append(self.registry_with(None, key=name, marker=target))
+        try:
+            for svc in svcs:
+                server._sample_disk(svc)
+            deadline = time.time() + 5
+            while len(started) < server.DISK_MAX_WORKERS \
+                    and time.time() < deadline:
+                time.sleep(0.01)
+            # Two workers hold the slots; the third is queued behind them.
+            self.assertEqual(len(started), server.DISK_MAX_WORKERS)
+            with server._disk_lock:
+                self.assertEqual(len(server._disk_inflight), 3)
+        finally:
+            gate.set()
+        for name in ("a", "b", "c"):
+            self.assertEqual(self.wait_disk(name), 1)
+        self.assertEqual(sorted(started), sorted(dirs))
 
 
 class ResourceDuBytesTest(ResourceTestBase):
