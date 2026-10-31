@@ -2,7 +2,7 @@
   "key": "beszel",
   "name": "Beszel",
   "tagline": "Metrics",
-  "group": "infra",
+  "group": "system",
   "icon": "activity",
   "author": "henrygd",
   "url": "https://HOST:8092/",

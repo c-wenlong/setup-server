@@ -304,14 +304,15 @@ def resolve_registry_path(raw, label):
 
 # ------------------------------------------------------------------ overrides
 
-# UI edits (name, description, pinned, hidden, row order) layered over the shipped
-# registry. Kept in one small JSON file so "reset to defaults" is
+# UI edits (name, description, group, pinned, hidden, row order) layered over
+# the shipped registry. Kept in one small JSON file so "reset to defaults" is
 # `rm overrides.json`, and so a redeploy of the repo never clobbers them.
 _overrides_lock = threading.Lock()
 
 
 def load_overrides():
-    """key -> {"name"?, "description"?}. Never raises.
+    """key -> {"name"?, "description"?, "group"?, "pinned"?, "hidden"?}.
+    Never raises.
 
     Missing, corrupt, unreadable, or the wrong shape all degrade to "no
     overrides" — the launcher is the thing you reach for when other things
@@ -336,7 +337,7 @@ def load_overrides():
     for key, entry in services.items():
         if not isinstance(key, str) or not isinstance(entry, dict):
             continue
-        kept = {f: entry[f] for f in ("name", "description")
+        kept = {f: entry[f] for f in ("name", "description", "group")
                 if isinstance(entry.get(f), str)}
         if entry.get("pinned") is True:
             kept["pinned"] = True
@@ -448,6 +449,17 @@ def effective(svc, overrides=None):
     if description is None:
         description = svc.get("description") or ""
     return name, description
+
+
+def effective_group(svc, entry):
+    """Bucket id for a tile: the box's override when present, else the
+    shipped registry `group`. `entry` is the service's overrides row ({} when
+    untouched). Returns None when neither side names a bucket — the grid then
+    sorts the tile under Other, same as a registry row with no group."""
+    gid = entry.get("group") if isinstance(entry, dict) else None
+    if not isinstance(gid, str) or not gid:
+        gid = svc.get("group")
+    return gid if isinstance(gid, str) and gid else None
 
 
 # ------------------------------------------------------------------ usage
@@ -1841,7 +1853,7 @@ def services_payload():
             active = degraded = installed = False
         name, description = effective(svc, overrides)
         oentry = overrides.get(svc.get("key")) or {}
-        gid = svc.get("group")
+        gid = effective_group(svc, oentry)
         services.append({
             "key": svc.get("key"),
             "name": name,
@@ -1956,14 +1968,14 @@ def service_detail(key):
         active = degraded = installed = False
     overrides = load_overrides()
     name, description = effective(svc, overrides)
-    edited = sorted(overrides.get(key, {}))
+    oentry = overrides.get(key) or {}
+    edited = sorted(oentry)
 
     return {
         "key": svc.get("key"),
         "name": name,
         "tagline": svc.get("tagline"),
-        "group": (svc.get("group") if isinstance(svc.get("group"), str)
-                  and svc.get("group") else None),
+        "group": effective_group(svc, oentry),
         "icon": svc.get("icon"),
         "url": resolve_url(svc, host),
         "state": derive_state(svc.get("setup"), installed, active),
@@ -3107,12 +3119,14 @@ def clean_field(field, value, limit, multiline):
 
 
 def patch_service(key, body):
-    """Apply {name?, description?} to overrides.json and return the detail.
+    """Apply {name?, description?, group?, pinned?, hidden?} to
+    overrides.json and return the detail.
 
     An override equal to the shipped default, or blanked out, is *removed*
     rather than stored: the file only ever holds real differences, so
     deleting it really does restore defaults and an unedited service leaves
-    no trace.
+    no trace. `group` must be one of the file-level `groups` catalog ids —
+    an empty value (or the shipped id) restores the registry bucket.
     """
     svc = find_service(key)
     if svc is None:
@@ -3128,6 +3142,16 @@ def patch_service(key, body):
         if field in body:
             edits[field] = clean_field(field, body[field], limit, multiline)
 
+    grp = None
+    if "group" in body:
+        if not isinstance(body["group"], str):
+            raise DeployError(400, "group must be a group id string")
+        grp = body["group"].strip()
+        if grp:
+            known = {item["id"] for item in load_groups()}
+            if grp not in known:
+                raise DeployError(400, "unknown group")
+
     pin = None
     if "pinned" in body:
         if not isinstance(body["pinned"], bool):
@@ -3140,9 +3164,11 @@ def patch_service(key, body):
             raise DeployError(400, "hidden must be a boolean")
         hid = body["hidden"]
 
-    if edits or pin is not None or hid is not None:
+    if edits or grp is not None or pin is not None or hid is not None:
         defaults = {"name": svc.get("name") or "",
-                    "description": svc.get("description") or ""}
+                    "description": svc.get("description") or "",
+                    "group": (svc.get("group")
+                              if isinstance(svc.get("group"), str) else "")}
         # Read-modify-write under one lock so two concurrent PATCHes (two
         # phones, two tabs) cannot lose each other's edit.
         with _overrides_lock:
@@ -3153,6 +3179,11 @@ def patch_service(key, body):
                     entry.pop(field, None)
                 else:
                     entry[field] = text
+            if grp is not None:
+                if not grp or grp == defaults["group"]:
+                    entry.pop("group", None)
+                else:
+                    entry["group"] = grp
             if pin is True:
                 entry["pinned"] = True
             elif pin is False:
@@ -3168,6 +3199,7 @@ def patch_service(key, body):
             _write_overrides(data)
         log("patched %s: %s" % (
             key, ", ".join(sorted(edits) +
+                           (["group"] if grp is not None else []) +
                            (["pinned"] if pin is not None else []) +
                            (["hidden"] if hid is not None else []))))
     return service_detail(key)

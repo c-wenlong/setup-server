@@ -2,7 +2,7 @@
   "key": "forgejo",
   "name": "Forgejo",
   "tagline": "Git",
-  "group": "knowledge",
+  "group": "dev",
   "icon": "git",
   "author": "forgejo",
   "url": "https://HOST:3000/",

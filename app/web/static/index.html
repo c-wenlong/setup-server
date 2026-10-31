@@ -158,7 +158,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
       <div class="d-main">
 
      <section class="d-sec">
-       <h3 class="d-sec-h">Name and description</h3>
+       <h3 class="d-sec-h">Name, category and description</h3>
 
        <p class="field">
          <label class="field-label" for="d-name">Name</label>
@@ -167,13 +167,19 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
        </p>
 
        <p class="field">
+         <label class="field-label" for="d-group">Category</label>
+         <select class="field-input" id="d-group"></select>
+       </p>
+
+       <p class="field">
          <label class="field-label" for="d-desc">Description</label>
          <textarea class="field-input field-area" id="d-desc" rows="4" spellcheck="false"></textarea>
        </p>
 
        <p class="field-hint">
-         Saved on the box, not in the repo. Clear a field and it goes back to the
-         name shipped in <code>services.json</code>.
+         Saved on the box, not in the repo. Clear a field, or pick the shipped
+         default category, and it goes back to what
+         <code>services.json</code> carries.
        </p>
        <p class="field-status" id="d-save" role="status" aria-live="polite"></p>
      </section>

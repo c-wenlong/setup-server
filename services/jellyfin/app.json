@@ -2,7 +2,7 @@
   "key": "jellyfin",
   "name": "Jellyfin",
   "tagline": "Media",
-  "group": "knowledge",
+  "group": "files",
   "icon": "film",
   "author": "jellyfin",
   "url": "https://HOST:8096/",

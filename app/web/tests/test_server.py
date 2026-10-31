@@ -1434,14 +1434,20 @@ class OverridesTest(SandboxTest):
 
     def setUp(self):
         super().setUp()
-        self.write_registry({"services": [
-            {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "camera",
-             "url": None, "health": None, "marker": None, "setup": None,
-             "env": None, "description": "Shipped description."},
-            {"key": "bravo", "name": "Bravo", "tagline": "t", "icon": "code",
-             "url": None, "health": None, "marker": None, "setup": None,
-             "env": None, "description": "Bravo default."},
-        ]})
+        self.write_registry({
+            "groups": [
+                {"id": "daily", "label": "Daily"},
+                {"id": "ai", "label": "AI"},
+            ],
+            "services": [
+                {"key": "alpha", "name": "Alpha", "tagline": "t", "icon": "camera",
+                 "group": "daily",
+                 "url": None, "health": None, "marker": None, "setup": None,
+                 "env": None, "description": "Shipped description."},
+                {"key": "bravo", "name": "Bravo", "tagline": "t", "icon": "code",
+                 "url": None, "health": None, "marker": None, "setup": None,
+                 "env": None, "description": "Bravo default."},
+            ]})
         server.magicdns_host = lambda: "box.ts.net"
         server.probe_all = lambda urls: {}
 
@@ -1605,6 +1611,79 @@ class OverridesTest(SandboxTest):
         self.assertTrue(self.tile("alpha")["user_hidden"])
         self.assertEqual(self.read_overrides_file()["services"]["alpha"],
                          {"name": "Photos", "hidden": True})
+
+    # ---- group
+
+    def test_group_override_roundtrips_through_detail_and_grid(self):
+        detail = server.patch_service("alpha", {"group": "ai"})
+        self.assertEqual(detail["group"], "ai")
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"group": "ai"})
+        self.assertEqual(self.tile("alpha")["group"], "ai")
+        self.assertEqual(server.service_detail("alpha")["meta"]["edited"],
+                         ["group"])
+
+    def test_group_alongside_a_rename_keeps_both(self):
+        server.patch_service("alpha", {"name": "Photos", "group": "ai"})
+        detail = server.service_detail("alpha")
+        self.assertEqual(detail["name"], "Photos")
+        self.assertEqual(detail["group"], "ai")
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"name": "Photos", "group": "ai"})
+
+    def test_setting_the_shipped_group_stores_nothing(self):
+        server.patch_service("alpha", {"group": "daily"})
+        self.assertEqual(self.read_overrides_file()["services"], {})
+        self.assertEqual(server.service_detail("alpha")["meta"]["edited"], [])
+
+    def test_clearing_group_restores_the_shipped_bucket(self):
+        server.patch_service("alpha", {"group": "ai"})
+        detail = server.patch_service("alpha", {"group": ""})
+        self.assertEqual(detail["group"], "daily")
+        self.assertEqual(self.tile("alpha")["group"], "daily")
+        self.assertEqual(self.read_overrides_file()["services"], {})
+
+    def test_group_on_a_bucketless_service(self):
+        # bravo ships with no group (Other): a pick buckets it, clearing
+        # sends it back to Other — group null on detail and tile alike.
+        self.assertIsNone(self.tile("bravo")["group"])
+        detail = server.patch_service("bravo", {"group": "ai"})
+        self.assertEqual(detail["group"], "ai")
+        detail = server.patch_service("bravo", {"group": ""})
+        self.assertIsNone(detail["group"])
+        self.assertIsNone(self.tile("bravo")["group"])
+        self.assertEqual(self.read_overrides_file()["services"], {})
+
+    def test_group_must_be_a_known_catalog_id(self):
+        for bad in ("nope", "Daily", "other"):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.patch_service("alpha", {"group": bad})
+            self.assertEqual(ctx.exception.status, 400)
+        self.assertFalse(os.path.exists(server.OVERRIDES_PATH))
+
+    def test_group_must_be_a_string(self):
+        for bad in (1, True, ["ai"], {"g": "ai"}):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.patch_service("alpha", {"group": bad})
+            self.assertEqual(ctx.exception.status, 400)
+        self.assertFalse(os.path.exists(server.OVERRIDES_PATH))
+
+    def test_a_rename_does_not_wipe_the_group(self):
+        server.patch_service("alpha", {"group": "ai"})
+        server.patch_service("alpha", {"name": "Photos"})
+        self.assertEqual(self.tile("alpha")["group"], "ai")
+        self.assertEqual(self.read_overrides_file()["services"]["alpha"],
+                         {"name": "Photos", "group": "ai"})
+
+    def test_group_survives_an_unrelated_write(self):
+        # The services map rewrite preserves the row order; a group override
+        # must survive it like name and pinned do.
+        server.patch_service("alpha", {"group": "ai"})
+        server.save_order(["bravo", "alpha"])
+        self.assertEqual(self.tile("alpha")["group"], "ai")
+        doc = self.read_overrides_file()
+        self.assertEqual(doc["services"]["alpha"], {"group": "ai"})
+        self.assertEqual(doc["order"], ["bravo", "alpha"])
 
     # ---- validation
 

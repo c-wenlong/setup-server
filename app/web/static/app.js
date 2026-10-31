@@ -58,10 +58,12 @@
      kept if an older launcher process has not been restarted yet — otherwise
      the Categories menu opens as an empty box. */
   var DEFAULT_GROUPS = [
-    { id: 'daily',     label: 'Daily' },
-    { id: 'ai',        label: 'AI & automation' },
-    { id: 'knowledge', label: 'Knowledge & media' },
-    { id: 'infra',     label: 'Infrastructure' }
+    { id: 'mine',         label: 'Mine' },
+    { id: 'files',        label: 'Files & media' },
+    { id: 'productivity', label: 'Productivity' },
+    { id: 'ai',           label: 'AI' },
+    { id: 'dev',          label: 'Dev & automation' },
+    { id: 'system',       label: 'System' }
   ];
 
   var services = [];
@@ -81,6 +83,7 @@
   var revealed = {};         // '=' + var name -> value. In memory, this page view only.
   var savedName = '';
   var savedDesc = '';
+  var savedGroup = '';       // the effective bucket id ('' = nothing shipped)
   var savedFlash = null;
   var gridScroll = 0;
   var navDepth = 0;          // in-app hash pushes, so Back knows where to go
@@ -114,6 +117,7 @@
   var elDTitle  = $('d-title');
   var elDSub    = $('d-sub');
   var elDName   = $('d-name');
+  var elDGroup  = $('d-group');
   var elDDesc   = $('d-desc');
   var elDSave   = $('d-save');
   var elEnvSec  = $('d-env-sec');
@@ -1604,6 +1608,25 @@
 
   /* --- editing --- */
 
+  /* Rebuild the Category select from the resolved groups catalog — the same
+     list the grid's filter pills read. The leading empty option is the reset
+     path: PATCHing '' clears the override and the tile drops back to the
+     bucket services.json ships, exactly like clearing a renamed title. */
+  function paintGroupOptions() {
+    if (!elDGroup) return;
+    elDGroup.textContent = '';
+    var reset = document.createElement('option');
+    reset.value = '';
+    text(reset, 'Shipped default');
+    elDGroup.appendChild(reset);
+    for (var i = 0; i < groups.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = groups[i].id;
+      text(opt, groups[i].label || groups[i].id);
+      elDGroup.appendChild(opt);
+    }
+  }
+
   /* Descriptions are paragraphs, not one-liners: grow the box to the text
      rather than making the reader scroll a four-row window. */
   function autoGrow(el) {
@@ -1665,18 +1688,29 @@
       var d = res.data;
       if (typeof d.name === 'string') savedName = d.name;
       if (typeof d.description === 'string') savedDesc = d.description;
+      /* The detail payload always carries the effective group; a group PATCH
+         returns the shipped id when the override was dropped. */
+      if (typeof d.group === 'string' || d.group === null) {
+        savedGroup = (typeof d.group === 'string' && d.group) || '';
+      }
 
       /* keep the grid honest even if the edit landed as we navigated away */
       var listed = find(key);
       if (listed && savedName) { listed.name = savedName; }
       if (listed && typeof d.description === 'string') listed.description = savedDesc;
+      if (listed) listed.group = savedGroup || null;
       if (loaded) notifyServices();
 
       if (!live) return;
 
       if (document.activeElement !== elDName) elDName.value = savedName;
+      if (elDGroup && document.activeElement !== elDGroup) elDGroup.value = savedGroup;
       if (document.activeElement !== elDDesc) { elDDesc.value = savedDesc; autoGrow(elDDesc); }
-      if (detailSvc) { detailSvc.name = savedName || detailSvc.name; paintHead(detailSvc); }
+      if (detailSvc) {
+        detailSvc.name = savedName || detailSvc.name;
+        detailSvc.group = savedGroup || null;
+        paintHead(detailSvc);
+      }
 
       var restored = value === '';
       saveStatus(restored ? 'Cleared — back to the shipped default.' : 'Saved.', 'is-saved');
@@ -1710,6 +1744,16 @@
     else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); elDDesc.blur(); }
   });
 
+  /* The select commits on pick, not on blur: a category move is one PATCH to
+     the same overrides.json entry a rename writes. The empty option sends ''
+     which clears the override — the reply carries the shipped bucket back
+     and the select snaps to it. */
+  if (elDGroup) elDGroup.addEventListener('change', function () {
+    if (!detailKey || elDGroup.disabled) return;
+    if (elDGroup.value === savedGroup) return;
+    patchField('group', elDGroup.value, elDGroup);
+  });
+
   /* --- loading a detail --- */
 
   function resetDetail() {
@@ -1730,11 +1774,18 @@
     }
     savedName = '';
     savedDesc = '';
+    savedGroup = '';
     elDName.value = '';
     elDDesc.value = '';
     elDDesc.style.height = '';
     elDName.disabled = true;
     elDDesc.disabled = true;
+    if (elDGroup) {
+      elDGroup.textContent = '';
+      elDGroup.value = '';
+      elDGroup.disabled = true;
+      elDGroup.setAttribute('aria-invalid', 'false');
+    }
     elDName.setAttribute('aria-invalid', 'false');
     elDDesc.setAttribute('aria-invalid', 'false');
     saveStatus('', '');
@@ -1799,10 +1850,29 @@
 
     savedName = typeof d.name === 'string' ? d.name : '';
     savedDesc = typeof d.description === 'string' ? d.description : '';
+    savedGroup = (typeof d.group === 'string' && d.group) || '';
     elDName.value = savedName;
     elDDesc.value = savedDesc;
     elDName.disabled = false;
     elDDesc.disabled = false;
+    paintGroupOptions();
+    if (elDGroup) {
+      /* The effective bucket may be an id the groups catalog no longer
+         lists (a registry shrink after an override was saved) — keep it
+         selectable so the select shows what the box actually serves. */
+      var found = false;
+      for (var i = 0; i < elDGroup.options.length; i++) {
+        if (elDGroup.options[i].value === savedGroup) { found = true; break; }
+      }
+      if (savedGroup && !found) {
+        var extra = document.createElement('option');
+        extra.value = savedGroup;
+        text(extra, savedGroup);
+        elDGroup.appendChild(extra);
+      }
+      elDGroup.value = savedGroup;
+      elDGroup.disabled = groups.length === 0;
+    }
     autoGrow(elDDesc);
 
     paintEnv(d.env, view.key);

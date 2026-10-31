@@ -2,7 +2,7 @@
   "key": "seafile",
   "name": "Seafile",
   "tagline": "Files",
-  "group": "daily",
+  "group": "files",
   "icon": "folder",
   "author": "haiwen",
   "url": "https://HOST:8443/",

@@ -2,7 +2,7 @@
   "key": "stirling-pdf",
   "name": "Stirling PDF",
   "tagline": "PDF",
-  "group": "daily",
+  "group": "files",
   "icon": "stirling-pdf",
   "author": "Stirling-Tools",
   "url": "https://HOST:8103/",
