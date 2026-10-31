@@ -4,6 +4,7 @@
   "tagline": "Study",
   "group": "mine",
   "icon": "book",
+  "favicon": "/icon.png",
   "author": "c-wenlong",
   "url": "https://HOST:8107/",
   "health": "http://127.0.0.1:8107/",

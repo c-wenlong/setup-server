@@ -801,6 +801,30 @@ def resolve_health(svc):
     return substitute_env(svc.get("health"), service_env(svc))
 
 
+def resolve_favicon(svc, host):
+    """Manifest favicon -> concrete icon URL for the tile's <img>, or None.
+
+    A relative reference joins against the tile's url, so "favicon.svg" is
+    next to it and "/favicon.svg" is at the service root; an absolute URL
+    stands alone and needs no url. Only http(s) survives — the frontend
+    puts the result into <img src> verbatim.
+    """
+    raw = svc.get("favicon")
+    if not raw:
+        return None
+    env = service_env(svc)
+    ref = substitute_host(substitute_env(raw, env), host)
+    if urllib.parse.urlsplit(ref).scheme in ("http", "https"):
+        return ref
+    base = resolve_url(svc, host)
+    if not base:
+        return None
+    url = urllib.parse.urljoin(base, ref)
+    if urllib.parse.urlsplit(url).scheme in ("http", "https"):
+        return url
+    return None
+
+
 # ------------------------------------------------------------------ probes
 
 _probe_cache = {}          # url -> (checked_at, ok)
@@ -1870,6 +1894,11 @@ def services_payload():
             # tab. Always present, null when the registry row has none.
             "author": svc.get("author"),
             "icon": svc.get("icon"),
+            # Live favicon URL for tiles that opt in: the <img> shows the
+            # service's own current mark, so a favicon update in that repo
+            # propagates here instead of waiting for a re-vendor. Falls
+            # back to the vendored mark, then the drawn glyph.
+            "favicon": resolve_favicon(svc, host),
             "url": resolve_url(svc, host),
             "state": derive_state(svc.get("setup"), installed, active),
             "installed": installed,
@@ -1977,6 +2006,7 @@ def service_detail(key):
         "tagline": svc.get("tagline"),
         "group": effective_group(svc, oentry),
         "icon": svc.get("icon"),
+        "favicon": resolve_favicon(svc, host),
         "url": resolve_url(svc, host),
         "state": derive_state(svc.get("setup"), installed, active),
         "installed": installed,
@@ -4384,21 +4414,33 @@ def _kuma_steps(action, monitors, on_failure=False):
     return steps
 
 
-def _force_argv(part):
+def _force_argvs(part):
     """SIGKILL-level teardown for one part — umbreld's `force-stop`.
 
     Runs only after the normal stop already failed (see _run_steps): a
     wedged container or unit must not be able to hold the service's stop,
-    or the retry of it, hostage. `docker kill` where `docker stop` failed,
-    `systemctl --user kill` for a unit. A part that is simply gone fails
-    this too — fine, there was nothing to force. Never attached to a
+    or the retry of it, hostage. Each argv keeps the part DOWN, not just
+    dead: a bare `docker kill` or `systemctl kill` is undone by the
+    restart policy (unless-stopped / Restart=always) as soon as the
+    process is gone. `docker stop --time 0` is the manager's own kill —
+    immediate SIGKILL with the container marked stopped, so the restart
+    policy stays out of it. A unit needs the sequence: kill now, `stop`
+    to cancel the restart systemd schedules on the death (and to kill
+    whatever raced back up), `disable` so the boot intent matches the
+    `disable --now` that was asked for. A part that is simply gone fails
+    these too — fine, there was nothing to force. Never attached to a
     remove step: teardown.sh owns its own refuse-before-changing safety,
     and killing a service its stop_guard shielded (AdGuard is the
     tailnet's DNS) would be exactly the outage the guard exists for.
     """
     if part["kind"] == "container":
-        return sg_docker(["docker", "kill", part["name"]])
-    return ["systemctl", "--user", "kill", "--signal=SIGKILL", part["name"]]
+        return [sg_docker(["docker", "stop", "--time", "0", part["name"]])]
+    unit = part["name"]
+    return [
+        ["systemctl", "--user", "kill", "--signal=SIGKILL", unit],
+        ["systemctl", "--user", "stop", unit],
+        ["systemctl", "--user", "disable", unit],
+    ]
 
 
 def _part_step(part, verb):
@@ -4422,7 +4464,7 @@ def _part_step(part, verb):
     step = {"argv": argv, "optional": part["optional"], "always": False,
             "env": None, "attempts": 2}
     if verb == "stop":
-        step["fallback"] = _force_argv(part)
+        step["fallback"] = _force_argvs(part)
     return step
 
 
@@ -4499,10 +4541,10 @@ def _run_steps(job, steps):
 
     `attempts` retries an idempotent step in place (umbreld's pRetry on its
     app scripts): a transient dockerd or registry failure should not fail
-    the job. `fallback` is a per-part force-stop argv that fires on abort —
-    the failed part's own fallback first, then the fallbacks of every part
-    the abort skipped, so the whole service still ends down rather than
-    half-up behind a wedged container.
+    the job. `fallback` is a per-part force-stop argv list that fires on
+    abort — the failed part's own fallback first, then the fallbacks of
+    every part the abort skipped, so the whole service still ends down
+    rather than half-up behind a wedged container.
     """
     code = 0
     try:
@@ -4557,10 +4599,9 @@ def _run_steps(job, steps):
         return result
 
     def force(step):
-        """The step's force-stop argv, if it carries one."""
-        fallback = step.get("fallback")
-        if fallback:
-            run_one({"env": None, "cwd": None}, argv=fallback)
+        """The step's force-stop argvs, if it carries them."""
+        for argv in step.get("fallback") or ():
+            run_one({"env": None, "cwd": None}, argv=argv)
 
     try:
         for index, step in enumerate(steps):
