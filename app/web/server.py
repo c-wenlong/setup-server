@@ -801,6 +801,30 @@ def resolve_health(svc):
     return substitute_env(svc.get("health"), service_env(svc))
 
 
+def resolve_favicon(svc, host):
+    """Manifest favicon -> concrete icon URL for the tile's <img>, or None.
+
+    A relative reference joins against the tile's url, so "favicon.svg" is
+    next to it and "/favicon.svg" is at the service root; an absolute URL
+    stands alone and needs no url. Only http(s) survives — the frontend
+    puts the result into <img src> verbatim.
+    """
+    raw = svc.get("favicon")
+    if not raw:
+        return None
+    env = service_env(svc)
+    ref = substitute_host(substitute_env(raw, env), host)
+    if urllib.parse.urlsplit(ref).scheme in ("http", "https"):
+        return ref
+    base = resolve_url(svc, host)
+    if not base:
+        return None
+    url = urllib.parse.urljoin(base, ref)
+    if urllib.parse.urlsplit(url).scheme in ("http", "https"):
+        return url
+    return None
+
+
 # ------------------------------------------------------------------ probes
 
 _probe_cache = {}          # url -> (checked_at, ok)
@@ -1870,6 +1894,11 @@ def services_payload():
             # tab. Always present, null when the registry row has none.
             "author": svc.get("author"),
             "icon": svc.get("icon"),
+            # Live favicon URL for tiles that opt in: the <img> shows the
+            # service's own current mark, so a favicon update in that repo
+            # propagates here instead of waiting for a re-vendor. Falls
+            # back to the vendored mark, then the drawn glyph.
+            "favicon": resolve_favicon(svc, host),
             "url": resolve_url(svc, host),
             "state": derive_state(svc.get("setup"), installed, active),
             "installed": installed,
@@ -1977,6 +2006,7 @@ def service_detail(key):
         "tagline": svc.get("tagline"),
         "group": effective_group(svc, oentry),
         "icon": svc.get("icon"),
+        "favicon": resolve_favicon(svc, host),
         "url": resolve_url(svc, host),
         "state": derive_state(svc.get("setup"), installed, active),
         "installed": installed,

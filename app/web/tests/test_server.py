@@ -548,6 +548,66 @@ class EnvSubstitutionTest(SandboxTest):
             subprocess.run = real
 
 
+class FaviconResolutionTest(SandboxTest):
+    """resolve_favicon: a manifest `favicon` joined onto the tile's url."""
+
+    def test_relative_path_joins_against_url(self):
+        svc = {"key": "a", "url": "https://HOST:8098/",
+               "favicon": "favicon.svg"}
+        self.assertEqual(server.resolve_favicon(svc, "box.ts.net"),
+                         "https://box.ts.net:8098/favicon.svg")
+
+    def test_root_relative_path_ignores_url_path(self):
+        # design-systems tiles /gallery/ but its favicon sits at the root.
+        svc = {"key": "a", "url": "https://HOST:8108/gallery/",
+               "favicon": "/assets/favicon.svg"}
+        self.assertEqual(server.resolve_favicon(svc, "box.ts.net"),
+                         "https://box.ts.net:8108/assets/favicon.svg")
+
+    def test_absolute_url_needs_no_tile_url(self):
+        svc = {"key": "a", "url": None,
+               "favicon": "https://HOST:8098/favicon.svg"}
+        self.assertEqual(server.resolve_favicon(svc, "box.ts.net"),
+                         "https://box.ts.net:8098/favicon.svg")
+
+    def test_env_tokens_resolve_like_url(self):
+        self.make_env("alpha/.env", "HTTPS_PORT=8443\n")
+        svc = {"key": "alpha", "env": "alpha/.env",
+               "url": "https://HOST:{HTTPS_PORT:8098}/",
+               "favicon": "/favicon.svg"}
+        self.assertEqual(server.resolve_favicon(svc, "box.ts.net"),
+                         "https://box.ts.net:8443/favicon.svg")
+
+    def test_absent_or_relative_without_url_is_none(self):
+        self.assertIsNone(server.resolve_favicon(
+            {"key": "a", "url": "https://HOST:1/"}, "box.ts.net"))
+        self.assertIsNone(server.resolve_favicon(
+            {"key": "a", "url": None, "favicon": "/favicon.svg"},
+            "box.ts.net"))
+
+    def test_non_http_scheme_never_reaches_an_img(self):
+        for raw in ("javascript:alert(1)", "data:text/html;base64,PGI+",
+                    "file:///etc/passwd"):
+            svc = {"key": "a", "url": "https://HOST:1/", "favicon": raw}
+            self.assertIsNone(server.resolve_favicon(svc, "box.ts.net"), raw)
+
+    def test_payload_carries_the_resolved_url(self):
+        self.write_registry({"services": [
+            {"key": "a", "name": "A", "tagline": "t", "icon": "camera",
+             "favicon": "/favicon.svg",
+             "url": "https://HOST:8098/", "health": None,
+             "marker": None, "setup": None},
+            {"key": "b", "name": "B", "tagline": "t", "icon": "code",
+             "url": "https://HOST:8099/", "health": None,
+             "marker": None, "setup": None},
+        ]})
+        server.magicdns_host = lambda: "box.ts.net"
+        tiles = {s["key"]: s for s in server.services_payload()["services"]}
+        self.assertEqual(tiles["a"]["favicon"],
+                         "https://box.ts.net:8098/favicon.svg")
+        self.assertIsNone(tiles["b"]["favicon"])
+
+
 # ---------------------------------------------------------------- allowlist
 
 class ScriptResolutionTest(SandboxTest):
@@ -721,9 +781,10 @@ class ServiceJobFieldTest(SandboxTest):
 
     # The identity fields, in payload order. `description` joined them so the
     # grid's hover tooltip does not have to fetch each service individually;
-    # `author` joined them so the 'c-wenlong' tab can filter on it.
+    # `author` joined them so the 'c-wenlong' tab can filter on it; `favicon`
+    # sits next to `icon` so the tile can load the service's own mark.
     EIGHT = ["key", "name", "tagline", "group", "description", "author",
-             "icon", "url", "state", "installed", "active"]
+             "icon", "favicon", "url", "state", "installed", "active"]
 
     def setUp(self):
         super().setUp()
@@ -835,11 +896,11 @@ class ServiceJobFieldTest(SandboxTest):
         self.assertEqual(before, after)
 
     def test_no_field_beyond_the_contract_was_added(self):
-        # The whole list contract in one assertion: the original eight, then
-        # job and control, then the three v3 keys, then the v5 receipt, then
-        # v9's hidden, and the user-hidden shelf flag after pinned.
-        # Anything else appearing here is a key the frontend was never told
-        # about.
+        # The whole list contract in one assertion: the identity fields
+        # (icon's live sibling favicon among them), then job and control,
+        # then the three v3 keys, then the v5 receipt, then v9's hidden,
+        # and the user-hidden shelf flag after pinned. Anything else
+        # appearing here is a key the frontend was never told about.
         server.start_deploy("alpha")
         for tile in self.tiles().values():
             self.assertEqual(list(tile), self.EIGHT + [
@@ -979,7 +1040,8 @@ class HttpTest(SandboxTest):
         svc = doc["services"][0]
         self.assertEqual(sorted(svc), ["active", "author", "control",
                                        "degraded", "deployed_at",
-                                       "description", "github", "group", "hidden",
+                                       "description", "favicon", "github",
+                                       "group", "hidden",
                                        "icon", "installed", "job", "key",
                                        "name", "pinned", "receipt", "removable",
                                        "resources",
@@ -996,7 +1058,8 @@ class HttpTest(SandboxTest):
         doc = json.loads(self.get("/api/services")[1])
         self.assertEqual(list(doc["services"][0]),
                          ["key", "name", "tagline", "group", "description",
-                          "author", "icon", "url", "state", "installed",
+                          "author", "icon", "favicon", "url", "state",
+                          "installed",
                           "active", "degraded", "job", "control", "usage",
                           "deployed_at",
                           "resources", "receipt", "removable", "updates",
@@ -1344,7 +1407,7 @@ class DetailTest(SandboxTest):
         detail = server.service_detail("alpha")
         self.assertEqual(sorted(detail), [
             "active", "control", "degraded", "deployed_at", "description",
-            "env", "group",
+            "env", "favicon", "group",
             "icon", "installed", "job", "key", "meta", "name", "receipt",
             "removable", "resources", "state", "tagline", "updates", "url", "usage"])
         self.assertEqual(detail["key"], "alpha")
@@ -1356,7 +1419,8 @@ class DetailTest(SandboxTest):
     def test_includes_the_nine_list_fields_verbatim(self):
         detail = server.service_detail("alpha")
         tile = {s["key"]: s for s in server.services_payload()["services"]}["alpha"]
-        for field in ("key", "name", "tagline", "group", "icon", "url",
+        for field in ("key", "name", "tagline", "group", "icon", "favicon",
+                      "url",
                       "state", "installed", "active", "degraded", "job",
                       "control",
                       "usage", "deployed_at", "resources"):
