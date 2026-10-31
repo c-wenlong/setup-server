@@ -672,6 +672,53 @@ def substitute_host(url, host):
     return url.replace("HOST", host)
 
 
+# {NAME|NAME2:default} in a manifest url/health: the first NAME the service's
+# .env actually sets wins, else the literal after ':'. That is how a tile
+# follows a port the deploy moved — LOCAL_PORT=9120 in .env re-points
+# {LOCAL_PORT:9119} at 9120, and {HTTPS_PORT|LOCAL_PORT:9119} honours an
+# explicitly split publish port while still following a lone LOCAL_PORT move.
+_ENV_TOKEN_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_|]*)(?::([^}]*))?\}")
+
+
+def service_env(svc):
+    """Parsed .env for url/health templating, or {} — never raises. This is
+    on the hot grid path, so a missing or refused file simply means every
+    token falls through to its :default."""
+    try:
+        return read_env(svc)
+    except DeployError:
+        return {}
+
+
+def substitute_env(url, env):
+    """Resolve {NAME|NAME2:default} tokens against a parsed .env dict. A
+    token with no default that resolves nothing is left verbatim so a typo
+    shows up as a broken URL instead of silently pointing somewhere wrong."""
+    if not url or "{" not in url:
+        return url
+
+    def repl(match):
+        for name in match.group(1).split("|"):
+            value = env.get(name)
+            if value is not None:
+                return value
+        return match.group(2) if match.group(2) is not None else match.group(0)
+
+    return _ENV_TOKEN_RE.sub(repl, url)
+
+
+def resolve_url(svc, host):
+    """Manifest url -> concrete URL: .env tokens first, then HOST."""
+    return substitute_host(
+        substitute_env(svc.get("url"), service_env(svc)), host)
+
+
+def resolve_health(svc):
+    """Manifest health -> concrete probe URL (.env tokens only — health is
+    always loopback and never carries HOST)."""
+    return substitute_env(svc.get("health"), service_env(svc))
+
+
 # ------------------------------------------------------------------ probes
 
 _probe_cache = {}          # url -> (checked_at, ok)
@@ -1268,7 +1315,7 @@ def system_stats():
 def services_payload():
     host = magicdns_host()
     registry = load_registry()
-    health_urls = [s["health"] for s in registry if s.get("health")]
+    health_urls = [resolve_health(s) for s in registry if s.get("health")]
     probes = probe_all(health_urls)
     # One in-memory pass over the job registry for the whole payload; see
     # jobs_by_key() for why this stays cheap enough to poll every 30s.
@@ -1283,7 +1330,7 @@ def services_payload():
 
     services = []
     for svc in registry:
-        health = svc.get("health")
+        health = resolve_health(svc)
         resources = service_resources(svc)
         if health:
             active = bool(probes.get(health, False))
@@ -1322,7 +1369,7 @@ def services_payload():
             # tab. Always present, null when the registry row has none.
             "author": svc.get("author"),
             "icon": svc.get("icon"),
-            "url": substitute_host(svc.get("url"), host),
+            "url": resolve_url(svc, host),
             "state": derive_state(svc.get("setup"), installed, active),
             "installed": installed,
             "active": active,
@@ -1387,7 +1434,7 @@ def service_detail(key):
     if svc is None:
         return None
     host = magicdns_host()
-    health = svc.get("health")
+    health = resolve_health(svc)
     probes = probe_all([health]) if health else {}
     resources = service_resources(svc)
     # Same derivation as the grid: a probe decides when one exists, a live
@@ -1416,7 +1463,7 @@ def service_detail(key):
         "group": (svc.get("group") if isinstance(svc.get("group"), str)
                   and svc.get("group") else None),
         "icon": svc.get("icon"),
-        "url": substitute_host(svc.get("url"), host),
+        "url": resolve_url(svc, host),
         "state": derive_state(svc.get("setup"), installed, active),
         "installed": installed,
         "active": active,
@@ -3926,7 +3973,7 @@ def start_action(key, action):
             raise DeployError(403, "this service has no teardown.sh yet, so "
                                    "it can only be removed by hand (see its "
                                    "TROUBLESHOOT.md)")
-        health = svc.get("health")
+        health = resolve_health(svc)
         active = bool(health) and probe_all([health]).get(health, False)
         if not ((active or marker_exists(svc.get("marker")))
                 and not is_removed(load_receipt(key), active)):

@@ -426,6 +426,62 @@ class HostSubstitutionTest(SandboxTest):
     def test_null_url_stays_null(self):
         self.assertIsNone(server.substitute_host(None, "box.ts.net"))
 
+
+class EnvSubstitutionTest(SandboxTest):
+    """{NAME|NAME2:default} in url/health resolves against the service .env."""
+
+    def test_var_and_default(self):
+        self.assertEqual(
+            server.substitute_env("http://x:{P:1}/", {"P": "2"}), "http://x:2/")
+        self.assertEqual(
+            server.substitute_env("http://x:{P:1}/", {}), "http://x:1/")
+
+    def test_first_present_name_wins(self):
+        self.assertEqual(
+            server.substitute_env(":{A|B:9}", {"B": "3"}), ":3")
+        self.assertEqual(
+            server.substitute_env(":{A|B:9}", {"A": "1", "B": "3"}), ":1")
+        self.assertEqual(server.substitute_env(":{A|B:9}", {}), ":9")
+
+    def test_token_without_default_stays_verbatim(self):
+        self.assertEqual(server.substitute_env(":{A}", {}), ":{A}")
+
+    def test_plain_url_and_null_untouched(self):
+        self.assertEqual(
+            server.substitute_env("https://x:5/", {"P": "2"}), "https://x:5/")
+        self.assertIsNone(server.substitute_env(None, {}))
+
+    def test_env_file_repoints_tile_and_health(self):
+        self.make_env("alpha/.env", "LOCAL_PORT=9120\nAPI_PORT=8643\n")
+        svc = {"key": "alpha", "env": "alpha/.env",
+               "url": "https://HOST:{HTTPS_PORT|LOCAL_PORT:9119}/",
+               "health": "http://127.0.0.1:{API_PORT:8642}/health"}
+        self.assertEqual(server.resolve_health(svc),
+                         "http://127.0.0.1:8643/health")
+        self.assertEqual(server.resolve_url(svc, "box.ts.net"),
+                         "https://box.ts.net:9120/")
+
+    def test_explicit_https_port_beats_local_port(self):
+        self.make_env("alpha/.env", "LOCAL_PORT=9120\nHTTPS_PORT=8443\n")
+        svc = {"key": "alpha", "env": "alpha/.env",
+               "url": "https://HOST:{HTTPS_PORT|LOCAL_PORT:9119}/"}
+        self.assertEqual(server.resolve_url(svc, "box.ts.net"),
+                         "https://box.ts.net:8443/")
+
+    def test_missing_env_file_uses_defaults(self):
+        svc = {"key": "alpha", "env": "alpha/.env",
+               "url": "https://HOST:{HTTPS_PORT|LOCAL_PORT:9119}/",
+               "health": "http://127.0.0.1:{API_PORT:8642}/health"}
+        self.assertEqual(server.resolve_health(svc),
+                         "http://127.0.0.1:8642/health")
+        self.assertEqual(server.resolve_url(svc, "box.ts.net"),
+                         "https://box.ts.net:9119/")
+
+    def test_no_env_field_uses_defaults(self):
+        svc = {"key": "alpha", "url": "https://HOST:{LOCAL_PORT:9119}/"}
+        self.assertEqual(server.resolve_url(svc, "box.ts.net"),
+                         "https://box.ts.net:9119/")
+
     def test_payload_substitutes(self):
         self.write_registry({"services": [
             {"key": "a", "name": "A", "tagline": "t", "icon": "camera",

@@ -63,6 +63,7 @@ out_lacks()  { ! grep -qi "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
+env_lacks()  { ! grep -q "$1" "$SVC/.env"; }
 
 # No `stat -c` without a `stat -f` fallback (macOS).
 file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
@@ -230,6 +231,7 @@ test_https_port_follows_local_port() {
   check "re-run exits zero"                    [ "$CODE" -eq 0 ]
   check "re-run kept :9122 -> 127.0.0.1:9122"  calls_have "tailscale serve --bg --https=9122 http://127.0.0.1:9122"
   check "  and never :9119"                    no_call "tailscale serve --bg --https=9119"
+  check "no publish split recorded"            env_lacks '^HTTPS_PORT='
   teardown
 
   setup
@@ -239,6 +241,20 @@ test_https_port_follows_local_port() {
   check "exits zero"                     [ "$CODE" -eq 0 ]
   check "served :8443 -> 127.0.0.1:9122" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:9122"
   check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
+  check ".env records the split"         grep -qx 'HTTPS_PORT=8443' "$SVC/.env"
+
+  # A recorded publish port survives re-runs, and a different explicit one is
+  # ignored with the same "edit .env" warning LOCAL_PORT gets.
+  unset LOCAL_PORT HTTPS_PORT
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run keeps the :8443 split"   calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:9122"
+  export HTTPS_PORT=8444
+  : > "$CALLS_LOG"
+  run_deploy
+  check "new explicit is ignored"        out_has "HTTPS_PORT=8444 ignored"
+  check "  still :8443"                  calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:9122"
+  check "  .env keeps 8443"              grep -qx 'HTTPS_PORT=8443' "$SVC/.env"
   teardown
 }
 
@@ -684,7 +700,8 @@ test_live() {
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
-  https_port="${HTTPS_PORT:-$port}"
+  https_port="$(sed -n 's/^HTTPS_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
+  [ -n "$https_port" ] || https_port="$port"
   api_port="$(sed -n 's/^API_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
   user="$(sed -n 's/^HERMES_DASHBOARD_USERNAME=//p' "$SERVICE_DIR/.env")"
   pass="$(sed -n 's/^HERMES_DASHBOARD_PASSWORD=//p' "$SERVICE_DIR/.env")"

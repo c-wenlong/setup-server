@@ -131,6 +131,12 @@ HERMES_DASHBOARD_SECRET=$(randhex)
 API_SERVER_KEY=$(randhex)
 EOF
   )
+  if [ -n "$HTTPS_PORT_EXPLICIT" ]; then
+    # An explicit publish port stops following LOCAL_PORT, so it must be
+    # recorded — the launcher tile reads this file for the tile URL.
+    printf '# Explicitly set at install: the tailnet publish port, which no longer\n# follows LOCAL_PORT. Delete this line to resume following it.\nHTTPS_PORT=%s\n' \
+      "$HTTPS_PORT" >> "$ENV_FILE"
+  fi
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
 fi
@@ -139,6 +145,7 @@ fi
 # a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
 REQUESTED_API_PORT="$API_PORT"
+REQUESTED_HTTPS_PORT="${HTTPS_PORT_EXPLICIT:+$HTTPS_PORT}"
 set -a; . "$ENV_FILE"; set +a
 DATA_DIR="${HERMES_DATA:?HERMES_DATA missing from $ENV_FILE}"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
@@ -147,7 +154,22 @@ fi
 if [ "$API_PORT" != "$REQUESTED_API_PORT" ]; then
   warn "API_PORT=$REQUESTED_API_PORT ignored — the existing $ENV_FILE says $API_PORT. Edit .env and re-run to move the port."
 fi
-[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
+if grep -q '^HTTPS_PORT=' "$ENV_FILE"; then
+  # .env already decided the publish port (an earlier explicit override);
+  # an explicit value on this re-run is as ignored as LOCAL_PORT is.
+  if [ -n "$HTTPS_PORT_EXPLICIT" ] && [ "$HTTPS_PORT" != "$REQUESTED_HTTPS_PORT" ]; then
+    warn "HTTPS_PORT=$REQUESTED_HTTPS_PORT ignored — the existing $ENV_FILE says $HTTPS_PORT. Edit .env and re-run to move the publish port."
+  fi
+elif [ -n "$HTTPS_PORT_EXPLICIT" ]; then
+  # First explicit override on a re-run: apply it and record it so the
+  # launcher tile and teardown see the real publish port.
+  printf '# Explicitly set on re-run: the tailnet publish port, which no longer\n# follows LOCAL_PORT. Delete this line to resume following it.\nHTTPS_PORT=%s\n' \
+    "$HTTPS_PORT" >> "$ENV_FILE"
+  ok "Recorded HTTPS_PORT=$HTTPS_PORT in $ENV_FILE"
+else
+  # No recorded publish port: HTTPS keeps following the local port .env settled on.
+  HTTPS_PORT="$LOCAL_PORT"
+fi
 
 mkdir -p "$STATE" "$DATA_DIR"
 ok "Data dir ready: $DATA_DIR"
