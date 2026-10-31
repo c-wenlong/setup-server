@@ -3836,12 +3836,35 @@ def start_deploy(key):
         raise DeployError(500, "could not start deploy")
 
     log("deploy %s started: %s (cwd %s)" % (job_id, key, cwd))
-    threading.Thread(target=_reap, args=(job, proc, logfile), daemon=True).start()
+    threading.Thread(target=_reap, args=(job, proc, logfile, argv, cwd),
+                     daemon=True).start()
     return job_id
 
 
-def _reap(job, proc, logfile):
+# A failed deploy re-runs its script once: setup.sh is idempotent by repo
+# convention, so a transient failure (apt mirror, registry, a tailscaled
+# blip mid-publish) heals itself instead of failing the job — umbreld's
+# pRetry on the install app-script. 2 attempts total, 1 retry.
+DEPLOY_ATTEMPTS = 2
+
+
+def _reap(job, proc, logfile, argv=None, cwd=None):
     code = proc.wait()
+    for attempt in range(1, DEPLOY_ATTEMPTS):
+        if code == 0 or argv is None:
+            break
+        logfile.write(("[failed: exited %d — retrying in %.0fs]\n"
+                       % (code, RETRY_DELAY)).encode())
+        time.sleep(RETRY_DELAY)
+        try:
+            logfile.write(("$ %s\n" % " ".join(argv)).encode())
+            proc = subprocess.Popen(
+                argv, cwd=cwd, stdout=logfile, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, shell=False)
+            code = proc.wait()
+        except Exception as exc:
+            logfile.write(("could not retry: %s\n" % exc).encode())
+            break
     try:
         logfile.close()
     except Exception:
@@ -4361,16 +4384,46 @@ def _kuma_steps(action, monitors, on_failure=False):
     return steps
 
 
+def _force_argv(part):
+    """SIGKILL-level teardown for one part — umbreld's `force-stop`.
+
+    Runs only after the normal stop already failed (see _run_steps): a
+    wedged container or unit must not be able to hold the service's stop,
+    or the retry of it, hostage. `docker kill` where `docker stop` failed,
+    `systemctl --user kill` for a unit. A part that is simply gone fails
+    this too — fine, there was nothing to force. Never attached to a
+    remove step: teardown.sh owns its own refuse-before-changing safety,
+    and killing a service its stop_guard shielded (AdGuard is the
+    tailnet's DNS) would be exactly the outage the guard exists for.
+    """
+    if part["kind"] == "container":
+        return sg_docker(["docker", "kill", part["name"]])
+    return ["systemctl", "--user", "kill", "--signal=SIGKILL", part["name"]]
+
+
 def _part_step(part, verb):
-    """One container or one unit, one verb. Argument list, never a string."""
+    """One container or one unit, one verb. Argument list, never a string.
+
+    A unit's stop/start carries the enablement bit (`disable --now`,
+    `enable --now`): a bare `systemctl --user stop` leaves the unit
+    enabled, so a box reboot would resurrect a service the user
+    deliberately stopped — umbreld persists auto-start separately from
+    runtime state for the same reason. Containers persist intent already:
+    `docker stop` plus the `unless-stopped` restart policy keeps a
+    stopped service stopped.
+    """
     if part["kind"] == "container":
         # docker needs the group; systemctl --user does not, so only this
         # branch goes through the sg wrapper.
         argv = sg_docker(["docker", verb, part["name"]])
     else:
-        argv = ["systemctl", "--user", verb, part["name"]]
-    return {"argv": argv, "optional": part["optional"], "always": False,
-            "env": None}
+        systemd = {"stop": ["disable", "--now"], "start": ["enable", "--now"]}
+        argv = ["systemctl", "--user"] + systemd[verb] + [part["name"]]
+    step = {"argv": argv, "optional": part["optional"], "always": False,
+            "env": None, "attempts": 2}
+    if verb == "stop":
+        step["fallback"] = _force_argv(part)
+    return step
 
 
 def plan_action(svc, action):
@@ -4409,7 +4462,8 @@ def plan_action(svc, action):
             steps.append(_guard_step(guard))
         steps.extend(_kuma_steps("pause", monitors))
         steps.append({"argv": build_command(teardown, runner_args(svc, "remove")),
-                      "optional": False, "always": False, "env": None})
+                      "optional": False, "always": False, "env": None,
+                      "attempts": 2})
         # A teardown that fails leaves the service up, so its monitors must
         # not stay paused. Runs only after a failure (see _run_steps).
         steps.extend(_kuma_steps("resume", monitors, on_failure=True))
@@ -4426,6 +4480,12 @@ def plan_action(svc, action):
     return steps
 
 
+# Seconds between attempts of one step, and of a deploy retry in _reap.
+# Tests set it to zero; on the box a short pause is the difference between
+# a dockerd or registry hiccup failing a job and healing it.
+RETRY_DELAY = 2.0
+
+
 def _run_steps(job, steps):
     """Run a plan in order, tee'd to the job log. Runs on its own thread.
 
@@ -4436,6 +4496,13 @@ def _run_steps(job, steps):
     compose profile is active, and the Kuma steps. Steps marked `always`
     still run after that abort, so a restart that dies half way still
     un-pauses the monitor it paused.
+
+    `attempts` retries an idempotent step in place (umbreld's pRetry on its
+    app scripts): a transient dockerd or registry failure should not fail
+    the job. `fallback` is a per-part force-stop argv that fires on abort —
+    the failed part's own fallback first, then the fallbacks of every part
+    the abort skipped, so the whole service still ends down rather than
+    half-up behind a wedged container.
     """
     code = 0
     try:
@@ -4445,15 +4512,16 @@ def _run_steps(job, steps):
         _finish(job, -1)
         return
 
-    def run_one(step):
+    def run_one(step, argv=None):
         # The argv, and only the argv: `env` may carry Kuma credentials.
-        logfile.write(("$ %s\n" % " ".join(step["argv"])).encode())
+        argv = step["argv"] if argv is None else argv
+        logfile.write(("$ %s\n" % " ".join(argv)).encode())
         guard = bool(step.get("guard"))
         try:
             # A guard gets its own session so a timeout can kill everything
             # it started (sg, bash, tailscale), not just the first process.
             proc = subprocess.Popen(
-                step["argv"], stdout=logfile, stderr=subprocess.STDOUT,
+                argv, stdout=logfile, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, shell=False, env=step.get("env"),
                 cwd=step.get("cwd"),
                 **({"start_new_session": True} if guard else {}),
@@ -4475,11 +4543,30 @@ def _run_steps(job, steps):
             logfile.write(("could not run: %s\n" % exc).encode())
             return -1
 
+    def run_step(step):
+        attempts = max(1, int(step.get("attempts") or 1))
+        result = -1
+        for attempt in range(attempts):
+            if attempt:
+                logfile.write(("[retrying in %.0fs]\n"
+                               % RETRY_DELAY).encode())
+                time.sleep(RETRY_DELAY)
+            result = run_one(step)
+            if result == 0:
+                break
+        return result
+
+    def force(step):
+        """The step's force-stop argv, if it carries one."""
+        fallback = step.get("fallback")
+        if fallback:
+            run_one({"env": None, "cwd": None}, argv=fallback)
+
     try:
         for index, step in enumerate(steps):
             if step.get("on_failure"):
                 continue
-            result = run_one(step)
+            result = run_step(step)
             if result == 0:
                 continue
             if step.get("optional"):
@@ -4494,9 +4581,12 @@ def _run_steps(job, steps):
                     job["refused"] = True
                 break
             logfile.write(("[failed: exited %d]\n" % result).encode())
+            force(step)
             for tail in steps[index + 1:]:
                 if tail.get("always") or tail.get("on_failure"):
-                    run_one(tail)
+                    run_step(tail)
+                else:
+                    force(tail)
             break
     finally:
         try:
@@ -5289,10 +5379,11 @@ def plan_update(svc, script, refs):
     steps = _kuma_steps("pause", monitors)
     for ref in refs:
         steps.append({"argv": sg_docker(["docker", "pull", ref]),
-                      "optional": False, "always": False, "env": None})
+                      "optional": False, "always": False, "env": None,
+                      "attempts": 2})
     steps.append({"argv": build_command(script, runner_args(svc, "deploy")),
                   "optional": False, "always": False, "env": None,
-                  "cwd": os.path.dirname(script)})
+                  "cwd": os.path.dirname(script), "attempts": 2})
     steps.extend(_kuma_steps("resume", monitors))
     return steps
 

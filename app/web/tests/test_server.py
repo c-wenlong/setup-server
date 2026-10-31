@@ -149,6 +149,7 @@ class SandboxTest(unittest.TestCase):
             "AUDIT_TTL": server.AUDIT_TTL,
             "_mount_of": server._mount_of,
             "_disk": server._disk,
+            "RETRY_DELAY": server.RETRY_DELAY,
             "Popen": subprocess.Popen,
         }
         server.REPO_ROOT = os.path.realpath(self.repo)
@@ -649,6 +650,37 @@ class DeployTest(SandboxTest):
         # constant; nothing came from the request beyond the looked-up key.
         script = os.path.realpath(os.path.join(self.repo, "alpha", "setup.sh"))
         self.assertIn(script, " ".join(argv))
+
+    def _wait_job(self, job_id, timeout=10.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            payload = server.job_payload(job_id)
+            if payload["status"] != "running":
+                return payload
+            time.sleep(0.01)
+        self.fail("job %s never finished" % job_id)
+
+    def test_a_failed_deploy_reruns_the_script_once(self):
+        """setup.sh is idempotent, so a transient failure heals itself
+        rather than failing the deploy — umbreld's pRetry on install."""
+        server.RETRY_DELAY = 0
+        codes = iter([1, 0])
+        subprocess.Popen = lambda argv, **kw: (
+            self.spawned.append((argv, kw)),
+            RecordedProc(next(codes, 0)))[1]
+        payload = self._wait_job(server.start_deploy("alpha"))
+        self.assertEqual(payload["status"], "done")
+        self.assertEqual(len(self.spawned), 2)
+        self.assertIn("retrying", payload["log"])
+
+    def test_a_deploy_that_fails_twice_stays_failed(self):
+        server.RETRY_DELAY = 0
+        subprocess.Popen = lambda argv, **kw: (
+            self.spawned.append((argv, kw)), RecordedProc(3))[1]
+        payload = self._wait_job(server.start_deploy("alpha"))
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["exit_code"], 3)
+        self.assertEqual(len(self.spawned), 2)
 
     def test_build_command_direct_when_group_present(self):
         script = os.path.join(self.repo, "alpha", "setup.sh")
@@ -3520,6 +3552,7 @@ class ControlTestBase(SandboxTest):
         self._saved["_find_uv"] = server._find_uv
         server._find_uv = lambda: None          # no Kuma unless a test asks
         server._have_docker_group = lambda: True  # plain docker argv by default
+        server.RETRY_DELAY = 0                  # retries, without the wait
         server.magicdns_host = lambda: "box.ts.net"
         server.probe_all = lambda urls: {u: False for u in urls}
         self.spawned = []
@@ -3568,20 +3601,27 @@ class ControlTestBase(SandboxTest):
         """Patch Popen to record argv and hand back canned exit codes.
 
         `failures` maps a substring of the joined argv to the exit code that
-        invocation should report. `parked=True` hands back processes that never
+        invocation should report — or to a LIST of codes, consumed one per
+        invocation (the last one repeats), so a step can fail once and then
+        succeed on its retry. `parked=True` hands back processes that never
         exit, so the job stays 'running' for the duration of the test — the
         recording equivalent of a bare FakeProc.
         """
-        failures = dict(failures or {})
+        failures = {k: (list(v) if isinstance(v, (list, tuple)) else v)
+                    for k, v in (failures or {}).items()}
 
         def fake(argv, **kwargs):
             self.spawned.append((list(argv), kwargs))
             if parked:
                 return FakeProc(argv, **kwargs)
             joined = " ".join(argv)
-            for needle, code in failures.items():
-                if needle in joined:
-                    return RecordedProc(code)
+            for needle, codes in failures.items():
+                if needle not in joined:
+                    continue
+                if isinstance(codes, (list, tuple)):
+                    return RecordedProc(
+                        codes.pop(0) if len(codes) > 1 else codes[0])
+                return RecordedProc(codes)
             return RecordedProc(0)
 
         subprocess.Popen = fake
@@ -3768,9 +3808,24 @@ class ControlPlanTest(ControlTestBase):
 
     def test_systemd_service_uses_the_user_manager(self):
         self.assertEqual(self.plan("manimkc", "stop"),
-                         [["systemctl", "--user", "stop", "manimkc.service"]])
+                         [["systemctl", "--user", "disable", "--now",
+                           "manimkc.service"]])
         self.assertEqual(self.plan("manimkc", "start"),
-                         [["systemctl", "--user", "start", "manimkc.service"]])
+                         [["systemctl", "--user", "enable", "--now",
+                           "manimkc.service"]])
+
+    def test_a_unit_stop_persists_intent_past_a_reboot(self):
+        """A bare `systemctl --user stop` leaves the unit enabled, so a box
+        reboot would resurrect a service the user deliberately stopped —
+        umbreld persists auto-start for the same reason. Containers get it
+        free from the unless-stopped restart policy; units need the
+        disable/enable pair."""
+        stop = self.plan("manimkc", "stop")[0]
+        self.assertIn("disable", stop)
+        self.assertIn("--now", stop)
+        start = self.plan("manimkc", "start")[0]
+        self.assertIn("enable", start)
+        self.assertIn("--now", start)
 
     def test_immich_stops_the_server_before_its_datastores(self):
         self.assertEqual(self.plan("immich", "stop"), [
@@ -3808,12 +3863,14 @@ class ControlPlanTest(ControlTestBase):
 
     def test_beszel_moves_hub_and_agent_together(self):
         self.assertEqual(self.plan("beszel", "stop"), [
-            ["systemctl", "--user", "stop", "beszel-agent.service"],
+            ["systemctl", "--user", "disable", "--now",
+             "beszel-agent.service"],
             ["docker", "stop", "beszel"],
         ])
         self.assertEqual(self.plan("beszel", "start"), [
             ["docker", "start", "beszel"],
-            ["systemctl", "--user", "start", "beszel-agent.service"],
+            ["systemctl", "--user", "enable", "--now",
+             "beszel-agent.service"],
         ])
 
     def test_beszel_start_brings_the_hub_up_before_the_agent(self):
@@ -3836,7 +3893,8 @@ class ControlPlanTest(ControlTestBase):
         server._have_docker_group = lambda: False
         server._which = lambda n: "/usr/bin/sg" if n == "sg" else None
         self.assertEqual(self.plan("manimkc", "stop")[0],
-                         ["systemctl", "--user", "stop", "manimkc.service"])
+                         ["systemctl", "--user", "disable", "--now",
+                          "manimkc.service"])
 
     def test_no_sg_available_falls_back_to_plain_docker(self):
         server._have_docker_group = lambda: False
@@ -3847,10 +3905,12 @@ class ControlPlanTest(ControlTestBase):
 
     def test_every_argv_word_comes_from_the_registry_or_a_constant(self):
         allowed = {"docker", "systemctl", "--user", "start", "stop",
+                   "enable", "disable", "--now",
                    "immich_server", "immich_machine_learning", "immich_redis",
-                   "immich_postgres"}
+                   "immich_postgres", "manimkc.service"}
         for action in server.CONTROL_ACTIONS:
-            for argv in self.plan("immich", action):
+            for argv in (self.plan("immich", action)
+                         + self.plan("manimkc", action)):
                 for word in argv:
                     self.assertIn(word, allowed)
 
@@ -4043,18 +4103,85 @@ class ControlRunnerTest(ControlTestBase):
                       self.argvs())
         self.assertNotIn("skipped", payload["log"])
 
-    def test_a_required_failure_stops_the_remaining_steps(self):
+    def test_a_required_failure_force_stops_the_whole_service(self):
+        """umbreld's force-stop: a container that will not stop must not
+        leave the rest of the service half-up behind it. The failing step
+        gets its retry, then every part's fallback argv fires — the failed
+        one first, then the parts the abort skipped."""
         payload = self.run_action("immich", "stop",
                                   failures={"immich_server": 3})
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(payload["exit_code"], 3)
-        self.assertEqual(self.argvs(), [["docker", "stop", "immich_server"]])
+        self.assertEqual(self.argvs(), [
+            ["docker", "stop", "immich_server"],
+            ["docker", "stop", "immich_server"],   # the retry
+            ["docker", "kill", "immich_server"],   # its fallback
+            ["docker", "kill", "immich_machine_learning"],
+            ["docker", "kill", "immich_redis"],
+            ["docker", "kill", "immich_postgres"],
+        ])
         self.assertIn("failed", payload["log"])
+        self.assertIn("$ docker kill immich_server", payload["log"])
+
+    def test_a_flaky_step_is_retried_in_place_and_succeeds(self):
+        """The transient case the retry exists for: dockerd hiccups once,
+        the second attempt stops the container and the plan goes on."""
+        payload = self.run_action("immich", "stop",
+                                  failures={"immich_server": [3, 0]})
+        self.assertEqual(payload["status"], "done")
+        self.assertEqual(self.argvs()[:2], [
+            ["docker", "stop", "immich_server"],
+            ["docker", "stop", "immich_server"],
+        ])
+        self.assertEqual(self.argvs()[-1],
+                         ["docker", "stop", "immich_postgres"])
+        self.assertNotIn("kill", payload["log"])
+        self.assertIn("retrying", payload["log"])
+
+    def test_a_unit_failure_force_kills_the_unit(self):
+        payload = self.run_action("manimkc", "stop",
+                                  failures={"disable --now": 3})
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(self.argvs(), [
+            ["systemctl", "--user", "disable", "--now", "manimkc.service"],
+            ["systemctl", "--user", "disable", "--now", "manimkc.service"],
+            ["systemctl", "--user", "kill", "--signal=SIGKILL",
+             "manimkc.service"],
+        ])
+
+    def test_the_retry_after_a_force_stop_succeeds(self):
+        """Force-stop is what makes the NEXT stop work: the killed
+        container answers `docker stop` cleanly, so the same action run
+        again goes through."""
+        first = self.run_action("n8n", "stop",
+                                failures={"docker stop n8n": 1})
+        self.assertEqual(first["status"], "failed")
+        self.assertEqual(self.argvs()[-1], ["docker", "kill", "n8n"])
+        second = self.run_action("n8n", "stop")
+        self.assertEqual(second["status"], "done")
+
+    def test_a_failed_start_uses_no_fallback(self):
+        """There is no force-start: a start that fails must not improvise."""
+        payload = self.run_action("n8n", "start",
+                                failures={"docker start n8n": 1})
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(self.argvs(), [["docker", "start", "n8n"],
+                                        ["docker", "start", "n8n"]])
+
+    def test_the_fallback_does_not_rescue_the_job(self):
+        """A stop that needed force still reports failed: the job log is
+        where the odd path stays visible, and the service is simply down
+        for the next action."""
+        payload = self.run_action("n8n", "stop",
+                                failures={"docker stop n8n": 1})
+        self.assertEqual(payload["status"], "failed")
+        self.assertIn("[failed: exited 1]", payload["log"])
 
     def test_beszel_stops_both_halves(self):
         self.run_action("beszel", "stop")
         self.assertEqual(self.argvs(), [
-            ["systemctl", "--user", "stop", "beszel-agent.service"],
+            ["systemctl", "--user", "disable", "--now",
+             "beszel-agent.service"],
             ["docker", "stop", "beszel"],
         ])
 
@@ -4062,7 +4189,8 @@ class ControlRunnerTest(ControlTestBase):
         self.run_action("beszel", "start")
         self.assertEqual(self.argvs(), [
             ["docker", "start", "beszel"],
-            ["systemctl", "--user", "start", "beszel-agent.service"],
+            ["systemctl", "--user", "enable", "--now",
+             "beszel-agent.service"],
         ])
 
     def test_popen_is_called_with_a_list_and_shell_false(self):
@@ -4075,8 +4203,10 @@ class ControlRunnerTest(ControlTestBase):
 
     def test_the_log_records_the_command_line_it_ran(self):
         payload = self.run_action("manimkc", "restart")
-        self.assertIn("$ systemctl --user stop manimkc.service", payload["log"])
-        self.assertIn("$ systemctl --user start manimkc.service", payload["log"])
+        self.assertIn("$ systemctl --user disable --now manimkc.service",
+                      payload["log"])
+        self.assertIn("$ systemctl --user enable --now manimkc.service",
+                      payload["log"])
 
 
 class ControlJobTest(ControlTestBase):
@@ -4169,7 +4299,8 @@ class ControlRefusalTest(ControlTestBase):
         payload = self.run_action("ollama", "stop")
         self.assertEqual(payload["status"], "done")
         self.assertEqual(self.argvs(),
-                         [["systemctl", "--user", "stop", "ollama.service"]])
+                         [["systemctl", "--user", "disable", "--now",
+                           "ollama.service"]])
 
     def test_launcher_is_refused_even_though_the_registry_configures_it(self):
         for verb in server.CONTROL_ACTIONS:
@@ -6907,6 +7038,26 @@ class RemoveTest(ControlTestBase):
         job = self.run_action("n8n", "remove", failures={"teardown.sh": 3})
         self.assertEqual(job["status"], "failed")
         self.assertEqual(self.argvs()[-1][-2:], ["resume", "n8n"])
+
+    def test_teardown_retries_once_before_failing(self):
+        self.enable_kuma()
+        job = self.run_action("n8n", "remove", failures={"teardown.sh": 3})
+        self.assertEqual(job["status"], "failed")
+        teardowns = [a for a in self.argvs() if a[0].endswith("teardown.sh")]
+        self.assertEqual(len(teardowns), 2)
+
+    def test_a_flaky_teardown_is_removed_on_the_retry(self):
+        job = self.run_action("n8n", "remove", failures={"teardown.sh": [3, 0]})
+        self.assertEqual(job["status"], "done")
+
+    def test_remove_never_force_stops(self):
+        """teardown.sh owns its refuse-before-changing safety; killing the
+        service after it refused is exactly the outage a stop_guard
+        prevents. No part step exists in a remove plan, so no fallback
+        can ever fire here."""
+        job = self.run_action("n8n", "remove", failures={"teardown.sh": 3})
+        self.assertEqual(job["status"], "failed")
+        self.assertFalse(any("kill" in a for a in self.argvs()))
 
     def test_failed_reinstall_resume_is_logged(self):
         self.enable_kuma()
