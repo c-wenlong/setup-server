@@ -1140,10 +1140,10 @@ def _disk_target(svc, home=None):
     return path
 
 
-def _du_bytes(path):
-    """Bytes `du -sk` reports for path, or None when it cannot answer."""
+def _du(path, flags):
+    """Bytes `du` reports for path, or None when it cannot answer."""
     try:
-        out = subprocess.run(["du", "-sk", path], capture_output=True,
+        out = subprocess.run(["du", flags, path], capture_output=True,
                              text=True, timeout=DISK_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1153,6 +1153,17 @@ def _du_bytes(path):
         return int(out.stdout.split(None, 1)[0]) * 1024
     except (ValueError, IndexError):
         return None
+
+
+def _du_bytes(path):
+    """`du -sk`: the service's data dir, the same figure the grid reports."""
+    return _du(path, "-sk")
+
+
+def _du_fs_bytes(path):
+    """`du -xsk`: one filesystem only, so a mounted volume under ~ is not
+    billed to the disk the storage sheet is breaking down."""
+    return _du(path, "-xsk")
 
 
 def _du_worker(key, target):
@@ -1496,6 +1507,296 @@ def system_stats():
         "cpus": os.cpu_count(),
         "uptime_s": _uptime(),
     }
+
+# ------------------------------------------------------------------ disk audit
+#
+# The storage sheet behind the health strip's disk cell: what fills the
+# disk, split into what the launcher manages (each service's data dir),
+# Docker, everything else under ~, and whatever is left: the "system and
+# other" a du of the home directory cannot see (system files, other users,
+# anything not on this filesystem's home). The scan walks the whole home
+# tree, so like _sample_disk it never runs inside a request: a GET starts
+# one worker, the next poll picks the numbers up.
+
+AUDIT_TTL = 600.0          # a finished scan stays fresh ten minutes
+DOCKER_DF_TIMEOUT = 20.0   # docker info/df; a wedged daemon must not park the worker
+
+_audit = {"at": 0.0, "running": False, "result": None, "error": None}
+_audit_lock = threading.Lock()
+
+
+def _du_children(path, mount=None):
+    """{child path: bytes|None} for each non-symlink child, or None when the
+    directory cannot be listed.
+
+    One du per child costs the same walk as one over the parent but returns
+    the split, which is exactly what ~/services needs, since each child is
+    a service's data dir the Apps section claims individually. Loose files
+    between the dirs are still counted (a file's du is trivial).
+    """
+    out = {}
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return None
+    for name in names:
+        child = os.path.join(path, name)
+        if os.path.islink(child):
+            continue
+        # A volume mounted inside services belongs to another disk: du
+        # would bill its bytes to this one, so it reports unmeasurable.
+        if mount and _mount_of(child) != mount:
+            out[child] = None
+            continue
+        out[child] = _du_fs_bytes(child)
+    return out
+
+
+def _inside(path, root):
+    return path == root or path.startswith(root + os.sep)
+
+
+_DF_SIZE_RE = re.compile(r"^\s*([\d.]+)\s*([kKmMgGtT]?i?B)\s*$")
+_DF_UNITS = {"B": 1, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12,
+             "KIB": 2 ** 10, "MIB": 2 ** 20, "GIB": 2 ** 30, "TIB": 2 ** 40}
+
+
+def _df_size(text):
+    """Docker's human size ("1.24GB", "0B") -> bytes, or None."""
+    m = _DF_SIZE_RE.match(str(text or ""))
+    if not m:
+        return None
+    try:
+        return int(float(m.group(1)) * _DF_UNITS[m.group(2).upper()])
+    except (ValueError, KeyError):
+        return None
+
+
+def _docker_df():
+    """{images, containers, volumes, build_cache, root} from `docker system
+    df`, or None when the daemon cannot be asked.
+
+    Goes through sg_docker like every docker call here. `root` is
+    DockerRootDir: the usual /var/lib/docker is extra usage on this disk,
+    while a rootless setup already sits inside the home scan, so the caller
+    needs to know which of the two it got.
+    """
+    def run(argv):
+        out = subprocess.run(sg_docker(argv), capture_output=True,
+                             text=True, timeout=DOCKER_DF_TIMEOUT)
+        return out.stdout if out.returncode == 0 else None
+
+    try:
+        listing = run(["docker", "system", "df", "--format", "{{json .}}"])
+        root = run(["docker", "info", "--format", "{{.DockerRootDir}}"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not listing:
+        return None
+    kinds = {"Images": "images", "Containers": "containers",
+             "Local Volumes": "volumes", "Build Cache": "build_cache"}
+    df = {}
+    for line in listing.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        key = kinds.get(row.get("Type"))
+        if key:
+            df[key] = _df_size(row.get("Size"))
+    if not df:
+        return None
+    df["root"] = (root or "").strip() or None
+    return df
+
+
+def _service_disk_bytes(key, target, pools, now, mount):
+    """Bytes for one service's du target on this filesystem: the grid's
+    fresh sample, a path the home scan already walked, 0 for a dir that
+    does not exist, else a `du` of its own, the same number _sample_disk
+    would report. A target on another mount is not this disk's bill at
+    all: None, never its real size."""
+    if not os.path.exists(target):
+        return 0
+    if mount and _mount_of(target) != mount:
+        return None
+    with _disk_lock:
+        hit = _disk_samples.get(key)
+    if hit and now - hit[0] < DISK_TTL:
+        return hit[1]
+    if target in pools:
+        return pools[target]
+    size = _du_bytes(target)
+    # Only the `du -sk` figure goes to the grid's cache: a pool value is a
+    # `du -xsk` number, which would shrink a service with a mounted volume
+    # under its dir.
+    with _disk_lock:
+        _disk_samples[key] = (now, size)
+    return size
+
+
+def _audit_scan(home=None):
+    """The storage sheet's numbers, measured synchronously on the worker.
+
+    Home is split one level deep: every top-level entry is a `du`, except
+    ~/services, whose children are each a `du` so a service claims its own
+    dir without the tree being walked twice. Entries a service claims are
+    shown under Apps and subtracted from their home entry, so the sections
+    partition the disk rather than double-count it.
+    """
+    home = home or os.path.expanduser("~")
+    now = time.time()
+    disk = _disk(SYSTEM_DISK_PATH)
+    mount = disk["mount"] if disk else None
+    registry = load_registry()
+    overrides = load_overrides()
+
+    entries = []
+    services_dir = os.path.join(home, "services")
+    try:
+        names = sorted(os.listdir(home))
+    except OSError:
+        names = []
+    for name in names:
+        path = os.path.join(home, name)
+        # A symlinked entry's real bytes live wherever the link points,
+        # usually another mount; listing it would show a misleading
+        # near-zero row. A mounted volume hides on the other disk too:
+        # du would charge this disk for bytes it does not hold.
+        if os.path.islink(path):
+            continue
+        if mount and _mount_of(path) != mount:
+            continue
+        if path == services_dir and os.path.isdir(path):
+            children = _du_children(path, mount)
+            total = (None if children is None
+                     else sum(b for b in children.values() if b))
+            entries.append({"name": name, "path": path, "bytes": total,
+                            "children": children})
+        else:
+            entries.append({"name": name, "path": path,
+                            "bytes": _du_fs_bytes(path), "children": None})
+
+    pools = {}
+    for e in entries:
+        pools[e["path"]] = e["bytes"]
+        for cpath, b in (e["children"] or {}).items():
+            pools[cpath] = b
+
+    measured = {}     # target -> bytes|None, deduped across shared targets
+    apps = []
+    for svc in registry:
+        if not isinstance(svc, dict):
+            continue
+        key = svc.get("key")
+        target = _disk_target(svc, home=home)
+        if key is None or target is None:
+            continue
+        if target in measured:
+            size = measured[target]
+        else:
+            size = _service_disk_bytes(key, target, pools, now, mount)
+            measured[target] = size
+        # A zero-byte row says nothing: skip it unless the service is
+        # installed, in which case a missing measurement shows as a dash.
+        if size or marker_exists(svc.get("marker")):
+            name, _ = effective(svc, overrides)
+            apps.append({"key": key, "name": name or key, "bytes": size})
+    apps.sort(key=lambda a: -(a["bytes"] or 0))
+
+    docker = _docker_df()
+    docker_out = None
+    docker_extra = 0
+    if docker:
+        root = docker.get("root")
+        # Shown only when its bytes are not already inside the home scan:
+        # outside ~ AND on this disk's filesystem. A rootless setup stays a
+        # home row; an unverifiable root stays out of the arithmetic.
+        if (root and not _inside(root, home) and mount
+                and _mount_of(root) == mount):
+            docker_out = {k: docker.get(k) for k in
+                          ("images", "containers", "volumes", "build_cache")}
+            docker_extra = sum(v for v in docker_out.values() if v)
+
+    home_rows = []
+    for e in entries:
+        if e["bytes"] is None:
+            continue
+        claimed = sum((b or 0) for t, b in measured.items()
+                      if _inside(t, e["path"]))
+        rest = e["bytes"] - claimed
+        if rest <= 0:
+            continue
+        home_rows.append({"name": e["name"], "path": "~" + os.sep + e["name"],
+                          "bytes": rest, "shared": claimed > 0})
+    home_rows.sort(key=lambda r: -r["bytes"])
+
+    home_raw = sum(e["bytes"] for e in entries if e["bytes"])
+    apps_outside = 0
+    for t, b in measured.items():
+        if (b and not _inside(t, home) and mount and os.path.exists(t)
+                and _mount_of(t) == mount):
+            apps_outside += b
+    other = None
+    if disk:
+        other = max(0, disk["used"] - home_raw - docker_extra - apps_outside)
+
+    # The bar's Apps slice sums targets, not rows: two services sharing a
+    # data dir list it on each row but only bill it once.
+    apps_total = sum(b for b in measured.values() if b)
+    return {"scanned_at": now, "apps": apps, "apps_total": apps_total,
+            "docker": docker_out, "home": home_rows,
+            "other_bytes": other}
+
+
+def _audit_worker():
+    try:
+        result, error = _audit_scan(), None
+    except Exception:
+        result, error = None, traceback.format_exc()
+        log("disk audit failed\n%s" % error)
+    with _audit_lock:
+        _audit["at"] = time.time()
+        _audit["result"] = result
+        _audit["error"] = error
+        _audit["running"] = False
+
+
+def _start_audit():
+    """Spawn the one scan worker. The flag is set inside the lock, so a GET
+    racing the spawn still reads `scanning`."""
+    with _audit_lock:
+        if _audit["running"]:
+            return
+        _audit["running"] = True
+    threading.Thread(target=_audit_worker, daemon=True,
+                     name="disk-audit").start()
+
+
+def disk_payload(fresh=False):
+    """`GET api/disk`. Always 200: a cold or stale cache kicks the worker
+    and answers `scanning` plus whatever the last run left, so the sheet
+    can show old numbers while new ones are walked. `?fresh=1` is the
+    sheet's Rescan button: it restarts the walk on demand."""
+    with _audit_lock:
+        stale = (_audit["result"] is None
+                 or time.time() - _audit["at"] >= AUDIT_TTL)
+    if stale or fresh:
+        _start_audit()
+    with _audit_lock:
+        result, running, error = (_audit["result"], _audit["running"],
+                                  _audit["error"])
+    payload = {"disk": _disk(SYSTEM_DISK_PATH), "scanning": running,
+               "scanned_at": None, "apps": [], "apps_total": None,
+               "docker": None, "home": [], "other_bytes": None}
+    if result:
+        payload.update({k: result[k] for k in
+                        ("scanned_at", "apps", "apps_total", "docker",
+                         "home", "other_bytes")})
+    elif error:
+        payload["error"] = ("The storage scan failed. The health strip's "
+                            "totals are still right; the breakdown is missing.")
+    return payload
 
 # ------------------------------------------------------------------ payload
 
@@ -5240,6 +5541,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path == "api/services":
             self._json(200, services_payload())
+            return
+        if path == "api/disk":
+            self._json(200, disk_payload(
+                fresh="fresh" in urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query)))
             return
         if path == "api/deployd":
             self._json(200, deployd_payload())
