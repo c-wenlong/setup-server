@@ -92,7 +92,7 @@
   /* Rows the user hid, shown under their own section. Manifest-hidden
      machinery never lands here — deployd has its own page. */
   function hiddenList() {
-    return everything().filter(function (s) { return s.user_hidden === true; })
+    return everything().filter(function (s) { return s.hidden !== true && s.user_hidden === true; })
       .sort(function (a, b) {
         return String(a.name || a.key).localeCompare(String(b.name || b.key));
       });
@@ -1005,7 +1005,9 @@
       return;
     }
     els.list.setAttribute('aria-busy', 'false');
-    if (!list().length) return;   // app.js's notice explains an empty list
+    /* Shelved rows count here too: with every app hidden the Hidden
+       section is the only way back, so it must still paint. */
+    if (!list().length && !hiddenList().length) return;   // app.js's notice explains an empty list
 
     var s = sections();
     var keys = order();
