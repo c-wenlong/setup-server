@@ -5,39 +5,42 @@ title = "setup-server gitleaks config"
 useDefault = true
 
 # ---------------------------------------------------------------------------
-# Allowlists
+# Allowlist
 #
-# Every entry below is scoped by BOTH a path and the literal string it is
-# forgiving (condition = "AND"), so a real secret landing in the same file is
-# still caught. There is deliberately no path-wide allowlist for tests/stubs/:
-# the stubs are ordinary shell scripts and a genuine credential pasted into one
-# must still fail the scan.
+# CI's gitleaks 8.24 predates the [[allowlists]] array form and silently
+# ignores it, so this file uses the singular [allowlist] table — deprecated on
+# newer releases but honoured by every version. TOML allows exactly one, so
+# the two scoped literals below share it: a finding is suppressed only when
+# its path matches one of `paths` AND its secret matches one of `regexes`
+# (condition = "AND"). Both regexes name exact inert strings, not wildcards,
+# so a real secret landing in either file is still caught. There is
+# deliberately no path-wide allowlist for tests/stubs/: the stubs are
+# ordinary shell scripts and a genuine credential pasted into one must still
+# fail the scan.
+#
+#   1. Home Assistant's curl stub replays the /auth/token response the real
+#      HA emits, and the generic-api-key rule reads the fake bearer token as
+#      a JWT. The value is a header-only JWT whose payload is the literal
+#      word "stub"; it has no signature, decodes to nothing, and is never
+#      sent anywhere but the mocked suite.
+#   2. Hermes' live suite asserts the dashboard refuses a bad password by
+#      curling with '-u $user:wrong-password'. The "secret" is a shell
+#      variable plus the literal words 'wrong-password' — a deliberately
+#      invalid credential that exists only so the check can prove it does
+#      not authenticate.
 # ---------------------------------------------------------------------------
-
-[[allowlists]]
-description = """
-Home Assistant's curl stub replays the /auth/token response the real HA emits, \
-and gitleaks' generic-api-key rule reads the fake bearer token as a JWT. The \
-value is a header-only JWT whose payload is the literal word "stub"; it has no \
-signature, decodes to nothing, and is never sent anywhere but the mocked suite.
-"""
-targetRules = ["generic-api-key", "jwt", "jwt-base64"]
+[allowlist]
+description = "Scoped false positives: HA stub JWT and hermes' fake wrong-password curl credential (see comments above)."
+targetRules = ["curl-auth-user", "generic-api-key", "jwt", "jwt-base64"]
 condition = "AND"
-paths = ['''^services/home-assistant/tests/stubs/curl$''']
-regexes = ['''eyJhbGciOiJIUzI1NiJ9\.stub''']
-
-[[allowlists]]
-description = """
-Hermes' live suite asserts the dashboard refuses a bad password by curling \
-with '-u $user:wrong-password'. The "secret" is a shell variable plus the \
-literal words 'wrong-password' — a deliberately invalid credential that \
-exists only so the check can prove it does not authenticate. Scoped to this \
-one literal in this one file; a real password landing here still fails.
-"""
-targetRules = ["curl-auth-user"]
-condition = "AND"
-paths = ['''^services/hermes-agent/tests/run-tests\.sh$''']
-regexes = ['''\$user:wrong-password''']
+paths = [
+  '''^services/home-assistant/tests/stubs/curl$''',
+  '''^services/hermes-agent/tests/run-tests\.sh$''',
+]
+regexes = [
+  '''eyJhbGciOiJIUzI1NiJ9\.stub''',
+  '''\$user:wrong-password''',
+]
 
 # ---------------------------------------------------------------------------
 # Note on */.env
