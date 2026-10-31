@@ -5,8 +5,9 @@
  * #view-catalogue section and nothing else. It never fetches on its own; it
  * paints from the list app.js already polls (window.LauncherApp.services())
  * and repaints on the `launcher:services` event app.js fires after each poll.
- * Install hands off to app.js's deploy sheet (LauncherApp.deploy), so it is
- * the same confirm-then-log flow as a tap on a dimmed tile.
+ * Install hands off to app.js's deploy sheet (LauncherApp.deploy), Uninstall
+ * to its Remove sheet (LauncherApp.remove) — the same confirm-then-log flow
+ * as the detail page's buttons.
  *
  * Text only via textContent; nothing from the API is ever parsed as HTML.
  */
@@ -21,7 +22,10 @@
     { id: 'installed', label: 'Installed', glyph: 'heartbeat' },
     { id: 'available', label: 'Not installed', glyph: 'archive' }
   ];
-  var GROUP_GLYPHS = { ai: 'chat', daily: 'home', knowledge: 'book', infra: 'cpu' };
+  var GROUP_GLYPHS = {
+    mine: 'home', files: 'folder', productivity: 'document',
+    ai: 'chat', dev: 'code', system: 'server'
+  };
 
   var root = document.getElementById('view-catalogue');
   if (!root) return;
@@ -228,8 +232,9 @@
 
   /* ---------- one row ---------- */
 
-  /* Compact status for the row's right edge; the detail page carries the
-     long form (receipt dates, "removed, data kept", …). */
+  /* Compact status: the icon dot's colour and the detail link's spoken
+     state. The detail page carries the long form (receipt dates, "removed,
+     data kept", …). */
   function rowStatus(svc) {
     var b = bucket(svc);
     if (isRunningJob(svc)) return { cls: 'run', text: running(svc).line };
@@ -246,6 +251,9 @@
     return { cls: 'muted', text: 'Coming soon' };
   }
 
+  /* One verb per row: Install for what the box lacks, Uninstall for what it
+     has (the same Remove sheet the detail page opens — stop_guard and all),
+     and the busy button watches whichever job is already running. */
   function action(svc) {
     var b = bucket(svc);
     var wrap = make('div', 'cat-actions');
@@ -261,57 +269,49 @@
       install.setAttribute('aria-label', 'Install ' + (svc.name || svc.key));
       install.addEventListener('click', function () { if (app()) app().deploy(svc.key, install); });
       wrap.appendChild(install);
-    } else if (b === 'installed' && svc.state === 'active' && typeof svc.url === 'string' && svc.url) {
-      var open = tag(make('a', 'btn cat-btn', 'Open'), svc, 'open');
-      open.href = svc.url;
-      open.target = '_blank';
-      open.rel = 'noopener noreferrer';
-      wrap.appendChild(open);
+    } else if (b === 'installed' && svc.removable === true) {
+      var rm = tag(make('button', 'btn cat-btn', 'Uninstall'), svc, 'remove');
+      rm.type = 'button';
+      rm.setAttribute('aria-label', 'Uninstall ' + (svc.name || svc.key));
+      rm.addEventListener('click', function () { if (app()) app().remove(svc.key, rm); });
+      wrap.appendChild(rm);
     }
-
-    /* Remove stays on the detail page: it is a deliberate, destructive
-       action, not a list-row affordance. */
     return wrap;
   }
 
-  /* Umbrel store row: squircle icon, name + tagline, status at the right
-     edge, then the action. The row body itself is the detail link, so the
-     action buttons sit beside it as siblings — the same layering the home
-     tiles use. */
+  /* Umbrel store row: squircle icon (with a state dot on its top-right for
+     installed services), name + tagline, then the one action. The row body
+     is plain content; a stretched link covers the whole row — button zone
+     included — so the entire tile opens the detail page and highlights on
+     hover, while the action button floats above the link on z-index. */
   function card(svc) {
-    var row = make('div', 'cat-row cat-row-' + bucket(svc));
+    var b = bucket(svc);
+    var st = rowStatus(svc);
+    var row = make('div', 'cat-row cat-row-' + b);
     row.setAttribute('data-key', svc.key);
 
-    var main = tag(make('a', 'cat-row-main'), svc, 'details');
-    main.href = '#/service/' + encodeURIComponent(svc.key);
-    main.setAttribute('aria-label',
-      (svc.name || svc.key) + ', ' + rowStatus(svc).text + ', opens details');
-
+    var body = make('div', 'cat-row-body');
     var ic = make('span', 'cat-icon');
     ic.appendChild(iconNode(svc));
-    main.appendChild(ic);
+    if (b === 'installed' || isRunningJob(svc)) {
+      var dot = make('i', 'cat-dot cat-dot-' + st.cls);
+      dot.setAttribute('aria-hidden', 'true');
+      ic.appendChild(dot);
+    }
+    body.appendChild(ic);
     var names = make('div', 'cat-names');
     names.appendChild(make('span', 'cat-name', svc.name || svc.key));
     if (svc.tagline) names.appendChild(make('span', 'cat-tag', svc.tagline));
-    main.appendChild(names);
-    var st = rowStatus(svc);
-    main.appendChild(make('span', 'cat-state cat-state-' + st.cls, st.text));
-    var chev = make('span', 'cat-chev');
-    chev.setAttribute('aria-hidden', 'true');
-    var cs = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    cs.setAttribute('viewBox', '0 0 24 24');
-    cs.setAttribute('fill', 'none');
-    cs.setAttribute('stroke', 'currentColor');
-    cs.setAttribute('stroke-width', '1.6');
-    cs.setAttribute('stroke-linecap', 'round');
-    cs.setAttribute('stroke-linejoin', 'round');
-    var cp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    cp.setAttribute('d', 'm9.5 6 6 6-6 6');
-    cs.appendChild(cp);
-    chev.appendChild(cs);
-    main.appendChild(chev);
-    row.appendChild(main);
+    body.appendChild(names);
+    row.appendChild(body);
     row.appendChild(action(svc));
+
+    var link = tag(make('a', 'cat-row-link'), svc, 'details');
+    link.href = '#/service/' + encodeURIComponent(svc.key);
+    link.setAttribute('aria-label',
+      (svc.name || svc.key) + ', ' + st.text + ', opens details');
+    link.appendChild(make('span', 'sr-only', 'Details'));
+    row.appendChild(link);
     return row;
   }
 
