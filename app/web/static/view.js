@@ -162,6 +162,7 @@
 
   function rssOf(svc)  { var r = resources(svc); return r ? num(r.rss_bytes) : null; }
   function cpuOf(svc)  { var r = resources(svc); return r ? num(r.cpu_pct)   : null; }
+  function diskOf(svc) { var r = resources(svc); return r ? num(r.disk_bytes) : null; }
 
   function partsOf(svc) {
     var r = resources(svc);
@@ -263,6 +264,7 @@
   var SUMMARY = [
     { id: 'ram',      label: 'RAM' },
     { id: 'cpu',      label: 'CPU' },
+    { id: 'disk',     label: 'Disk' },
     { id: 'deployed', label: 'Deployed' },
     { id: 'launched', label: 'Last launched' },
     { id: 'opened',   label: 'Last opened' }
@@ -330,6 +332,7 @@
 
     text(s.ram, fmtBytes(rssOf(svc)));
     text(s.cpu, fmtPct(cpuOf(svc)));
+    text(s.disk, fmtBytes(diskOf(svc)));
 
     var dep = deployedOf(svc);
     text(s.deployed, fmtDate(dep));

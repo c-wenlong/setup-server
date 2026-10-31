@@ -317,6 +317,52 @@
       "description": "Quiver's remote-control hub (swe remote serve): the phone PWA for watching and steering coding-agent sessions, with an inbox and a Usage tab, and the hub MacBook satellites dial. Pinned uv install under ~/.local/share/quiver-hub, systemd user unit, loopback-only behind Serve on :8477. Runs with --public-url, so 'Pair with Tailscale' works behind Serve; approve the code on the box with swe remote devices --approve. services/quiver-hub/pair.sh mints a token for satellites."
     },
     {
+      "key": "openclaw",
+      "name": "OpenClaw",
+      "tagline": "Agent gateway",
+      "group": "ai",
+      "icon": "chat",
+      "author": "openclaw",
+      "url": "https://HOST:18789/",
+      "health": "http://127.0.0.1:18789/healthz",
+      "marker": "~/services/openclaw",
+      "setup": "services/openclaw/setup.sh",
+      "env": "services/openclaw/.env",
+      "description": "Self-hosted AI assistant gateway: the Control UI plus every chat channel (Telegram, WhatsApp, Discord, Slack) in one container. Official GHCR image rather than a host Node install — the box runs Node 22 and OpenClaw wants 24+. State, workspace and auth profiles live under ~/services/openclaw; a gateway token is generated into .env and the Control UI asks for it on first open. Host ~/.claude and ~/.codex are mounted in when present so the bundled Claude/Codex providers can reuse their logins; setup.sh never creates or overwrites them.",
+      "control": {
+        "parts": [
+          {
+            "container": "openclaw-gateway"
+          }
+        ],
+        "kuma": "openclaw",
+        "_comment": "The cli sidecar is behind a compose profile and never runs long, so it is not a part."
+      }
+    },
+    {
+      "key": "hermes-agent",
+      "name": "Hermes Agent",
+      "tagline": "Agent runtime",
+      "group": "ai",
+      "icon": "cpu",
+      "author": "NousResearch",
+      "url": "https://HOST:9119/",
+      "health": "http://127.0.0.1:8642/health",
+      "marker": "~/services/hermes-agent",
+      "setup": "services/hermes-agent/setup.sh",
+      "env": "services/hermes-agent/.env",
+      "description": "Nous Research's self-improving agent: sessions, skills, memories and scheduled jobs, with a web dashboard on :9119 and a key-gated OpenAI-compatible API on loopback :8642. Official image, single container. Its data dir is ~/services/hermes-agent/data — deliberately NOT ~/.hermes, which belongs to the separate native hermes-gateway install this box already runs; the two coexist and teardown only ever touches the Docker one. Dashboard basic-auth credentials are generated into .env; the tailnet is still the real boundary.",
+      "control": {
+        "parts": [
+          {
+            "container": "hermes-agent"
+          }
+        ],
+        "kuma": "hermes-agent",
+        "_comment": "Dashboard and API are s6-supervised inside the one container, so a single part covers both. The tile's health probe is the API /health endpoint because the dashboard itself sits behind basic auth."
+      }
+    },
+    {
       "key": "kaichenpedia",
       "name": "kaichenpedia",
       "tagline": "Wiki",

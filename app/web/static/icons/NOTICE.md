@@ -111,13 +111,32 @@ brand mark. Official `triggerdev-logo--dark.svg` is `#121317` and would vanish
 on the dark tile (`#171719`), so only the lime mark is kept and used on both
 themes.
 
+Neither OpenClaw nor Hermes Agent has a mark in dashboard-icons or
+selfhst/icons, so both are vendored from their own upstream repos:
+
+| File here | Upstream | Service |
+|---|---|---|
+| `openclaw.svg` | [openclaw/openclaw](https://github.com/openclaw/openclaw) `ui/public/favicon.svg` at `851156af` (the lobster) | OpenClaw |
+| `hermes-agent.svg` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) `assets/icon-master.svg` at `c2b69de6` | Hermes Agent |
+| `hermes-agent-dark.svg` | same repo, `assets/icon-master-dark.svg` | Hermes Agent, dark theme |
+
+Both repos are MIT-licensed; the marks remain the projects' brand marks and
+are used here only to identify the services. `hermes-agent.svg` ships the
+white app-icon plate for the light tile and upstream's own `#0d1117` plate for
+the dark tile.
+
 ## Modifications
 
 1. **Light minification.** XML declarations, comments, `<metadata>`,
    `xml:space`, `version`, `enable-background`, editor-generated `id="Layer_N"`
    and inter-tag whitespace removed. Geometry, gradients, masks, `viewBox` and
    every colour are untouched.
-2. **`paperless-ngx-dark.svg` is a derived work**, not an upstream file. The
+2. **`openclaw.svg`**: upstream's favicon carries SMIL `<animate>` eye-blink
+   elements; those were removed so the tile is static like every other mark.
+   Geometry and colours are untouched.
+3. **`hermes-agent*.svg`**: run through svgo (path float precision reduced);
+   geometry, `viewBox` and every colour are unchanged.
+4. **`paperless-ngx-dark.svg` is a derived work**, not an upstream file. The
    mark is a single very dark green (`#17541f`) with roughly 2:1 contrast
    against the dark tile (`#171719`) — effectively invisible. The dark-theme
    copy keeps the same hue and saturation and lifts only the lightness, to

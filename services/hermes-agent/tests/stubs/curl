@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# curl stub — fakes the Hermes Agent HTTP surface. State in $STATE_DIR:
+#   health_fails_left    — countdown of 503s from the dashboard /
+#   api_fails_left       — countdown of 503s from :8642/health (models the API
+#                          still coming up after the dashboard is already up)
+#   dashboard_basic_auth — exists => the dashboard gates with HTTP Basic: any
+#                          request without -u gets a 401, authed ones a 200
+#
+# Understands the flag shapes setup.sh actually uses: bundled -fsS, -o, -u,
+# --max-time.
+echo "curl $*" >> "$CALLS_LOG"
+
+out=""; url=""; failonerr=0; authed=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -u|--user) authed=1; shift 2 ;;
+    -H|--max-time|--connect-timeout|-w|-d|--data-binary|-X) shift 2 ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; *u*) authed=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <body>
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  else
+    printf '%s' "$2"
+  fi
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */health)
+    if [ -f "$STATE_DIR/api_fails_left" ]; then
+      left="$(cat "$STATE_DIR/api_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/api_fails_left"
+        emit 503 ''
+      fi
+    fi
+    emit 200 '{"status":"ok"}'
+    ;;
+  *)
+    if [ -f "$STATE_DIR/health_fails_left" ]; then
+      left="$(cat "$STATE_DIR/health_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/health_fails_left"
+        emit 503 ''
+      fi
+    fi
+    if [ -f "$STATE_DIR/dashboard_basic_auth" ] && [ "$authed" = "0" ]; then
+      emit 401 '<html>401 Unauthorized</html>'
+    fi
+    # Authed (or no basic-auth simulation): the dashboard serves a 302 to its
+    # login page / a 200 shell — either is a pass for curl -fsS.
+    emit 302 '<html>Redirecting to login</html>'
+    ;;
+esac
