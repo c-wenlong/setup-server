@@ -1659,7 +1659,12 @@
       timer = setTimeout(function () { ctl.abort(); }, 15000);
     }
     fetch('api/disk' + (fresh ? '?fresh=1' : ''), opts)
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        /* A 404 JSON body is still an error: an old server answers
+           "unknown endpoint" and would otherwise render as a warn line. */
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
       .then(function (j) {
         if (timer) clearTimeout(timer);
         dsk.fetching = false;
