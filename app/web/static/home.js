@@ -81,9 +81,21 @@
   }
 
   /* The apps: everything except services marked hidden (deployd, which is
-     the Deploys page rather than a row). */
+     the Deploys page rather than a row) and rows the user shelved under
+     Hidden themselves. */
   function list() {
-    return everything().filter(function (s) { return s.hidden !== true; });
+    return everything().filter(function (s) {
+      return s.hidden !== true && s.user_hidden !== true;
+    });
+  }
+
+  /* Rows the user hid, shown under their own section. Manifest-hidden
+     machinery never lands here — deployd has its own page. */
+  function hiddenList() {
+    return everything().filter(function (s) { return s.hidden !== true && s.user_hidden === true; })
+      .sort(function (a, b) {
+        return String(a.name || a.key).localeCompare(String(b.name || b.key));
+      });
   }
 
   function stored(key, fallback) {
@@ -103,7 +115,9 @@
   }
 
   function parseFold(raw) {
-    var out = { stop: false, fresh: false };
+    /* hidden starts folded every load — it's a shelf you open to peek,
+       so its state is deliberately not persisted. */
+    var out = { stop: false, fresh: false, hidden: true };
     String(raw).split(',').forEach(function (k) {
       if (k === 'stop' || k === 'fresh') out[k] = true;
     });
@@ -155,7 +169,12 @@
     caret:   ['m7 10 5 5 5-5'],
     ext:     ['M14 5h5v5', 'M19 5l-8 8'],
     pin:     ['M12 17v5', 'M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.3V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.7a2 2 0 0 0-1.1-1.8l-1.8-.9A2 2 0 0 1 15 10.8V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z'],
-    grip:    ['M9 5.5h.01', 'M15 5.5h.01', 'M9 12h.01', 'M15 12h.01', 'M9 18.5h.01', 'M15 18.5h.01']
+    grip:    ['M9 5.5h.01', 'M15 5.5h.01', 'M9 12h.01', 'M15 12h.01', 'M9 18.5h.01', 'M15 18.5h.01'],
+    eye:     ['M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z', 'M12 9a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z'],
+    eyeoff:  ['M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19',
+              'm14.12 14.12a3 3 0 1 1-4.24-4.24',
+              'M6.61 6.61A13.53 13.53 0 0 0 1 12s4 8 11 8a9.74 9.74 0 0 0 5.39-1.61',
+              'M2 2l20 20']
   };
 
   /* Status glyphs: state in the SHAPE (Linear's convention), colour only on
@@ -175,7 +194,8 @@
       dots:  '<circle cx="7" cy="7" r="5.6" class="s" stroke-dasharray="0.1 2.9"/>',
       dash:  '<circle cx="7" cy="7" r="5.6" class="s" stroke-dasharray="2.4 2"/>',
       busy:  '<circle cx="7" cy="7" r="5.6" class="t"/><path d="M7 1.4a5.6 5.6 0 0 1 5.6 5.6" class="s spin"/>',
-      pin:   '<path d="M4.5 2h5v.9l-1 .3v3l1.7 1.9V10H3.8V8.1l1.7-1.9v-3l-1-.3z M6.55 10h.9v2.6h-.9z" class="f"/>'
+      pin:   '<path d="M4.5 2h5v.9l-1 .3v3l1.7 1.9V10H3.8V8.1l1.7-1.9v-3l-1-.3z M6.55 10h.9v2.6h-.9z" class="f"/>',
+      hid:   '<path d="M1.5 7S3.8 3.5 7 3.5 12.5 7 12.5 7 10.2 10.5 7 10.5 1.5 7 1.5 7Z" class="s"/><path d="M6.2 6.2a1.2 1.2 0 0 0 1.6 1.6" class="s"/><path d="M2.5 11.5l9-9" class="s"/>'
     }[kind] || '';
     s.innerHTML = html;
     return s;
@@ -352,8 +372,13 @@
       items.push({ id: 'deploy', label: 'Install', icon: 'down', key: '↵' });
     }
     items.push({ id: 'pin', label: svc.pinned === true ? 'Unpin from top' : 'Pin to top', icon: 'pin', key: 'P' });
-    items.push({ id: 'move-up', label: 'Move up', icon: 'up', key: 'K' });
-    items.push({ id: 'move-down', label: 'Move down', icon: 'down', key: 'J' });
+    items.push({ id: 'hide', label: svc.user_hidden === true ? 'Show app' : 'Hide app',
+                 icon: svc.user_hidden === true ? 'eye' : 'eyeoff', key: 'H' });
+    /* Hidden is sorted by name — a manual move there is a silent no-op. */
+    if (svc.user_hidden !== true) {
+      items.push({ id: 'move-up', label: 'Move up', icon: 'up', key: 'K' });
+      items.push({ id: 'move-down', label: 'Move down', icon: 'down', key: 'J' });
+    }
     if (items.length) items.push('-');
     items.push({ id: 'details', label: svc.state === 'available' || svc.state === 'planned'
       ? 'About this app' : 'Details and settings', icon: 'info', key: 'D' });
@@ -453,7 +478,9 @@
   }
 
   function sections() {
-    return partition(list(), true, ranks());
+    var p = partition(list(), true, ranks());
+    p.hid = hiddenList().filter(matches);
+    return p;
   }
 
   /* Every key the page would paint with no filter, in paint order — the
@@ -466,7 +493,10 @@
 
   function order() {
     var s = sections();
-    return s.pinned.concat(s.run, state.fold.stop ? [] : s.stop, state.fold.fresh ? [] : s.fresh)
+    return s.pinned.concat(s.run,
+            state.fold.stop ? [] : s.stop,
+            state.fold.fresh ? [] : s.fresh,
+            state.fold.hidden ? [] : s.hid)
             .map(function (x) { return x.key; });
   }
 
@@ -757,7 +787,7 @@
   }
 
   function groupHead(id, kind, label, count, note) {
-    var foldable = id === 'stop' || id === 'fresh';
+    var foldable = id === 'stop' || id === 'fresh' || id === 'hidden';
     var h = make(foldable ? 'button' : 'div', 'h-group');
     if (foldable) {
       h.type = 'button';
@@ -777,11 +807,29 @@
     return h;
   }
 
+  /* A foldable section's rows, always painted inside an animated wrapper:
+     folding is a class toggle, not a rebuild, so the grid-rows transition
+     can run and folded content stays put for the next expand. `inert` keeps
+     the collapsed rows out of the tab order and off the click path. */
+  function foldBox(id, rows, maxRam) {
+    var box = make('div', 'h-fold' + (state.fold[id] ? ' is-folded' : ''));
+    box.setAttribute('data-foldbox', id);
+    if (state.fold[id]) {
+      box.setAttribute('inert', '');
+      box.setAttribute('aria-hidden', 'true');
+    }
+    var inner = make('div', 'h-fold-in');
+    rows.forEach(function (x) { inner.appendChild(row(x, maxRam)); });
+    box.appendChild(inner);
+    return box;
+  }
+
   function row(svc, maxRam) {
     var key = svc.key;
     var job = liveJob(svc);
     var b = bucket(svc);
-    var r = make('div', 'h-row' + (b !== 'run' ? ' is-dim' : '') + (job ? ' is-busy' : '') +
+    var r = make('div', 'h-row' + (b !== 'run' || svc.user_hidden === true ? ' is-dim' : '') +
+                        (job ? ' is-busy' : '') +
                         (hasUpdate(svc) ? ' has-upd' : '') + (state.sel === key ? ' is-sel' : ''));
     r.setAttribute('data-key', key);
     if (state.sel === key) r.setAttribute('aria-current', 'true');
@@ -790,13 +838,17 @@
     var appc = make('div', 'h-app');
     appc.appendChild(glyph(glyphKind(svc)));
     /* The grip is the only draggable handle: making the whole row draggable
-       would break text selection and the name link's own drag. */
-    var grip = make('span', 'h-grip');
-    grip.draggable = true;
-    grip.setAttribute('data-grip', key);
-    grip.title = 'Drag to reorder';
-    grip.appendChild(svg(ICON.grip, { width: '2.6' }));
-    appc.appendChild(grip);
+       would break text selection and the name link's own drag. Shelved rows
+       get none — the Hidden section is sorted by name, so a drag would look
+       like it did nothing. */
+    if (svc.user_hidden !== true) {
+      var grip = make('span', 'h-grip');
+      grip.draggable = true;
+      grip.setAttribute('data-grip', key);
+      grip.title = 'Drag to reorder';
+      grip.appendChild(svg(ICON.grip, { width: '2.6' }));
+      appc.appendChild(grip);
+    }
     var ic = make('span', 'h-ic');
     ic.appendChild(iconNode(svc));
     appc.appendChild(ic);
@@ -831,6 +883,16 @@
     pin.title = svc.pinned === true ? 'Unpin from top' : 'Pin to top';
     pin.appendChild(svg(ICON.pin, { width: '1.9' }));
     appc.appendChild(pin);
+    var hid = svc.user_hidden === true;
+    var eye = make('button', 'h-eye' + (hid ? ' is-on' : ''));
+    eye.type = 'button';
+    eye.setAttribute('data-hide', key);
+    eye.setAttribute('data-fid', 'hide:' + key);
+    eye.setAttribute('aria-pressed', hid ? 'true' : 'false');
+    eye.setAttribute('aria-label', (hid ? 'Show ' : 'Hide ') + (svc.name || key));
+    eye.title = hid ? 'Show in the list' : 'Hide from the list';
+    eye.appendChild(svg(hid ? ICON.eyeoff : ICON.eye, { width: '1.9' }));
+    appc.appendChild(eye);
     r.appendChild(appc);
 
     /* parts */
@@ -943,13 +1005,15 @@
       return;
     }
     els.list.setAttribute('aria-busy', 'false');
-    if (!list().length) return;   // app.js's notice explains an empty list
+    /* Shelved rows count here too: with every app hidden the Hidden
+       section is the only way back, so it must still paint. */
+    if (!list().length && !hiddenList().length) return;   // app.js's notice explains an empty list
 
     var s = sections();
     var keys = order();
     if (keys.indexOf(state.sel) === -1) state.sel = keys.length ? keys[0] : null;
 
-    if (!s.pinned.length && !s.run.length && !s.stop.length && !s.fresh.length) {
+    if (!s.pinned.length && !s.run.length && !s.stop.length && !s.fresh.length && !s.hid.length) {
       els.list.appendChild(emptyState());
       paintBar();
       return;
@@ -969,11 +1033,15 @@
     }
     if (s.stop.length) {
       els.list.appendChild(groupHead('stop', 'ring', 'Stopped', s.stop.length, 'Most recently used first'));
-      if (!state.fold.stop) s.stop.forEach(function (x) { els.list.appendChild(row(x, maxRam)); });
+      els.list.appendChild(foldBox('stop', s.stop, maxRam));
     }
     if (s.fresh.length) {
       els.list.appendChild(groupHead('fresh', 'dots', 'Not installed', s.fresh.length));
-      if (!state.fold.fresh) s.fresh.forEach(function (x) { els.list.appendChild(row(x, maxRam)); });
+      els.list.appendChild(foldBox('fresh', s.fresh, maxRam));
+    }
+    if (s.hid.length) {
+      els.list.appendChild(groupHead('hidden', 'hid', 'Hidden', s.hid.length));
+      els.list.appendChild(foldBox('hidden', s.hid, maxRam));
     }
 
     /* A poll repaints every row; put focus back where it was. */
@@ -1182,6 +1250,7 @@
       return;
     }
     if (id === 'pin') { togglePin(key); return; }
+    if (id === 'hide') { toggleHide(key); return; }
     if (id === 'move-up') { moveBy(key, -1); return; }
     if (id === 'move-down') { moveBy(key, 1); return; }
     if (typeof a.action === 'function' && !a.action(key, id, opener)) {
@@ -1225,6 +1294,21 @@
     if (!svc || !a || typeof a.pin !== 'function') return;
     a.pin(key, svc.pinned !== true).then(function (ok) {
       if (!ok) toast('Could not save the pin for ' + (svc.name || key) + '.');
+    });
+  }
+
+  function toggleHide(key) {
+    var svc = find(key);
+    var a = app();
+    if (!svc || !a || typeof a.hide !== 'function') return;
+    var showing = svc.user_hidden === true;
+    a.hide(key, !showing).then(function (ok) {
+      if (ok) {
+        toast(showing ? (svc.name || key) + ' is back in the list.'
+                      : (svc.name || key) + ' is under Hidden now.');
+      } else {
+        toast('Could not save that for ' + (svc.name || key) + '.');
+      }
     });
   }
 
@@ -1291,6 +1375,7 @@
   function sectionOf(key) {
     var s = find(key);
     if (!s) return null;
+    if (s.user_hidden === true) return 'hidden';
     return s.pinned === true ? 'pinned' : bucket(s);
   }
 
@@ -1329,7 +1414,10 @@
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     var row = e.target.closest ? e.target.closest('.h-row[data-key]') : null;
+    /* Folded rows are painted but invisible — dropping onto one would mark
+       a row nobody can see. */
     if (!row || row.getAttribute('data-key') === dragKey ||
+        (row.closest && row.closest('.h-fold.is-folded')) ||
         sectionOf(row.getAttribute('data-key')) !== sectionOf(dragKey)) {
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
       clearDrop(); return;
@@ -1482,8 +1570,30 @@
     if (fold) {
       var id = fold.getAttribute('data-fold');
       state.fold[id] = !state.fold[id];
-      remember(FOLD_STORE, ['stop', 'fresh'].filter(function (k) { return state.fold[k]; }).join(','));
-      paintList();
+      if (id !== 'hidden') {
+        remember(FOLD_STORE, ['stop', 'fresh'].filter(function (k) { return state.fold[k]; }).join(','));
+      }
+      /* No repaint: the rows stay painted inside their fold box, so the
+         toggle is a class flip and the grid-rows transition animates it. */
+      fold.setAttribute('aria-expanded', state.fold[id] ? 'false' : 'true');
+      var box = els.list.querySelector('[data-foldbox="' + id + '"]');
+      if (box) {
+        box.classList.toggle('is-folded', state.fold[id]);
+        if (state.fold[id]) {
+          box.setAttribute('inert', '');
+          box.setAttribute('aria-hidden', 'true');
+        } else {
+          box.removeAttribute('inert');
+          box.removeAttribute('aria-hidden');
+        }
+      }
+      /* A selected row inside the just-folded section is unreachable now;
+         move the highlight to the first visible row, same as a repaint
+         used to do. */
+      if (state.fold[id] && order().indexOf(state.sel) === -1) {
+        var ks = order();
+        select(ks.length ? ks[0] : null, false);
+      }
       paintBar();
       return;
     }
@@ -1508,6 +1618,13 @@
       var pk = pin.getAttribute('data-pin');
       select(pk, false);
       togglePin(pk);
+      return;
+    }
+    var hideBtn = t.closest('[data-hide]');
+    if (hideBtn) {
+      var hk = hideBtn.getAttribute('data-hide');
+      select(hk, false);
+      toggleHide(hk);
       return;
     }
     var more = t.closest('[data-menu]');
