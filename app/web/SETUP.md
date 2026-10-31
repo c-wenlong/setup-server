@@ -238,7 +238,8 @@ menu (Restart, Stop, Update, Copy address, Details, Remove), each item with
 its own letter. The bar along the bottom shows what is selected. The pills
 under the search filter by category, plus **Updates** when any image tag
 has moved; sort the Running group by clicking its column headers. The
-sidebar collapses to icons (button at its foot) and holds the theme button,
+sidebar collapses to icons (button at its foot; hovering the rail expands
+it over the page until the pointer leaves) and holds the theme button,
 which cycles System → Light → Dark. All of it is remembered on that device.
 
 **Deploys.** The sidebar's Deploys page is deployd's UI: whether the
