@@ -85,7 +85,11 @@
     'umami':         { file: 'umami', dark: true },           /* black ink  */
     /* Bespoke mark: three swatch cards on a slate plate — reads on both
        tile themes, so no -dark pair. No upstream brand (private repo). */
-    'design-systems': { file: 'design-systems' }
+    'design-systems': { file: 'design-systems' },
+    /* Red-gradient lobster, reads on both tile themes. */
+    'openclaw':      { file: 'openclaw' },
+    /* App-icon plate: white bg for the light tile, #0d1117 for dark. */
+    'hermes-agent':  { file: 'hermes-agent', dark: true }
   };
 
   /* Spellings the registry might plausibly use for the same service. */

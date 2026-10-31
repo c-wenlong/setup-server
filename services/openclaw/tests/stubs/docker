@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
+#   compose_up         — touched by `compose ... up`
+#   origins_set        — exists => `config get gateway.controlUi.allowedOrigins`
+#                        answers non-empty (a user already configured origins)
+#   proxies_set        — exists => `config get gateway.trustedProxies` answers
+#                        non-empty (a user already configured proxies)
+#   config_sets        — the argv of every `config set --batch-json` call
+#   docker_run_fails   — exists => `docker run --entrypoint sh` (purge cleanup) fails
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    for a in "$@"; do
+      [ "$a" = "-a" ] && echo "openclaw-gateway"
+    done
+    ;;
+
+  inspect)
+    # Only the live suite inspects containers; keep the mocked answer sane.
+    echo running
+    ;;
+
+  run)
+    # teardown --purge's cleanup of container-owned files:
+    #   docker run --rm --pull never -v DIR:/x --entrypoint sh IMAGE -c SCRIPT
+    # The real container is root, so it can delete what the host user cannot.
+    mount_host=""; entry=""; script=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -v|--volume) mount_host="${2%%:*}"; shift 2 ;;
+        --entrypoint) entry="$2"; shift 2 ;;
+        -c) script="$2"; shift 2; break ;;
+        *) shift ;;
+      esac
+    done
+    [ "$entry" = "sh" ] || exit 0
+    [ -f "$STATE_DIR/docker_run_fails" ] && exit 1
+    [ -n "$mount_host" ] && [ -n "$script" ] || exit 1
+    chmod -R u+rwX "$mount_host" 2>/dev/null
+    sh -c "${script//\/x/$mount_host}" "$@"
+    exit $?
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        joined=" $* "
+        for a in "$@"; do
+          case "$a" in
+            up)   touch "$STATE_DIR/compose_up" ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        # The pre-start config sync runs:
+        #   compose ... run --rm --no-deps --entrypoint node openclaw-gateway \
+        #     dist/index.js config get|set ...
+        case "$joined" in
+          *" config get "*allowedOrigins*)
+            if [ -f "$STATE_DIR/origins_set" ]; then
+              echo '["https://example.ts.net:18789"]'
+            fi
+            ;;
+          *" config get "*trustedProxies*)
+            if [ -f "$STATE_DIR/proxies_set" ]; then
+              echo '["10.0.0.1"]'
+            fi
+            ;;
+          *" config set "*)
+            printf '%s\n' "$*" >> "$STATE_DIR/config_sets"
+            ;;
+        esac
+        ;;
+    esac
+    ;;
+esac
+exit 0

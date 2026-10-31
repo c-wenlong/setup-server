@@ -1,0 +1,22 @@
+{
+  "key": "hermes-agent",
+  "name": "Hermes Agent",
+  "tagline": "Agent runtime",
+  "group": "ai",
+  "icon": "cpu",
+  "author": "NousResearch",
+  "url": "https://HOST:9119/",
+  "health": "http://127.0.0.1:8642/health",
+  "marker": "~/services/hermes-agent",
+  "env": ".env",
+  "description": "Nous Research's self-improving agent: sessions, skills, memories and scheduled jobs, with a web dashboard on :9119 and a key-gated OpenAI-compatible API on loopback :8642. Official image, single container. Its data dir is ~/services/hermes-agent/data — deliberately NOT ~/.hermes, which belongs to the separate native hermes-gateway install this box already runs; the two coexist and teardown only ever touches the Docker one. Dashboard basic-auth credentials are generated into .env; the tailnet is still the real boundary.",
+  "control": {
+    "parts": [
+      {
+        "container": "hermes-agent"
+      }
+    ],
+    "kuma": "hermes-agent",
+    "_comment": "Dashboard and API are s6-supervised inside the one container, so a single part covers both. The tile's health probe is the API /health endpoint because the dashboard itself sits behind basic auth."
+  }
+}
