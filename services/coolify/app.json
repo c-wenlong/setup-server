@@ -2,7 +2,7 @@
   "key": "coolify",
   "name": "Coolify",
   "tagline": "PaaS",
-  "group": "infra",
+  "group": "dev",
   "icon": "coolify",
   "author": "coollabsio",
   "url": "https://HOST:8101/",

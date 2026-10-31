@@ -2,7 +2,7 @@
   "key": "immich",
   "name": "Immich",
   "tagline": "Photos",
-  "group": "daily",
+  "group": "files",
   "icon": "camera",
   "author": "immich-app",
   "url": "https://HOST:2283/",

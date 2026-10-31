@@ -2,7 +2,7 @@
   "key": "umami",
   "name": "Umami",
   "tagline": "Analytics",
-  "group": "infra",
+  "group": "system",
   "icon": "umami",
   "author": "umami-software",
   "url": "https://HOST:8106/",

@@ -2,7 +2,7 @@
   "key": "paperless-ngx",
   "name": "Paperless-ngx",
   "tagline": "Documents",
-  "group": "daily",
+  "group": "files",
   "icon": "paperless-ngx",
   "author": "paperless-ngx",
   "url": "https://HOST:8095/",

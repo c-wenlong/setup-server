@@ -2,7 +2,7 @@
   "key": "homepage",
   "name": "Homepage",
   "tagline": "Dashboard",
-  "group": "infra",
+  "group": "system",
   "icon": "web",
   "author": "gethomepage",
   "url": "https://HOST:8100/",

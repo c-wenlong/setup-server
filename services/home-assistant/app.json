@@ -2,7 +2,7 @@
   "key": "home-assistant",
   "name": "Home Assistant",
   "tagline": "Home",
-  "group": "infra",
+  "group": "system",
   "icon": "home",
   "author": "home-assistant",
   "url": "https://HOST:8123/",

@@ -66,25 +66,36 @@
     "          file cannot re-enable them: launcher, ntfy.",
     "group    - bucket id from the file-level `groups` list. The launcher",
     "          paints a heading per bucket and sorts inside it. Unknown or",
-    "          missing ids fall through to Other at the end.",
+    "          missing ids fall through to Other at the end. Editable per",
+    "          box via overrides.json exactly like name/description: the",
+    "          PATCH endpoint accepts {group: <id>} against this list and",
+    "          an empty value restores the shipped bucket.",
     "order (in registry.json) is the order inside each bucket: daily drivers first."
   ],
   "groups": [
     {
-      "id": "daily",
-      "label": "Daily"
+      "id": "mine",
+      "label": "Mine"
+    },
+    {
+      "id": "files",
+      "label": "Files & media"
+    },
+    {
+      "id": "productivity",
+      "label": "Productivity"
     },
     {
       "id": "ai",
-      "label": "AI & automation"
+      "label": "AI"
     },
     {
-      "id": "knowledge",
-      "label": "Knowledge & media"
+      "id": "dev",
+      "label": "Dev & automation"
     },
     {
-      "id": "infra",
-      "label": "Infrastructure"
+      "id": "system",
+      "label": "System"
     }
   ],
   "control": {
@@ -98,51 +109,51 @@
     "kuma_env": "services/monitoring/.env"
   },
   "order": [
-    "immich",
-    "seafile",
-    "syncthing",
-    "vaultwarden",
-    "code-server",
-    "open-webui",
-    "paperclip",
-    "openhands",
     "quiver-hub",
-    "openclaw",
-    "hermes-agent",
     "kaichenpedia",
     "gnosia-learn",
     "sources",
     "design-systems",
+    "manimkc",
+    "deployd",
+    "immich",
+    "seafile",
+    "syncthing",
+    "vaultwarden",
+    "paperless-ngx",
+    "stirling-pdf",
+    "jellyfin",
+    "karakeep",
     "appflowy",
+    "plane",
+    "firefly-iii",
+    "open-webui",
+    "paperclip",
+    "openhands",
+    "openclaw",
+    "hermes-agent",
+    "ollama",
+    "code-server",
+    "forgejo",
     "metabase",
     "n8n",
     "trigger-dev",
-    "beszel",
-    "uptime-kuma",
-    "ntfy",
-    "manimkc",
-    "ollama",
-    "adguard",
-    "remote-desktop",
-    "paperless-ngx",
-    "stirling-pdf",
-    "plane",
-    "firefly-iii",
-    "homepage",
     "coolify",
+    "adguard",
+    "ntfy",
+    "uptime-kuma",
+    "beszel",
+    "homepage",
+    "remote-desktop",
     "umami",
-    "home-assistant",
-    "jellyfin",
-    "karakeep",
-    "forgejo",
-    "deployd"
+    "home-assistant"
   ],
   "external": [
     {
       "key": "manimkc",
       "name": "manimkc",
       "tagline": "Video",
-      "group": "ai",
+      "group": "mine",
       "icon": "video",
       "author": "c-wenlong",
       "url": "https://HOST:8090/docs",
@@ -164,7 +175,7 @@
       "key": "karakeep",
       "name": "Karakeep",
       "tagline": "Bookmarks",
-      "group": "knowledge",
+      "group": "files",
       "icon": "bookmark",
       "author": "karakeep-app",
       "url": null,

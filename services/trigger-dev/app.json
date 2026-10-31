@@ -2,7 +2,7 @@
   "key": "trigger-dev",
   "name": "Trigger.dev",
   "tagline": "Jobs",
-  "group": "ai",
+  "group": "dev",
   "icon": "workflow",
   "author": "triggerdotdev",
   "url": "https://HOST:8030/",

@@ -2,7 +2,7 @@
   "key": "deployd",
   "name": "Deployd",
   "tagline": "Push-to-deploy",
-  "group": "infra",
+  "group": "mine",
   "icon": "workflow",
   "author": "c-wenlong",
   "hidden": true,

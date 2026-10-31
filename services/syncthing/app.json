@@ -2,7 +2,7 @@
   "key": "syncthing",
   "name": "Syncthing",
   "tagline": "Sync",
-  "group": "daily",
+  "group": "files",
   "icon": "syncthing",
   "author": "syncthing",
   "url": "https://HOST:8384/",

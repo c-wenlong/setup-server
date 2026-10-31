@@ -2,7 +2,7 @@
   "key": "vaultwarden",
   "name": "Vaultwarden",
   "tagline": "Passwords",
-  "group": "daily",
+  "group": "files",
   "icon": "lock",
   "author": "dani-garcia",
   "url": "https://HOST:8222/",

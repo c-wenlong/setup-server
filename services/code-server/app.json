@@ -2,7 +2,7 @@
   "key": "code-server",
   "name": "code-server",
   "tagline": "Code",
-  "group": "daily",
+  "group": "dev",
   "icon": "code",
   "author": "coder",
   "url": "https://HOST/",

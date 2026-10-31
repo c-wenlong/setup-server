@@ -2,7 +2,7 @@
   "key": "metabase",
   "name": "Metabase",
   "tagline": "BI",
-  "group": "knowledge",
+  "group": "dev",
   "icon": "metabase",
   "author": "metabase",
   "url": "https://HOST:8104/",

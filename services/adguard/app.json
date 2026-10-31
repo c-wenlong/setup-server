@@ -2,7 +2,7 @@
   "key": "adguard",
   "name": "AdGuard Home",
   "tagline": "DNS",
-  "group": "infra",
+  "group": "system",
   "icon": "shield",
   "author": "AdguardTeam",
   "url": "https://HOST:3080/",

@@ -2,7 +2,7 @@
   "key": "remote-desktop",
   "name": "Remote Desktop",
   "tagline": "Desktop",
-  "group": "infra",
+  "group": "system",
   "icon": "remote-desktop",
   "author": "apache",
   "url": "https://HOST:8094/",
