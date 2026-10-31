@@ -716,10 +716,37 @@ test_studio_stop_survives_rerun() {
   run_deploy
   check "re-run exits zero"       [ "$CODE" -eq 0 ]
   if [ "$OS" = "Linux" ]; then
-    check "studio still enabled"  calls_have "systemctl --user enable gnosia-learn-studio"
+    check "studio still enabled"  [ -f "$STATE_DIR/studio_enabled" ]
     check "studio not restarted"  no_call "systemctl --user restart gnosia-learn-studio"
   else
     check "studio still enabled"  calls_have "launchctl enable gui/.*/com.gnosia-learn.studio"
+    check "studio not reloaded"   no_call "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
+  fi
+  check "says it stays stopped"   out_has "leaving it stopped"
+  teardown
+}
+
+test_panel_stopped_studio_survives_rerun() {
+  echo "• deployd re-run: a studio stopped from a panel (disable --now) stays stopped"
+  setup
+  touch "$STATE_DIR/operator"
+  export STUDIO_ENABLED=1
+  run_deploy
+  check "first run ok"            [ "$CODE" -eq 0 ]
+  # The launcher's and the phone panel's Stop is `disable --now`, which
+  # leaves the runner disabled AND inactive. The re-run's own `enable` must
+  # not turn that into a restart: is-enabled can no longer proxy "stopped
+  # on purpose", so the check reads is-active instead. On launchd the same
+  # state is just the unloaded label (no enabled bit exists there).
+  rm -f "$STATE_DIR/studio_active" "$STATE_DIR/studio_enabled" \
+        "$STATE_DIR/launchd/com.gnosia-learn.studio"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "re-run exits zero"       [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "studio not re-enabled" no_call "systemctl --user enable gnosia-learn-studio"
+    check "studio not restarted"  no_call "systemctl --user restart gnosia-learn-studio"
+  else
     check "studio not reloaded"   no_call "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
   fi
   check "says it stays stopped"   out_has "leaving it stopped"
@@ -2304,6 +2331,7 @@ test_persisted_https_port
 test_setup_leaves_stopped
 test_studio_enabled
 test_studio_stop_survives_rerun
+test_panel_stopped_studio_survives_rerun
 test_deploy_bounces_studio
 test_deploy_leaves_stopped_studio
 test_flag_change_redeploys

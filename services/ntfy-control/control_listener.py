@@ -444,9 +444,13 @@ def kuma(action, control):
 # --------------------------------------------------------------- lifecycle
 
 def part_argv(part, verb):
+    """Same verb mapping as the launcher's _part_step: a unit's stop/start
+    carries the enablement bit so a reboot cannot resurrect a service
+    stopped from the phone. Containers persist intent via unless-stopped."""
     if part["kind"] == "container":
         return ["docker", verb, part["name"]]
-    return ["systemctl", "--user", verb, part["name"]]
+    systemd = {"stop": ["disable", "--now"], "start": ["enable", "--now"]}
+    return ["systemctl", "--user"] + systemd[verb] + [part["name"]]
 
 
 def plan(control, verb):
