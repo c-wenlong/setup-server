@@ -103,10 +103,6 @@ work at both URLs. This is the single easiest thing to get wrong.
 ```
 
 - `url` — where the tile navigates. `null` for services with no web UI.
-- `favicon` — optional live icon: a path resolved against `url` (or a full
-  URL). The tile's `<img>` loads it straight from the service, so the
-  service's own favicon updates propagate; on any load failure the tile
-  falls back to the vendored mark in `static/icons/`, then the drawn glyph.
 - `health` — loopback probe. Drives `active`. `null` ⇒ never active.
 - `marker` — a path that exists once deployed (state dir or generated
   `.env`). Drives `installed` without needing Docker.
