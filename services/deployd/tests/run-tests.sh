@@ -92,6 +92,16 @@ echo "deployd-self-update su=${DEPLOYD_SELF_UPDATE:-none}" >> "$CALLS_LOG"
 [ -f "$STATE_DIR/self_update_fails" ] && exit 4
 exit 0
 EOF
+  # The launcher code tree the freshness baseline watches: one restartable
+  # file plus the two live-file shapes it must ignore. Seeded at a fixed
+  # old timestamp, so the first tick's baseline check stamps it and every
+  # later tick stays quiet; tests bump one file to 2030 to pose as a later
+  # change the pull diff cannot see.
+  mkdir -p "$REPO/app/web/static"
+  for f in server.py services.json static/app.js; do
+    echo x > "$REPO/app/web/$f"
+    touch -t 202001010000 "$REPO/app/web/$f"
+  done
   echo "aaa1111111111111111111111111111111111111" > "$STATE_DIR/head"
 }
 
@@ -228,7 +238,15 @@ test_setup_macos() {
   check "plist written"      [ -f "$PLIST" ]
   check "plist interval"     grep -qF "<key>StartInterval</key><integer>60</integer>" "$PLIST"
   check "agent bootstrapped" calls_have "bootstrap"
-  check "no systemd touch"   no_call "systemctl"
+  # setup.sh itself must not write or enable units — the first tick does run
+  # the poller, whose Linux-built launcher probe legitimately calls
+  # `systemctl --user show` in this sandbox, so assert the setup-level calls
+  # and unit files specifically rather than any systemctl sighting.
+  check "no service unit"    [ ! -f "$SUNIT" ]
+  check "no timer unit"      [ ! -f "$TIMER" ]
+  check "no unit enable"     no_call "deployd.timer"
+  check "no daemon-reload"   no_call "daemon-reload"
+  check "no lingering"       no_call "enable-linger"
   teardown
 }
 
@@ -423,6 +441,61 @@ test_poll_launcher_probe_unknown() {
   teardown
 }
 
+test_poll_launcher_external_change() {
+  echo "• poll: a checkout moved outside deployd's pull still restarts"
+  setup
+  run_poll                       # first tick only stamps launcher-code.seen
+  : > "$CALLS_LOG"
+  launcher_running
+  # A manual pull or hand edit moved the file — the pull diff is empty,
+  # so only the mtime baseline can fire. Fractional seconds on purpose:
+  # a baseline saved at lower precision would re-mark every later tick.
+  python3 -c 'import os, sys; os.utime(sys.argv[1], (1893456000.5, 1893456000.5))' \
+    "$REPO/app/web/server.py"
+  run_poll
+  check "restart ran"          calls_have "$RESTART_CALL"
+  check "no marker left"       [ ! -f "$DSTATE/launcher-restart.pending" ]
+  : > "$CALLS_LOG"
+  run_poll                       # baseline advanced — once, not every tick
+  check "no second restart"    no_call "$RESTART_CALL"
+  teardown
+}
+
+test_poll_launcher_live_only() {
+  echo "• poll: live-served app/web files never count as stale"
+  setup
+  run_poll
+  : > "$CALLS_LOG"
+  launcher_running
+  touch -t 203001010000 "$REPO/app/web/static/app.js" \
+                        "$REPO/app/web/services.json"
+  run_poll
+  check "no restart"           no_call "$RESTART_CALL"
+  check "no marker"            [ ! -f "$DSTATE/launcher-restart.pending" ]
+  teardown
+}
+
+test_poll_launcher_edit_during_restart() {
+  echo "• poll: an edit landing mid-restart still restarts next tick"
+  setup
+  run_poll                       # first tick only stamps launcher-code.seen
+  : > "$CALLS_LOG"
+  launcher_running
+  touch -t 203001010000 "$REPO/app/web/server.py"
+  # The stub bumps this file mid-restart: a baseline stamped *after* the
+  # restart would already cover it, so the change must survive to tick 2.
+  echo "$REPO/app/web/server.py" > "$STATE_DIR/restart_edits"
+  run_poll
+  check "first restart"        calls_have "$RESTART_CALL"
+  : > "$CALLS_LOG"
+  run_poll                       # baseline predates the mid-cycle edit
+  check "restarts again"       calls_have "$RESTART_CALL"
+  : > "$CALLS_LOG"
+  run_poll                       # now covered — quiet
+  check "settles"              no_call "$RESTART_CALL"
+  teardown
+}
+
 test_poll_pull_failure_keeps_going() {
   echo "• poll: a failed checkout pull still polls remotes on stale config"
   setup
@@ -607,6 +680,9 @@ for t in \
   test_poll_launcher_restart_retry \
   test_poll_launcher_absent \
   test_poll_launcher_probe_unknown \
+  test_poll_launcher_external_change \
+  test_poll_launcher_live_only \
+  test_poll_launcher_edit_during_restart \
   test_poll_pull_failure_keeps_going \
   test_poll_lock \
   test_poll_force_and_status \

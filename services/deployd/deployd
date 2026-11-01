@@ -25,6 +25,13 @@
 #                                                failed (self-update or
 #                                                launcher restart), retried
 #                                                every tick until it works
+#            $SERVICE_HOME/state/launcher-code.seen
+#                                                newest app/web/ code mtime
+#                                                already restarted for — the
+#                                                freshness baseline that lets
+#                                                a checkout moved outside
+#                                                deployd's own pull still
+#                                                restart the launcher
 #   lock     $SERVICE_HOME/.poll.lock            mkdir lock, stale at 60 min
 #
 # Trust model: a "deploy" block runs its `cmd` as this user, so it carries
@@ -381,6 +388,61 @@ def launcher_code_path(path):
         or path == "app/web/services.json")
 
 
+def launcher_code_mtime(setup_repo):
+    """Newest mtime across the files launcher_code_path() names — the code
+    set a restart exists to reload. 0 when the checkout has no app/web/ at
+    all (a fixture, a tools-only clone)."""
+    root = os.path.join(setup_repo, "app", "web")
+    newest = 0.0
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            rel = os.path.relpath(os.path.join(base, name), setup_repo)
+            if not launcher_code_path(rel):
+                continue
+            try:
+                newest = max(newest, os.path.getmtime(
+                    os.path.join(base, name)))
+            except OSError:
+                pass
+    return newest
+
+
+def launcher_seen_path(state_dir):
+    return os.path.join(state_dir, "launcher-code.seen")
+
+
+def mark_launcher_stale(setup_repo, state_dir):
+    """Freshness baseline for the launcher restart. The pull diff above only
+    sees moves deployd's own `git pull` made — a manual pull, a hand edit on
+    the box, or any other route the checkout takes to move still leaves the
+    old process running. launcher-code.seen records the newest code mtime
+    already actioned; anything newer gets the same pending marker and falls
+    into the normal restart path. First tick has no baseline, so it marks
+    once; the restart (or a not-running launcher) writes the baseline, so it
+    fires once per change instead of every tick."""
+    newest = launcher_code_mtime(setup_repo)
+    if newest <= 0:
+        return
+    try:
+        with open(launcher_seen_path(state_dir)) as fh:
+            seen = float(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        seen = 0.0
+    if newest <= seen:
+        return
+    write_marker(os.path.join(state_dir, "launcher-restart.pending"),
+                 "mtime:%r" % newest)
+
+
+def record_launcher_baseline(state_dir, newest):
+    """Stamp the code mtime the launcher state now satisfies. The caller
+    passes the mtime captured *before* its restart/probe so a file changed
+    mid-restart still reads newer next tick instead of being stamped as
+    already loaded. Full precision: float mtimes exist on every modern fs,
+    and a truncated baseline would re-mark on every later tick."""
+    write_marker(launcher_seen_path(state_dir), repr(newest))
+
+
 LAUNCHER_UNIT = "launcher.service"      # app/web/setup.sh's systemd unit,
 LAUNCHER_LABEL = "com.launcher.server"  # launchd label
 
@@ -414,7 +476,7 @@ def _launcher_running(env):
         "active", "activating", "reloading", "failed", "deactivating")
 
 
-def restart_launcher(pending):
+def restart_launcher(pending, setup_repo, state_dir):
     """Re-exec the launcher so it loads the new server.py — it runs
     straight from the checkout, and the running process holds the old code
     forever otherwise. A launcher that is stopped or absent has nothing
@@ -422,7 +484,9 @@ def restart_launcher(pending):
     anyway). `restart` signals the unit's whole cgroup, so a launcher job
     in flight dies with it — tolerated because every deploy cmd is built
     to re-run. The marker stays on failure or an unanswered probe and
-    retries next tick."""
+    retries next tick. Every path that leaves nothing stale stamps the
+    launcher-code.seen baseline, so an mtime-triggered mark fires once per
+    change instead of every tick."""
     if sys.platform == "darwin":
         restart = ["launchctl", "kickstart", "-k",
                    "gui/%d/%s" % (os.getuid(), LAUNCHER_LABEL)]
@@ -433,6 +497,10 @@ def restart_launcher(pending):
         env = {"XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR")
                or "/run/user/%d" % os.getuid()}
         restart = ["systemctl", "--user", "restart", LAUNCHER_UNIT]
+    # Baseline is what the code tree looked like *before* the restart —
+    # a pull or edit landing while the unit cycles reads newer than this
+    # next tick, so it can never be stamped as already loaded.
+    baseline = launcher_code_mtime(setup_repo)
     running = _launcher_running(env)
     if running is False:
         log("app/web/ changed but no launcher is running — nothing to "
@@ -441,6 +509,7 @@ def restart_launcher(pending):
             os.remove(pending)
         except OSError:
             pass
+        record_launcher_baseline(state_dir, baseline)
         return
     if running is None:
         warn("cannot tell whether the launcher is running — keeping the "
@@ -453,6 +522,7 @@ def restart_launcher(pending):
             os.remove(pending)
         except OSError:
             pass
+        record_launcher_baseline(state_dir, baseline)
         log("launcher restarted")
     else:
         warn("launcher restart failed (rc=%s); retrying next tick: %s"
@@ -510,8 +580,12 @@ def refresh_checkout(setup_repo, state_dir):
         else:
             warn("deployd self-update failed (rc=%s); retrying next tick:\n%s"
                  % (rc, "\n".join(out.splitlines()[-40:])))
+    # A pull deployd did not make — a manual `git pull`, a hand edit, a
+    # checkout repaired some other way — is invisible to the diff above but
+    # leaves the same stale process. Baseline freshness catches it.
+    mark_launcher_stale(setup_repo, state_dir)
     if os.path.exists(launcher_pending):
-        restart_launcher(launcher_pending)
+        restart_launcher(launcher_pending, setup_repo, state_dir)
 
 
 def acquire_lock(service_home):

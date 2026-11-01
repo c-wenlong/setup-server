@@ -24,7 +24,13 @@ done
 for u in ${units[@]+"${units[@]}"}; do
   case "$verb" in
     start) touch "$STATE_DIR/active.$u" ;;
-    restart) [ ! -f "$STATE_DIR/restart_fails" ] || exit 1; touch "$STATE_DIR/active.$u" ;;
+    restart)
+      [ ! -f "$STATE_DIR/restart_fails" ] || exit 1
+      touch "$STATE_DIR/active.$u"
+      # A file landing while the unit cycles: its path sits in
+      # restart_edits, and the pre-restart baseline must not cover it.
+      [ ! -f "$STATE_DIR/restart_edits" ] || touch -t 203101010000 "$(cat "$STATE_DIR/restart_edits")"
+      ;;
     is-active) [ -f "$STATE_DIR/active.$u" ] || exit 3 ;;
     stop) [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
     disable) [ "$now" -eq 0 ] || [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
