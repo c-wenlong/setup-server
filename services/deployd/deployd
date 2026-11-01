@@ -431,15 +431,16 @@ def mark_launcher_stale(setup_repo, state_dir):
     if newest <= seen:
         return
     write_marker(os.path.join(state_dir, "launcher-restart.pending"),
-                 "mtime:%d" % newest)
+                 "mtime:%r" % newest)
 
 
-def record_launcher_baseline(setup_repo, state_dir):
-    """Stamp the code mtime the running launcher now satisfies — after a
-    restart, or when no launcher runs to be stale. Anything written later
-    outdates it and mark_launcher_stale fires again."""
-    newest = launcher_code_mtime(setup_repo)
-    write_marker(launcher_seen_path(state_dir), "%d" % int(newest))
+def record_launcher_baseline(state_dir, newest):
+    """Stamp the code mtime the launcher state now satisfies. The caller
+    passes the mtime captured *before* its restart/probe so a file changed
+    mid-restart still reads newer next tick instead of being stamped as
+    already loaded. Full precision: float mtimes exist on every modern fs,
+    and a truncated baseline would re-mark on every later tick."""
+    write_marker(launcher_seen_path(state_dir), repr(newest))
 
 
 LAUNCHER_UNIT = "launcher.service"      # app/web/setup.sh's systemd unit,
@@ -496,6 +497,10 @@ def restart_launcher(pending, setup_repo, state_dir):
         env = {"XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR")
                or "/run/user/%d" % os.getuid()}
         restart = ["systemctl", "--user", "restart", LAUNCHER_UNIT]
+    # Baseline is what the code tree looked like *before* the restart —
+    # a pull or edit landing while the unit cycles reads newer than this
+    # next tick, so it can never be stamped as already loaded.
+    baseline = launcher_code_mtime(setup_repo)
     running = _launcher_running(env)
     if running is False:
         log("app/web/ changed but no launcher is running — nothing to "
@@ -504,7 +509,7 @@ def restart_launcher(pending, setup_repo, state_dir):
             os.remove(pending)
         except OSError:
             pass
-        record_launcher_baseline(setup_repo, state_dir)
+        record_launcher_baseline(state_dir, baseline)
         return
     if running is None:
         warn("cannot tell whether the launcher is running — keeping the "
@@ -517,7 +522,7 @@ def restart_launcher(pending, setup_repo, state_dir):
             os.remove(pending)
         except OSError:
             pass
-        record_launcher_baseline(setup_repo, state_dir)
+        record_launcher_baseline(state_dir, baseline)
         log("launcher restarted")
     else:
         warn("launcher restart failed (rc=%s); retrying next tick: %s"

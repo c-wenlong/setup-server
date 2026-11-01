@@ -242,7 +242,8 @@ test_setup_macos() {
   # the poller, whose Linux-built launcher probe legitimately calls
   # `systemctl --user show` in this sandbox, so assert the setup-level calls
   # and unit files specifically rather than any systemctl sighting.
-  check "no unit files"      [ ! -f "$SUNIT" ] && [ ! -f "$TIMER" ]
+  check "no service unit"    [ ! -f "$SUNIT" ]
+  check "no timer unit"      [ ! -f "$TIMER" ]
   check "no unit enable"     no_call "deployd.timer"
   check "no daemon-reload"   no_call "daemon-reload"
   check "no lingering"       no_call "enable-linger"
@@ -447,8 +448,10 @@ test_poll_launcher_external_change() {
   : > "$CALLS_LOG"
   launcher_running
   # A manual pull or hand edit moved the file — the pull diff is empty,
-  # so only the mtime baseline can fire.
-  touch -t 203001010000 "$REPO/app/web/server.py"
+  # so only the mtime baseline can fire. Fractional seconds on purpose:
+  # a baseline saved at lower precision would re-mark every later tick.
+  python3 -c 'import os, sys; os.utime(sys.argv[1], (1893456000.5, 1893456000.5))' \
+    "$REPO/app/web/server.py"
   run_poll
   check "restart ran"          calls_have "$RESTART_CALL"
   check "no marker left"       [ ! -f "$DSTATE/launcher-restart.pending" ]
@@ -469,6 +472,27 @@ test_poll_launcher_live_only() {
   run_poll
   check "no restart"           no_call "$RESTART_CALL"
   check "no marker"            [ ! -f "$DSTATE/launcher-restart.pending" ]
+  teardown
+}
+
+test_poll_launcher_edit_during_restart() {
+  echo "• poll: an edit landing mid-restart still restarts next tick"
+  setup
+  run_poll                       # first tick only stamps launcher-code.seen
+  : > "$CALLS_LOG"
+  launcher_running
+  touch -t 203001010000 "$REPO/app/web/server.py"
+  # The stub bumps this file mid-restart: a baseline stamped *after* the
+  # restart would already cover it, so the change must survive to tick 2.
+  echo "$REPO/app/web/server.py" > "$STATE_DIR/restart_edits"
+  run_poll
+  check "first restart"        calls_have "$RESTART_CALL"
+  : > "$CALLS_LOG"
+  run_poll                       # baseline predates the mid-cycle edit
+  check "restarts again"       calls_have "$RESTART_CALL"
+  : > "$CALLS_LOG"
+  run_poll                       # now covered — quiet
+  check "settles"              no_call "$RESTART_CALL"
   teardown
 }
 
@@ -658,6 +682,7 @@ for t in \
   test_poll_launcher_probe_unknown \
   test_poll_launcher_external_change \
   test_poll_launcher_live_only \
+  test_poll_launcher_edit_during_restart \
   test_poll_pull_failure_keeps_going \
   test_poll_lock \
   test_poll_force_and_status \
