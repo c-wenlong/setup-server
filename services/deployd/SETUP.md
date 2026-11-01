@@ -34,6 +34,10 @@ Each tick:
    `services.json`, which it re-reads live) restarts its unit so the new
    `server.py` loads — a stopped or absent launcher just drops the
    `state/launcher-restart.pending` marker, a failed restart keeps it.
+   The diff alone misses a checkout moved outside deployd's own pull (a
+   manual `git pull`, a hand edit on the box), so
+   `state/launcher-code.seen` keeps the newest `app/web/` mtime already
+   restarted for — anything newer gets the same pending marker.
    Changes to `app/web/setup.sh` only log a hint: unit/plist changes need
    a manual re-run.
 2. Scan `services/*/app.json` for `deploy` blocks.
