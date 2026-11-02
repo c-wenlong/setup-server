@@ -93,6 +93,24 @@ HTTPS_PORT=$HTTPS_PORT
 SERVICE_HOME=$HOME/services/kaichenpedia
 NODE_BIN=$(dirname "$(command -v node)")
 PUBLIC_URL=https://$host:$HTTPS_PORT/
+
+# --- kaichenpedia API secrets (consumed by the kaichenpedia-api container) ---
+# GH_TOKEN: GitHub classic PAT (repo scope). /api/save and the copilot
+# commit through the GitHub API, so those endpoints fail without it.
+#GH_TOKEN=
+# COPILOT_SECRET: leave UNSET on this tailnet-only deployment — unset runs
+# /api/* in open mode and the site never prompts for it. Set it if the site
+# is ever published beyond the tailnet.
+#COPILOT_SECRET=
+# Optional server-side provider fallback — the in-browser settings panel
+# (gear icon, stored in localStorage) overrides all of these per request.
+#COPILOT_PROVIDER=anthropic
+#ANTHROPIC_API_KEY=
+#OPENAI_API_KEY=
+#GEMINI_API_KEY=
+#COPILOT_API_KEY=
+#COPILOT_BASE_URL=
+#COPILOT_MODEL=
 EOF
   ok "Wrote $ENV_FILE"
 fi
@@ -107,10 +125,11 @@ mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SERVICE_HOME/www"
 
 # ---------------------------------------------------------------- nginx.conf
 NGINX_CONF="$SERVICE_HOME/nginx.conf"
+NGINX_CHANGED=0
 if [ -f "$NGINX_CONF" ]; then
   ok "nginx.conf already exists, leaving untouched: $NGINX_CONF"
 else
-  info "Writing nginx.conf (Quartz links are extensionless — try_files adds .html)"
+  info "Writing nginx.conf (Quartz links are extensionless — try_files adds .html; /api/ goes to the sidecar)"
   cat > "$NGINX_CONF" <<'EOF'
 server {
     listen 80;
@@ -119,12 +138,46 @@ server {
     index index.html;
     error_page 404 /404.html;
 
+    # /api/* goes to the kaichenpedia-api sidecar (the repo's worker/server.ts).
+    location /api/ {
+        proxy_pass http://kaichenpedia-api:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
     location / {
         try_files $uri $uri/ $uri.html =404;
     }
 }
 EOF
   ok "Wrote $NGINX_CONF"
+fi
+
+# Installs predating the api sidecar have the stock conf above without the
+# /api/ block. Patch in place (never rewrite — the file may carry user
+# edits; a backup is left beside it).
+if ! grep -q 'location /api/' "$NGINX_CONF"; then
+  info "Adding /api/ proxy block to existing $NGINX_CONF"
+  cp "$NGINX_CONF" "$NGINX_CONF.bak"
+  python3 - "$NGINX_CONF" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+api = """
+    # /api/* goes to the kaichenpedia-api sidecar (the repo's worker/server.ts).
+    location /api/ {
+        proxy_pass http://kaichenpedia-api:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+"""
+i = s.rfind("}")
+if i < 0:
+    sys.exit("nginx.conf has no closing brace — add the /api/ block by hand")
+open(p, "w").write(s[:i] + api + s[i:])
+PYEOF
+  NGINX_CHANGED=1
+  ok "Patched $NGINX_CONF"
 fi
 
 # ------------------------------------------------------------ deploy script
@@ -140,12 +193,36 @@ info "Initial deploy (clone + npm ci + quartz build — a few minutes on first r
 ok "Site built: $SERVICE_HOME/www/current"
 
 # ---------------------------------------------------------------- container
-info "Starting nginx container (docker compose up -d)"
+info "Starting containers (docker compose up -d)"
 docker compose --project-directory "$SERVICE_DIR" up -d
+
+# A bind-mounted conf change doesn't recreate the container — bounce it.
+if [ "$NGINX_CHANGED" = "1" ]; then
+  docker compose --project-directory "$SERVICE_DIR" restart kaichenpedia
+fi
 
 info "Waiting for nginx on 127.0.0.1:$LOCAL_PORT"
 wait_http "http://127.0.0.1:$LOCAL_PORT/" 15 1 || die "nginx did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs"
 ok "Wiki is answering locally"
+
+# The api sidecar answers JSON through the nginx proxy — an HTML page here
+# means the proxy or sidecar is broken (static still works either way).
+info "Checking /api/ -> kaichenpedia-api sidecar"
+api_ok=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  body="$(curl -s -m 5 -X POST "http://127.0.0.1:$LOCAL_PORT/api/save" \
+    -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)"
+  case "$body" in *'"error"'*) api_ok=1; break ;; esac
+  sleep 2
+done
+if [ "$api_ok" = "1" ]; then
+  ok "API sidecar answering through nginx"
+else
+  warn "/api/ not answering — save/copilot need it. Check: docker logs kaichenpedia-api"
+fi
+
+grep -q '^GH_TOKEN=.' "$ENV_FILE" \
+  || warn "GH_TOKEN not set in $ENV_FILE — /api/save and the copilot will fail until you add a GitHub PAT (repo scope) and re-run."
 
 # ------------------------------------------------- legacy poller removal
 # deployd (services/deployd) polls the remote and re-runs this script now;

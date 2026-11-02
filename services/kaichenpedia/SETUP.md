@@ -25,8 +25,10 @@ deployd ──► setup.sh ──► bin/deploy.sh
                      ~/services/kaichenpedia/www/current
                                 │  bind mount (ro)
                                 ▼
-                    nginx (Docker) 127.0.0.1:8091
-                                │
+                    nginx (Docker) 127.0.0.1:8091 ── /api/* ──► kaichenpedia-api (Docker :8080)
+                                │                              worker/server.ts — same handler
+                                │                              code as the Cloudflare Worker;
+                                │                              in-browser edits + copilot
                                 ▼
               Tailscale Serve  HTTPS :8091 (tailnet only)
         https://homeserver.tail-name.ts.net:8091
@@ -47,10 +49,19 @@ webhooks can't reach it. The push-to-deploy options were:
 ## Security model
 
 - nginx binds `127.0.0.1:8091` only; HTTPS + device auth come from Tailscale.
-- The site is static files — no app code, no database, no accounts.
-- `.env` holds no secrets (paths + ports only). Repo auth for deployd's
-  polling and the deploy clone's fetch comes from git's existing
-  credential helper (`gh auth setup-git`).
+- The `kaichenpedia-api` sidecar (node, `tsx worker/server.ts`) handles
+  `/api/*` only — no published port, reachable solely through the nginx
+  proxy on the compose network. It runs the same route handlers as the
+  Cloudflare deployment.
+- `COPILOT_SECRET` stays unset here: tailnet-only means `/api/*` runs in
+  open mode (the UI never prompts). Set it if the site is ever published
+  wider. `/api/*` POSTs still require `application/json` + a same-origin
+  `Sec-Fetch-Site`, so cross-site pages can't commit through a reader's
+  browser.
+- `.env` gains one secret, `GH_TOKEN` (GitHub PAT, repo scope): `/api/save`
+  and the copilot commit through the GitHub API. Everything else in `.env`
+  is paths + ports. Repo auth for deployd's polling and the deploy clone's
+  fetch still comes from git's credential helper (`gh auth setup-git`).
 - The deploy clone (`~/services/kaichenpedia/repo`) is machine-managed and
   hard-reset on every deploy — **never edit it by hand**; a human working
   copy belongs in `~/dev` per the filesystem layout in `DIRECTORY.md`.
@@ -72,12 +83,16 @@ webhooks can't reach it. The push-to-deploy options were:
 2. Writes `.env` if absent (repo URL, branch, ports, poll interval, node
    path, service home). Re-runs read `.env` as the source of truth.
 3. Writes `~/services/kaichenpedia/nginx.conf` if absent (`try_files`
-   maps Quartz's extensionless links to `.html` files).
+   maps Quartz's extensionless links to `.html` files; `/api/` proxies to
+   the `kaichenpedia-api` sidecar). Installs predating the sidecar get the
+   `/api/` block patched into their existing conf (backup beside it) —
+   never a rewrite.
 4. Installs `deploy.sh` -> `~/services/kaichenpedia/bin/` (refreshed every
    run; edit the repo copy, then re-run setup.sh).
 5. Runs the initial deploy: clone, sync, `npm ci`, `quartz build`, swap.
-6. `docker compose up -d` (nginx, `restart: unless-stopped`) + local health
-   check.
+6. `docker compose up -d` (nginx + `kaichenpedia-api`, both
+   `restart: unless-stopped`) + local health check on the page and a JSON
+   probe through `POST /api/save`. Warns if `GH_TOKEN` is unset.
 7. Removes the old per-service `kaichenpedia-deploy` timer / LaunchAgent
    if a host still has one — deployd (`services/deployd`) owns scheduling
    now. Removal only happens once deployd itself is installed
