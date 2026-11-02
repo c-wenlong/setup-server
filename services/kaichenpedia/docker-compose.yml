@@ -10,3 +10,32 @@ services:
       # next -> current swap is visible to the running container.
       - ${SERVICE_HOME}/www:/usr/share/nginx/html:ro
       - ${SERVICE_HOME}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+  # API sidecar: runs the repo's worker/server.ts (the same handler code
+  # Cloudflare uses). nginx proxies /api/* here; static stays on nginx.
+  kaichenpedia-api:
+    image: node:22-slim
+    container_name: kaichenpedia-api
+    restart: unless-stopped
+    working_dir: /srv/site
+    # tsx is fetched INSIDE the container (npx cache lives in the writable
+    # layer): the worker code only needs node stdlib, and reusing the host's
+    # node_modules would break on macOS (darwin binaries don't run here).
+    command: ["sh", "-c", "npx -y tsx@4.21.0 worker/server.ts"]
+    volumes:
+      # Code only — the deploy clone stays read-only to the container.
+      - ${SERVICE_HOME}/repo/site:/srv/site:ro
+    environment:
+      PORT: "8080"
+      # All optional except GH_TOKEN (needed by /api/save + copilot).
+      # Leave COPILOT_SECRET empty on this tailnet-only deploy = open mode.
+      GH_TOKEN: ${GH_TOKEN:-}
+      COPILOT_SECRET: ${COPILOT_SECRET:-}
+      COPILOT_PROVIDER: ${COPILOT_PROVIDER:-}
+      COPILOT_API_KEY: ${COPILOT_API_KEY:-}
+      COPILOT_BASE_URL: ${COPILOT_BASE_URL:-}
+      COPILOT_MODEL: ${COPILOT_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      MODELS_ALLOWED_HOSTS: ${MODELS_ALLOWED_HOSTS:-}

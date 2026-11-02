@@ -126,6 +126,9 @@ test_fresh_deploy() {
   check "site swapped into current"   [ -f "$HOME/services/kaichenpedia/www/current/index.html" ]
   check "recorded built sha"          grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
   check "compose up invoked"          [ -f "$STATE_DIR/compose_up" ]
+  check "api probe hit the stub"      calls_have "/api/save"
+  check "api probe passed"            out_has "API sidecar answering through nginx"
+  check "warns about missing GH_TOKEN" out_has "GH_TOKEN not set"
   if [ "$OS" = "Linux" ]; then
     check "no timer written"          [ ! -f "$HOME/.config/systemd/user/kaichenpedia-deploy.timer" ]
     check "no lingering touched"      no_call "loginctl enable-linger"
