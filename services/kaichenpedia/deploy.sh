@@ -19,6 +19,11 @@
 #   npm ci                                   # only when package-lock changes
 #   npx quartz build                         # site/public/
 #   swap site/public into www/current        # atomic: next -> current
+#
+# Note: this script does not restart the kaichenpedia-api sidecar — after a
+# manual --force deploy, setup.sh's next run (or deployd's) restarts it when
+# state/built-sha moved. To bounce it now:
+#   docker compose --project-directory <setup-server>/services/kaichenpedia restart kaichenpedia-api
 
 set -euo pipefail
 

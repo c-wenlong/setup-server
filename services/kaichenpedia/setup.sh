@@ -139,8 +139,13 @@ server {
     error_page 404 /404.html;
 
     # /api/* goes to the kaichenpedia-api sidecar (the repo's worker/server.ts).
+    # Variable proxy_pass + the Docker resolver re-resolve the sidecar's
+    # address per request — a literal upstream caches the container IP at
+    # config load and goes stale when Compose recreates it.
     location /api/ {
-        proxy_pass http://kaichenpedia-api:8080;
+        resolver 127.0.0.11 valid=5s;
+        set $api http://kaichenpedia-api:8080;
+        proxy_pass $api;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
@@ -165,8 +170,13 @@ p = sys.argv[1]
 s = open(p).read()
 api = """
     # /api/* goes to the kaichenpedia-api sidecar (the repo's worker/server.ts).
+    # Variable proxy_pass + the Docker resolver re-resolve the sidecar's
+    # address per request — a literal upstream caches the container IP at
+    # config load and goes stale when Compose recreates it.
     location /api/ {
-        proxy_pass http://kaichenpedia-api:8080;
+        resolver 127.0.0.11 valid=5s;
+        set $api http://kaichenpedia-api:8080;
+        proxy_pass $api;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
@@ -189,7 +199,9 @@ ok "Deploy script installed"
 
 # ------------------------------------------------------------ initial build
 info "Initial deploy (clone + npm ci + quartz build — a few minutes on first run)"
+sha_before="$(cat "$SERVICE_HOME/state/built-sha" 2>/dev/null || echo none)"
 "$SERVICE_HOME/bin/deploy.sh" || die "Initial deploy failed — see output above."
+sha_after="$(cat "$SERVICE_HOME/state/built-sha" 2>/dev/null || echo none)"
 ok "Site built: $SERVICE_HOME/www/current"
 
 # ---------------------------------------------------------------- container
@@ -199,6 +211,12 @@ docker compose --project-directory "$SERVICE_DIR" up -d
 # A bind-mounted conf change doesn't recreate the container — bounce it.
 if [ "$NGINX_CHANGED" = "1" ]; then
   docker compose --project-directory "$SERVICE_DIR" restart kaichenpedia
+fi
+# `up -d` also leaves an unchanged api container running — restart it when
+# the deploy actually swapped builds, so new route code is loaded.
+if [ "$sha_before" != "$sha_after" ]; then
+  docker compose --project-directory "$SERVICE_DIR" restart kaichenpedia-api \
+    2>/dev/null || warn "could not restart kaichenpedia-api — check: docker logs kaichenpedia-api"
 fi
 
 info "Waiting for nginx on 127.0.0.1:$LOCAL_PORT"

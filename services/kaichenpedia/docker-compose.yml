@@ -18,10 +18,12 @@ services:
     container_name: kaichenpedia-api
     restart: unless-stopped
     working_dir: /srv/site
-    # tsx + node_modules come from deploy.sh's `npm ci` in the repo clone —
-    # mounted ro so the container can never mutate the deploy clone.
-    command: ["./node_modules/.bin/tsx", "worker/server.ts"]
+    # tsx is fetched INSIDE the container (npx cache lives in the writable
+    # layer): the worker code only needs node stdlib, and reusing the host's
+    # node_modules would break on macOS (darwin binaries don't run here).
+    command: ["sh", "-c", "npx -y tsx@4.21.0 worker/server.ts"]
     volumes:
+      # Code only — the deploy clone stays read-only to the container.
       - ${SERVICE_HOME}/repo/site:/srv/site:ro
     environment:
       PORT: "8080"
