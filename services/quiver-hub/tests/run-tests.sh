@@ -610,7 +610,7 @@ test_live() {
   live_check "not listening on non-local ifaces"  no_external_listener "$local_port"
   live_check "tailscale serve maps the port"      serve_maps "$url" "http://127.0.0.1:$local_port"
   live_check "tailnet HTTPS /v1/status is ok"     status_ok "$url/v1/status" 30
-  live_check "tailnet HTTPS serves the PWA"       body_has "$url/" "Have a pair token?"
+  live_check "tailnet HTTPS serves the PWA"       body_has "$url/" "<title>SWE</title>"
   live_check "API needs a device credential"      http_code_is "$url/v1/sessions" 401
   live_check "hub saved its public URL"           grep -qF "\"public_url\": \"$url\"" "$HOME/.quiver/data/remote/hub.json"
   # Mints a real (unused) token; it expires on its own after 5 minutes.
