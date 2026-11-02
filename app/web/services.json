@@ -168,11 +168,14 @@
         "parts": [
           {
             "container": "kaichenpedia"
+          },
+          {
+            "container": "kaichenpedia-api"
           }
         ],
         "kuma": "kaichenpedia"
       },
-      "description": "Personal wiki: a Quartz static build of the private kaichenpedia GitHub repo, served by nginx. deployd polls GitHub every minute and redeploys on new commits, so pushing from any device is the publish step; ~/services/kaichenpedia/bin/deploy.sh --force does it now. An amber tile means the wiki is frozen at its last build.",
+      "description": "Personal wiki: a Quartz static build of the private kaichenpedia GitHub repo, served by nginx with a node sidecar running /api/* (in-browser editing + copilot). deployd polls GitHub every minute and redeploys on new commits, so pushing from any device is the publish step; ~/services/kaichenpedia/bin/deploy.sh --force does it now. An amber tile means the wiki is frozen at its last build.",
       "deploy": {
         "repo": "https://github.com/c-wenlong/kaichenpedia.git",
         "ref": "main",
