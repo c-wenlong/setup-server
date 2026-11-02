@@ -54,9 +54,9 @@ service definition:
 
 ```json
 "deploy": {
-  "repo": "https://github.com/c-wenlong/quiver.git",
+  "repo": "https://github.com/c-wenlong/swe.git",
   "ref": "main",
-  "cmd": "QUIVER_REF=$DEPLOY_SHA QUIVER_TRACK=$DEPLOY_REF services/quiver-hub/setup.sh"
+  "cmd": "QUIVER_REPO=$DEPLOY_REPO QUIVER_REF=$DEPLOY_SHA QUIVER_TRACK=$DEPLOY_REF services/quiver-hub/setup.sh"
 }
 ```
 

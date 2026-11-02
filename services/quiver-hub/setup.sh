@@ -4,7 +4,7 @@
 # behind Tailscale (Linux + macOS).
 #
 # End state:
-#   - quiver installed from github.com/c-wenlong/quiver at a pinned commit, in
+#   - swe installed from github.com/c-wenlong/swe at a pinned commit, in
 #     its own uv tool dir (~/.local/share/quiver-hub), apart from the `swe` on
 #     your PATH so the two can't upgrade each other
 #   - `swe remote serve` listening on 127.0.0.1:LOCAL_PORT only, told its
@@ -18,7 +18,7 @@
 #     satellite agents both use that URL
 #
 # Usage:
-#   ./setup.sh                          # local 8477, HTTPS 8477, quiver main
+#   ./setup.sh                          # local 8477, HTTPS 8477, swe main
 #   LOCAL_PORT=8478 HTTPS_PORT=8478 ./setup.sh   # first run only; .env wins after
 #   QUIVER_REF=<sha|tag|branch> ./setup.sh       # install that ref this run
 #   QUIVER_TRACK=<branch|tag> ./setup.sh         # ...while .env keeps tracking
@@ -48,7 +48,7 @@ QUIVER_REF="${QUIVER_REF:-main}"
 # run through deployd would pin .env to that SHA, and a later plain re-run
 # would read it back and downgrade the hub.
 QUIVER_TRACK="${QUIVER_TRACK:-$QUIVER_REF}"
-QUIVER_REPO="${QUIVER_REPO:-https://github.com/c-wenlong/quiver.git}"
+QUIVER_REPO="${QUIVER_REPO:-https://github.com/c-wenlong/swe.git}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
@@ -83,8 +83,8 @@ hub_ok() {  # hub_ok <status url> <timeout>: the hub answers {"ok": true}
 info "Preflight checks ($OS)"
 refuse_root "Run as a regular user, not root. The hub reads your own sessions (~/.claude, ~/.codex, ...) and runs as a user unit."
 command -v curl >/dev/null || die "curl is required (health checks)."
-command -v git >/dev/null  || die "git is required (resolving QUIVER_REF, and uv installs quiver from git)."
-command -v uv >/dev/null   || die "uv is required to install quiver. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh"
+command -v git >/dev/null  || die "git is required (resolving QUIVER_REF, and uv installs swe from git)."
+command -v uv >/dev/null   || die "uv is required to install swe. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh"
 if [ "$OS" = "Linux" ]; then
   command -v systemctl >/dev/null || die "systemd is required on Linux (the hub runs as a systemd user unit)."
   command -v loginctl >/dev/null  || die "loginctl is required on Linux (lingering, for boot persistence)."
@@ -111,7 +111,7 @@ else
 LOCAL_PORT=$LOCAL_PORT
 HTTPS_PORT=$HTTPS_PORT
 
-# Which commit of c-wenlong/quiver the hub runs: a branch, tag or full SHA.
+# Which commit of c-wenlong/swe the hub runs: a branch, tag or full SHA.
 # A branch means "move to its current tip on every setup.sh run"; a SHA pins.
 # (Written from QUIVER_TRACK, which defaults to QUIVER_REF — deploy tooling
 # can pin this run's SHA while the file keeps following the branch.)
@@ -156,7 +156,7 @@ PUBLIC_URL="https://$TS_HOST:$HTTPS_PORT"
 ok "Ports: 127.0.0.1:$LOCAL_PORT, HTTPS :$HTTPS_PORT ($PUBLIC_URL)"
 
 # ---------------------------------------------------- install / upgrade
-info "Resolving quiver $QUIVER_REF"
+info "Resolving swe $QUIVER_REF"
 if [[ "$QUIVER_REF" =~ ^[0-9a-f]{40}$ ]]; then
   REV="$QUIVER_REF"
 else
@@ -168,16 +168,16 @@ else
   [ -n "$REV" ] || REV="$(printf '%s\n' "$refs" | awk -v r="refs/tags/$QUIVER_REF" '$2 == r { print $1; exit }')"
   [ -n "$REV" ] || die "No branch or tag named '$QUIVER_REF' in $QUIVER_REPO. Use a branch, a tag or a full 40-char SHA."
 fi
-ok "quiver $QUIVER_REF -> ${REV:0:12}"
+ok "swe $QUIVER_REF -> ${REV:0:12}"
 
 installed="$(cat "$REV_FILE" 2>/dev/null || true)"
 if [ "$installed" = "$REV" ] && [ -x "$SWE" ]; then
-  ok "quiver ${REV:0:12} already installed in $INSTALL_DIR"
+  ok "swe ${REV:0:12} already installed in $INSTALL_DIR"
 else
   if [ -n "$installed" ]; then
-    info "Upgrading quiver ${installed:0:12} -> ${REV:0:12}"
+    info "Upgrading swe ${installed:0:12} -> ${REV:0:12}"
   else
-    info "Installing quiver ${REV:0:12} into $INSTALL_DIR"
+    info "Installing swe ${REV:0:12} into $INSTALL_DIR"
   fi
   # Each commit gets its own uv tool dir and bin dir under releases/, apart
   # from the `swe` on your PATH (uv tool, Nix, brew), which this never
@@ -196,13 +196,13 @@ else
   rm -rf "$RELEASE"
   mkdir -p "$RELEASE"
   UV_TOOL_DIR="$RELEASE/tools" UV_TOOL_BIN_DIR="$RELEASE/bin" \
-    uv tool install --force --reinstall --quiet "quiver @ git+$QUIVER_REPO@$REV" \
-    || { rm -rf "$RELEASE"; die "uv tool install failed for quiver@$REV (see above). The installed build is unchanged."; }
+    uv tool install --force --reinstall --quiet "swe @ git+$QUIVER_REPO@$REV" \
+    || { rm -rf "$RELEASE"; die "uv tool install failed for swe@$REV (see above). The installed build is unchanged."; }
   [ -x "$RELEASE/bin/swe" ] || { rm -rf "$RELEASE"; die "uv finished but $RELEASE/bin/swe is missing. The installed build is unchanged."; }
-  # The hub needs a quiver new enough to have `swe remote`. An old pin would
+  # The hub needs a swe new enough to have `swe remote`. An old pin would
   # give a unit that crash-loops on "unknown command".
   has_remote "$RELEASE/bin/swe" \
-    || { rm -rf "$RELEASE"; die "quiver ${REV:0:12} has no 'swe remote serve --public-url' (too old: needs 6c70755 or later). Use a newer QUIVER_REF; the installed build is unchanged."; }
+    || { rm -rf "$RELEASE"; die "swe ${REV:0:12} has no 'swe remote serve --public-url' (too old: needs 6c70755 or later). Use a newer QUIVER_REF; the installed build is unchanged."; }
 
   # A first deploy before releases/ existed left bin/ and tools/ as real dirs.
   [ -L "$INSTALL_DIR/bin" ] || rm -rf "${INSTALL_DIR:?}/bin" "${INSTALL_DIR:?}/tools"
@@ -212,7 +212,7 @@ else
   for old in "$INSTALL_DIR"/releases/*; do
     case "$(basename "$old")" in "$name"|"$live") ;; *) rm -rf "$old" ;; esac
   done
-  ok "Installed quiver ${REV:0:12}"
+  ok "Installed swe ${REV:0:12}"
 fi
 
 has_remote "$SWE" \

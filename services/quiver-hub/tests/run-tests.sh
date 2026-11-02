@@ -29,7 +29,7 @@ red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
 MAIN_SHA="1111111111111111111111111111111111111111"
-REPO="https://github.com/c-wenlong/quiver.git"
+REPO="https://github.com/c-wenlong/swe.git"
 
 # --------------------------------------------------------------- harness
 setup() {
@@ -128,7 +128,7 @@ test_fresh_deploy() {
   check ".env: HTTPS_PORT=8477"              env_has "HTTPS_PORT=8477"
   check ".env: QUIVER_REF=main"              env_has "QUIVER_REF=main"
   check "resolved main with ls-remote"       calls_have "git ls-remote $REPO refs/heads/main"
-  check "uv installs the resolved commit"    uv_spec_is "quiver @ git+$REPO@$MAIN_SHA"
+  check "uv installs the resolved commit"    uv_spec_is "swe @ git+$REPO@$MAIN_SHA"
   check "installs into a per-commit release" [ -x "$INSTALL/releases/$MAIN_SHA/bin/swe" ]
   check "bin links to that release"          live_is "$MAIN_SHA"
   check "hub swe reachable through the link" [ -x "$INSTALL/bin/swe" ]
@@ -189,8 +189,8 @@ test_upgrade_when_main_moves() {
   echo "4444444444444444444444444444444444444444" > "$STATE_DIR/main_sha"
   run_deploy
   check "exits zero"            [ "$CODE" -eq 0 ]
-  check "says upgrading"        out_has "Upgrading quiver 111111111111 -> 444444444444"
-  check "installs the new tip"  uv_spec_is "quiver @ git+$REPO@4444444444444444444444444444444444444444"
+  check "says upgrading"        out_has "Upgrading swe 111111111111 -> 444444444444"
+  check "installs the new tip"  uv_spec_is "swe @ git+$REPO@4444444444444444444444444444444444444444"
   check "records the new tip"   rev_is "4444444444444444444444444444444444444444"
   check "bin links the new tip" live_is "4444444444444444444444444444444444444444"
   check "keeps the previous release for rollback" [ -d "$INSTALL/releases/$MAIN_SHA" ]
@@ -295,7 +295,7 @@ test_pin_by_sha() {
   run_deploy
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "no ls-remote"        no_call "git ls-remote"
-  check "installs that sha"   uv_spec_is "quiver @ git+$REPO@$QUIVER_REF"
+  check "installs that sha"   uv_spec_is "swe @ git+$REPO@$QUIVER_REF"
   check ".env records it"     env_has "QUIVER_REF=$QUIVER_REF"
   teardown
 }
@@ -306,7 +306,7 @@ test_track_ref() {
   export QUIVER_REF="abcdefabcdefabcdefabcdefabcdefabcdefabcd" QUIVER_TRACK="main"
   run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
-  check "installs the pinned sha" uv_spec_is "quiver @ git+$REPO@$QUIVER_REF"
+  check "installs the pinned sha" uv_spec_is "swe @ git+$REPO@$QUIVER_REF"
   check ".env still tracks main"  env_has "QUIVER_REF=main"
   teardown
 }
@@ -317,7 +317,7 @@ test_pin_by_tag() {
   export QUIVER_REF="v1.2.3"
   run_deploy
   check "exits zero"                 [ "$CODE" -eq 0 ]
-  check "installs the peeled commit" uv_spec_is "quiver @ git+$REPO@2222222222222222222222222222222222222222"
+  check "installs the peeled commit" uv_spec_is "swe @ git+$REPO@2222222222222222222222222222222222222222"
   teardown
 }
 
@@ -328,7 +328,7 @@ test_explicit_ref_beats_env() {
   export QUIVER_REF="v1.2.3"
   run_deploy
   check "exits zero"                 [ "$CODE" -eq 0 ]
-  check "installs the tag's commit"  uv_spec_is "quiver @ git+$REPO@2222222222222222222222222222222222222222"
+  check "installs the tag's commit"  uv_spec_is "swe @ git+$REPO@2222222222222222222222222222222222222222"
   check ".env still says main"       env_has "QUIVER_REF=main"
   teardown
 }
