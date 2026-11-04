@@ -871,14 +871,9 @@ it cannot rewrite the definition under the deploy the first one starts.
 A repo or ref change first takes deployd's own `.poll.lock` (409 while a
 tick runs): a tick already holding the old source and the commit it
 resolved there would otherwise deploy them over the new one. A method
-change the runner cannot swap alone wraps the deploy in steps: leaving
-`compose` runs `docker compose down` on the old stack first and `up -d`
-again if the deploy fails; a container method moving to `compose` parks
-`app-<key>` as `app-<key>.parked` (a dot no key can hold; stopped, so the port is free), drops it
-once the stack is up, and on failure clears the new stack by its project
-label and puts the container back; a container method moving to `script`
-stops `app-<key>` first and starts it again on failure. A script's own
-processes are its own, so leaving `script` stops nothing.
+change is a plain `ghapp.py deploy`: the runner stops and restores the old
+runtime itself (v17; until then this save wrapped the deploy in those
+steps, so no other path got them).
 
 No `.env` value is in any of it: definitions only ever hold `env_names`.
 Ports never move. `ghapp_entries` now reads every method (its description
@@ -923,3 +918,45 @@ the sheet watched has ended). app.js and home.js treat `#/deploys/<key>`
 as the Deploys page (grid hidden, nav and breadcrumb on Deploys). There
 is no JS test harness in this repo; the logic is kept to painting and
 the server stays the only validator.
+
+## v17: the runner owns method switches (2026-11-04)
+
+Part of [#137](https://github.com/c-wenlong/setup-server/issues/137). v15
+handled a method change only on the gallery's save, by wrapping the deploy
+job in stop and restore steps. A deploy started any other way (a deployd
+poll, `ghapp.py deploy` by hand, a hand-edited definition) never stopped
+the old runtime, which could keep holding the app's port. The handling now
+lives in `ghapp.deploy`, so every path gets it, and `PUT
+api/deployments/{key}` starts the same plain `start_deploy` as a redeploy.
+The per-app save slot and the 409 while a deployd tick holds `.poll.lock`
+are unchanged.
+
+**`deployed.json` gains `definition`**: the definition as deployed, written
+on every successful deploy (env_names only, never values; `GET
+api/deployments/{key}` already returns the whole record).
+
+**The switch.** Under the app lock, after the fetch and before the
+checkout, the runner compares the previous record's `method` (absent means
+`dockerfile`, as every record from before methods was) with the
+definition's. Each step prints a `==>` line in the job log.
+
+| From → to | Before the deploy | On success | On failure |
+|---|---|---|---|
+| `compose` → anything | `compose down` with the recorded definition's file; by the `com.docker.compose.project=app-<key>` label when the record has no `definition` or the file is gone | nothing | remove `app-<key>`, re-check-out the recorded sha and `up -d` the old stack; says so and skips when the file cannot be recovered |
+| container → `script` | `docker stop app-<key>` | nothing | `docker start app-<key>` |
+| container → `compose` | park `app-<key>` as `app-<key>.parked` (rename, stop) | remove the parked container | clear the project's containers, rename it back, start it |
+| `script` → anything | nothing: one log line says a script's own processes are not managed | | |
+| same method, or container → container | nothing (`swap()` replaces `app-<key>`) | | |
+
+"Container" is dockerfile, image, static, node or python. A compose
+deploy's own rollback now only re-checks-out an earlier sha when that
+deploy was compose too: another method's commit holds no stack.
+
+**`$DEPLOY_SHA` is checked.** When deployd hands over a sha, the runner
+fetches the definition's ref into `refs/remotes/origin/<ref>` and requires
+the sha to be an ancestor of it (or its tip, `git merge-base
+--is-ancestor`). Otherwise the deploy fails with "deployd asked for X but
+origin/<ref> is at Y" before anything is stopped or checked out, so
+deployd's fail and backoff retry it, the same as
+`services/kaichenpedia/deploy.sh`. The clone stays `--filter=blob:none` and
+the checkout stays a forced detach plus `clean -ffdxq`.

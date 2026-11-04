@@ -19,8 +19,11 @@ and one runtime directory beside the other services:
         src/            the repo, checked out at the deployed commit
         .env            passed to the container with --env-file (0600)
         data/           mounted at `volume`, when the app declares one
-        deployed.json   {sha, image, method, at, release?}: what is running,
-                        written last
+        deployed.json   {sha, image, method, ref, at, release?, definition}:
+                        what is running, written last. `definition` is the
+                        definition as deployed (it holds env_names, never
+                        values): the next deploy reads it to stop this
+                        method's runtime when the method changes
         site-*/         static method only: the live and rollback releases
         .lock           one deploy or remove per app at a time
 
@@ -63,10 +66,34 @@ Methods, and the fields each adds to the definition:
 A definition's shell words (build/start/cmd) run via `sh -c` inside src/;
 every other word still reaches an argv only after validate() shape-checks it.
 
+Method switches belong to the runner, so every way a deploy starts (the
+gallery's save, a deployd poll, `ghapp.py deploy` by hand, a hand-edited
+definition) gets the same handling. Under the app lock, deploy() compares
+the method in the previous deployed.json with the definition's. When they
+differ and the new method would not replace the old runtime on its own
+(see switch_steps), the old runtime is stopped first, cleared on success,
+and brought back if the deploy fails, so the port is never held by the old
+method and a failed switch leaves the version that was working:
+
+    compose -> anything   `compose down` on the old stack (the recorded
+                          definition's file; by project label when an older
+                          deployed.json has none); on failure, remove what
+                          the new method started and `up -d` the old stack
+                          at its recorded sha
+    container -> script   stop app-<key>; on failure, start it again
+    container -> compose  park app-<key> as app-<key>.parked (stopped);
+                          remove it on success; on failure, clear the
+                          project's containers and put it back
+    script -> anything    nothing: a script's own processes are its own
+    container -> container  nothing: swap() replaces app-<key> itself
+
+("container" is any of CONTAINER_METHODS.)
+
 Usage (cwd does not matter):
 
-    ghapp.py deploy <key>     fetch the ref (or $DEPLOY_SHA), run the method,
-                              health-check, publish, record
+    ghapp.py deploy <key>     fetch the ref (or $DEPLOY_SHA, which must be on
+                              origin/<ref>), switch methods if needed, run
+                              the method, health-check, publish, record
     ghapp.py remove <key>     stop the container or compose stack and drop
                               its Serve port; keep src/, .env, data/ and the
                               definition
@@ -466,9 +493,15 @@ def tailscale_bin():
     return mac if os.path.isfile(mac) else None
 
 
-def resolve_sha(d):
+def deployd_sha():
+    """$DEPLOY_SHA when deployd set a well-formed one, else None."""
     env_sha = os.environ.get("DEPLOY_SHA", "")
-    if SHA_RE.match(env_sha):
+    return env_sha if SHA_RE.match(env_sha) else None
+
+
+def resolve_sha(d):
+    env_sha = deployd_sha()
+    if env_sha:
         return env_sha
     code, out = quiet(["git", "ls-remote", clone_url(d["repo"]), d["ref"]])
     for line in out.splitlines():
@@ -479,7 +512,16 @@ def resolve_sha(d):
                    % (d["ref"], d["repo"], code))
 
 
-def checkout(d, sha, src):
+def fetch(d, sha, src, verify=False):
+    """Bring `sha` into src/ without touching the working tree, so a
+    refused commit changes nothing on disk that a deploy depends on.
+
+    `verify` is for a sha deployd handed over ($DEPLOY_SHA): fetch the
+    definition's ref first and require the sha to be on it (an ancestor of
+    origin/<ref>, or its tip). Otherwise a sha the fetch could not bring
+    down, or one from another branch, would deploy something deployd did
+    not ask for while it records the request as done. Raising instead makes
+    deployd's fail/backoff retry, the same as services/kaichenpedia/deploy.sh."""
     if not os.path.isdir(os.path.join(src, ".git")):
         os.makedirs(os.path.dirname(src), exist_ok=True)
         run(["git", "clone", "--no-checkout", "--filter=blob:none",
@@ -487,9 +529,35 @@ def checkout(d, sha, src):
     # A key can be deleted and re-created for another repo while src/ stays:
     # origin always follows the current definition.
     run(["git", "-C", src, "remote", "set-url", "origin", clone_url(d["repo"])])
-    run(["git", "-C", src, "fetch", "--quiet", "origin", sha])
+    if not verify:
+        run(["git", "-C", src, "fetch", "--quiet", "origin", sha])
+        return
+    # REF_RE allows neither `+` nor `:`, so the ref cannot reshape the
+    # refspec. Everything reachable from the ref comes down with it, so a
+    # sha that passes the check below needs no fetch of its own.
+    tracking = "refs/remotes/origin/" + d["ref"]
+    run(["git", "-C", src, "fetch", "--quiet", "origin",
+         "+%s:%s" % (d["ref"], tracking)])
+    code, _ = quiet(["git", "-C", src, "merge-base", "--is-ancestor",
+                     sha, tracking])
+    if code != 0:
+        _, tip = quiet(["git", "-C", src, "rev-parse", "--verify", "--quiet",
+                        tracking + "^{commit}"])
+        raise AppError("deployd asked for %s but origin/%s is at %s (fetch "
+                       "failed or diverged); failing so it retries"
+                       % (sha, d["ref"], tip.strip() or "nothing"))
+
+
+def check_out(sha, src):
+    """Point the working tree at a fetched sha: detached, forced, and
+    cleaned, so nothing a previous deploy left behind survives."""
     run(["git", "-C", src, "checkout", "--quiet", "--force", "--detach", sha])
     run(["git", "-C", src, "clean", "-ffdxq"])
+
+
+def checkout(d, sha, src, verify=False):
+    fetch(d, sha, src, verify=verify)
+    check_out(sha, src)
 
 
 def current_image(key):
@@ -502,16 +570,48 @@ def current_image(key):
     return out if code == 0 and out.startswith("sha256:") else None
 
 
-def deployed_sha(key):
-    """The sha the last successful deploy recorded, or None: the rollback
-    target for the methods with no spare image ID to fall back to."""
+def deployed_record(key):
+    """The last successful deploy's deployed.json as a dict, or None."""
     try:
         with open(os.path.join(app_dir(key), "deployed.json"),
                   encoding="utf-8") as fh:
-            sha = json.load(fh).get("sha")
+            rec = json.load(fh)
     except (OSError, ValueError):
         return None
+    return rec if isinstance(rec, dict) else None
+
+
+def record_sha(rec):
+    """A deployed.json's sha when it is well-formed, else None."""
+    sha = (rec or {}).get("sha")
     return sha if isinstance(sha, str) and SHA_RE.match(sha) else None
+
+
+def deployed_sha(key):
+    """The sha the last successful deploy recorded, or None: the rollback
+    target for the methods with no spare image ID to fall back to."""
+    return record_sha(deployed_record(key))
+
+
+def recorded_method(rec):
+    """The method a deployed.json says is running. A record written before
+    methods existed carries none, and every app was dockerfile then."""
+    m = rec.get("method")
+    return m if m in METHODS else "dockerfile"
+
+
+def recorded_definition(key, rec):
+    """The definition a deployed.json says was deployed, re-validated (its
+    words reach argvs again), or None: a record from before `definition`
+    was written, or one that no longer passes validate()."""
+    d = rec.get("definition")
+    if not isinstance(d, dict):
+        return None
+    try:
+        d = validate(dict(d))
+    except AppError:
+        return None
+    return d if d["key"] == key else None
 
 
 def inside_checkout(d, src, field):
@@ -767,6 +867,221 @@ def deploy_static(d, src, sha, previous, prev_release):
     return name
 
 
+# ------------------------------------------------------------------ switches
+
+def compose_file_path(d, src):
+    """The compose file a definition names, when it is in the checkout and
+    resolves inside it; None otherwise (an escaping link cannot drive
+    `down` or `up`)."""
+    try:
+        path = inside_checkout(d, src, "compose_file")
+    except AppError:
+        return None
+    return path if os.path.isfile(path) else None
+
+
+def compose_project_containers(key):
+    """Every container of compose project app-<key>, found by the label
+    compose puts on them, so no compose file is needed."""
+    code, out = quiet(["docker", "ps", "--all",
+                       "--filter", "label=com.docker.compose.project=%s"
+                                    % container_name(key),
+                       "--format", "{{.Names}}"])
+    return sorted(out.split()) if code == 0 else []
+
+
+def try_run(argv):
+    """An optional step: echoed and run like any other, but a failure is
+    noted in the log and never raised (a container already gone is fine)."""
+    res = run(argv, check=False)
+    if res.returncode != 0:
+        say("%s exited %d; continuing" % (" ".join(argv[:3]), res.returncode))
+    return res.returncode == 0
+
+
+def switch_steps(key, prev, now):
+    """(before, after, restore) callables for a method change the new
+    method cannot make by itself, or None when there is nothing to do:
+    nothing deployed, the same method, or a container method replaced by
+    another (swap() removes app-<key> itself).
+
+    `before` stops the old method's runtime ahead of the deploy, `after`
+    (success only) clears what it left, and `restore` (failure only) clears
+    whatever the new method started and brings the old runtime back, so the
+    box keeps the version that was working. Every step prints a `==>` line
+    for the job log. A script's own processes are its own business: leaving
+    `script` stops nothing."""
+    if not prev:
+        return None
+    was = recorded_method(prev)
+    if was == now:
+        return None
+    name = container_name(key)
+    src = os.path.join(app_dir(key), "src")
+
+    def nothing():
+        pass
+
+    if was == "script":
+        def note():
+            say("method change script -> %s: a script's own processes are not "
+                "managed here, so nothing is stopped" % now)
+        return note, nothing, nothing
+
+    if was == "compose":
+        old = recorded_definition(key, prev)
+        if old is not None and method_of(old) != "compose":
+            old = None
+        old_sha = record_sha(prev)
+
+        def stop_stack():
+            say("method change compose -> %s: taking the old compose stack "
+                "down first" % now)
+            # src/ is still at the old sha here: deploy() calls this before
+            # its checkout.
+            path = compose_file_path(old, src) if old else None
+            if path:
+                run(compose_argv(old, src, ["down"]))
+                return
+            say("%s: stopping project %s by its label"
+                % ("the old compose file is gone" if old else
+                   "deployed.json predates `definition`", name))
+            names = compose_project_containers(key)
+            if names:
+                run(["docker", "rm", "--force"] + names)
+
+        def restore_stack():
+            say("the deploy failed: removing what %s started and bringing "
+                "the old compose stack back" % now)
+            try_run(["docker", "rm", "--force", name])
+            if old is None or old_sha is None:
+                say("the old compose file is not recorded (deployed.json "
+                    "predates `definition`); not restoring the old stack")
+                return
+            try:
+                # The failed deploy checked out the new sha; the old file
+                # lives at the old one, which src/ already holds (it ran
+                # from there). No fetch: when the switch also moved repos,
+                # the old remote may be gone and the stack must still
+                # come back. Fetch only if the commit really is missing.
+                try:
+                    check_out(old_sha, src)
+                except AppError:
+                    checkout(old, old_sha, src)
+                if not compose_file_path(old, src):
+                    raise AppError("no %s at %s" % (old["compose_file"],
+                                                    old_sha[:12]))
+                run(compose_argv(old, src, ["up", "--detach"]), check=False)
+            except AppError as exc:
+                say("the old compose stack was not restored: %s" % exc)
+        return stop_stack, nothing, restore_stack
+
+    if was not in CONTAINER_METHODS:
+        return None
+    if now == "script":
+        def stop():
+            say("method change %s -> script: stopping %s first (a script "
+                "does not replace it)" % (was, name))
+            try_run(["docker", "stop", name])
+
+        def start():
+            say("the deploy failed: starting %s again" % name)
+            try_run(["docker", "start", name])
+        return stop, nothing, start
+    if now == "compose":
+        # deploy_compose force-removes app-<key> before `up`, so park the
+        # container under another name (stopped, so the port is free) and
+        # put it back if the stack does not come up. KEY_RE allows no dot,
+        # so "<name>.parked" can never be another app's container, nor a
+        # compose one (compose names its containers with dashes).
+        parked = name + ".parked"
+
+        def park():
+            say("method change %s -> compose: parking %s as %s until the "
+                "stack is up" % (was, name, parked))
+            code, out = quiet(["docker", "ps", "--all",
+                               "--filter", "name=^/%s" % name,
+                               "--format", "{{.Names}}"])
+            names = set(out.split()) if code == 0 else set()
+            if parked in names and name not in names:
+                # An earlier switch was killed (a deployd timeout) before
+                # it could put the container back: the parked one is still
+                # the working version, and the deployed.json that brought
+                # us here still says so. Keep it.
+                say("%s is still parked from an interrupted switch; keeping "
+                    "it" % parked)
+                try_run(["docker", "stop", parked])
+                return
+            if parked in names:
+                # A live app-<key> exists too, so this one is stale.
+                try_run(["docker", "rm", "--force", parked])
+            try_run(["docker", "rename", name, parked])
+            try_run(["docker", "stop", parked])
+
+        def drop():
+            say("the compose stack is up: removing the parked %s" % parked)
+            try_run(["docker", "rm", "--force", parked])
+
+        def unpark():
+            say("the deploy failed: clearing compose project %s and putting "
+                "%s back" % (name, name))
+            names = compose_project_containers(key)
+            if names:
+                try_run(["docker", "rm", "--force"] + names)
+            try_run(["docker", "rename", parked, name])
+            try_run(["docker", "start", name])
+        return park, drop, unpark
+    return None
+
+
+def deploy_method(d, m, sha, src, prev):
+    """Run method `m` for definition `d` at `sha`, checked out in src/.
+    Returns (image, release, prev_release) for the record."""
+    key = d["key"]
+    # Taken BEFORE the build/pull: rebuilding the same commit moves the
+    # tag, and the ID is then the only name left for the working image.
+    previous = current_image(key)
+    prev_release = deployed_release(key)
+    image = release = None
+    if m == "script":
+        run_sh(d["cmd"], src)
+        if d.get("port") and d.get("health_path") \
+                and not healthy(d, HEALTH_WAIT):
+            raise AppError("http://127.0.0.1:%d%s did not answer within %ds"
+                           % (d["port"], d["health_path"], HEALTH_WAIT))
+    elif m == "compose":
+        # Only an earlier compose stack is something to roll back to: the
+        # sha of another method's deploy holds no stack (switch_steps puts
+        # that method's runtime back instead).
+        was_compose = prev is not None and recorded_method(prev) == "compose"
+        deploy_compose(d, src, record_sha(prev) if was_compose else None)
+    elif m == "image":
+        image = d["image"]
+        say("pulling %s" % image)
+        run(["docker", "pull", image])
+        swap(d, image, previous)
+    elif m == "static":
+        release = deploy_static(d, src, sha, previous, prev_release)
+        image = STATIC_IMAGE
+    elif m in ("node", "python"):
+        generated_dockerfile(d, src)
+        image = "%s:%s" % (image_repo(key), sha[:12])
+        say("building %s (generated %s)" % (image, GENERATED_DOCKERFILE))
+        run(build_argv(d, sha, src, dockerfile=GENERATED_DOCKERFILE,
+                       context="."))
+        swap(d, image, previous)
+    else:
+        df_path = inside_checkout(d, src, "dockerfile")
+        if not os.path.isfile(df_path):
+            raise AppError("no %s in %s at %s"
+                           % (d["dockerfile"], d["repo"], sha[:12]))
+        image = "%s:%s" % (image_repo(key), sha[:12])
+        say("building %s" % image)
+        run(build_argv(d, sha, src))
+        swap(d, image, previous)
+    return image, release, prev_release
+
+
 def deploy(key):
     load(key)                 # fail fast on a bad key or missing definition
     with Lock(key):
@@ -776,59 +1091,41 @@ def deploy(key):
         say("deploying %s at %s (%s, %s method)"
             % (d["repo"], sha[:12], d["ref"], m))
         src = os.path.join(app_dir(key), "src")
-        checkout(d, sha, src)
-        if d.get("volume") and m in CONTAINER_METHODS:
-            os.makedirs(os.path.join(app_dir(key), "data"), exist_ok=True)
-
-        # Taken BEFORE the build/pull: rebuilding the same commit moves the
-        # tag, and the ID is then the only name left for the working image.
-        previous = current_image(key)
-        prev_sha = deployed_sha(key)
-        prev_release = deployed_release(key)
-        image = release = None
-        if m == "script":
-            run_sh(d["cmd"], src)
-            if d.get("port") and d.get("health_path") \
-                    and not healthy(d, HEALTH_WAIT):
-                raise AppError("http://127.0.0.1:%d%s did not answer within %ds"
-                               % (d["port"], d["health_path"], HEALTH_WAIT))
-        elif m == "compose":
-            deploy_compose(d, src, prev_sha)
-        elif m == "image":
-            image = d["image"]
-            say("pulling %s" % image)
-            run(["docker", "pull", image])
-            swap(d, image, previous)
-        elif m == "static":
-            release = deploy_static(d, src, sha, previous, prev_release)
-            image = STATIC_IMAGE
-        elif m in ("node", "python"):
-            generated_dockerfile(d, src)
-            image = "%s:%s" % (image_repo(key), sha[:12])
-            say("building %s (generated %s)" % (image, GENERATED_DOCKERFILE))
-            run(build_argv(d, sha, src, dockerfile=GENERATED_DOCKERFILE,
-                           context="."))
-            swap(d, image, previous)
-        else:
-            df_path = inside_checkout(d, src, "dockerfile")
-            if not os.path.isfile(df_path):
-                raise AppError("no %s in %s at %s"
-                               % (d["dockerfile"], d["repo"], sha[:12]))
-            image = "%s:%s" % (image_repo(key), sha[:12])
-            say("building %s" % image)
-            run(build_argv(d, sha, src))
-            swap(d, image, previous)
-
-        if m != "script":         # a script manages its own Serve routes
-            publish(d)
-        record = {"sha": sha, "image": image, "method": m, "ref": d["ref"],
-                  "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        if release:
-            record["release"] = release
-        with open(os.path.join(app_dir(key), "deployed.json.tmp"), "w") as fh:
-            json.dump(record, fh)
-        os.replace(os.path.join(app_dir(key), "deployed.json.tmp"),
-                   os.path.join(app_dir(key), "deployed.json"))
+        # Fetch, but leave the working tree alone: a refused $DEPLOY_SHA
+        # stops here with nothing stopped, and a compose stack being left
+        # can still be taken down with the file it was started from.
+        fetch(d, sha, src, verify=deployd_sha() is not None)
+        prev = deployed_record(key)
+        steps = switch_steps(key, prev, m)
+        try:
+            if steps:
+                steps[0]()
+            check_out(sha, src)
+            if d.get("volume") and m in CONTAINER_METHODS:
+                os.makedirs(os.path.join(app_dir(key), "data"), exist_ok=True)
+            image, release, prev_release = deploy_method(d, m, sha, src, prev)
+            if m != "script":     # a script manages its own Serve routes
+                publish(d)
+            # `definition` is what the next deploy stops this runtime by
+            # when the method changes; a definition holds env_names only.
+            record = {"sha": sha, "image": image, "method": m, "ref": d["ref"],
+                      "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                      "definition": d}
+            if release:
+                record["release"] = release
+            tmp = os.path.join(app_dir(key), "deployed.json.tmp")
+            with open(tmp, "w") as fh:
+                json.dump(record, fh)
+            os.replace(tmp, os.path.join(app_dir(key), "deployed.json"))
+        except Exception:
+            if steps:
+                try:
+                    steps[2]()
+                except Exception as exc:    # never mask the deploy's error
+                    say("restoring the previous method failed: %s" % exc)
+            raise
+        if steps:
+            steps[1]()
         if m == "static":
             prune_releases(key, (release, prev_release))
         prune_images(key, image)
@@ -842,20 +1139,12 @@ def compose_down(d):
     is there, project-labelled containers by name when it is not (a checkout
     may predate the file's rename or removal)."""
     src = os.path.join(app_dir(d["key"]), "src")
-    try:
-        path = inside_checkout(d, src, "compose_file")
-    except AppError:
-        path = None     # an escaping link cannot drive `down`
-    if path and os.path.isfile(path):
+    if compose_file_path(d, src):
         # --remove-orphans: services the file no longer lists must go too.
         run(compose_argv(d, src, ["down", "--remove-orphans"]))
         say("compose stack %s down" % container_name(d["key"]))
         return
-    code, out = quiet(["docker", "ps", "--all",
-                       "--filter", "label=com.docker.compose.project=%s"
-                                    % container_name(d["key"]),
-                       "--format", "{{.Names}}"])
-    names = sorted(out.split()) if code == 0 else []
+    names = compose_project_containers(d["key"])
     if names:
         run(["docker", "rm", "--force"] + names)
         say("compose stack %s removed by project label" % container_name(d["key"]))

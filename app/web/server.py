@@ -3481,7 +3481,8 @@ def _iso_from_epoch(ts):
 
 
 def _deployed_record(key):
-    """An app's deployed.json ({sha, image, method, ref, at}) or None."""
+    """An app's deployed.json ({sha, image, method, ref, at, release?,
+    definition}) or None."""
     try:
         with open(os.path.join(ghapp.app_dir(key), "deployed.json"),
                   encoding="utf-8") as fh:
@@ -3697,11 +3698,6 @@ def _sync_app_poller(d):
 _deployment_edits = set()
 _deployment_edits_lock = threading.Lock()
 
-# Runtimes a method starts and another method does not replace on its own:
-# ghapp's single-container swap only ever removes app-<key>, so a compose
-# stack (or a container under a script) would keep holding the app's port.
-SINGLE_CONTAINER_METHODS = ("dockerfile", "image", "static", "node", "python")
-
 
 def _claim_deployd_poll():
     """deployd's own poll lock (the `.poll.lock` dir a tick holds), or None
@@ -3721,79 +3717,6 @@ def _claim_deployd_poll():
         log("deployd poll lock not taken (%s); saving without it" % exc)
         return None
     return lock
-
-
-def _switch_steps(key, old, new):
-    """(before, after, restore) step lists around the `ghapp.py deploy` of
-    a method switch the runner cannot swap by itself: `before` stops the
-    old method's runtime, `after` (success only) clears what it left, and
-    `restore` (on failure only) clears whatever the new method started and
-    brings the old runtime back, so the box keeps the version that was
-    working. All empty when nothing is deployed, the method is unchanged,
-    or the runner's own swap covers it. A script's own processes are its
-    own business: leaving `script` stops nothing."""
-    was, now = ghapp.method_of(old), ghapp.method_of(new)
-    if was == now or _deployed_record(key) is None:
-        return [], [], []
-    name = ghapp.container_name(key)
-    if was == "compose":
-        src = os.path.join(ghapp.app_dir(key), "src")
-        if not os.path.isfile(os.path.join(src, old["compose_file"])):
-            return [], [], []
-        return ([{"argv": sg_docker(ghapp.compose_argv(old, src, ["down"]))}],
-                [],
-                [{"argv": sg_docker(["docker", "rm", "--force", name]),
-                  "on_failure": True, "optional": True},
-                 {"argv": sg_docker(ghapp.compose_argv(old, src, ["up", "--detach"])),
-                  "on_failure": True}])
-    if was not in SINGLE_CONTAINER_METHODS:
-        return [], [], []
-    if now == "script":
-        return ([{"argv": sg_docker(["docker", "stop", name]), "optional": True}],
-                [],
-                [{"argv": sg_docker(["docker", "start", name]),
-                  "on_failure": True, "optional": True}])
-    if now == "compose":
-        # The runner's compose deploy force-removes app-<key> before `up`,
-        # and its own rollback only knows earlier compose stacks. Park the
-        # container under another name (stopped, so the port is free) and
-        # put it back if the stack does not come up. KEY_RE allows no dot,
-        # so "<name>.parked" can never be another app's container (nor a
-        # compose one, which compose names with dashes); and `name` is
-        # KEY_RE-shaped, so the one shell line below carries no request text.
-        prev = name + ".parked"
-        clear = ('ids=$(docker ps -aq --filter label=com.docker.compose.project=%s); '
-                 '[ -z "$ids" ] || docker rm --force $ids' % name)
-        return ([{"argv": sg_docker(["docker", "rm", "--force", prev]), "optional": True},
-                 {"argv": sg_docker(["docker", "rename", name, prev]), "optional": True},
-                 {"argv": sg_docker(["docker", "stop", prev]), "optional": True}],
-                [{"argv": sg_docker(["docker", "rm", "--force", prev]), "optional": True}],
-                [{"argv": sg_docker(["sh", "-c", clear]),
-                  "on_failure": True, "optional": True},
-                 {"argv": sg_docker(["docker", "rename", prev, name]),
-                  "on_failure": True, "optional": True},
-                 {"argv": sg_docker(["docker", "start", name]),
-                  "on_failure": True, "optional": True}])
-    return [], [], []
-
-
-def _start_method_deploy(key, old, new):
-    """The deploy job for a saved definition: start_deploy, or when the
-    method changes in a way the runner cannot swap by itself, the same
-    `ghapp.py deploy` wrapped in the steps that stop and restore the old
-    runtime (see _switch_steps)."""
-    before, after, restore = _switch_steps(key, old, new)
-    if not before:
-        return start_deploy(key)
-    if not os.path.isfile(GHAPP_SCRIPT):
-        raise DeployError(404, "ghapp.py not found")
-    steps = before + [{"argv": build_command(GHAPP_SCRIPT, ["deploy", key]),
-                       "cwd": HERE}] + after + restore
-    job = register_job(key, "deploy")
-    log("deploy %s started: %s (%s -> %s, %d steps)"
-        % (job["id"], key, ghapp.method_of(old), ghapp.method_of(new), len(steps)))
-    threading.Thread(target=_run_steps, args=(job, steps), daemon=True).start()
-    return job["id"]
 
 
 def _restore_definition(key, old, new):
@@ -3880,9 +3803,12 @@ def _update_claimed(key, body):
                 pass
     # Outside _ghapp_lock: start_deploy may take it itself (adopt_app). The
     # save slot is still held, so no other PUT can rewrite the definition
-    # before this job exists.
+    # before this job exists. A method change is a plain deploy too:
+    # ghapp.py reads the method its last deploy recorded and stops, clears
+    # or restores the old runtime itself, so a deployd poll or a deploy by
+    # hand gets the same switch as this save.
     try:
-        job_id = _start_method_deploy(key, old, new)
+        job_id = start_deploy(key)
     except DeployError:
         # The deploy never started (job slots full, a race): put the old
         # definition, and the poller's old source, back.
