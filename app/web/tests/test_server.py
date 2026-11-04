@@ -9870,8 +9870,8 @@ class DeploymentsHttpTest(DeploymentsBase):
 
 
 class DeploymentUpdateRaceTest(DeploymentsBase):
-    """The review's three cases: overlapping saves, a deployd tick holding
-    the old source, and method switches the runner cannot swap alone."""
+    """Overlapping saves, a deployd tick holding the old source, and a
+    method change (a plain deploy: ghapp.py owns the switch)."""
 
     def test_a_second_save_of_the_same_app_is_refused(self):
         before = open(ghapp.def_path("hello-app")).read()
@@ -9922,115 +9922,44 @@ class DeploymentUpdateRaceTest(DeploymentsBase):
         self.addCleanup(setattr, server, "_run_steps", saved)
         return seen
 
-    def test_leaving_compose_stops_the_stack_and_restores_it_on_failure(self):
+    def test_a_method_change_is_a_plain_deploy_the_runner_switches(self):
+        # ghapp.py owns the stop/restore of the old runtime now, so every
+        # switch the gallery saves is the same start_deploy a redeploy is:
+        # no wrapped step plan of the server's own.
         self.write_def("api-box", port=8304, method="compose",
                        compose_file="deploy/compose.yml", container_port=8000)
         self.deployed("api-box")
-        src = os.path.join(ghapp.app_dir("api-box"), "src", "deploy")
-        os.makedirs(src)
-        open(os.path.join(src, "compose.yml"), "w").close()
-        server._have_docker_group = lambda: True
-        seen = self.capture_steps()
-        out = server.update_deployment("api-box", {"method": "image",
-                                                   "image": "nginx:1.27"})
-        for _ in range(50):
-            if seen:
-                break
-            time.sleep(0.02)
-        steps = seen[0]
-        self.assertEqual([s["argv"][-1] if "on_failure" not in s else "restore"
-                          for s in steps], ["down", "api-box", "restore", "restore"])
-        self.assertIn("--project-name", steps[0]["argv"])
-        self.assertIn("app-api-box", steps[0]["argv"])
-        self.assertEqual(steps[1]["argv"][-2:], ["deploy", "api-box"])
-        # On failure: clear whatever the new method started, then the stack.
-        self.assertEqual(steps[2]["argv"], ["docker", "rm", "--force", "app-api-box"])
-        self.assertEqual(steps[3]["argv"][-2:], ["up", "--detach"])
-        self.assertTrue(steps[3]["on_failure"])
-        self.assertEqual(server._jobs[out["job_id"]]["key"], "api-box")
-        self.assertEqual(self.deploys, [])          # not the plain path
-
-    def test_container_to_script_stops_the_container_first(self):
         self.deployed("hello-app")
-        server._have_docker_group = lambda: True
         seen = self.capture_steps()
-        server.update_deployment("hello-app", {"method": "script",
-                                               "cmd": "make deploy"})
-        for _ in range(50):
-            if seen:
-                break
-            time.sleep(0.02)
-        argvs = [s["argv"] for s in seen[0]]
-        self.assertEqual(argvs[0], ["docker", "stop", "app-hello-app"])
-        self.assertEqual(argvs[2], ["docker", "start", "app-hello-app"])
-
-    def test_container_to_compose_parks_the_container_until_the_stack_is_up(self):
-        self.deployed("hello-app")
-        server._have_docker_group = lambda: True
-        seen = self.capture_steps()
-        server.update_deployment("hello-app", {"method": "compose",
-                                               "compose_file": "compose.yml"})
-        for _ in range(50):
-            if seen:
-                break
-            time.sleep(0.02)
-        steps = seen[0]
-        argvs = [s["argv"] for s in steps]
-        # Never a name another app could own: app-<key> with a dotted key
-        # is impossible (the review's app-hello-prev was app hello-prev's).
-        self.assertIsNone(ghapp.KEY_RE.match("hello-app.parked"))
-        self.assertEqual(argvs[:3], [
-            ["docker", "rm", "--force", "app-hello-app.parked"],
-            ["docker", "rename", "app-hello-app", "app-hello-app.parked"],
-            ["docker", "stop", "app-hello-app.parked"]])
-        self.assertEqual(argvs[3][-2:], ["deploy", "hello-app"])
-        # Success only: drop the parked container.
-        self.assertEqual(argvs[4], ["docker", "rm", "--force", "app-hello-app.parked"])
-        self.assertFalse(steps[4].get("on_failure"))
-        # Failure only: clear the new stack by its project label, then put
-        # the old container back under its name and start it.
-        self.assertEqual(argvs[5][:2], ["sh", "-c"])
-        self.assertIn("label=com.docker.compose.project=app-hello-app", argvs[5][2])
-        self.assertEqual(argvs[6], ["docker", "rename", "app-hello-app.parked", "app-hello-app"])
-        self.assertEqual(argvs[7], ["docker", "start", "app-hello-app"])
-        self.assertTrue(all(s.get("on_failure") for s in steps[5:]))
-
-    def test_a_failed_switch_runs_the_restore_steps_and_skips_the_cleanup(self):
-        self.deployed("hello-app")
-        server._have_docker_group = lambda: True
-        before, after, restore = server._switch_steps(
-            "hello-app", self.read_def("hello-app"),
-            dict(self.read_def("hello-app"), method="compose",
-                 compose_file="compose.yml"))
-        steps = before + [{"argv": ["ghapp.py", "deploy", "hello-app"]}] + after + restore
-        ran = []
-
-        class Done:
-            def __init__(self, code):
-                self.code = code
-
-            def wait(self, timeout=None):
-                return self.code
-
-        def fake(argv, **kwargs):
-            ran.append(list(argv))
-            return Done(1 if argv[0] == "ghapp.py" else 0)
-        subprocess.Popen = fake
-        job = server.register_job("hello-app", "deploy")
-        server._run_steps(job, steps)
-        self.assertEqual(job["status"], "failed")
-        self.assertEqual([a[:2] for a in ran], [
-            ["docker", "rm"], ["docker", "rename"], ["docker", "stop"],
-            ["ghapp.py", "deploy"],
-            ["sh", "-c"], ["docker", "rename"], ["docker", "start"]])
-
-    def test_same_method_or_never_deployed_is_the_plain_deploy(self):
-        self.write_def("api-box", port=8304, method="compose",
-                       compose_file="deploy/compose.yml", container_port=8000)
-        seen = self.capture_steps()
-        # Not deployed yet: nothing runs to stop.
-        server.update_deployment("api-box", {"method": "image", "image": "nginx:1.27"})
-        self.deployed("hello-app")
-        server.update_deployment("hello-app", {"context": "site"})
+        cases = [("api-box", {"method": "image", "image": "nginx:1.27"}),
+                 ("hello-app", {"method": "script", "cmd": "make deploy"}),
+                 ("hello-app", {"method": "compose",
+                                "compose_file": "compose.yml"}),
+                 ("hello-app", {"method": "dockerfile", "compose_file": None,
+                                "cmd": None})]
+        for key, body in cases:
+            out = server.update_deployment(key, body)
+            self.assertEqual(out, {"key": key, "job_id": "job-1"}, body)
+            self.assertEqual(self.read_def(key)["method"], body["method"])
+        self.assertEqual(self.deploys,
+                         ["api-box", "hello-app", "hello-app", "hello-app"])
         self.assertEqual(seen, [])
-        self.assertEqual(self.deploys, ["api-box", "hello-app"])
+        self.assertFalse(hasattr(server, "_switch_steps"))
+
+    def test_a_method_and_source_change_still_waits_out_a_deployd_tick(self):
+        lock = os.path.join(server.DEPLOYD_HOME, ".poll.lock")
+        os.mkdir(lock)
+        self.addCleanup(lambda: os.path.isdir(lock) and os.rmdir(lock))
+        self.deployed("hello-app")
+        before = open(ghapp.def_path("hello-app")).read()
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_deployment("hello-app", {
+                "method": "image", "image": "nginx:1.27", "ref": "next"})
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(open(ghapp.def_path("hello-app")).read(), before)
+        self.assertEqual((self.deploys, self.pollers), ([], {}))
+        # A method change on the same repo and ref needs no tick's lock.
+        server.update_deployment("hello-app", {"method": "image",
+                                               "image": "nginx:1.27"})
+        self.assertEqual(self.deploys, ["hello-app"])
+        self.assertTrue(os.path.isdir(lock))      # never taken, never dropped
