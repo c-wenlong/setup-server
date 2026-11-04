@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""ghapp.py — build and run an app straight from a GitHub repo's Dockerfile.
+"""ghapp.py — deploy an app from a GitHub repo, through a per-app method.
 
-The runner behind the launcher's "New app from GitHub". One app is one JSON
-definition the launcher writes (never hand-edited, never in this repo):
+The runner behind the launcher's "New app from GitHub" and the deployments
+gallery. One app is one JSON definition the launcher writes (never
+hand-edited, never in this repo):
 
     ~/services/launcher/apps/<key>.json
         {"key", "name", "repo": "owner/name", "ref": "main",
-         "dockerfile": "Dockerfile", "context": ".",
+         "method": "dockerfile" | "image" | "compose" | "static"
+                 | "node" | "python" | "script",   # absent == "dockerfile"
          "container_port": 3000, "port": 8301, "health_path": "/",
-         "volume": "/data" | null}
+         "volume": "/data" | null,
+         ... the method's own fields, below ...}
 
 and one runtime directory beside the other services:
 
@@ -16,15 +19,57 @@ and one runtime directory beside the other services:
         src/            the repo, checked out at the deployed commit
         .env            passed to the container with --env-file (0600)
         data/           mounted at `volume`, when the app declares one
-        deployed.json   {sha, image, at}: what is running, written last
+        deployed.json   {sha, image, method, at, release?}: what is running,
+                        written last
+        site-*/         static method only: the live and rollback releases
         .lock           one deploy or remove per app at a time
+
+Methods, and the fields each adds to the definition:
+
+    dockerfile  "dockerfile" (path), "context", "container_port" — build the
+                repo's Dockerfile, run the image. The default: a definition
+                with no "method", or a word this file does not know, deploys
+                exactly as it always has.
+    image       "image" (name:tag or name@digest), "container_port" — pull
+                and run; no build, no checkout contents used.
+    compose     "compose_file" (repo-relative path), "service" (optional:
+                which service the published port serves, used to scope the
+                failure log), "container_port" — `docker compose up -d` on
+                the repo's file, under project app-<key>. The compose file
+                owns its own port mapping; it must publish the service on
+                127.0.0.1:`port`. Rollback re-checks-out the previous
+                deployed sha and `up -d`s it again.
+                Volumes caveat: src/ is machine-managed — every deploy runs
+                `checkout --force` + `clean -ffdxq` — so compose-managed
+                volumes must live outside the checkout (absolute host paths
+                or named volumes); bind mounts under src/ do not survive.
+    static      "build" (shell command run in src/), "output" (repo-relative
+                dir) — run the build, copy the output to a fresh per-build
+                release dir outside src/ (site-<sha12>-<ms>/, recorded in
+                deployed.json, so neither `git clean` nor a same-commit
+                rebuild can delete what is being served), then serve it
+                read-only from a small nginx container on the app's port.
+                Rollback mounts the previous release.
+    node        "version" (image tag suffix, e.g. "22-alpine"), "start"
+    python      (e.g. "3.13-slim"), optional "build" — a generated
+                Dockerfile is rendered into the checkout, then the method
+                behaves as `dockerfile`.
+    script      "cmd" (shell command run in src/, no container) — the escape
+                hatch. Deploy is: checkout, run cmd. No container, no
+                publish of its own; the health check still runs against
+                "port"+"health_path" when both are set, and both are the only
+                fields a script definition may omit.
+
+A definition's shell words (build/start/cmd) run via `sh -c` inside src/;
+every other word still reaches an argv only after validate() shape-checks it.
 
 Usage (cwd does not matter):
 
-    ghapp.py deploy <key>     fetch the ref (or $DEPLOY_SHA), build, swap the
-                              container, health-check, publish, record
-    ghapp.py remove <key>     stop the container and drop its Serve port;
-                              keep src/, .env, data/ and the definition
+    ghapp.py deploy <key>     fetch the ref (or $DEPLOY_SHA), run the method,
+                              health-check, publish, record
+    ghapp.py remove <key>     stop the container or compose stack and drop
+                              its Serve port; keep src/, .env, data/ and the
+                              definition
 
 deployd runs `deploy` from a state/pollers.json entry the launcher writes, so
 a push to the watched branch redeploys with no change to deployd itself; the
@@ -68,6 +113,31 @@ HEALTH_RE = re.compile(r"^/[A-Za-z0-9._~/?=&%-]{0,200}$")
 VOLUME_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,200}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
+# The deployment methods and the field shapes only they use. A command is
+# not regex-gated (any shell is legitimate): the contract is one line of
+# printable text, short enough to echo in a job log.
+METHODS = ("dockerfile", "image", "compose", "static", "node", "python",
+           "script")
+CONTAINER_METHODS = ("dockerfile", "image", "static", "node", "python")
+METHOD_RE = re.compile(r"^[a-z][a-z0-9-]{0,19}$")
+# A docker image reference: registry/namespace/name:tag or name@digest. The
+# gate is "can never be a flag or a path": starts alnum, one `:` or `@` for
+# the tag/digest, no whitespace or shell words beyond the reference's own
+# alphabet.
+IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{1,255}$")
+# Runtime tag suffixes ("22", "22.1-alpine", "3.13-slim", "lts") and compose
+# service names.
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
+SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+
+# Where the generated Dockerfile lands inside the checkout for node/python
+# (untracked on purpose: `git clean` drops it, every deploy rewrites it),
+# and the small web server behind the static method.
+GENERATED_DOCKERFILE = ".ghapp.Dockerfile"
+STATIC_IMAGE = "nginx:1.27-alpine"
+STATIC_CONTAINER_PORT = 80
+STATIC_DOCROOT = "/usr/share/nginx/html"
+
 # deployd's .env (read for SERVICE_HOME, never sourced) and its default home.
 DEPLOYD_ENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "services", "deployd", ".env")
@@ -99,9 +169,49 @@ def image_repo(key):
     return "launcher-app/" + key
 
 
+def method_of(d):
+    """The definition's deploy method. An absent, null or unrecognised word
+    is `dockerfile`: definitions written before methods existed deploy
+    unchanged, and a typo fails on the dockerfile fields it is then missing
+    rather than passing as something new."""
+    m = d.get("method")
+    return m if m in METHODS else "dockerfile"
+
+
+def _rel_field(d, field, allow_dot=True):
+    """A required repo-relative path, or raise. REL_RE itself accepts ".",
+    which is only meaningful for context/output, not for a file."""
+    v = d.get(field)
+    if not isinstance(v, str) or (v == "." and not allow_dot) \
+            or (v != "." and not REL_RE.match(v)):
+        raise AppError("bad %s %r" % (field, v))
+
+
+def _port_field(d, field, required=True):
+    """A TCP port; `required=False` lets the script method leave it out."""
+    v = d.get(field)
+    if v is None and not required:
+        return
+    if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= 65535:
+        raise AppError("bad %s %r" % (field, v))
+
+
+def _cmd_field(d, field, required=True):
+    """A shell command: one line of text, no embedded newlines (a newline
+    would split a generated Dockerfile's RUN line). Not regex-gated — any
+    shell is legitimate; it only ever runs via `sh -c` inside src/."""
+    v = d.get(field)
+    if v is None and not required:
+        return
+    if not isinstance(v, str) or not 0 < len(v) <= 500 \
+            or "\n" in v or "\r" in v or "\0" in v:
+        raise AppError("bad %s %r" % (field, v))
+
+
 def validate(d):
     """A definition dict -> the same dict, or raise AppError. Every word that
-    reaches an argv is shape-checked here first."""
+    reaches an argv is shape-checked here first; which fields are required
+    depends on the method (method_of: absent or unknown means dockerfile)."""
     if not isinstance(d, dict):
         raise AppError("definition is not an object")
     key = d.get("key")
@@ -112,16 +222,46 @@ def validate(d):
     if not isinstance(d.get("ref"), str) or not REF_RE.match(d["ref"]) \
             or d["ref"].startswith("-"):
         raise AppError("bad ref %r" % (d.get("ref"),))
-    for field in ("dockerfile", "context"):
-        v = d.get(field)
-        if not isinstance(v, str) or not (v == "." or REL_RE.match(v)):
-            raise AppError("bad %s %r" % (field, v))
-    for field in ("container_port", "port"):
-        v = d.get(field)
-        if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= 65535:
-            raise AppError("bad %s %r" % (field, v))
-    if not isinstance(d.get("health_path"), str) or not HEALTH_RE.match(d["health_path"]):
-        raise AppError("bad health_path %r" % (d.get("health_path"),))
+    method = d.get("method")
+    if method and (not isinstance(method, str) or not METHOD_RE.match(method)):
+        raise AppError("bad method %r" % (method,))
+    m = method_of(d)
+    if m == "dockerfile":
+        _rel_field(d, "dockerfile")
+        _rel_field(d, "context")
+        _port_field(d, "container_port")
+    elif m == "image":
+        v = d.get("image")
+        if not isinstance(v, str) or not IMAGE_RE.match(v) \
+                or (":" not in v and "@" not in v):
+            raise AppError("bad image %r" % (v,))
+        _port_field(d, "container_port")
+    elif m == "compose":
+        _rel_field(d, "compose_file", allow_dot=False)
+        svc = d.get("service")
+        if svc is not None and (not isinstance(svc, str)
+                                or not SERVICE_RE.match(svc)):
+            raise AppError("bad service %r" % (svc,))
+        _port_field(d, "container_port")
+    elif m == "static":
+        _cmd_field(d, "build")
+        _rel_field(d, "output")
+    elif m in ("node", "python"):
+        v = d.get("version")
+        if not isinstance(v, str) or not VERSION_RE.match(v):
+            raise AppError("bad version %r" % (v,))
+        _cmd_field(d, "build", required=False)
+        _cmd_field(d, "start")
+        _port_field(d, "container_port")
+    else:                                   # script
+        _cmd_field(d, "cmd")
+    _port_field(d, "port", required=(m != "script"))
+    hp = d.get("health_path")
+    if hp is None:
+        if m != "script":
+            raise AppError("bad health_path %r" % (hp,))
+    elif not isinstance(hp, str) or not HEALTH_RE.match(hp):
+        raise AppError("bad health_path %r" % (hp,))
     vol = d.get("volume")
     if vol is not None and (not isinstance(vol, str) or not VOLUME_RE.match(vol)
                             or "/../" in vol + "/"):
@@ -215,33 +355,79 @@ def clone_url(repo):
 
 # ------------------------------------------------------------------ argv
 
-def build_argv(d, sha, src):
-    ctx = os.path.normpath(os.path.join(src, d["context"]))
+def build_argv(d, sha, src, dockerfile=None, context=None):
+    """`docker build` for the app's own image. dockerfile/context default to
+    the definition's; node/python pass their generated Dockerfile instead."""
+    ctx = os.path.normpath(os.path.join(src, context or d.get("context") or "."))
+    df = dockerfile or d["dockerfile"]
     return ["docker", "build",
             "--tag", "%s:%s" % (image_repo(d["key"]), sha[:12]),
-            "--file", os.path.normpath(os.path.join(src, d["dockerfile"])),
+            "--file", os.path.normpath(os.path.join(src, df)),
             "--label", "setup-server.app=%s" % d["key"],
             "--label", "org.opencontainers.image.revision=%s" % sha,
             "--label", "org.opencontainers.image.source=https://github.com/%s" % d["repo"],
             ctx]
 
 
-def run_argv(d, image):
+def run_argv(d, image, container_port=None, mounts=()):
     """`docker run` for the app. 127.0.0.1 only, restart unless-stopped (a
     stopped app stays stopped across reboots, the same policy as the compose
-    services)."""
+    services). `mounts` are extra host:container[:opts] bind specs (static's
+    read-only docroot)."""
     key = d["key"]
+    inner = container_port or d["container_port"]
     argv = ["docker", "run", "--detach",
             "--name", container_name(key),
             "--restart", "unless-stopped",
-            "--publish", "127.0.0.1:%d:%d" % (d["port"], d["container_port"]),
+            "--publish", "127.0.0.1:%d:%d" % (d["port"], inner),
             "--label", "setup-server.app=%s" % key]
     env_file = os.path.join(app_dir(key), ".env")
     if os.path.isfile(env_file):
         argv += ["--env-file", env_file]
     if d.get("volume"):
         argv += ["--volume", "%s:%s" % (os.path.join(app_dir(key), "data"), d["volume"])]
+    for spec in mounts:
+        argv += ["--volume", spec]
     return argv + [image]
+
+
+def compose_argv(d, src, tail):
+    """`docker compose` against the repo's file, as project app-<key> so its
+    containers never collide with the single-container methods'. The app's
+    .env passes as the project env file (same file --env-file would get)."""
+    argv = ["docker", "compose",
+            "--project-name", container_name(d["key"]),
+            "--file", os.path.normpath(os.path.join(src, d["compose_file"]))]
+    env_file = os.path.join(app_dir(d["key"]), ".env")
+    if os.path.isfile(env_file):
+        argv += ["--env-file", env_file]
+    return argv + tail
+
+
+def generated_dockerfile(d, src):
+    """Render a node/python definition into a Dockerfile inside the checkout
+    and return its repo-relative name. Untracked on purpose: `git clean`
+    drops it after every checkout, so every deploy writes it fresh."""
+    lines = ["FROM %s:%s" % (method_of(d), d["version"]),
+             "WORKDIR /app",
+             "COPY . ."]
+    if d.get("build"):
+        lines.append("RUN " + d["build"])
+    lines.append("EXPOSE %d" % d["container_port"])
+    lines.append('CMD ["sh", "-c", %s]' % json.dumps(d["start"]))
+    path = os.path.join(src, GENERATED_DOCKERFILE)
+    # O_NOFOLLOW: a repo may legitimately track a file of this name, and
+    # `checkout --force` would restore a tracked symlink pointing at a host
+    # file (../.env) that an ordinary write would truncate through the link.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                     | os.O_NOFOLLOW, 0o644)
+    except OSError:
+        raise AppError("%s in the checkout is not a regular file"
+                       % GENERATED_DOCKERFILE)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return GENERATED_DOCKERFILE
 
 
 # ------------------------------------------------------------------ helpers
@@ -314,6 +500,36 @@ def current_image(key):
                        container_name(key)])
     out = out.strip()
     return out if code == 0 and out.startswith("sha256:") else None
+
+
+def deployed_sha(key):
+    """The sha the last successful deploy recorded, or None: the rollback
+    target for the methods with no spare image ID to fall back to."""
+    try:
+        with open(os.path.join(app_dir(key), "deployed.json"),
+                  encoding="utf-8") as fh:
+            sha = json.load(fh).get("sha")
+    except (OSError, ValueError):
+        return None
+    return sha if isinstance(sha, str) and SHA_RE.match(sha) else None
+
+
+def inside_checkout(d, src, field):
+    """The real path of a repo input (dockerfile, compose_file, output).
+    It must resolve INSIDE the checkout: a tracked symlink could otherwise
+    turn a build input into a read or bind-mount of a host file."""
+    rel = d[field]
+    root = os.path.realpath(src)
+    real = os.path.realpath(os.path.join(root, rel))
+    if real != root and not real.startswith(root + os.sep):
+        raise AppError("%s %r escapes the checkout" % (field, rel))
+    return real
+
+
+def run_sh(command, cwd):
+    """A definition's shell command, run `sh -c` inside the checkout. The
+    only place a definition's words go through a shell."""
+    run(["sh", "-c", command], cwd=cwd)
 
 
 def healthy(d, timeout):
@@ -402,15 +618,17 @@ class Lock(object):
 
 # ------------------------------------------------------------------ verbs
 
-def swap(d, image, previous):
+def swap(d, image, previous, previous_run_kw=None, **run_kw):
     """Replace the running container with `image`. If the new one cannot
     start or does not answer in time, put `previous` (an image ID) back and
-    fail: the box is never left without the version that was working."""
+    fail: the box is never left without the version that was working.
+    `previous_run_kw` overrides run_kw for the rollback run, for methods
+    whose mounts differ per release (static)."""
     key = d["key"]
     quiet(["docker", "rm", "--force", container_name(key)])
     say("starting %s on 127.0.0.1:%d" % (container_name(key), d["port"]))
     try:
-        run(run_argv(d, image))
+        run(run_argv(d, image, **run_kw))
         if not healthy(d, HEALTH_WAIT):
             run(["docker", "logs", "--tail", "40", container_name(key)], check=False)
             raise AppError("http://127.0.0.1:%d%s did not answer within %ds"
@@ -419,54 +637,246 @@ def swap(d, image, previous):
         quiet(["docker", "rm", "--force", container_name(key)])
         if previous:
             say("rolling back to the image that was running (%s)" % previous[:19])
-            run(run_argv(d, previous), check=False)
+            kw = run_kw if previous_run_kw is None else previous_run_kw
+            run(run_argv(d, previous, **kw), check=False)
         raise
+
+
+def deploy_compose(d, src, prev_sha):
+    """`docker compose up -d` on the repo's file. There is no image ID to
+    roll back to (compose replaced its containers in place), so a failed
+    health check re-checks-out the last deployed sha and `up -d`s it: the
+    stack returns to the compose file that was working."""
+    path = inside_checkout(d, src, "compose_file")
+    if not os.path.isfile(path):
+        raise AppError("no %s in %s" % (d["compose_file"], d["repo"]))
+    # A previous method's single container may still hold the port; compose
+    # names its own app-<key>-<service>-N and never reclaims it.
+    quiet(["docker", "rm", "--force", container_name(d["key"])])
+    # --build: a `build:` service must not keep serving the previous commit's
+    # image. --remove-orphans: a renamed service must not keep its port.
+    up = ["up", "--detach", "--build", "--remove-orphans"]
+    say("docker compose up -d (%s)" % d["compose_file"])
+    try:
+        run(compose_argv(d, src, up))
+        if not healthy(d, HEALTH_WAIT):
+            logs = ["logs", "--tail", "40"]
+            if d.get("service"):
+                logs.append(d["service"])
+            run(compose_argv(d, src, logs), check=False)
+            raise AppError("http://127.0.0.1:%d%s did not answer within %ds"
+                           % (d["port"], d["health_path"], HEALTH_WAIT))
+    except AppError:
+        if prev_sha:
+            say("restoring the compose stack at %s" % prev_sha[:12])
+            checkout(d, prev_sha, src)
+            run(compose_argv(d, src, up), check=False)
+        raise
+
+
+RELEASE_RE = re.compile(r"^site-[0-9a-f]{12}-[0-9]{1,20}$")
+
+
+def new_release_name(key, sha):
+    """site-<sha12>-<ms>: one name per BUILD, not per commit, so redeploying
+    the same commit never reuses (and so never deletes) the live release."""
+    stamp = int(time.time() * 1000)
+    while True:
+        name = "site-%s-%d" % (sha[:12], stamp)
+        if not os.path.exists(os.path.join(app_dir(key), name)):
+            return name
+        stamp += 1
+
+
+def release_dir(key, name):
+    """~/services/apps/<key>/<name>: one static build's output, staged
+    OUTSIDE the checkout so the next deploy's `git clean -ffdxq` cannot
+    delete the site the running container still serves."""
+    return os.path.join(app_dir(key), name)
+
+
+def deployed_release(key):
+    """The release dir name the last successful static deploy recorded, or
+    None: the rollback mount, and the one prune must never drop."""
+    try:
+        with open(os.path.join(app_dir(key), "deployed.json"),
+                  encoding="utf-8") as fh:
+            name = json.load(fh).get("release")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if isinstance(name, str) and RELEASE_RE.match(name) \
+            and os.path.isdir(release_dir(key, name)):
+        return name
+    return None
+
+
+def prune_releases(key, keep_names):
+    """Drop static releases that are neither current nor the rollback one."""
+    keep = {n for n in keep_names if n}
+    try:
+        names = os.listdir(app_dir(key))
+    except OSError:
+        return
+    for name in names:
+        if name.startswith("site-") and name not in keep:
+            shutil.rmtree(os.path.join(app_dir(key), name), ignore_errors=True)
+
+
+def deploy_static(d, src, sha, previous, prev_release):
+    """Run the def's build in the checkout, copy its output to a fresh
+    release dir outside it, then serve that read-only from the small nginx
+    image. Returns the release name. The live release is never touched: a
+    failed build, pull or swap drops only the new release, and a failed swap
+    rolls back to the previous release dir, not just its image."""
+    key = d["key"]
+    run_sh(d["build"], src)
+    out_dir = inside_checkout(d, src, "output")
+    if not os.path.isdir(out_dir):
+        raise AppError("the build produced no %s directory" % d["output"])
+    name = new_release_name(key, sha)
+    release = release_dir(key, name)
+    tmp = release + ".tmp"
+    try:
+        # symlinks=True: a link inside the output is copied as a link and
+        # then resolves inside the container's filesystem; dereferencing it
+        # here would copy whatever HOST path it pointed at into the release.
+        shutil.copytree(out_dir, tmp, symlinks=True)
+        os.replace(tmp, release)
+        run(["docker", "pull", STATIC_IMAGE])
+        say("serving %s from %s on 127.0.0.1:%d"
+            % (d["output"], STATIC_IMAGE, d["port"]))
+        # The rollback run mounts the PREVIOUS release: rolling back to the
+        # old image over this deploy's release would serve the failed content.
+        # With no recorded release there is nothing to mount: rolling the
+        # old image back over THIS release would serve content that is
+        # about to be deleted, so no container rollback then.
+        prev_kw = None
+        if prev_release:
+            prev_kw = {"container_port": STATIC_CONTAINER_PORT,
+                       "mounts": [release_dir(key, prev_release) + ":"
+                                  + STATIC_DOCROOT + ":ro"]}
+        else:
+            previous = None
+        swap(d, STATIC_IMAGE, previous, previous_run_kw=prev_kw,
+             container_port=STATIC_CONTAINER_PORT,
+             mounts=[release + ":" + STATIC_DOCROOT + ":ro"])
+    except (AppError, OSError):
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(release, ignore_errors=True)
+        raise
+    return name
 
 
 def deploy(key):
     load(key)                 # fail fast on a bad key or missing definition
     with Lock(key):
         d = load(key)         # re-read under the lock: a delete may have won
+        m = method_of(d)
         sha = resolve_sha(d)
-        say("deploying %s at %s (%s)" % (d["repo"], sha[:12], d["ref"]))
+        say("deploying %s at %s (%s, %s method)"
+            % (d["repo"], sha[:12], d["ref"], m))
         src = os.path.join(app_dir(key), "src")
         checkout(d, sha, src)
-        if not os.path.isfile(os.path.join(src, d["dockerfile"])):
-            raise AppError("no %s in %s at %s" % (d["dockerfile"], d["repo"], sha[:12]))
-        if d.get("volume"):
+        if d.get("volume") and m in CONTAINER_METHODS:
             os.makedirs(os.path.join(app_dir(key), "data"), exist_ok=True)
 
-        image = "%s:%s" % (image_repo(key), sha[:12])
-        # Taken BEFORE the build: rebuilding the same commit moves the tag,
-        # and the ID is then the only name left for the working image.
+        # Taken BEFORE the build/pull: rebuilding the same commit moves the
+        # tag, and the ID is then the only name left for the working image.
         previous = current_image(key)
-        say("building %s" % image)
-        run(build_argv(d, sha, src))
-        swap(d, image, previous)
+        prev_sha = deployed_sha(key)
+        prev_release = deployed_release(key)
+        image = release = None
+        if m == "script":
+            run_sh(d["cmd"], src)
+            if d.get("port") and d.get("health_path") \
+                    and not healthy(d, HEALTH_WAIT):
+                raise AppError("http://127.0.0.1:%d%s did not answer within %ds"
+                               % (d["port"], d["health_path"], HEALTH_WAIT))
+        elif m == "compose":
+            deploy_compose(d, src, prev_sha)
+        elif m == "image":
+            image = d["image"]
+            say("pulling %s" % image)
+            run(["docker", "pull", image])
+            swap(d, image, previous)
+        elif m == "static":
+            release = deploy_static(d, src, sha, previous, prev_release)
+            image = STATIC_IMAGE
+        elif m in ("node", "python"):
+            generated_dockerfile(d, src)
+            image = "%s:%s" % (image_repo(key), sha[:12])
+            say("building %s (generated %s)" % (image, GENERATED_DOCKERFILE))
+            run(build_argv(d, sha, src, dockerfile=GENERATED_DOCKERFILE,
+                           context="."))
+            swap(d, image, previous)
+        else:
+            df_path = inside_checkout(d, src, "dockerfile")
+            if not os.path.isfile(df_path):
+                raise AppError("no %s in %s at %s"
+                               % (d["dockerfile"], d["repo"], sha[:12]))
+            image = "%s:%s" % (image_repo(key), sha[:12])
+            say("building %s" % image)
+            run(build_argv(d, sha, src))
+            swap(d, image, previous)
 
-        publish(d)
+        if m != "script":         # a script manages its own Serve routes
+            publish(d)
+        record = {"sha": sha, "image": image, "method": m, "ref": d["ref"],
+                  "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        if release:
+            record["release"] = release
         with open(os.path.join(app_dir(key), "deployed.json.tmp"), "w") as fh:
-            json.dump({"sha": sha, "image": image, "ref": d["ref"],
-                       "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, fh)
+            json.dump(record, fh)
         os.replace(os.path.join(app_dir(key), "deployed.json.tmp"),
                    os.path.join(app_dir(key), "deployed.json"))
+        if m == "static":
+            prune_releases(key, (release, prev_release))
         prune_images(key, image)
         record_deployd_sha(key, sha)
         set_paused(key, False)    # a removed (or new) app resumes auto-deploy
         say("deployed %s at %s" % (key, sha[:12]))
 
 
+def compose_down(d):
+    """Stop the app's compose stack: `down` on the checked-out file when it
+    is there, project-labelled containers by name when it is not (a checkout
+    may predate the file's rename or removal)."""
+    src = os.path.join(app_dir(d["key"]), "src")
+    try:
+        path = inside_checkout(d, src, "compose_file")
+    except AppError:
+        path = None     # an escaping link cannot drive `down`
+    if path and os.path.isfile(path):
+        # --remove-orphans: services the file no longer lists must go too.
+        run(compose_argv(d, src, ["down", "--remove-orphans"]))
+        say("compose stack %s down" % container_name(d["key"]))
+        return
+    code, out = quiet(["docker", "ps", "--all",
+                       "--filter", "label=com.docker.compose.project=%s"
+                                    % container_name(d["key"]),
+                       "--format", "{{.Names}}"])
+    names = sorted(out.split()) if code == 0 else []
+    if names:
+        run(["docker", "rm", "--force"] + names)
+        say("compose stack %s removed by project label" % container_name(d["key"]))
+    else:
+        say("no compose file or labelled stack for %s; nothing to stop" % d["key"])
+
+
 def remove(key):
-    """Drop the container and this app's Serve port. Nothing changes until
-    Docker answers and (where Tailscale is installed) Serve status reads;
-    a container or route already gone is fine, but one that will not go
-    fails the job and keeps deployed.json, so the app still shows installed."""
+    """Drop the container (or compose stack) and this app's Serve port.
+    Nothing changes until Docker answers and (where Tailscale is installed
+    and the app has a port) Serve status reads; a container or route already
+    gone is fine, but one that will not go fails the job and keeps
+    deployed.json, so the app still shows installed."""
     d = load(key)
     name = container_name(key)
+    m = method_of(d)
+    port = d.get("port")        # only a script method may leave it unset
     with Lock(key):
-        ts = tailscale_bin()
+        ts = tailscale_bin() if port is not None else None
         ports = serve_ports() if ts else {}
-        if ports is None:
+        if port is not None and ports is None:
             raise AppError("cannot read `tailscale serve status`; nothing was changed")
         code, out = quiet(["docker", "ps", "--all", "--filter", "name=^/%s$" % name,
                            "--format", "{{.Names}}"])
@@ -477,9 +887,12 @@ def remove(key):
             say("container %s removed" % name)
         else:
             say("container %s was already gone" % name)
-        target = "http://127.0.0.1:%d" % d["port"]
-        if ports.get(str(d["port"])) == target:
-            run([ts, "serve", "--https=%d" % d["port"], "off"])
+        if m == "compose":
+            compose_down(d)
+        if port is not None:
+            target = "http://127.0.0.1:%d" % port
+            if ports.get(str(port)) == target:
+                run([ts, "serve", "--https=%d" % port, "off"])
         try:
             os.remove(os.path.join(app_dir(key), "deployed.json"))
         except OSError:
