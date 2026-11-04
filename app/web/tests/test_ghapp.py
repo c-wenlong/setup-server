@@ -30,6 +30,30 @@ def good(**over):
     return d
 
 
+def base(**over):
+    """The fields every definition carries, with none of a method's own."""
+    d = {"key": "hello-app", "name": "Hello", "repo": "c-wenlong/hello",
+         "ref": "main", "port": 8301, "health_path": "/", "volume": None}
+    d.update(over)
+    return d
+
+
+def method_def(method, **over):
+    """A minimal valid definition for `method` (dockerfile defs use good())."""
+    fields = {"image": {"image": "ghcr.io/o/hello:1.2.3", "container_port": 3000},
+              "compose": {"compose_file": "docker-compose.yml",
+                          "container_port": 3000},
+              "static": {"build": "make site", "output": "public"},
+              "node": {"version": "22-alpine", "build": "npm ci && npm run build",
+                       "start": "npm start", "container_port": 3000},
+              "python": {"version": "3.13-slim", "start": "python -m app",
+                         "container_port": 3000},
+              "script": {"cmd": "./run.sh"}}
+    d = base(method=method, **fields[method])
+    d.update(over)
+    return d
+
+
 class Sandbox(unittest.TestCase):
 
     def setUp(self):
@@ -45,11 +69,13 @@ class Sandbox(unittest.TestCase):
         ghapp.APPS_HOME = os.path.join(self.tmp, "apps")
         os.makedirs(ghapp.DEFS_DIR)
         self.calls = []
+        self.cwds = []            # cwd of each call, index-aligned with calls
         self.quiet_out = {}
         self.run_codes = {}
 
         def fake_run(argv, check=True, capture=False, cwd=None):
             self.calls.append(list(argv))
+            self.cwds.append(cwd)
             code = 0
             for prefix, c in self.run_codes.items():
                 if " ".join(argv).startswith(prefix):
@@ -64,6 +90,7 @@ class Sandbox(unittest.TestCase):
 
         def fake_quiet(argv, cwd=None):
             self.calls.append(list(argv))
+            self.cwds.append(cwd)
             for prefix, out in self.quiet_out.items():
                 if " ".join(argv).startswith(prefix):
                     return out
@@ -89,11 +116,17 @@ class Sandbox(unittest.TestCase):
             json.dump(d, fh)
 
     def make_src(self, key, dockerfile="Dockerfile"):
+        return self.make_file(key, dockerfile)
+
+    def make_file(self, key, rel, content=""):
+        """A checkout that passed `clone`/`checkout`: src/.git plus the one
+        repo file `rel` (the method's input — Dockerfile, compose file…)."""
         src = os.path.join(ghapp.app_dir(key), "src")
         os.makedirs(os.path.join(src, ".git"), exist_ok=True)
-        path = os.path.join(src, dockerfile)
+        path = os.path.join(src, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        open(path, "w").close()
+        with open(path, "w") as fh:
+            fh.write(content)
         return src
 
     def argv_with(self, *words):
@@ -120,6 +153,87 @@ class ValidateTest(unittest.TestCase):
         for over in bad:
             with self.assertRaises(ghapp.AppError, msg=over):
                 ghapp.validate(good(**over))
+
+
+class MethodValidateTest(unittest.TestCase):
+    """The `method` field selects which fields validate() requires; an
+    absent or unknown word is dockerfile, so old definitions are untouched."""
+
+    def test_every_methods_good_shape_passes(self):
+        ghapp.validate(good(method="dockerfile"))
+        for m in ("image", "compose", "static", "node", "python", "script"):
+            self.assertEqual(ghapp.validate(method_def(m))["method"], m, m)
+
+    def test_absent_or_unknown_method_is_dockerfile(self):
+        self.assertEqual(ghapp.method_of(good()), "dockerfile")
+        self.assertEqual(ghapp.method_of(good(method=None)), "dockerfile")
+        self.assertEqual(ghapp.method_of(good(method="podman")), "dockerfile")
+        # An unknown word still needs the dockerfile fields it now means.
+        ghapp.validate(good(method="podman"))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.validate(base(method="podman"))       # no dockerfile/context
+
+    def test_method_itself_is_shape_checked(self):
+        for m in ("Image", "DOCKER FILE", "-x", "x" * 40, 3, ["image"]):
+            with self.assertRaises(ghapp.AppError, msg=m):
+                ghapp.validate(good(method=m))
+
+    def test_per_method_fields_are_shape_checked(self):
+        bad = [
+            method_def("image", image="nginx"),                 # needs :tag/@digest
+            method_def("image", image="-evil:1"),
+            method_def("image", image="a b:c"),
+            method_def("image", image=None),
+            method_def("compose", compose_file="."),
+            method_def("compose", compose_file="../x.yml"),
+            method_def("compose", service="bad name"),
+            method_def("compose", service=["web"]),
+            method_def("static", build="a\nb"),
+            method_def("static", build=""),
+            method_def("static", output="/abs"),
+            method_def("static", output=None),
+            method_def("node", version=22),                     # tag, not int
+            method_def("node", version="-alpine"),
+            method_def("node", build="x" * 501),
+            method_def("node", start=None),
+            method_def("python", start="has\nnewline"),
+            method_def("script", cmd="a\rb"),
+            method_def("script", cmd="x" * 501),
+            method_def("script", cmd=""),
+            method_def("image", container_port=0),
+            method_def("compose", container_port="3000"),
+            method_def("image", port=None),
+            method_def("image", health_path=None),
+        ]
+        for d in bad:
+            with self.assertRaises(ghapp.AppError, msg=d):
+                ghapp.validate(d)
+
+    def test_image_reference_shapes(self):
+        ghapp.validate(method_def("image", image="nginx:1.27-alpine"))
+        ghapp.validate(method_def("image", image="registry.local:5000/o/n:v2"))
+        ghapp.validate(method_def("image", image="o/n@sha256:" + "a" * 64))
+
+    def test_script_may_omit_port_and_health_path(self):
+        d = method_def("script", port=None, health_path=None)
+        ghapp.validate(d)
+        ghapp.validate(method_def("script", port=None))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.validate(method_def("script", port="abc"))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.validate(method_def("script", health_path="no-slash"))
+
+    def test_node_python_build_optional_but_start_required(self):
+        ghapp.validate(method_def("node", build=None))
+        ghapp.validate(method_def("python", build=None))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.validate(method_def("node", start=""))
+
+    def test_shared_fields_still_gated_for_other_methods(self):
+        with self.assertRaises(ghapp.AppError):
+            ghapp.validate(method_def("image", volume="data"))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.validate(method_def("script", env_names=["1BAD"]))
 
 
 class ArgvTest(Sandbox):
@@ -229,6 +343,192 @@ class DeployTest(Sandbox):
         self.quiet_out["/bin/tailscale serve status"] = (0, json.dumps(status))
         ghapp.deploy("hello-app")
         self.assertFalse(self.argv_with("/bin/tailscale", "--bg"))
+
+
+class MethodDeployTest(Sandbox):
+    """deploy() dispatch: each method's argv construction and lifecycle."""
+
+    OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["DEPLOY_SHA"] = SHA
+        ghapp.healthy = lambda d, t: True
+
+    def write_method(self, method, **over):
+        d = method_def(method, **over)
+        self.write_def(d)
+        return d
+
+    def deployed(self):
+        return json.load(open(os.path.join(ghapp.app_dir("hello-app"),
+                                           "deployed.json")))
+
+    def test_image_pulls_and_runs_without_building(self):
+        self.write_method("image")
+        self.make_src("hello-app")
+        ghapp.deploy("hello-app")
+        self.assertTrue(self.argv_with("docker", "pull", "ghcr.io/o/hello:1.2.3"))
+        runs = self.argv_with("docker", "run")
+        self.assertEqual(runs[-1][-1], "ghcr.io/o/hello:1.2.3")
+        self.assertIn("127.0.0.1:8301:3000", runs[-1])
+        self.assertFalse(self.argv_with("docker", "build"))
+        self.assertEqual(self.deployed()["method"], "image")
+        self.assertEqual(self.deployed()["image"], "ghcr.io/o/hello:1.2.3")
+
+    def test_image_unhealthy_rolls_back_to_the_previous_id(self):
+        self.write_method("image")
+        self.make_src("hello-app")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "b" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(self.argv_with("docker", "run")[-1][-1],
+                         "sha256:" + "b" * 64)
+
+    def test_compose_ups_the_repo_file_as_project_app_key(self):
+        self.write_method("compose")
+        src = self.make_file("hello-app", "docker-compose.yml")
+        ghapp.deploy("hello-app")
+        ups = self.argv_with("compose", "up", "--detach")
+        self.assertEqual(len(ups), 1)
+        self.assertEqual(ups[0][ups[0].index("--project-name") + 1], "app-hello-app")
+        self.assertEqual(ups[0][ups[0].index("--file") + 1],
+                         os.path.join(src, "docker-compose.yml"))
+        self.assertFalse(self.argv_with("docker", "build"))
+        self.assertFalse(self.argv_with("docker", "run"))
+        self.assertEqual(self.deployed()["method"], "compose")
+
+    def test_compose_passes_the_app_env_file_when_present(self):
+        self.write_method("compose", service="web")
+        src = self.make_file("hello-app", "docker-compose.yml")
+        open(os.path.join(ghapp.app_dir("hello-app"), ".env"), "w").close()
+        ghapp.deploy("hello-app")
+        up = self.argv_with("compose", "up", "--detach")[0]
+        self.assertEqual(up[up.index("--env-file") + 1],
+                         os.path.join(ghapp.app_dir("hello-app"), ".env"))
+        self.assertEqual(up[up.index("--file") + 1],
+                         os.path.join(src, "docker-compose.yml"))
+
+    def test_compose_missing_file_stops_before_up(self):
+        self.write_method("compose")
+        os.makedirs(os.path.join(ghapp.app_dir("hello-app"), "src", ".git"))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertFalse(self.argv_with("compose", "up"))
+
+    def test_compose_unhealthy_restores_the_last_deployed_sha(self):
+        self.write_method("compose")
+        self.make_file("hello-app", "docker-compose.yml")
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"),
+                  "w") as fh:
+            json.dump({"sha": self.OLD_SHA}, fh)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        # Re-checkout of the old sha, then up -d again.
+        back = self.argv_with("checkout", "--detach", self.OLD_SHA)
+        self.assertTrue(back)
+        ups = self.argv_with("compose", "up", "--detach")
+        self.assertEqual(len(ups), 2)
+        self.assertFalse(os.path.exists(
+            os.path.join(ghapp.app_dir("hello-app"), "deployed.json.tmp")))
+
+    def test_compose_unhealthy_first_deploy_has_no_restore(self):
+        self.write_method("compose")
+        self.make_file("hello-app", "docker-compose.yml")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(len(self.argv_with("compose", "up", "--detach")), 1)
+
+    def test_compose_failure_log_scopes_to_the_named_service(self):
+        self.write_method("compose", service="web")
+        self.make_file("hello-app", "docker-compose.yml")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        logs = self.argv_with("compose", "logs")
+        self.assertEqual(logs[0][-1], "web")
+
+    def test_static_builds_then_serves_output_read_only(self):
+        self.write_method("static")
+        src = self.make_src("hello-app")
+        os.makedirs(os.path.join(src, "public"))
+        ghapp.deploy("hello-app")
+        idx = self.calls.index(self.argv_with("sh", "-c", "make site")[0])
+        self.assertEqual(self.cwds[idx], src)
+        self.assertTrue(self.argv_with("docker", "pull", ghapp.STATIC_IMAGE))
+        run = self.argv_with("docker", "run")[-1]
+        self.assertIn("127.0.0.1:8301:80", run)
+        mount = run[run.index("--volume") + 1]
+        self.assertTrue(mount.endswith(":/usr/share/nginx/html:ro"), mount)
+        self.assertTrue(mount.startswith(os.path.join(src, "public")), mount)
+        self.assertEqual(self.deployed()["image"], ghapp.STATIC_IMAGE)
+
+    def test_static_missing_output_dir_stops_before_running(self):
+        self.write_method("static")
+        self.make_src("hello-app")
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertFalse(self.argv_with("docker", "run"))
+
+    def test_node_writes_a_dockerfile_then_builds_like_dockerfile(self):
+        self.write_method("node")
+        src = self.make_src("hello-app")
+        ghapp.deploy("hello-app")
+        path = os.path.join(src, ghapp.GENERATED_DOCKERFILE)
+        text = open(path).read()
+        self.assertIn("FROM node:22-alpine", text)
+        self.assertIn("RUN npm ci && npm run build", text)
+        self.assertIn("EXPOSE 3000", text)
+        self.assertIn('CMD ["sh", "-c", "npm start"]', text)
+        build = self.argv_with("docker", "build")[0]
+        self.assertEqual(build[build.index("--file") + 1], path)
+        self.assertEqual(build[-1], src)
+        self.assertTrue(self.argv_with("docker", "run"))
+        self.assertEqual(self.deployed()["method"], "node")
+
+    def test_python_omits_run_line_without_a_build(self):
+        self.write_method("python")
+        src = self.make_src("hello-app")
+        ghapp.deploy("hello-app")
+        text = open(os.path.join(src, ghapp.GENERATED_DOCKERFILE)).read()
+        self.assertIn("FROM python:3.13-slim", text)
+        self.assertNotIn("RUN ", text)
+        self.assertIn('CMD ["sh", "-c", "python -m app"]', text)
+
+    def test_script_runs_cmd_in_the_checkout_no_container_no_publish(self):
+        self.write_method("script", port=None, health_path=None)
+        src = self.make_src("hello-app")
+        ghapp.tailscale_bin = lambda: "/bin/ts"
+        ghapp.deploy("hello-app")
+        idx = self.calls.index(self.argv_with("sh", "-c", "./run.sh")[0])
+        self.assertEqual(self.cwds[idx], src)
+        self.assertFalse(self.argv_with("docker", "run"))
+        self.assertFalse(self.argv_with("docker", "build"))
+        self.assertFalse(self.argv_with("docker", "pull"))
+        self.assertFalse(self.argv_with("/bin/ts", "serve"))
+        self.assertEqual(self.deployed()["method"], "script")
+        self.assertIsNone(self.deployed()["image"])
+
+    def test_script_health_check_runs_when_port_and_path_are_set(self):
+        self.write_method("script")         # port 8301 + health_path "/"
+        self.make_src("hello-app")
+        seen = []
+        ghapp.healthy = lambda d, t: seen.append((d["port"], d["health_path"])) or True
+        ghapp.deploy("hello-app")
+        self.assertEqual(seen, [(8301, "/")])
+        self.assertFalse(self.argv_with("docker", "run"))
+
+    def test_script_unhealthy_is_an_error(self):
+        self.write_method("script")
+        self.make_src("hello-app")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertFalse(os.path.exists(
+            os.path.join(ghapp.app_dir("hello-app"), "deployed.json")))
 
 
 class RemoveTest(Sandbox):
@@ -502,3 +802,46 @@ class PlumbingTest(Sandbox):
         finally:
             ghapp.os.execv = saved
             os.environ.pop("GHAPP_SG", None)
+
+
+class MethodRemoveTest(Sandbox):
+    """remove() is method-aware: compose downs its stack, a script without a
+    port never needs Serve status."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(ghapp.app_dir("hello-app"))
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
+            fh.write("{}")
+        self.marker = os.path.join(ghapp.app_dir("hello-app"), "deployed.json")
+
+    def test_compose_remove_downs_the_stack(self):
+        self.write_def(method_def("compose"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.quiet_out["/bin/ts serve status"] = (0, "{}")
+        ghapp.tailscale_bin = lambda: "/bin/ts"
+        ghapp.remove("hello-app")
+        down = self.argv_with("compose", "down")
+        self.assertEqual(len(down), 1)
+        self.assertIn("app-hello-app", down[0])
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_compose_remove_without_the_file_uses_the_project_label(self):
+        self.write_def(method_def("compose"))
+        self.make_src("hello-app")          # checkout exists, no compose file
+        self.quiet_out["/bin/ts serve status"] = (0, "{}")
+        ghapp.tailscale_bin = lambda: "/bin/ts"
+        self.quiet_out["docker ps --all --filter label="] = \
+            (0, "app-hello-app-web-1\napp-hello-app-db-1\n")
+        ghapp.remove("hello-app")
+        rm = self.argv_with("docker", "rm", "--force")
+        self.assertEqual(rm[0][-2:], ["app-hello-app-db-1", "app-hello-app-web-1"])
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_script_without_a_port_needs_no_serve_status(self):
+        self.write_def(method_def("script", port=None, health_path=None))
+        self.make_src("hello-app")
+        # tailscale_bin is None in the sandbox; any Serve read would fail.
+        ghapp.remove("hello-app")
+        self.assertFalse(os.path.exists(self.marker))
+        self.assertFalse(self.argv_with("serve"))
