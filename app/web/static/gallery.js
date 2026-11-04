@@ -63,6 +63,21 @@
     return Math.round(h / 24) + ' d ago';
   }
   function app() { return window.LauncherApp || null; }
+
+  /* A repaint replaces nodes, which would drop keyboard focus every tick.
+     Focusable nodes carry a stable data-fid; whichever one had focus gets
+     it back after `paint` runs. */
+  function keepFocus(container, paint) {
+    var active = document.activeElement;
+    var fid = (container && active && container.contains(active))
+      ? active.getAttribute('data-fid') : null;
+    paint();
+    if (!fid || !container) return;
+    var sel = '[data-fid="' + (window.CSS && CSS.escape ? CSS.escape(fid) : fid) + '"]';
+    var el = container.querySelector(sel);
+    if (!el) return;
+    try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+  }
   function hostOf(url) {
     try { var u = new URL(url); return u.host + (u.pathname === '/' ? '' : u.pathname); }
     catch (e) { return url || ''; }
@@ -73,6 +88,7 @@
   function extLink(href, label, cls) {
     var a = make('a', cls || 'gal-link');
     a.href = href;
+    a.setAttribute('data-fid', 'link:' + href);
     a.target = '_blank';
     a.rel = 'noopener noreferrer';
     text(a, label);
@@ -203,6 +219,7 @@
     var a = make('a', 'gal-card gal-' + item.state);
     a.href = '#/deploys/' + encodeURIComponent(item.key);
     a.setAttribute('data-key', item.key);
+    a.setAttribute('data-fid', 'card:' + item.key);
 
     var top = make('div', 'gal-top');
     top.appendChild(dot(item));
@@ -260,7 +277,9 @@
     var t = ++token;
     call('GET', 'api/deployments', null, function (data, status) {
       if (t !== token || route.page !== 'list') return;
-      paintList(status === 200 ? data : null);
+      keepFocus(document.getElementById('gallery-mount'), function () {
+        paintList(status === 200 ? data : null);
+      });
     });
   }
 
@@ -326,6 +345,7 @@
     var job = d.job && d.job.status === 'running' ? d.job : null;
     var btn = make('button', 'h-btn h-btn-accent');
     btn.type = 'button';
+    btn.setAttribute('data-fid', 'redeploy');
     var err = make('p', 'gdp-err');
     err.hidden = true;
     if (job) {
@@ -359,10 +379,59 @@
 
   /* --- the method form --- */
 
-  function seedValue(def, f) {
-    var v = def[f.name];
-    if (v === undefined || v === null) return f.def;
-    return String(v);
+  /* What a field starts as. A name present in `base` is a real value
+     (null or absent there means empty: absent stays absent, so editing a
+     branch never adds a build step or a health check). A name missing from
+     it gets the starting value, which only a newly picked method needs. */
+  function seedValue(base, f) {
+    if (Object.prototype.hasOwnProperty.call(base, f.name)) {
+      var v = base[f.name];
+      return v == null ? '' : String(v);
+    }
+    return f.def;
+  }
+
+  /* Fields whose meaning is the same under every method, so a switch
+     carries what is on screen. build/start/version mean something else per
+     method and never cross over. */
+  var CARRY = { container_port: true };
+
+  function fieldNames(method) {
+    var out = {};
+    var fs = (METHODS[method] || {}).fields || [];
+    for (var i = 0; i < fs.length; i++) out[fs[i].name] = true;
+    return out;
+  }
+
+  /* The values a method's form opens with: what was typed under it earlier
+     this visit; else, for the stored method, the stored definition; else a
+     carried field from the screen, or a leftover the definition still holds
+     from an earlier time on that method (a field the stored method does not
+     use). The source fields always carry. */
+  function baseFor(method) {
+    var cur = form.inputs.length ? collect() : null;
+    var stored = form.def;
+    var storedOwn = fieldNames(form.stored);
+    var draft = form.drafts[method];
+    var base = {};
+    var fs = (METHODS[method] || {}).fields || [];
+    for (var i = 0; i < fs.length; i++) {
+      var n = fs[i].name;
+      if (draft && Object.prototype.hasOwnProperty.call(draft, n)) base[n] = draft[n];
+      else if (method === form.stored) base[n] = stored[n];
+      else if (CARRY[n] && cur && cur[n] != null && cur[n] !== '') base[n] = cur[n];
+      else if (stored[n] != null && !storedOwn[n]) base[n] = stored[n];
+    }
+    var common = SOURCE.concat(AFTER);
+    for (var j = 0; j < common.length; j++) {
+      var c = common[j].name;
+      var v = cur ? cur[c] : stored[c];
+      /* An empty health path under Script becomes the starting "/" again
+         for a method that needs one; under the stored method it stays. */
+      if (v != null && v !== '') base[c] = v;
+      else if (method === form.stored || !cur) base[c] = null;
+    }
+    return base;
   }
 
   function inputFor(f, value, opts) {
@@ -426,7 +495,7 @@
   }
 
   function renderFields() {
-    var def = form.def;
+    var def = baseFor(form.method);
     form.fieldsBox.textContent = '';
     form.inputs = [];
     var spec = METHODS[form.method] || METHODS.dockerfile;
@@ -451,7 +520,9 @@
       'Saving checks the definition on the server, then redeploys with it. Key ' +
       d.key + ' and port ' + (d.definition.port || '(none)') + ' stay as they are.'));
     var def = d.definition || {};
-    form = { kind: 'app', def: def, method: def.method || 'dockerfile', inputs: [] };
+    form = { kind: 'app', def: def, method: def.method || 'dockerfile', inputs: [],
+             drafts: {} };
+    form.stored = form.method;
 
     var pick = make('div', 'field gdp-field');
     var lab = text(make('label', 'field-label'), 'Method');
@@ -478,9 +549,9 @@
     form.clean = JSON.stringify(collect());
 
     sel.addEventListener('change', function () {
-      /* Keep what was typed in the shared fields across a method switch. */
-      var keep = collect();
-      form.def = Object.assign({}, form.def, keep);
+      /* Remember what this method's form held, so switching back to it
+         returns exactly that. */
+      form.drafts[form.method] = collect();
       form.method = sel.value;
       renderFields();
       markDirty();
@@ -512,15 +583,24 @@
     saveNote = '';
 
     var mine = form;
+    /* Nothing is editable while a save is in flight: a success rebuilds
+       the form from the server, which would drop anything typed since. */
+    function lock(on) {
+      sel.disabled = on;
+      reset.disabled = on || JSON.stringify(collect()) === mine.clean;
+      for (var i = 0; i < mine.inputs.length; i++) mine.inputs[i].input.disabled = on;
+    }
     save.addEventListener('click', function () {
       var body = collect();
       mine.busy = true;
       save.disabled = true;
+      lock(true);
       err.hidden = true;
       text(status, 'Checking…');
       call('PUT', 'api/deployments/' + encodeURIComponent(d.key), body, function (data, code) {
         mine.busy = false;
         if (form !== mine) return;
+        lock(false);
         if (code === 202 && data && data.job_id) {
           saveNote = 'Saved. The deploy log is open in the sheet.';
           text(status, saveNote);
@@ -585,9 +665,11 @@
     text(save, 'Save command');
     save.disabled = true;
     var clean = cmd.input.value;
+    var busy = false;
     cmd.input.addEventListener('input', function () {
-      save.disabled = cmd.input.value === clean;
+      save.disabled = busy || cmd.input.value === clean;
     });
+    var mine = form;
     bar.appendChild(save);
     sec.appendChild(err);
     sec.appendChild(bar);
@@ -596,11 +678,17 @@
     saveNote = '';
 
     save.addEventListener('click', function () {
+      busy = true;
       save.disabled = true;
+      cmd.input.disabled = true;
       err.hidden = true;
       call('POST', 'api/deployd/pollers/' + encodeURIComponent(d.key),
            { repo: def.repo, ref: def.ref || 'main', cmd: cmd.input.value },
            function (data, code) {
+             busy = false;
+             /* Another page (or a rebuilt form) since: not this reply's. */
+             if (form !== mine || route.key !== d.key) return;
+             cmd.input.disabled = false;
              if (code === 200 && data && data.watched) {
                clean = cmd.input.value;
                saveNote = 'Saved. It runs the next time ' + (def.ref || 'main') +
@@ -622,8 +710,11 @@
     var det = make('details', 'dep-log gdp-log');
     det.setAttribute('data-log', id);
     if (open) det.open = true;
-    det.appendChild(text(make('summary'), label));
+    var sum = text(make('summary'), label);
+    sum.setAttribute('data-fid', 'sum:' + id);
+    det.appendChild(sum);
     var pre = make('pre', 'dep-log-tail gdp-pre');
+    pre.setAttribute('data-fid', 'pre:' + id);
     pre.tabIndex = 0;
     text(pre, body || '(no output)');
     det.appendChild(pre);
@@ -704,14 +795,16 @@
     var sub = view.querySelector('.gdp-headsub');
     text(sub, ((METHODS[d.method] || {}).label || d.method) + ' · ' +
               (d.kind === 'app' ? 'App from GitHub' : 'Service from this repo') + ' · ' + d.key);
-    paintOverview(view.querySelector('.gdp-overview'), d);
+    var ov = view.querySelector('.gdp-overview');
+    keepFocus(ov, function () { paintOverview(ov, d); });
     /* The form repaints only when it is new or after a save: a tick must
        never throw away what is being typed. */
     if (fresh || rebuildForm || !form) {
       var ms = view.querySelector('.gdp-method');
       if (d.kind === 'app') paintAppMethod(ms, d); else paintServiceMethod(ms, d);
     }
-    paintLogs(view.querySelector('.gdp-logs'), d);
+    var lg = view.querySelector('.gdp-logs');
+    keepFocus(lg, function () { paintLogs(lg, d); });
   }
 
   function backLink() {
