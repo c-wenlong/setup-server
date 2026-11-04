@@ -30,6 +30,10 @@ Serves static/ as static files and a small JSON API:
     POST   api/deployd/pollers/{key}/restore   drop its overrides row
     POST   api/deployd/pollers/{key}/pause|resume   <key>.disabled marker
     POST   api/deployd/pollers/{key}/deploy    202 -> `deployd --force` job
+    GET    api/deployments       the Deploys gallery: one item per app/service
+    GET    api/deployments/{key}               definition, record, log tails
+    PUT    api/deployments/{key}               new method fields -> 202 job
+    POST   api/deployments/{key}/redeploy      202 -> deploy job
     GET    api/jobs/{id}
     GET    healthz
 
@@ -2110,6 +2114,23 @@ def _repo_defs():
     return out
 
 
+def _method_phrase(d):
+    """How a definition builds, in words, for its registry description. Any
+    method reads: the deployments page can switch an app between them."""
+    m = ghapp.method_of(d)
+    if m == "dockerfile":
+        return "its %s" % d.get("dockerfile")
+    if m == "image":
+        return "the image %s" % d.get("image")
+    if m == "compose":
+        return "its %s" % d.get("compose_file")
+    if m == "static":
+        return "a static build of %s" % d.get("output")
+    if m in ("node", "python"):
+        return "a generated %s %s Dockerfile" % (m, d.get("version"))
+    return "its own deploy command"
+
+
 def ghapp_entries():
     """Registry-shaped entries for the GitHub apps. The URL keeps the HOST
     placeholder services.json uses, so substitute_host fills it in."""
@@ -2117,21 +2138,23 @@ def ghapp_entries():
     for d, source in _ghapp_defs():
         key = d["key"]
         owner = d["repo"].split("/", 1)[0]
+        # Only a script definition may leave port/health_path unset.
+        port, hp = d.get("port"), d.get("health_path")
         entries.append({
             "key": key,
             "name": d.get("name") or key,
             "tagline": d.get("tagline") or "From GitHub",
             "group": GHAPP_GROUP["id"],
-            "description": "Built on this box from github.com/%s (%s) with its "
-                           "%s, redeployed when that branch moves."
-                           % (d["repo"], d["ref"], d["dockerfile"]),
+            "description": "Built on this box from github.com/%s (%s) with %s, "
+                           "redeployed when that branch moves."
+                           % (d["repo"], d["ref"], _method_phrase(d)),
             "author": owner,
             "icon": "code",
-            "url": "https://HOST:%d/" % d["port"],
+            "url": "https://HOST:%d/" % port if port else None,
             # A repo-only app is not on this box: something else may answer
             # on its exported port, so it gets no probe and no parts.
-            "health": (None if source == "repo" else
-                       "http://127.0.0.1:%d%s" % (d["port"], d["health_path"])),
+            "health": (None if source == "repo" or not port or not hp else
+                       "http://127.0.0.1:%d%s" % (port, hp)),
             "marker": os.path.join(ghapp.app_dir(key), "deployed.json"),
             # Shown by the detail page's env editor; every read and write
             # goes through env_path(), which derives it from the key.
@@ -2887,17 +2910,21 @@ def _deployd_log_tail(path):
     return "\n".join(lines[-DEPLOYD_LOG_TAIL:])
 
 
-def _deployd_entry(state_dir, watched):
-    """One watched service's row for the payload, from its state triplet.
+def _deployd_base(state_dir, key):
+    """state/<key> with the key sanitised the way deployd names its files."""
+    return os.path.join(state_dir, re.sub(r"[^A-Za-z0-9._-]", "_", key))
 
-    `sha` None means never deployed, `fail` is the backoff record
-    verbatim."""
-    key = watched["key"]
-    base = os.path.join(state_dir, re.sub(r"[^A-Za-z0-9._-]", "_", key))
-    sha = fail = None
+
+def _deployd_marks(state_dir, key):
+    """(sha, sha_mtime, fail, disabled) from one key's state files, without
+    reading its log. `sha` None means never deployed, `fail` is the backoff
+    record verbatim ({} when present but unreadable, None when absent)."""
+    base = _deployd_base(state_dir, key)
+    sha = sha_mtime = fail = None
     try:
         with open(base + ".sha", encoding="utf-8") as fh:
             sha = fh.read().strip() or None
+        sha_mtime = os.path.getmtime(base + ".sha")
     except OSError:
         pass
     try:
@@ -2909,7 +2936,17 @@ def _deployd_entry(state_dir, watched):
         fail = {}  # present but unreadable: still a failure state
     except OSError:
         pass  # absent: no recorded failure
-    disabled = os.path.exists(base + ".disabled")
+    return sha, sha_mtime, fail, os.path.exists(base + ".disabled")
+
+
+def _deployd_entry(state_dir, watched):
+    """One watched service's row for the payload, from its state triplet.
+
+    `sha` None means never deployed, `fail` is the backoff record
+    verbatim."""
+    key = watched["key"]
+    base = _deployd_base(state_dir, key)
+    sha, _, fail, disabled = _deployd_marks(state_dir, key)
     log_tail = _deployd_log_tail(base + ".log")
     try:
         log_mtime = os.path.getmtime(base + ".log")
@@ -3121,6 +3158,330 @@ def start_deployd_force(key):
     threading.Thread(target=_reap, args=(job, proc, logfile),
                      daemon=True).start()
     return job_id
+
+
+# ---- deployments gallery
+#
+# One card per thing this box deploys from git, for the Deploys page:
+#
+#   GET  api/deployments                  the gallery list
+#   GET  api/deployments/{key}            one app: definition, record, logs
+#   PUT  api/deployments/{key}            new method fields -> 202 deploy job
+#   POST api/deployments/{key}/redeploy   202 deploy job
+#
+# Two kinds. An "app" is a launcher definition (~/services/launcher/apps/
+# <key>.json, run by ghapp.py); its method and fields are editable here, and
+# ghapp.validate() is the only gate on them. A "service" is anything else
+# deployd watches (a services/*/app.json deploy block after pollers.json
+# overrides, or a custom poller). It shows as method "script" and its cmd is
+# edited through the poller endpoints, never here: this file never writes
+# services/*/app.json.
+
+DEPLOYMENT_JOB_LOGS = 3          # recent launcher jobs shown per key
+DEPLOYMENT_JOB_LOG_BYTES = 16384  # tail of each
+# A definition's identity: the URL, the Serve port and the deployd poller
+# all hang off these, so the method editor never changes them.
+DEPLOYMENT_IMMUTABLE = ("key", "name", "port")
+
+
+def _github_slug(repo):
+    """owner/name for a GitHub repo given as a slug or a clone URL, else
+    None. Only for building commit links, so anything unusual is None."""
+    if not isinstance(repo, str):
+        return None
+    if ghapp.REPO_RE.match(repo):
+        return repo
+    m = _GITHUB_REMOTE_RE.search(repo.strip())
+    return m.group(1) if m and ghapp.REPO_RE.match(m.group(1)) else None
+
+
+def _iso_from_epoch(ts):
+    if ts is None:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _deployed_record(key):
+    """An app's deployed.json ({sha, image, method, ref, at}) or None."""
+    try:
+        with open(os.path.join(ghapp.app_dir(key), "deployed.json"),
+                  encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _box_defs():
+    """{key: definition} for every valid definition on this box. Repo-only
+    restore candidates are not deployed here, so they are not deployments."""
+    return {d["key"]: d for d, source in _ghapp_defs() if source == "box"}
+
+
+def _deployment_state(job, deployed_sha, fail, disabled):
+    """live | failed | paused | deploying | never, most urgent first.
+
+    A launcher job that failed within JOB_LINGER counts as failed: ghapp.py
+    writes no .fail record of its own, so that job is the only trace of a
+    deploy started from this page that did not take."""
+    if job and job.get("status") == "running":
+        return "deploying"
+    if fail is not None or (job and job.get("status") == "failed"):
+        return "failed"
+    if not deployed_sha:
+        return "never"
+    if disabled:
+        return "paused"
+    return "live"
+
+
+def _deployment_items():
+    """[(item, extra)] for every deployment, apps first then services, each
+    sorted by key. `extra` holds what the detail view adds: the definition
+    or watched entry, and the health URL to probe."""
+    env = _deployd_env()
+    state_dir = _deployd_state_dir(env)
+    watched, _ = _deployd_scan(env.get("SETUP_REPO") or REPO_ROOT, state_dir)
+    jobs = jobs_by_key()
+    overrides = load_overrides()
+    host = magicdns_host()
+    # One registry read for the whole list (find_service would re-read the
+    # app definitions once per card).
+    registry = {s.get("key"): s for s in load_registry() if isinstance(s, dict)}
+    # A definition whose key services.json already has is shadowed there
+    # (the registry key wins), so start_deploy would run that service's
+    # setup.sh: it is not an app this page may edit.
+    defs = {k: d for k, d in _box_defs().items()
+            if (registry.get(k) or {}).get("runner") == "ghapp"}
+    out = []
+    for key in sorted(defs):
+        d = defs[key]
+        _, _, fail, disabled = _deployd_marks(state_dir, key)
+        rec = _deployed_record(key) or {}
+        sha = rec.get("sha") if isinstance(rec.get("sha"), str) else None
+        svc = registry.get(key)
+        name = effective(svc, overrides)[0] if svc else None
+        port, hp = d.get("port"), d.get("health_path")
+        health = ("http://127.0.0.1:%d%s" % (port, hp)) if port and hp else None
+        out.append(({
+            "key": key,
+            "name": name or d.get("name") or key,
+            "kind": "app",
+            "method": ghapp.method_of(d),
+            "repo": d["repo"],
+            "github": d["repo"],
+            "ref": d["ref"],
+            "deployed": {"sha": sha, "at": rec.get("at")} if sha else None,
+            "state": _deployment_state(jobs.get(key), sha, fail, disabled),
+            "job": jobs.get(key),
+            "url": ("https://%s:%d/" % (host, port)) if port else None,
+        }, {"def": d, "health": health, "state_dir": state_dir}))
+    for w in sorted(watched, key=lambda e: e["key"]):
+        key = w["key"]
+        if key in defs:               # an app's own ghapp.py poller
+            continue
+        sha, sha_mtime, fail, disabled = _deployd_marks(state_dir, key)
+        svc = registry.get(key)
+        out.append(({
+            "key": key,
+            "name": (effective(svc, overrides)[0] if svc else None) or key,
+            "kind": "service",
+            "method": "script",
+            "repo": w["repo"],
+            "github": _github_slug(w["repo"]),
+            "ref": w["ref"],
+            "deployed": ({"sha": sha, "at": _iso_from_epoch(sha_mtime)}
+                         if sha else None),
+            "state": _deployment_state(jobs.get(key), sha, fail, disabled),
+            "job": jobs.get(key),
+            "url": resolve_url(svc, host) if svc else None,
+        }, {"watched": w, "health": resolve_health(svc) if svc else None,
+            "state_dir": state_dir}))
+    return out
+
+
+def _with_health(pairs):
+    """Fill each item's `healthy` (True/False, None with nothing to probe)
+    from one concurrent, cached probe pass: the same probe_all the grid
+    uses, so a gallery poll costs no more than a grid poll."""
+    urls = [extra["health"] for _, extra in pairs if extra["health"]]
+    probes = probe_all(urls) if urls else {}
+    for item, extra in pairs:
+        item["healthy"] = (bool(probes.get(extra["health"], False))
+                           if extra["health"] else None)
+    return pairs
+
+
+def deployments_payload():
+    """GET api/deployments: the gallery list."""
+    return {"deployments": [item for item, _ in
+                            _with_health(_deployment_items())],
+            "methods": list(ghapp.METHODS)}
+
+
+def _job_logs(key):
+    """The newest DEPLOYMENT_JOB_LOGS launcher jobs for `key`, newest first,
+    each with its log tail. Only the in-memory registry: it keeps finished
+    jobs for JOB_RETENTION, and a log under JOBS_DIR whose job is gone has
+    nothing left to say which key it was for."""
+    with _jobs_lock:
+        _prune_jobs(time.time())
+        mine = sorted((dict(j) for j in _jobs.values() if j["key"] == key),
+                      key=lambda j: j["started"], reverse=True)
+    out = []
+    for j in mine[:DEPLOYMENT_JOB_LOGS]:
+        text = ""
+        try:
+            with open(j["log_path"], "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - DEPLOYMENT_JOB_LOG_BYTES))
+                text = _ANSI_RE.sub("", fh.read().decode("utf-8", "replace"))
+        except OSError:
+            pass
+        out.append({"id": j["id"], "action": j.get("action") or "deploy",
+                    "status": j["status"], "exit_code": j["exit_code"],
+                    "started": _iso_from_epoch(j["started"]),
+                    "finished": _iso_from_epoch(j.get("finished")),
+                    "log": text})
+    return out
+
+
+def _find_deployment(key):
+    """(item, extra) for one key, or raise 404."""
+    if not isinstance(key, str) or not _POLLER_KEY_RE.match(key):
+        raise DeployError(404, "unknown deployment")
+    for item, extra in _deployment_items():
+        if item["key"] == key:
+            return item, extra
+    raise DeployError(404, "unknown deployment")
+
+
+def deployment_detail(key):
+    """GET api/deployments/{key}: the list item plus the definition (no
+    .env values: the definition only ever holds env_names), the deployed
+    record, deployd's failure record and the log tails."""
+    item, extra = _with_health([_find_deployment(key)])[0]
+    state_dir = extra["state_dir"]
+    _, _, fail, disabled = _deployd_marks(state_dir, key)
+    if item["kind"] == "app":
+        d = extra["def"]
+        definition = dict(d)
+        definition["method"] = ghapp.method_of(d)
+        record = _deployed_record(key)
+        editable = {"via": "api/deployments/%s" % key,
+                    "immutable": list(DEPLOYMENT_IMMUTABLE)}
+    else:
+        w = extra["watched"]
+        definition = {"key": key, "method": "script", "repo": w["repo"],
+                      "ref": w["ref"], "cmd": w.get("cmd"),
+                      "source": w.get("source")}
+        record = item["deployed"]
+        # A service's cmd goes through the poller override path; its method
+        # stays "script" until services move onto methods.
+        editable = {"via": "api/deployd/pollers/%s" % key,
+                    "immutable": ["key", "method"]}
+    item.update({
+        "definition": definition,
+        "editable": editable,
+        "record": record,
+        "fail": fail,
+        "paused": disabled,
+        "logs": {
+            "deployd": _deployd_log_tail(_deployd_base(state_dir, key) + ".log"),
+            "jobs": _job_logs(key),
+        },
+    })
+    return item
+
+
+def _sync_app_poller(d):
+    """Point an app's own deployd poller at its (possibly new) repo and ref.
+    Only a poller that runs this app's ghapp.py deploy is touched; deployd
+    not being installed is fine (the app is still deployable by hand)."""
+    key = d["key"]
+    try:
+        existing = _deployd_overrides(_deployd_state_dir(_deployd_env())).get(key)
+        if not isinstance(existing, dict) or existing.get("cmd") != _poller_cmd(key):
+            return
+        repo = ghapp.clone_url(d["repo"])
+        if existing.get("repo") == repo and (existing.get("ref") or "main") == d["ref"]:
+            return
+        deployd_upsert_poller(key, {"repo": repo, "ref": d["ref"],
+                                    "cmd": _poller_cmd(key)})
+    except Exception as exc:
+        log("github app %s: poller not updated (%s)" % (key, exc))
+
+
+def update_deployment(key, body):
+    """PUT api/deployments/{key}: merge `body` over the stored definition
+    (null drops a field), validate with ghapp.validate, write it, then
+    deploy. Returns {key, job_id}. A failed validation or a deploy that
+    cannot start leaves the stored definition exactly as it was."""
+    if not isinstance(body, dict):
+        raise DeployError(400, "body must be a JSON object")
+    item, extra = _find_deployment(key)
+    if item["kind"] != "app":
+        raise DeployError(400, "%s is deployed by deployd: change its cmd with "
+                          "POST api/deployd/pollers/%s" % (key, key))
+    with _ghapp_lock:
+        try:
+            old = ghapp.load(key)
+        except ghapp.AppError as exc:
+            raise DeployError(409, str(exc))
+        new = dict(old)
+        for field, value in body.items():
+            if not isinstance(field, str):
+                raise DeployError(400, "field names must be strings")
+            if field in DEPLOYMENT_IMMUTABLE:
+                if value != old.get(field):
+                    raise DeployError(400, "%s cannot be changed here" % field)
+                continue
+            if value is None:
+                new.pop(field, None)
+            else:
+                new[field] = value
+        try:
+            ghapp.validate(new)
+        except ghapp.AppError as exc:
+            raise DeployError(400, str(exc))
+        if jobs_by_key().get(key, {}).get("status") == "running":
+            raise DeployError(409, "a job is already running for %s" % key)
+        # Held while the file changes: a deploy deployd started reads the
+        # definition under the same lock, so it sees all of one or the other.
+        try:
+            with ghapp.Lock(key):
+                _write_json_atomically(ghapp.def_path(key), new, ".app.")
+        except ghapp.AppError:
+            raise DeployError(409, "a deploy of %s is running: try again when "
+                              "it ends" % key)
+    # Outside _ghapp_lock: start_deploy may take it itself (adopt_app).
+    try:
+        job_id = start_deploy(key)
+    except DeployError:
+        # The deploy never started (job slots full, a race): put the old
+        # definition back unless something else has rewritten it since.
+        with _ghapp_lock:
+            try:
+                with open(ghapp.def_path(key), encoding="utf-8") as fh:
+                    still_mine = json.load(fh) == new
+            except (OSError, ValueError):
+                still_mine = False
+            if still_mine:
+                _write_json_atomically(ghapp.def_path(key), old, ".app.")
+        raise
+    _sync_app_poller(new)
+    log("deployment %s updated (%s method)" % (key, ghapp.method_of(new)))
+    return {"key": key, "job_id": job_id}
+
+
+def redeploy_deployment(key):
+    """POST api/deployments/{key}/redeploy -> job id: ghapp.py deploy for an
+    app, `deployd --force` for a service (the same code paths as the
+    service page's Deploy and the poller's Deploy now)."""
+    item, _ = _find_deployment(key)
+    if item["kind"] == "app":
+        return start_deploy(key)
+    return start_deployd_force(key)
 
 
 # ---- editing
@@ -5650,6 +6011,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._dispatch("DELETE")
 
+    def do_PUT(self):
+        self._dispatch("PUT")
+
     def _read_json_body(self, limit=MAX_BODY_BYTES):
         """Parsed JSON body, or None when empty. Raises DeployError on junk.
 
@@ -5683,6 +6047,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._route_patch(path)
             elif method == "DELETE":
                 self._route_delete(path)
+            elif method == "PUT":
+                self._route_put(path)
             else:
                 self._route_post(path)
         except DeployError as exc:
@@ -5714,6 +6080,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "api/deployd":
             self._json(200, deployd_payload())
             return
+        if path == "api/deployments":
+            self._json(200, deployments_payload())
+            return
+        if path.startswith("api/deployments/"):
+            rest = path[len("api/deployments/"):].strip("/")
+            if rest and "/" not in rest:
+                self._json(200, deployment_detail(rest))
+                return
         if path == "api/github/repos":
             self._json(200, github_repos())
             return
@@ -5772,6 +6146,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 and parts[3] == "deploy":
             job_id = start_deploy(parts[2])
             self._json(202, {"job_id": job_id})
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "deployments"] \
+                and parts[3] == "redeploy":
+            self._json(202, {"key": parts[2],
+                             "job_id": redeploy_deployment(parts[2])})
             return
         # start/stop/restart. Same 202 + job id as a deploy, on purpose: the
         # UI streams progress from api/jobs/{id} with the code it already has.
@@ -5846,6 +6225,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[0] == "api" and parts[1] == "services" \
                 and parts[3] == "env":
             self._json(200, update_env_var(parts[2], parts[4], body))
+            return
+        self._error(404, "unknown endpoint")
+
+    def _route_put(self, path):
+        # The body is the definition's new editable fields (merged over the
+        # stored ones, then validated whole); drained first like every route.
+        body = self._read_json_body()
+        parts = path.strip("/").split("/")
+        if len(parts) == 3 and parts[:2] == ["api", "deployments"]:
+            self._json(202, update_deployment(parts[2], body))
             return
         self._error(404, "unknown endpoint")
 
