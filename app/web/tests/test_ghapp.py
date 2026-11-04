@@ -852,6 +852,63 @@ class HostEnvTest(Sandbox):
         for argv in runs:
             self.assertNotIn("--env-file", argv)
 
+    def test_failed_switch_off_static_restores_nginx_as_static_runs_it(self):
+        """static -> image/dockerfile/node/python failing its health check
+        puts the old nginx back with static's port and release mount and
+        without the .env, not with the new method's run settings."""
+        for method in ("image", "dockerfile", "node", "python"):
+            self.calls[:], self.cwds[:], self.envs[:] = [], [], []
+            app = ghapp.app_dir("hello-app")
+            shutil.rmtree(app, ignore_errors=True)
+            d = good() if method == "dockerfile" else method_def(method)
+            self.write_def(d)
+            self.make_src("hello-app")
+            self.write_env("SITE_PASSPHRASE=%s\n" % self.SECRET)
+            name = "site-%s-1000" % ("a" * 12)
+            os.makedirs(os.path.join(app, name))
+            with open(os.path.join(app, "deployed.json"), "w") as fh:
+                json.dump({"sha": "a" * 40, "method": "static", "release": name}, fh)
+            self.quiet_out["docker inspect"] = (0, "sha256:" + "f" * 64)
+            ghapp.healthy = lambda d, t: False
+            with self.assertRaises(ghapp.AppError, msg=method):
+                self.deploy_quietly()
+            runs = self.argv_with("docker", "run")
+            self.assertEqual(len(runs), 2, method)
+            self.assertIn("--env-file", runs[0], method)      # the new app's
+            back = runs[1]
+            self.assertEqual(back[-1], "sha256:" + "f" * 64, method)
+            self.assertNotIn("--env-file", back, method)
+            self.assertIn("127.0.0.1:8301:80", back, method)
+            self.assertEqual(back[back.index("--volume") + 1],
+                             os.path.join(app, name) + ":/usr/share/nginx/html:ro",
+                             method)
+
+    def test_failed_switch_off_static_without_a_release_does_not_roll_back(self):
+        self.write_def(method_def("image"))
+        self.make_src("hello-app")
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
+            json.dump({"sha": "a" * 40, "method": "static"}, fh)
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "f" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            self.deploy_quietly()
+        self.assertEqual(len(self.argv_with("docker", "run")), 1)
+
+    def test_container_to_container_rollback_keeps_its_own_run_settings(self):
+        self.write_def(method_def("image"))
+        self.make_src("hello-app")
+        self.write_env("A=1\n")
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
+            json.dump({"sha": "a" * 40, "method": "dockerfile"}, fh)
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "f" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            self.deploy_quietly()
+        back = self.argv_with("docker", "run")[-1]
+        self.assertEqual(back[-1], "sha256:" + "f" * 64)
+        self.assertIn("--env-file", back)
+        self.assertIn("127.0.0.1:8301:3000", back)
+
     def test_the_real_run_logs_the_argv_and_never_a_value(self):
         """Through the real run(), which echoes the argv to the job log:
         subprocess.run is stubbed (no process reaches the host), and the
@@ -1513,7 +1570,7 @@ class MethodSwitchTest(Sandbox):
         for was in ("dockerfile", "image", None):
             if was:
                 self.previous(was)
-            self.calls[:] = []
+            self.calls[:], self.cwds[:], self.envs[:] = [], [], []
             self.log[:] = []
             ghapp.deploy("hello-app")
             self.assertEqual(self.index("docker", "stop"), -1, was)

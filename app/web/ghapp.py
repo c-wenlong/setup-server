@@ -56,7 +56,7 @@ Methods, and the fields each adds to the definition:
                 read-only from a small nginx container on the app's port.
                 That container gets no --env-file: it only serves files,
                 and the .env holds the build's secrets. Rollback mounts
-                the previous release.
+                the previous release, also when a switch off static fails.
     node        "version" (image tag suffix, e.g. "22-alpine"), "start"
     python      (e.g. "3.13-slim"), optional "build" — a generated
                 Dockerfile is rendered into the checkout, then the method
@@ -927,6 +927,14 @@ def prune_releases(key, keep_names):
             shutil.rmtree(os.path.join(app_dir(key), name), ignore_errors=True)
 
 
+def static_run_kw(key, name):
+    """run_argv() keywords for serving release `name` from the nginx
+    image: its port, the docroot read-only, and no --env-file (the .env
+    holds the build's secrets, and nginx needs none of it)."""
+    return {"container_port": STATIC_CONTAINER_PORT, "env_file": False,
+            "mounts": [release_dir(key, name) + ":" + STATIC_DOCROOT + ":ro"]}
+
+
 def deploy_static(d, src, sha, previous, prev_release):
     """Run the def's build in the checkout, copy its output to a fresh
     release dir outside it, then serve that read-only from the small nginx
@@ -957,15 +965,11 @@ def deploy_static(d, src, sha, previous, prev_release):
         # about to be deleted, so no container rollback then.
         prev_kw = None
         if prev_release:
-            prev_kw = {"container_port": STATIC_CONTAINER_PORT,
-                       "env_file": False,
-                       "mounts": [release_dir(key, prev_release) + ":"
-                                  + STATIC_DOCROOT + ":ro"]}
+            prev_kw = static_run_kw(key, prev_release)
         else:
             previous = None
         swap(d, STATIC_IMAGE, previous, previous_run_kw=prev_kw,
-             container_port=STATIC_CONTAINER_PORT, env_file=False,
-             mounts=[release + ":" + STATIC_DOCROOT + ":ro"])
+             **static_run_kw(key, name))
     except (AppError, OSError):
         shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(release, ignore_errors=True)
@@ -1149,6 +1153,16 @@ def deploy_method(d, m, sha, src, prev):
     previous = current_image(key)
     prev_release = deployed_release(key)
     image = release = None
+    # Rolling another container method back onto a static deploy must run
+    # nginx the way static does (its port, its release mounted, no .env);
+    # with no recorded release there is nothing to serve, so no rollback.
+    prev_kw = None
+    if m != "static" and prev is not None \
+            and recorded_method(prev) == "static":
+        if prev_release:
+            prev_kw = static_run_kw(key, prev_release)
+        else:
+            previous = None
     if m == "script":
         run_sh(d["cmd"], src, key)
         if d.get("port") and d.get("health_path") \
@@ -1165,7 +1179,7 @@ def deploy_method(d, m, sha, src, prev):
         image = d["image"]
         say("pulling %s" % image)
         run(["docker", "pull", image])
-        swap(d, image, previous)
+        swap(d, image, previous, previous_run_kw=prev_kw)
     elif m == "static":
         release = deploy_static(d, src, sha, previous, prev_release)
         image = STATIC_IMAGE
@@ -1175,7 +1189,7 @@ def deploy_method(d, m, sha, src, prev):
         say("building %s (generated %s)" % (image, GENERATED_DOCKERFILE))
         run(build_argv(d, sha, src, dockerfile=GENERATED_DOCKERFILE,
                        context="."))
-        swap(d, image, previous)
+        swap(d, image, previous, previous_run_kw=prev_kw)
     else:
         df_path = inside_checkout(d, src, "dockerfile")
         if not os.path.isfile(df_path):
@@ -1184,7 +1198,7 @@ def deploy_method(d, m, sha, src, prev):
         image = "%s:%s" % (image_repo(key), sha[:12])
         say("building %s" % image)
         run(build_argv(d, sha, src))
-        swap(d, image, previous)
+        swap(d, image, previous, previous_run_kw=prev_kw)
     return image, release, prev_release
 
 

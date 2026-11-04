@@ -995,9 +995,12 @@ into containers, where it still applies.
 
 **Static's nginx gets no `--env-file`.** It only serves files, and the
 `.env` now holds the build's secrets, which must not sit in the serving
-container's environment. That covers the rollback run too. Every other
-container method (dockerfile, image, node, python) and compose keep
-passing it.
+container's environment. That covers the rollback run too, including a
+failed switch from static to another container method: the old nginx comes
+back the way static runs it (port 80 inside, the recorded release mounted,
+no `.env`), and with no recorded release there is no container rollback.
+Every other container method (dockerfile, image, node, python) and compose
+keep passing it.
 
 **No value is printed.** Values go into the child's environment only,
 never an argv, so the job log's echoed `$ sh -c ...` line carries none,
