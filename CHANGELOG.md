@@ -18,6 +18,15 @@ first, dated by merge.
   setup.sh so the timer picks the new cadence up — the same change
   `POLL_SECONDS=120 ./setup.sh` always was, now from the page.
 
+- **Launcher: "Refresh" check on a deployment page.** A new button beside
+  Redeploy fetches the deployment's watched ref into a shared bare cache
+  under deployd's state dir and reports how many commits the deployed sha
+  trails it by, with an expandable list of the missing commits (sha,
+  subject, author, age). The result persists as `state/<key>.check.json`,
+  so the Remote fact row shows the last check on every load. A deployed
+  sha that a force-push erased reports "no longer on the ref" instead of
+  a nonsense count.
+
 - **Launcher: live favicons for opted-in tiles.** A manifest can declare
   `favicon` — a path resolved against the tile's `url` (or a full URL,
   with the same `.env` token and `HOST` substitution) — and the tile

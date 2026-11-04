@@ -166,6 +166,30 @@
 .gdp-facts dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
 .gdp-state, .gdp-commit { display: inline-flex; align-items: center; gap: 8px; }
 .gdp-bad { color: var(--bad); }
+.gdp-warn { color: var(--warn); }
+
+.gdp-behind {
+  margin: 14px 0 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 8px);
+  font-size: 13px;
+}
+.gdp-behind summary {
+  padding: 8px 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.gdp-commits {
+  margin: 0;
+  padding: 4px 12px 10px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.gdp-commits li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.gdp-commits .gdp-subject { color: var(--text); overflow-wrap: anywhere; }
 
 .gal-link { color: var(--accent-fg); text-decoration: none; }
 .gal-link:hover { text-decoration: underline; }

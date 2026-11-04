@@ -34,6 +34,7 @@ Serves static/ as static files and a small JSON API:
     GET    api/deployments/{key}               definition, record, log tails
     PUT    api/deployments/{key}               new method fields -> 202 job
     POST   api/deployments/{key}/redeploy      202 -> deploy job
+    POST   api/deployments/{key}/check         200 -> commits-behind report
     GET    api/jobs/{id}
     GET    healthz
 
@@ -3491,6 +3492,7 @@ def start_deployd_force(key):
 #   GET  api/deployments/{key}            one app: definition, record, logs
 #   PUT  api/deployments/{key}            new method fields -> 202 deploy job
 #   POST api/deployments/{key}/redeploy   202 deploy job
+#   POST api/deployments/{key}/check      200 commits-behind report
 #
 # Two kinds. An "app" is a launcher definition (~/services/launcher/apps/
 # <key>.json, run by ghapp.py); its method and fields are editable here, and
@@ -3710,12 +3712,147 @@ def deployment_detail(key):
         "record": record,
         "fail": fail,
         "paused": disabled,
+        "check": _cached_check(state_dir, key),
         "logs": {
             "deployd": _deployd_log_tail(_deployd_base(state_dir, key) + ".log"),
             "jobs": _job_logs(key),
         },
     })
     return item
+
+
+# ---- remote-behind check
+#
+# "Refresh" on a deployment page: how far the deployed sha trails the
+# watched ref. One bare repo under deployd's state dir caches every
+# watched remote; each check fetches just the ref, so a check costs an
+# incremental fetch and a local rev-list. It works the same for apps
+# (ghapp definitions) and services (poller cmds): neither side's own
+# clone is touched.
+
+CHECK_LOG_COMMITS = 50
+_check_lock = threading.Lock()
+
+
+def _deployd_check_file(state_dir, key):
+    return _deployd_base(state_dir, key) + ".check.json"
+
+
+def _cached_check(state_dir, key):
+    """The last check result for `key`, or None before the first one."""
+    try:
+        with open(_deployd_check_file(state_dir, key),
+                  encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _git_out(argv, timeout=90):
+    """(rc, stdout) like ghapp.quiet but bounded and prompt-free."""
+    try:
+        res = subprocess.run(argv, text=True, timeout=timeout, check=False,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL,
+                             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.SubprocessError):
+        return 127, ""
+    return res.returncode, res.stdout or ""
+
+
+def check_deployment_behind(key):
+    """POST api/deployments/{key}/check -> the behind report.
+
+    `behind` counts commits on the remote ref the deployed sha lacks;
+    `ahead` counts shas the deployed side has that the ref does not (a
+    deploy of something never pushed, or a reverted remote). A deployed
+    sha missing from the remote's history (force-push, rewrite) reports
+    `stale_deployed` because the count itself is meaningless there. The
+    result is persisted so GET renders the last check without a refetch."""
+    item, extra = _find_deployment(key)
+    state_dir = extra["state_dir"]
+    deployed = (item.get("deployed") or {}).get("sha")
+    ref = item.get("ref") or "main"
+    # Apps store a GitHub slug; services store the URL outright.
+    url = (ghapp.clone_url(item["repo"]) if item["kind"] == "app"
+           else item["repo"])
+    cache = os.path.join(state_dir, "remote.git")
+    refname = "refs/checks/" + re.sub(r"[^A-Za-z0-9._-]", "_", key)
+    with _check_lock:
+        if not os.path.isdir(cache):
+            rc, out = _git_out(["git", "init", "--bare", cache])
+            if rc != 0:
+                raise DeployError(502, "could not init the remote cache")
+        rc, out = _git_out(["git", "-C", cache, "fetch", "--quiet", url,
+                            "%s:%s" % (ref, refname)])
+        if rc != 0:
+            raise DeployError(502, "could not fetch %s@%s"
+                              % (item["repo"], ref))
+        rc, remote = _git_out(["git", "-C", cache, "rev-parse", refname])
+        remote = remote.strip()
+        if rc != 0 or not ghapp.SHA_RE.match(remote):
+            raise DeployError(502, "could not resolve %s on %s"
+                              % (ref, item["repo"]))
+        behind = ahead = None
+        stale = False
+        if deployed:
+            rc, out = _git_out(["git", "-C", cache, "rev-list", "--count",
+                                "%s..%s" % (deployed, refname)])
+            if rc != 0:
+                # The deployed sha is not in the fetched history. GitHub
+                # serves reachable shas on demand, so try fetching it
+                # directly before declaring the deploy untraceable.
+                rc2, _ = _git_out(["git", "-C", cache, "fetch", "--quiet",
+                                   url, deployed])
+                if rc2 == 0:
+                    rc, out = _git_out(
+                        ["git", "-C", cache, "rev-list", "--count",
+                         "%s..%s" % (deployed, refname)])
+            if rc == 0:
+                try:
+                    behind = int(out.strip())
+                except ValueError:
+                    behind = None
+            else:
+                stale = True
+            if behind is not None:
+                rc, out = _git_out(
+                    ["git", "-C", cache, "rev-list", "--count",
+                     "%s..%s" % (refname, deployed)])
+                if rc == 0:
+                    try:
+                        ahead = int(out.strip())
+                    except ValueError:
+                        pass
+        commits = []
+        log_range = refname if deployed is None else (
+            "%s..%s" % (deployed, refname) if behind else None)
+        if log_range:
+            rc, out = _git_out(
+                ["git", "-C", cache, "log", "--no-decorate",
+                 "-n", str(CHECK_LOG_COMMITS),
+                 "--format=%H%x1f%s%x1f%ae%x1f%aI", log_range])
+            if rc == 0:
+                for line in out.splitlines():
+                    parts = line.split("\x1f")
+                    if len(parts) == 4:
+                        commits.append({"sha": parts[0],
+                                        "subject": parts[1],
+                                        "author": parts[2],
+                                        "at": parts[3]})
+    rec = {"key": key, "repo": item["repo"], "ref": ref,
+           "deployed_sha": deployed, "remote_sha": remote,
+           "behind": behind, "ahead": ahead,
+           "stale_deployed": stale, "commits": commits,
+           "checked_at": _iso_from_epoch(time.time())}
+    try:
+        with open(_deployd_check_file(state_dir, key), "w",
+                  encoding="utf-8") as fh:
+            json.dump(rec, fh)
+    except OSError:
+        pass
+    return rec
 
 
 def _sync_app_poller(d):
@@ -6582,6 +6719,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 and parts[3] == "redeploy":
             self._json(202, {"key": parts[2],
                              "job_id": redeploy_deployment(parts[2])})
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "deployments"] \
+                and parts[3] == "check":
+            self._json(200, check_deployment_behind(parts[2]))
             return
         # start/stop/restart. Same 202 + job id as a deploy, on purpose: the
         # UI streams progress from api/jobs/{id} with the code it already has.
