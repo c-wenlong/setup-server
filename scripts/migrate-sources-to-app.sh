@@ -31,7 +31,8 @@
 #                                           deploy through the runner
 #
 # Steps:
-#   1. preflight (regular user, docker, git, python3, tailscale); refuse
+#   1. preflight (regular user, docker, git, python3, tailscale, and uv,
+#      npm and node on the PATH ghapp.py gives the build); refuse
 #      when this checkout resolves a different deployd state dir than the
 #      installed deployd uses; take deployd's poll lock, so no tick runs the
 #      old setup.sh mid-migration
@@ -41,15 +42,15 @@
 #   3. warm up: clone and check out the target commit into the app's src/
 #      with ghapp.py's own fetch, while the old site keeps serving
 #   4. write the definition and the (paused) deployd poller
-#   5. write the trigger's drop-in, daemon-reload, and restart
-#      sources-trigger once no sources-manual-* unit is running
-#   6. stop the old container and run `ghapp.py deploy sources` pinned to
+#   5. stop the old container and run `ghapp.py deploy sources` pinned to
 #      the warmed commit (the static build runs now: the site is down for
 #      its length, which is printed)
-#   7. success: remove the old container and its compose network, drop
-#      deployd's old failure record. Failure, or an interrupt (exit trap)
-#      anywhere from step 4 on: remove the new container, start the old one
-#      again, put the drop-in back as it was (and restart the trigger),
+#   6. success: remove the old container and its compose network, drop
+#      deployd's old failure record, then write the trigger's drop-in,
+#      daemon-reload, and restart sources-trigger once no sources-manual-*
+#      unit is running (if it cannot, the drop-in is put back as it was
+#      and a re-run retries). Failure, or an interrupt (exit trap) anywhere
+#      in steps 4-5: remove the new container, start the old one again,
 #      undo only what step 4 added, and exit non-zero
 #
 # Usage, from the checkout deployd uses (any checkout when its deployd .env
@@ -57,7 +58,7 @@
 #   ./scripts/migrate-sources-to-app.sh
 #
 # Idempotent: once a deploy is recorded, a re-run only finishes cleanup and
-# makes sure the drop-in is in place. It never deletes ~/services/sources/
+# makes sure the drop-in is in place (retrying a restart that failed). It never deletes ~/services/sources/
 # (old clone, releases, deploy.sh copy) or any .env; it prints their paths
 # so they can be removed by hand.
 
@@ -162,6 +163,43 @@ if verb == "state-dir":
     if len(sys.argv) > 2:
         ghapp.DEPLOYD_ENV = sys.argv[2]
     print(ghapp.deployd_state_dir() or "")
+
+elif verb == "setup-repo":
+    # SETUP_REPO from a deployd .env (the checkout deployd pulls and runs
+    # pollers from), decoded like deployd's own load_env; "" when unset.
+    import shlex
+    value = ""
+    try:
+        with open(sys.argv[2], encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, raw = line.partition("=")
+                if name.strip() != "SETUP_REPO":
+                    continue
+                try:
+                    parts = shlex.split(raw)
+                    value = parts[0] if parts else ""
+                except ValueError:
+                    value = raw
+    except OSError:
+        pass
+    print(value)
+
+elif verb == "tools":
+    # The build needs uv, npm and node on the PATH ghapp.py gives a host
+    # build. Checked against a bare system PATH, the one deployd's timer
+    # and the trigger's transient units start from, so a tool found only
+    # through this shell's PATH (the old .env's UV_BIN, say) fails here,
+    # before the old site is stopped, rather than in the deploy.
+    import shutil
+    path = ghapp.host_path("/usr/local/bin:/usr/bin:/bin")
+    missing = [t for t in ("uv", "npm", "node") if not shutil.which(t, path=path)]
+    if missing:
+        fail("%s not found on the PATH ghapp.py gives the build (%s); install "
+             "them in one of %s, or link them there, and re-run"
+             % (", ".join(missing), path, ", ".join(ghapp.HOST_PATH_DIRS)))
 
 elif verb == "env":
     # Build the app's .env from the old .env file.
@@ -293,6 +331,7 @@ docker info --format '{{.ID}}' >/dev/null 2>&1 \
 resolve_tailscale
 [ -f "$GHAPP" ] || die "no $GHAPP in this checkout"
 helper check-def || die "refusing to overwrite another app's definition"
+helper tools || die "the static build would not find its tools; nothing was changed"
 HAVE_TRIGGER=0
 if [ "$OS" = Linux ] && command -v systemctl >/dev/null && [ -f "$UNIT_DIR/$TRIGGER.service" ]; then
   HAVE_TRIGGER=1
@@ -307,11 +346,13 @@ fi
 # would land somewhere the real deployd never reads.
 installed_deployd_env() {
   local f bin
+  # The binary the installed unit runs comes first; the default location
+  # is only a fallback, since a stale copy can outlive a moved deployd.
   {
-    echo "$HOME/services/deployd/bin/deployd"
     for f in "$HOME/.config/systemd/user/deployd.service" "$HOME"/Library/LaunchAgents/*deployd*.plist; do
       [ -f "$f" ] && sed -n 's#.*[=> ]\(/[^ <]*/bin/deployd\)\([ <].*\)\{0,1\}$#\1#p' "$f"
     done
+    echo "$HOME/services/deployd/bin/deployd"
   } | while IFS= read -r bin; do
     [ -f "$bin" ] && sed -n 's/^ENV_BAKED = "\(\/[^"]*\)".*/\1/p' "$bin" | head -1
   done | head -1
@@ -329,11 +370,17 @@ if [ -n "$INSTALLED_ENV" ] && [ -f "$INSTALLED_ENV" ]; then
 fi
 
 # The trigger's deploy command runs the ghapp.py of the checkout deployd
-# keeps pulled (its SETUP_REPO), so it outlives the checkout this script
-# runs from (a worktree, say); this checkout's when deployd is not here.
+# keeps pulled (SETUP_REPO in its .env), so it outlives the checkout this
+# script runs from (a worktree, say). Then the checkout holding that .env,
+# then this one when deployd is not here.
 DEPLOY_ROOT="$REPO_ROOT"
-if [ -n "$INSTALLED_ENV" ] && [ -f "${INSTALLED_ENV%/services/deployd/.env}/app/web/ghapp.py" ]; then
-  DEPLOY_ROOT="${INSTALLED_ENV%/services/deployd/.env}"
+if [ -n "$INSTALLED_ENV" ] && [ -f "$INSTALLED_ENV" ]; then
+  setup_repo="$(helper setup-repo "$INSTALLED_ENV")"
+  if [ -n "$setup_repo" ] && [ -f "$setup_repo/app/web/ghapp.py" ]; then
+    DEPLOY_ROOT="$setup_repo"
+  elif [ -f "${INSTALLED_ENV%/services/deployd/.env}/app/web/ghapp.py" ]; then
+    DEPLOY_ROOT="${INSTALLED_ENV%/services/deployd/.env}"
+  fi
 fi
 PYTHON3="$(command -v python3)"
 # The trigger interpolates SOURCES_DEPLOY into `sh -c`, so the command is
@@ -428,49 +475,44 @@ restart_trigger() {
   systemctl --user restart "$TRIGGER" || return 2
 }
 
-DROPIN_HAD=0         # 1: a deploy.conf existed before this run (saved copy)
+# install_dropin: write the drop-in, daemon-reload, restart the trigger.
+# 0 when the trigger runs with it (or there is no trigger here). On any
+# failure the file goes back to what it was, so a matching file always
+# means a restart picked it up and a re-run retries a failed one.
 DROPIN_SAVED=""
-DROPIN_WROTE=0
 install_dropin() {
   [ "$HAVE_TRIGGER" -eq 1 ] || return 0
   if [ -f "$DROPIN" ] && [ "$(cat "$DROPIN")" = "$(dropin_text)" ]; then
     ok "$TRIGGER drop-in already points at ghapp.py"
     return 0
   fi
+  local had=0 rc=0
   if [ -f "$DROPIN" ]; then
-    DROPIN_HAD=1
+    had=1
     DROPIN_SAVED="$(mktemp)"
     cp "$DROPIN" "$DROPIN_SAVED"
   fi
   mkdir -p "$DROPIN_DIR"
   dropin_text > "$DROPIN.tmp"
   mv "$DROPIN.tmp" "$DROPIN"
-  DROPIN_WROTE=1
-  systemctl --user daemon-reload
-  local rc=0
-  restart_trigger "${SOURCES_TRIGGER_WAIT:-1800}" || rc=$?
+  systemctl --user daemon-reload && restart_trigger "${SOURCES_TRIGGER_WAIT:-1800}" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ok "$TRIGGER now deploys with: ghapp.py deploy $KEY"
+    return 0
+  fi
   case "$rc" in
-    0) ok "$TRIGGER now deploys with: ghapp.py deploy $KEY" ;;
-    1) die "a sources-manual-* unit is still running after ${SOURCES_TRIGGER_WAIT:-1800}s; not restarting $TRIGGER" ;;
-    *) die "systemctl --user restart $TRIGGER failed" ;;
+    1) warn "a sources-manual-* unit is still running after ${SOURCES_TRIGGER_WAIT:-1800}s; not restarting $TRIGGER" ;;
+    *) warn "systemctl --user restart $TRIGGER failed" ;;
   esac
-}
-
-uninstall_dropin() {
-  [ "$DROPIN_WROTE" -eq 1 ] || return 0
-  DROPIN_WROTE=0
-  if [ "$DROPIN_HAD" -eq 1 ] && [ -n "$DROPIN_SAVED" ]; then
+  if [ "$had" -eq 1 ]; then
     cp "$DROPIN_SAVED" "$DROPIN"
   else
     rm -f "$DROPIN"
     rmdir "$DROPIN_DIR" 2>/dev/null || true
   fi
   systemctl --user daemon-reload || true
-  if restart_trigger "${SOURCES_TRIGGER_WAIT:-600}"; then
-    ok "$TRIGGER is back on its previous deploy command"
-  else
-    warn "$TRIGGER may still run with SOURCES_DEPLOY=ghapp.py: once no sources-manual-* unit runs, run: systemctl --user restart $TRIGGER"
-  fi
+  warn "put $DROPIN back as it was; $TRIGGER keeps its previous deploy command"
+  return 1
 }
 
 cleanup_old() {
@@ -490,8 +532,9 @@ cleanup_old() {
 }
 
 # Put the box back the way this run found it: no new container, the old one
-# running again if it was, the drop-in as it was, and only the
-# definition/poller pieces this run added taken back out. Safe to call twice.
+# running again if it was, and only the definition/poller pieces this run
+# added taken back out. Safe to call twice. (The trigger drop-in is only
+# written after the new site answers, so there is none to undo here.)
 SNAPSHOT="1 1 1"
 was_running=0
 restore() {
@@ -504,7 +547,6 @@ restore() {
       warn "could not start $OLD_CONTAINER: run docker start $OLD_CONTAINER"
     fi
   fi
-  uninstall_dropin
   # shellcheck disable=SC2086  # three 0/1 words, split on purpose
   helper unwire $SNAPSHOT \
     || warn "could not undo the definition/poller: see $DEF_FILE and deployd's pollers.json"
@@ -544,7 +586,7 @@ if [ -f "$DEF_FILE" ] && [ -f "$APP_DIR/deployed.json" ]; then
   if container_running "$NEW_CONTAINER"; then
     ok "already migrated: $NEW_CONTAINER is running from $DEF_FILE"
     cleanup_old
-    install_dropin
+    install_dropin || die "the site is migrated, but $TRIGGER was not switched to ghapp.py: re-run this script once no sources-manual-* unit runs"
   else
     warn "already migrated, but $NEW_CONTAINER is not running: start or redeploy it from the launcher"
     warn "left any old $OLD_CONTAINER container and the $TRIGGER drop-in as they are"
@@ -565,13 +607,11 @@ helper warm "$SHA_FILE" || die "warm-up checkout failed; the old site was not to
 SHA="$(cat "$SHA_FILE")"
 ok "checked out ${SHA:0:12}"
 
-# --------------------------------------------------- def + poller + trigger
+# ----------------------------------------------------------- def + poller
 SNAPSHOT="$(helper snapshot)" || die "could not read the current definition/poller state"
 info "Writing the launcher definition and deployd poller"
 ROLLBACK=1      # from here until the new container answers, exit = restore
 helper wire || die "could not write the definition or poller; the old site was not touched"
-info "Pointing $TRIGGER at ghapp.py"
-install_dropin
 
 # ---------------------------------------------------------------- swap
 if container_running "$OLD_CONTAINER"; then
@@ -593,4 +633,11 @@ ROLLBACK=0
 ok "$NEW_CONTAINER answered after $(( $(date +%s) - started ))s of downtime"
 
 cleanup_old
+# Only now: until the new site answered, a Redeploy through the trigger
+# would have run ghapp.py against this migration's own deploy (and its
+# lock). Until the restart below, the trigger keeps calling the old
+# deploy.sh, which only rebuilds ~/services/sources/www and touches no
+# container.
+info "Pointing $TRIGGER at ghapp.py"
+install_dropin || die "the site is migrated, but $TRIGGER was not switched to ghapp.py: re-run this script once no sources-manual-* unit runs"
 summary

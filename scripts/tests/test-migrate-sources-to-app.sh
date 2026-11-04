@@ -203,6 +203,10 @@ case "$*" in
 esac
 exit 0
 STUB
+  # npm and node only have to be found (the build itself is the uv stub).
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/bin/npm"
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/bin/node"
+  chmod +x "$HOME/.local/bin/npm" "$HOME/.local/bin/node"
   printf '#!/usr/bin/env bash\necho "sleep $*" >> "$CALLS_LOG"\n' > "$SB/bin/sleep"
   printf '#!/usr/bin/env bash\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n' > "$SB/bin/uname"
   chmod +x "$SB/bin/"* "$HOME/.local/bin/uv"
@@ -294,7 +298,7 @@ check "drop-in written"                     test -f "$(DROPIN)"
 check "drop-in sets SOURCES_DEPLOY"         grep -qx "Environment=\"SOURCES_DEPLOY=$PY3 $R/app/web/ghapp.py deploy sources\"" "$(DROPIN)"
 check "daemon-reload ran"                   calls_have "systemctl --user daemon-reload"
 check "trigger restarted"                   calls_have "systemctl --user restart sources-trigger"
-check "trigger restarted before the stop"   before "systemctl --user restart sources-trigger" "docker stop sources"
+check "trigger restarted after the swap"    before "--publish 127.0.0.1:8098:80" "systemctl --user restart sources-trigger"
 check "old container stopped"               calls_have "docker stop sources"
 check "nginx on 127.0.0.1:8098"             calls_have "--publish 127.0.0.1:8098:80"
 check "nginx gets the host gateway"         calls_have "--add-host host.docker.internal:host-gateway"
@@ -383,7 +387,7 @@ check "no new container attempted"          calls_lack "docker run"
 check "no container removed"                calls_lack "docker rm"
 teardown
 
-echo "• build fails: the old site and trigger come back"
+echo "• build fails: the old site comes back, the trigger is untouched"
 setup
 touch "$STATE_DIR/fail-build"
 migrate
@@ -392,9 +396,8 @@ check "old container started again"         calls_have "docker start sources"
 check "old container running"               test -f "$STATE_DIR/old-running"
 check "old container not removed"           test -f "$STATE_DIR/old-exists"
 check "no nginx started"                    calls_lack "docker run"
-check "drop-in removed"                     test ! -e "$(DROPIN)"
-check "drop-in dir removed"                 test ! -e "$(dirname "$(DROPIN)")"
-check "trigger restarted twice"             [ "$(calls_count "systemctl --user restart sources-trigger")" -eq 2 ]
+check "no drop-in written"                  test ! -e "$(dirname "$(DROPIN)")"
+check "trigger never restarted"             calls_lack "restart sources-trigger"
 check "definition removed"                  test ! -e "$(DEF)"
 check "poller row dropped"                  sh -c "! grep -q '\"sources\"' '$(POLLERS)'"
 check "poller not left paused"              test ! -e "$D/sources.disabled"
@@ -420,11 +423,11 @@ touch "$STATE_DIR/fail-run"
 migrate
 check "exits non-zero"                      [ "$CODE" -ne 0 ]
 check "old container running"               test -f "$STATE_DIR/old-running"
-check "drop-in removed"                     test ! -e "$(DROPIN)"
+check "no drop-in written"                  test ! -e "$(DROPIN)"
 check "definition removed"                  test ! -e "$(DEF)"
 teardown
 
-echo "• a drop-in already there (someone else's) is put back as it was"
+echo "• a drop-in already there is left alone when the deploy fails"
 setup
 mkdir -p "$(dirname "$(DROPIN)")"
 printf '[Service]\nEnvironment=SOURCES_DEPLOY=/opt/custom-deploy\n' > "$(DROPIN)"
@@ -432,7 +435,7 @@ cp "$(DROPIN)" "$SB/dropin.mine"
 touch "$STATE_DIR/fail-build"
 migrate
 check "exits non-zero"                      [ "$CODE" -ne 0 ]
-check "the earlier drop-in is restored"     cmp -s "$SB/dropin.mine" "$(DROPIN)"
+check "the earlier drop-in is untouched"    cmp -s "$SB/dropin.mine" "$(DROPIN)"
 teardown
 
 echo "• a manual run in flight: waits, then restarts the trigger"
@@ -445,28 +448,86 @@ check "slept while busy"                    calls_have "sleep 5"
 check "restarted after the wait"            before "sleep 5" "systemctl --user restart sources-trigger"
 teardown
 
-echo "• a manual run that never ends: gives up and restores"
+echo "• a manual run that never ends: the site moves, the trigger switch waits for a re-run"
 setup
 touch "$STATE_DIR/manual-busy-forever"
 SOURCES_TRIGGER_WAIT=0 migrate
 check "exits non-zero"                      [ "$CODE" -ne 0 ]
 check "names the busy unit"                 out_has "sources-manual-* unit is still running"
+check "says to re-run"                      out_has "re-run this script once no sources-manual-* unit runs"
 check "trigger never restarted"             calls_lack "restart sources-trigger"
-check "old container never stopped"         calls_lack "docker stop"
-check "drop-in removed"                     test ! -e "$(DROPIN)"
-check "definition removed"                  test ! -e "$(DEF)"
-check "warns to restart by hand"            out_has "systemctl --user restart sources-trigger"
+check "the new site is up"                  test -f "$STATE_DIR/new-exists"
+check "old container removed"               test ! -e "$STATE_DIR/old-exists"
+check "definition kept"                     test -f "$(DEF)"
+check "drop-in put back (none)"             test ! -e "$(DROPIN)"
+echo "• then a re-run switches the trigger"
+rm -f "$STATE_DIR/manual-busy-forever"
+: > "$CALLS_LOG"
+migrate
+check "exits zero"                          [ "$CODE" -eq 0 ]
+check "says already migrated"               out_has "already migrated"
+check "drop-in written"                     test -f "$(DROPIN)"
+check "trigger restarted"                   calls_have "systemctl --user restart sources-trigger"
+check "no rebuild"                          calls_lack "uv run"
 teardown
 
-echo "• the trigger restart fails: restores"
+echo "• the trigger restart fails: the earlier drop-in is put back"
 setup
+mkdir -p "$(dirname "$(DROPIN)")"
+printf '[Service]\nEnvironment=SOURCES_DEPLOY=/opt/custom-deploy\n' > "$(DROPIN)"
+cp "$(DROPIN)" "$SB/dropin.mine"
 touch "$STATE_DIR/fail-restart"
 migrate
 check "exits non-zero"                      [ "$CODE" -ne 0 ]
 check "says the restart failed"             out_has "restart sources-trigger failed"
-check "old container never stopped"         calls_lack "docker stop"
-check "drop-in removed"                     test ! -e "$(DROPIN)"
+check "the earlier drop-in is back"         cmp -s "$SB/dropin.mine" "$(DROPIN)"
+check "the new site is up"                  test -f "$STATE_DIR/new-exists"
+echo "• then a re-run retries the switch"
+rm -f "$STATE_DIR/fail-restart"
+migrate
+check "exits zero"                          [ "$CODE" -eq 0 ]
+check "drop-in now names ghapp.py"          grep -q "ghapp.py deploy sources" "$(DROPIN)"
 teardown
+
+echo "• SETUP_REPO names deployd's checkout: the drop-in follows it"
+setup
+mkdir -p "$SB/elsewhere/app/web" "$SB/deployd-checkout/app/web"
+cp "$SRC_ROOT/app/web/ghapp.py" "$SB/elsewhere/app/web/"
+cp "$SRC_ROOT/app/web/ghapp.py" "$SB/deployd-checkout/app/web/"
+printf 'SETUP_REPO=%s\nSERVICE_HOME=%s\n' "$SB/elsewhere" "$HOME/services/deployd" \
+  > "$SB/deployd-checkout/services/deployd/.env"
+migrate
+check "exits zero"                          [ "$CODE" -eq 0 ]
+check "drop-in runs SETUP_REPO's ghapp.py"  grep -qx "Environment=\"SOURCES_DEPLOY=$PY3 $SB/elsewhere/app/web/ghapp.py deploy sources\"" "$(DROPIN)"
+teardown
+
+echo "• the unit's deployd wins over a stale default binary"
+setup
+mkdir -p "$SB/moved/bin" "$SB/moved-checkout/services/deployd" "$SB/moved-home/state"
+printf 'SETUP_REPO=%s\nSERVICE_HOME=%s\n' "$SB/moved-checkout" "$SB/moved-home" \
+  > "$SB/moved-checkout/services/deployd/.env"
+printf '#!/usr/bin/env python3\nENV_BAKED = "%s"\n' "$SB/moved-checkout/services/deployd/.env" > "$SB/moved/bin/deployd"
+printf '[Service]\nExecStart=/usr/bin/python3 %s/moved/bin/deployd\n' "$SB" \
+  > "$HOME/.config/systemd/user/deployd.service"
+migrate
+check "exits non-zero"                      [ "$CODE" -ne 0 ]
+check "names the unit's state dir"          out_has "$SB/moved-home/state"
+check "nothing written"                     test ! -e "$(ENVF)"
+teardown
+
+echo "• build tools missing from ghapp's PATH: refused before anything changes"
+if [ -z "$(PATH=/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin command -v uv)" ]; then
+  setup
+  rm -f "$HOME/.local/bin/uv"
+  migrate
+  check "exits non-zero"                    [ "$CODE" -ne 0 ]
+  check "names uv"                          out_has "uv not found on the PATH ghapp.py gives the build"
+  check "nothing written"                   test ! -e "$(ENVF)"
+  check "old container never stopped"       calls_lack "docker stop"
+  teardown
+else
+  echo "    (skipped: uv is installed system-wide here)"
+fi
 
 echo "• no trigger unit here: migrates without a drop-in"
 setup
@@ -550,7 +611,7 @@ migrate
 check "exits non-zero"                      [ "$CODE" -ne 0 ]
 check "says it was interrupted"             out_has "interrupted before the new container answered"
 check "old container running again"         test -f "$STATE_DIR/old-running"
-check "drop-in removed"                     test ! -e "$(DROPIN)"
+check "no drop-in written"                  test ! -e "$(DROPIN)"
 check "definition removed"                  test ! -e "$(DEF)"
 check "poller row dropped"                  sh -c "! grep -q '\"sources\"' '$(POLLERS)'"
 check "poller not left paused"              test ! -e "$D/sources.disabled"
