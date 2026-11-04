@@ -36,6 +36,8 @@
   var tick = null;
   var current = null;         // the detail payload on screen
   var form = null;            // the method form's state on the detail page
+  var checkPending = false;   // a Refresh fetch is in flight on the detail
+  var commitsOpen = false;    // the behind list's expanded state survives repaints
   var saveNote = '';          // shown under the rebuilt form after a save
   var lastFetch = 0;          // the tick and app.js's list poll both refresh
 
@@ -398,21 +400,29 @@
     var chk = make('button', 'h-btn');
     chk.type = 'button';
     chk.setAttribute('data-fid', 'check-remote');
-    text(chk, 'Refresh');
+    text(chk, checkPending ? 'Checking…' : 'Refresh');
+    chk.disabled = checkPending;
     chk.title = 'Fetch ' + (d.ref || 'main') + ' and count commits the deploy is behind';
     chk.addEventListener('click', function () {
+      checkPending = true;
       chk.disabled = true;
+      text(chk, 'Checking…');
       err.hidden = true;
+      /* The server bounds the whole check (lock wait included) to 90s;
+         waiting a little past it keeps a slow-but-fine fetch from
+         looking like a failure. */
       call('POST', 'api/deployments/' + encodeURIComponent(d.key) + '/check', null,
         function (data, status) {
+          checkPending = false;
           chk.disabled = false;
+          text(chk, 'Refresh');
           if (status === 200 && data && data.key) {
             refreshDetail();
             return;
           }
           text(err, (data && data.error) || 'Check failed (HTTP ' + status + ').');
           err.hidden = false;
-        }, 60000);
+        }, 100000);
     });
     bar.appendChild(chk);
     sec.appendChild(bar);
@@ -423,6 +433,10 @@
        they came from this click or a cached earlier one. */
     if (d.check && d.check.commits && d.check.commits.length) {
       var det = make('details', 'gdp-behind');
+      /* The ticker repaints the whole section; without this, an expanded
+         list collapses under the reader every poll. */
+      det.open = commitsOpen;
+      det.addEventListener('toggle', function () { commitsOpen = det.open; });
       var sum = make('summary');
       var n = d.check.behind != null ? d.check.behind : d.check.commits.length;
       text(sum, n + (n === 1 ? ' commit' : ' commits') +
@@ -934,6 +948,8 @@
     token++;
     current = null;
     form = null;
+    checkPending = false;
+    commitsOpen = false;
     if (tick) { clearInterval(tick); tick = null; }
     if (view && next.page !== 'detail') view.textContent = '';
     if (next.page === 'list') {

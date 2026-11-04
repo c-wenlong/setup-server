@@ -3712,7 +3712,7 @@ def deployment_detail(key):
         "record": record,
         "fail": fail,
         "paused": disabled,
-        "check": _cached_check(state_dir, key),
+        "check": _cached_check(state_dir, key, item),
         "logs": {
             "deployd": _deployd_log_tail(_deployd_base(state_dir, key) + ".log"),
             "jobs": _job_logs(key),
@@ -3731,6 +3731,7 @@ def deployment_detail(key):
 # clone is touched.
 
 CHECK_LOG_COMMITS = 50
+CHECK_BUDGET = 90          # seconds, lock wait included; the page waits 100
 _check_lock = threading.Lock()
 
 
@@ -3738,15 +3739,24 @@ def _deployd_check_file(state_dir, key):
     return _deployd_base(state_dir, key) + ".check.json"
 
 
-def _cached_check(state_dir, key):
-    """The last check result for `key`, or None before the first one."""
+def _cached_check(state_dir, key, item):
+    """The last check for `key`, unless the deployment has moved on: a
+    redeploy or a repo/ref edit retires the old report rather than
+    showing counts that describe a deploy the user no longer has."""
     try:
         with open(_deployd_check_file(state_dir, key),
                   encoding="utf-8") as fh:
             rec = json.load(fh)
     except (OSError, ValueError):
         return None
-    return rec if isinstance(rec, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    if (rec.get("repo") != item.get("repo")
+            or rec.get("ref") != (item.get("ref") or "main")
+            or rec.get("deployed_sha")
+               != (item.get("deployed") or {}).get("sha")):
+        return None
+    return rec
 
 
 def _git_out(argv, timeout=90):
@@ -3766,10 +3776,11 @@ def check_deployment_behind(key):
 
     `behind` counts commits on the remote ref the deployed sha lacks;
     `ahead` counts shas the deployed side has that the ref does not (a
-    deploy of something never pushed, or a reverted remote). A deployed
-    sha missing from the remote's history (force-push, rewrite) reports
-    `stale_deployed` because the count itself is meaningless there. The
-    result is persisted so GET renders the last check without a refetch."""
+    deploy of something never pushed, or a reverted remote). The
+    ancestor test comes first: a deployed sha a force-push rewrote out
+    of the ref's history reports `stale_deployed` instead of a
+    meaningless count. The result is persisted so GET renders the last
+    check without a refetch."""
     item, extra = _find_deployment(key)
     state_dir = extra["state_dir"]
     deployed = (item.get("deployed") or {}).get("sha")
@@ -3779,17 +3790,26 @@ def check_deployment_behind(key):
            else item["repo"])
     cache = os.path.join(state_dir, "remote.git")
     refname = "refs/checks/" + re.sub(r"[^A-Za-z0-9._-]", "_", key)
-    with _check_lock:
+    # One budget for the whole check, lock wait included, so the page's
+    # 100s wait always outlives the work it asked for.
+    deadline = time.monotonic() + CHECK_BUDGET
+
+    def out(argv):
+        return _git_out(argv, timeout=max(1, deadline - time.monotonic()))
+
+    if not _check_lock.acquire(timeout=CHECK_BUDGET):
+        raise DeployError(503, "another check is still running")
+    try:
         if not os.path.isdir(cache):
-            rc, out = _git_out(["git", "init", "--bare", cache])
+            rc, res = out(["git", "init", "--bare", cache])
             if rc != 0:
                 raise DeployError(502, "could not init the remote cache")
-        rc, out = _git_out(["git", "-C", cache, "fetch", "--quiet", url,
-                            "%s:%s" % (ref, refname)])
+        rc, res = out(["git", "-C", cache, "fetch", "--quiet", url,
+                       "%s:%s" % (ref, refname)])
         if rc != 0:
             raise DeployError(502, "could not fetch %s@%s"
                               % (item["repo"], ref))
-        rc, remote = _git_out(["git", "-C", cache, "rev-parse", refname])
+        rc, remote = out(["git", "-C", cache, "rev-parse", refname])
         remote = remote.strip()
         if rc != 0 or not ghapp.SHA_RE.match(remote):
             raise DeployError(502, "could not resolve %s on %s"
@@ -3797,50 +3817,63 @@ def check_deployment_behind(key):
         behind = ahead = None
         stale = False
         if deployed:
-            rc, out = _git_out(["git", "-C", cache, "rev-list", "--count",
-                                "%s..%s" % (deployed, refname)])
-            if rc != 0:
-                # The deployed sha is not in the fetched history. GitHub
-                # serves reachable shas on demand, so try fetching it
-                # directly before declaring the deploy untraceable.
-                rc2, _ = _git_out(["git", "-C", cache, "fetch", "--quiet",
-                                   url, deployed])
+            # Is the deployed sha still on the ref's history? rev-list
+            # cannot say: it counts either way once the object is
+            # cached. merge-base --is-ancestor is the test; rc 1 means
+            # not an ancestor, rc >1 means the object is missing.
+            rc, res = out(["git", "-C", cache, "merge-base",
+                           "--is-ancestor", deployed, refname])
+            if rc > 1:
+                # Not in the cache; GitHub serves reachable shas on
+                # demand, so try fetching it before giving up on it.
+                rc2, res = out(["git", "-C", cache, "fetch", "--quiet",
+                                url, deployed])
                 if rc2 == 0:
-                    rc, out = _git_out(
-                        ["git", "-C", cache, "rev-list", "--count",
-                         "%s..%s" % (deployed, refname)])
+                    rc, res = out(["git", "-C", cache, "merge-base",
+                                   "--is-ancestor", deployed, refname])
             if rc == 0:
-                try:
-                    behind = int(out.strip())
-                except ValueError:
-                    behind = None
-            else:
-                stale = True
-            if behind is not None:
-                rc, out = _git_out(
-                    ["git", "-C", cache, "rev-list", "--count",
-                     "%s..%s" % (refname, deployed)])
+                rc, res = out(["git", "-C", cache, "rev-list", "--count",
+                               "%s..%s" % (deployed, refname)])
                 if rc == 0:
                     try:
-                        ahead = int(out.strip())
+                        behind = int(res.strip())
                     except ValueError:
                         pass
+                ahead = 0
+            else:
+                # Off the ref's history: either ahead of it (the deploy
+                # contains the tip plus unpushed work) or rewritten away.
+                rc, res = out(["git", "-C", cache, "merge-base",
+                               "--is-ancestor", refname, deployed])
+                if rc == 0:
+                    rc, res = out(["git", "-C", cache, "rev-list",
+                                   "--count", "%s..%s" % (refname, deployed)])
+                    if rc == 0:
+                        try:
+                            ahead = int(res.strip())
+                        except ValueError:
+                            pass
+                    behind = 0
+                else:
+                    stale = True
         commits = []
         log_range = refname if deployed is None else (
             "%s..%s" % (deployed, refname) if behind else None)
         if log_range:
-            rc, out = _git_out(
+            rc, res = out(
                 ["git", "-C", cache, "log", "--no-decorate",
                  "-n", str(CHECK_LOG_COMMITS),
                  "--format=%H%x1f%s%x1f%ae%x1f%aI", log_range])
             if rc == 0:
-                for line in out.splitlines():
+                for line in res.splitlines():
                     parts = line.split("\x1f")
                     if len(parts) == 4:
                         commits.append({"sha": parts[0],
                                         "subject": parts[1],
                                         "author": parts[2],
                                         "at": parts[3]})
+    finally:
+        _check_lock.release()
     rec = {"key": key, "repo": item["repo"], "ref": ref,
            "deployed_sha": deployed, "remote_sha": remote,
            "behind": behind, "ahead": ahead,

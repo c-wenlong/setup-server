@@ -9831,8 +9831,11 @@ class DeploymentCheckTest(DeploymentsBase):
         def fake(argv, timeout=90):
             joined = " ".join(argv)
             self.git_calls.append(joined)
-            for needle, rc, out in self.script:
+            for i, rule in enumerate(self.script):
+                needle, rc, out = rule[0], rule[1], rule[2]
                 if needle in joined:
+                    if len(rule) > 3:          # one-shot rule, consumed
+                        self.script.pop(i)
                     return rc, out
             return 0, ""
         server._git_out = fake
@@ -9841,14 +9844,18 @@ class DeploymentCheckTest(DeploymentsBase):
         server._git_out = self._git_saved
         super().tearDown()
 
-    def behind_script(self, count="3", log="", fetch_rc=0, revlist_rc=0):
+    def behind_script(self, count="3", log="", fetch_rc=0, ancestor_rc=0,
+                      ahead_count="0", ahead_rc=0):
         """Script a clean check: fetch ok, remote tip SHA_B, the deployed
-        sha `count` commits behind it (unreachable when revlist_rc != 0)."""
+        sha `count` commits behind it (ancestor_rc != 0: not on the ref;
+        ahead_rc == 0 then means the deploy contains the tip)."""
         self.script = [
             ("fetch --quiet", fetch_rc, ""),
             ("rev-parse", 0 if fetch_rc == 0 else 1, SHA_B + "\n"),
-            ("rev-list --count %s..refs" % SHA_A, revlist_rc, count + "\n"),
-            ("rev-list --count refs", 0, "0\n"),
+            ("merge-base --is-ancestor %s " % SHA_A, ancestor_rc, ""),
+            ("merge-base --is-ancestor refs", ahead_rc, ""),
+            ("rev-list --count %s..refs" % SHA_A, 0, count + "\n"),
+            ("rev-list --count refs", 0, ahead_count + "\n"),
             ("log --no-decorate", 0, log),
         ]
 
@@ -9894,22 +9901,49 @@ class DeploymentCheckTest(DeploymentsBase):
         rec = server.check_deployment_behind("hello-app")
         self.assertIsNone(rec["behind"])
         self.assertEqual([c["subject"] for c in rec["commits"]], ["Initial"])
-        self.assertFalse(any("rev-list" in c for c in self.git_calls))
+        self.assertFalse(any("rev-list" in c or "merge-base" in c
+                             for c in self.git_calls))
         # The log range is the bare ref, not deployed..ref.
         self.assertTrue(any(c.endswith("refs/checks/hello-app")
                             for c in self.git_calls if "log" in c))
 
-    def test_a_deployed_sha_lost_to_a_rewrite_is_stale(self):
+    def test_a_deployed_sha_rewritten_out_of_the_ref_is_stale(self):
+        """The cached object still exists after a force-push, so rev-list
+        would happily count; only the ancestor test sees the sha left the
+        ref's history."""
         self.deployed("hello-app", SHA_A)
-        self.behind_script(revlist_rc=1)
+        self.behind_script(ancestor_rc=1, ahead_rc=1)
         rec = server.check_deployment_behind("hello-app")
         self.assertIsNone(rec["behind"])
         self.assertTrue(rec["stale_deployed"])
-        # The deployed sha got one direct-fetch retry before the verdict.
+        self.assertFalse(any("rev-list" in c for c in self.git_calls))
+
+    def test_a_missing_deployed_sha_is_fetched_then_compared(self):
+        self.deployed("hello-app", SHA_A)
+        self.script = [
+            # Not in the cache yet (rc > 1): the recovery fetch succeeds
+            # and the retest shows it is on the ref after all.
+            ("merge-base --is-ancestor %s " % SHA_A, 128, "", True),
+            ("fetch --quiet", 0, ""),
+            ("rev-parse", 0, SHA_B + "\n"),
+            ("merge-base --is-ancestor %s " % SHA_A, 0, ""),
+            ("rev-list --count %s..refs" % SHA_A, 0, "2\n"),
+            ("log --no-decorate", 0, ""),
+        ]
+        rec = server.check_deployment_behind("hello-app")
+        self.assertEqual(rec["behind"], 2)
+        self.assertFalse(rec["stale_deployed"])
         self.assertTrue(any(c.endswith("fetch --quiet "
                                        "https://github.com/c-wenlong/hello.git "
                                        + SHA_A)
                             for c in self.git_calls))
+
+    def test_a_deploy_ahead_of_the_ref_says_so(self):
+        self.deployed("hello-app", SHA_A)
+        self.behind_script(ancestor_rc=1, ahead_rc=0, ahead_count="2")
+        rec = server.check_deployment_behind("hello-app")
+        self.assertEqual((rec["behind"], rec["ahead"]), (0, 2))
+        self.assertFalse(rec["stale_deployed"])
 
     def test_fetch_failure_is_502_and_writes_nothing(self):
         self.behind_script(fetch_rc=1)
@@ -9927,9 +9961,29 @@ class DeploymentCheckTest(DeploymentsBase):
     def test_a_malformed_cached_check_is_ignored(self):
         self.mark("forgejo", "check.json", "not json{")
         self.assertIsNone(server.deployment_detail("forgejo")["check"])
-        self.mark("forgejo", "check.json", json.dumps({"behind": 1}))
+        self.mark("forgejo", "sha", SHA_B + "\n")
+        self.mark("forgejo", "check.json", json.dumps(
+            {"repo": "https://github.com/c-wenlong/setup-server.git",
+             "ref": "main", "deployed_sha": SHA_B, "behind": 1}))
         self.assertEqual(
             server.deployment_detail("forgejo")["check"]["behind"], 1)
+
+    def test_a_check_for_a_superseded_deploy_is_retired(self):
+        """A redeploy or an edit moves the deployment; the saved report
+        described the old one, so it no longer renders."""
+        self.mark("forgejo", "sha", SHA_B + "\n")
+        rec = {"repo": "https://github.com/c-wenlong/setup-server.git",
+               "ref": "main", "deployed_sha": SHA_A, "behind": 3}
+        self.mark("forgejo", "check.json", json.dumps(rec))
+        # Written against SHA_A, but the box now runs SHA_B.
+        self.assertIsNone(server.deployment_detail("forgejo")["check"])
+        rec["deployed_sha"] = SHA_B
+        self.mark("forgejo", "check.json", json.dumps(rec))
+        self.assertEqual(
+            server.deployment_detail("forgejo")["check"]["behind"], 3)
+        rec["ref"] = "next"
+        self.mark("forgejo", "check.json", json.dumps(rec))
+        self.assertIsNone(server.deployment_detail("forgejo")["check"])
 
 
 class DeploymentUpdateTest(DeploymentsBase):
