@@ -7713,6 +7713,59 @@ class DeploydTest(SandboxTest):
         server.deployd_timer = lambda: "active"
         self.assertEqual(server.deployd_payload()["timer"], "active")
 
+    def _poll_env(self, seconds):
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            fh.write("POLL_SECONDS=%d\n" % seconds)
+
+    def _tick_json(self, rec):
+        state = self.state_dir()
+        with open(os.path.join(state, "tick.json"), "w") as fh:
+            json.dump(rec, fh)
+
+    def test_poll_block_defaults(self):
+        poll = server.deployd_payload()["poll"]
+        self.assertEqual(poll, {"seconds": None, "tick": None,
+                                "running": False, "next_due": None})
+
+    def test_poll_seconds_and_tick(self):
+        self._poll_env(120)
+        now = time.time()
+        self._tick_json({"started": now - 90, "finished": now - 84, "rc": 0})
+        poll = server.deployd_payload()["poll"]
+        self.assertEqual(poll["seconds"], 120)
+        self.assertEqual(poll["tick"]["rc"], 0)
+        self.assertFalse(poll["running"])
+        self.assertAlmostEqual(poll["next_due"], now + 30, places=3)
+
+    def test_poll_running_has_no_next_due(self):
+        self._poll_env(60)
+        self._tick_json({"started": time.time() - 5})   # no finished yet
+        poll = server.deployd_payload()["poll"]
+        self.assertTrue(poll["running"])
+        self.assertIsNone(poll["next_due"])
+        # A start older than the stale-lock window is a dead tick, not a
+        # running one — it reports and still projects the next due time.
+        self._tick_json({"started": time.time() - 4000})
+        poll = server.deployd_payload()["poll"]
+        self.assertFalse(poll["running"])
+        self.assertIsNotNone(poll["next_due"])
+
+    def test_poll_junk_env_and_tick(self):
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            fh.write("POLL_SECONDS=soon\n")
+        with open(os.path.join(self.state_dir(), "tick.json"), "w") as fh:
+            fh.write("not json")
+        poll = server.deployd_payload()["poll"]
+        self.assertIsNone(poll["seconds"])
+        self.assertIsNone(poll["tick"])
+        self.assertFalse(poll["running"])
+
 
 class DeploydHttpTest(HttpTest):
 

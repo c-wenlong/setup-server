@@ -350,7 +350,17 @@ textarea.dep-input {
 
 .dps { display: flex; flex-direction: column; gap: 16px; padding-bottom: 48px; }
 .dps .h-head { flex-wrap: wrap; }
-.dep-engine { display: flex; align-items: center; gap: 8px; flex: none; }
+.dep-engine { display: flex; align-items: center; gap: 8px; flex: none; flex-wrap: wrap; }
+.dep-pollrow {
+  display: flex; align-items: baseline; gap: 8px;
+  flex-basis: 100%;
+}
+.dep-poll {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.dep-iform { flex-basis: 100%; margin: 4px 0 0; }
 .dep-pill {
   display: inline-flex; align-items: center; gap: 6px;
   height: 26px; padding: 0 10px; border-radius: var(--radius-chip);

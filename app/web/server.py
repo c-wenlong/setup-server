@@ -3175,6 +3175,36 @@ def deployd_timer():
         return None
 
 
+def _deployd_tick(state_dir):
+    """state/tick.json -> {"started": ts, "finished"?: ts, "rc"?: n} or None.
+
+    deployd writes `started` at the top of a poll and adds `finished`/`rc`
+    when it ends, so a dict without `finished` is a poll in flight (or one
+    that died mid-run)."""
+    try:
+        with open(os.path.join(state_dir, "tick.json"),
+                  encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) \
+            or not isinstance(rec.get("started"), (int, float)):
+        return None
+    out = {"started": rec["started"]}
+    if isinstance(rec.get("finished"), (int, float)):
+        out["finished"] = rec["finished"]
+        out["rc"] = rec.get("rc")
+    return out
+
+
+def _deployd_poll_seconds(env):
+    """POLL_SECONDS from deployd's .env as an int, or None."""
+    try:
+        return int(env.get("POLL_SECONDS") or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
 def _deployd_log_tail(path):
     """Last DEPLOYD_LOG_TAIL lines of a <key>.log, ANSI stripped."""
     try:
@@ -3275,9 +3305,19 @@ def deployd_payload():
                 orphans.append(key)
     except OSError:
         pass
+    seconds = _deployd_poll_seconds(env)
+    tick = _deployd_tick(state_dir)
+    # A tick older than the stale-lock window cannot still be running: the
+    # poller would have had its lock reclaimed long ago.
+    running = bool(tick and "finished" not in tick
+                   and time.time() - tick["started"] < 3600)
+    next_due = (tick["started"] + seconds
+                if tick and seconds and not running else None)
     return {
         "installed": os.path.isdir(state_dir),
         "timer": deployd_timer(),
+        "poll": {"seconds": seconds, "tick": tick,
+                 "running": running, "next_due": next_due},
         "self_update_pending": os.path.exists(
             os.path.join(state_dir, "self-update.pending")),
         "launcher_restart_pending": os.path.exists(

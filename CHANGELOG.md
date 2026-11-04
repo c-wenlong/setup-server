@@ -10,6 +10,14 @@ first, dated by merge.
 
 ### Added
 
+- **Deploys: poll cadence in the header, editable.** deployd now writes
+  `state/tick.json` each poll ({started, finished, rc}), and the Deploys
+  page shows it: `every 60s · last poll 40s ago, took 5s · next in ~20s`,
+  plus a "still running" state while a poll is in flight. An Edit beside
+  it rewrites `POLL_SECONDS` in `services/deployd/.env` and re-runs
+  setup.sh so the timer picks the new cadence up — the same change
+  `POLL_SECONDS=120 ./setup.sh` always was, now from the page.
+
 - **Launcher: live favicons for opted-in tiles.** A manifest can declare
   `favicon` — a path resolved against the tile's `url` (or a full URL,
   with the same `.env` token and `HOST` substitution) — and the tile

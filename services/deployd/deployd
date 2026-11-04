@@ -16,6 +16,10 @@
 #                                                setup.sh when it writes the
 #                                                timer, not here)
 #   state    $SERVICE_HOME/state/<key>.sha       last deployed remote sha
+#            $SERVICE_HOME/state/tick.json       last poll {started,
+#                                                finished, rc} — what the
+#                                                launcher shows as
+#                                                interval/last/next poll
 #            $SERVICE_HOME/state/<key>.fail      {"sha":..,"at":..} backoff
 #            $SERVICE_HOME/state/<key>.log       tail of the last cmd output
 #            $SERVICE_HOME/state/pollers.json    launcher-written overrides:
@@ -609,6 +613,23 @@ def acquire_lock(service_home):
         return None
 
 
+def write_tick(state_dir, started, finished=None, rc=None):
+    """state/tick.json — the last poll's start (and end, once it has one).
+
+    The launcher's Deploys page renders this as 'last poll Xs ago, took
+    Ys'; a missing file just means this install has not ticked yet."""
+    rec = {"started": started}
+    if finished is not None:
+        rec["finished"] = finished
+        rec["rc"] = rc
+    try:
+        with open(os.path.join(state_dir, "tick.json"), "w") as fh:
+            json.dump(rec, fh)
+    except OSError as e:
+        warn("cannot write %s: %s"
+             % (os.path.join(state_dir, "tick.json"), e))
+
+
 def tick(env):
     setup_repo = env.get("SETUP_REPO")
     if not setup_repo:
@@ -632,6 +653,9 @@ def tick(env):
     if not lock:
         log("another poll is running — skipping this tick")
         return 0
+    t0 = time.time()
+    write_tick(state_dir, t0)
+    rc = 1
     try:
         refresh_checkout(setup_repo, state_dir)
         entries, _ = scan_entries(setup_repo, state_dir)
@@ -674,8 +698,10 @@ def tick(env):
         if failures:
             warn("%s entr%s failed this tick"
                  % (failures, "y" if failures == 1 else "ies"))
-        return 1 if failures else 0
+        rc = 1 if failures else 0
+        return rc
     finally:
+        write_tick(state_dir, t0, finished=time.time(), rc=rc)
         try:
             os.rmdir(lock)
         except OSError:
