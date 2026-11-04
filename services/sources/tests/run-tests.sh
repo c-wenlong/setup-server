@@ -449,6 +449,19 @@ test_jobs_db_linked() {
   check "jobs.db is a symlink"    [ -L "$HOME/services/sources/repo/data/jobs/jobs.db" ]
   check "link targets fetch clone" sh -c '[ "$(readlink "$1")" = "$2" ]' _ "$HOME/services/sources/repo/data/jobs/jobs.db" "$SOURCE_REPO/data/jobs/jobs.db"
   check "Jobs page shipped"       [ -f "$HOME/services/sources/www/current/d/jobs.bin" ]
+  # A relative SOURCE_REPO saved in .env: the -f check resolves it from
+  # the caller's cwd, but a relative symlink target would resolve under
+  # data/jobs/ in the deploy clone. The link must be absolute.
+  mkdir -p "$SANDBOX/fetchclone/data/jobs"
+  echo "fake db" > "$SANDBOX/fetchclone/data/jobs/jobs.db"
+  set_env SOURCE_REPO "fetchclone"
+  ( cd "$SANDBOX" && PATH="$STUBS:$PATH" bash "$HOME/services/sources/bin/deploy.sh" --force ) >/dev/null 2>&1
+  CODE=$?
+  check "relative src deploys"    [ "$CODE" -eq 0 ]
+  link="$(readlink "$HOME/services/sources/repo/data/jobs/jobs.db")"
+  check "link is absolute"        [ "${link#/}" != "$link" ]
+  check "link lands on real file" [ "$link" = "$(cd "$SANDBOX/fetchclone" && pwd)/data/jobs/jobs.db" ]
+  check "Jobs page rebuilt"       [ -f "$HOME/services/sources/www/current/d/jobs.bin" ]
   teardown
 }
 

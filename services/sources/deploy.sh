@@ -114,8 +114,11 @@ git -C "$REPO_DIR" reset --hard --quiet "origin/$BRANCH"
 # without Jobs rather than a stale page.
 JOBS_DB="$REPO_DIR/data/jobs/jobs.db"
 if [ -n "${SOURCE_REPO:-}" ] && [ -f "$SOURCE_REPO/data/jobs/jobs.db" ]; then
+  # setup.sh saves SOURCE_REPO as given; a relative target would resolve
+  # under data/jobs/ inside the deploy clone, so pin the absolute path.
+  jobs_dir="$(cd "$SOURCE_REPO/data/jobs" && pwd)"
   mkdir -p "$REPO_DIR/data/jobs"
-  ln -sfn "$SOURCE_REPO/data/jobs/jobs.db" "$JOBS_DB"
+  ln -sfn "$jobs_dir/jobs.db" "$JOBS_DB"
   echo "jobs.db linked from the fetch clone"
 else
   rm -f "$JOBS_DB"
