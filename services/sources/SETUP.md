@@ -50,8 +50,7 @@ clone would have doubled a multi-GB corpus for nothing. That sharing is
 what let a killed fetch block every deploy (issue #138): the aborted run
 left the tree dirty, `git pull --ff-only` refused, and the deploy could
 never reach the sha deployd asked for. So the deploy now keeps a
-machine-managed clone at `~/services/sources/repo`, the kaichenpedia
-shape: fetched and hard-reset to `origin/BRANCH` each run, never written
+machine-managed clone at `~/services/sources/repo`: fetched and hard-reset to `origin/BRANCH` each run, never written
 by anything else, and safe to delete — it re-clones on the next deploy.
 `~/dev/sources` only seeds `REPO_URL` at setup time (its origin remote
 carries the auth that already works on this box); after that it can be
@@ -59,7 +58,7 @@ dirty, locked or gone and deploys still run.
 
 ## Why polling, not a webhook
 
-Same reasoning as kaichenpedia: the box is tailnet-only, so GitHub can't
+The box is tailnet-only, so GitHub can't
 reach it. deployd (`services/deployd`) resolves `main` with
 `git ls-remote` every minute and re-runs this service's `setup.sh` when it
 moves — `deploy.sh --force` skips the wait entirely. Anything pushed to

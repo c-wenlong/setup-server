@@ -72,8 +72,8 @@ opened the shell.
 - **Per-container stats**: user must be in the `docker` group (agent reads
   /var/run/docker.sock). If the group was granted *after* the agent's session
   started, `systemctl --user restart beszel-agent` picks it up.
-- **Containers that vanish from the list**: kaichenpedia and n8n are
-  deliberately stopped on this box, so they have no stats. Not a fault.
+- **Containers that vanish from the list**: n8n is deliberately stopped
+  on this box, so it has no stats. Not a fault.
 
 ## 5. Stats stale / gaps in graphs
 

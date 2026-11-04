@@ -54,8 +54,8 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8100}"
-# The HTTPS port follows the local port unless set explicitly (the n8n and
-# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# The HTTPS port follows the local port unless set explicitly (the n8n
+# convention), so overriding only LOCAL_PORT cannot split the
 # two. Whether it was explicit is remembered for the .env read-back below.
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"

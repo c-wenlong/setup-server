@@ -22,8 +22,8 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-3001}"
-# HTTPS follows the local port unless set explicitly (the n8n and
-# kaichenpedia convention), so overriding only LOCAL_PORT cannot split the
+# HTTPS follows the local port unless set explicitly (the n8n
+# convention), so overriding only LOCAL_PORT cannot split the
 # two. Until 2026-09-13 this defaulted to a literal 10000, chosen back when
 # Tailscale Serve only allowed 443/8443/10000; that limit is long gone.
 # This script never sources .env, so there is no read-back to guard.

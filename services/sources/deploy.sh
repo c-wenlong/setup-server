@@ -15,7 +15,7 @@
 # install time — edit the copy in the setup-server repo, then re-run setup.sh).
 #
 # The build runs in a machine-managed deploy clone at $SERVICE_HOME/repo,
-# like kaichenpedia — never in SOURCE_REPO (~/dev/sources, the fetch
+# never in SOURCE_REPO (~/dev/sources, the fetch
 # clone). A killed fetch leaves that tree dirty, and a dirty tree used to
 # refuse `git pull --ff-only` and block every deploy (issue #138); here it
 # cannot, because no fetch job ever writes this clone. That is also why

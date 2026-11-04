@@ -106,6 +106,19 @@ first, dated by merge.
 
 ### Changed
 
+- **kaichenpedia is a launcher app now, not a `services/` folder.** It runs
+  on the `dockerfile` method (`app/web/ghapp.py`, container
+  `app-kaichenpedia` on `127.0.0.1:8091`, same URL and Serve port), so its
+  method and fields are edited from the Deploys gallery like any app built
+  from GitHub, and deployd redeploys it through `ghapp.py deploy`.
+  `services/kaichenpedia/` is gone; a rebuilt box re-adds it from the
+  gallery. `scripts/migrate-kaichenpedia-to-app.sh` is the one-time move
+  for a box still on the old compose container: it copies the old
+  container's environment into the app's `.env` (never printed), warms the
+  build, swaps containers under deployd's poll lock and puts the old
+  container back if the new one does not answer. The Uptime Kuma monitor
+  stays; ntfy-control no longer lists it (its allowlist is `services.json`).
+
 - **kaichenpedia: one container built from the repo's `site/Dockerfile`.**
   The wiki moved from Quartz to Next.js, so the old pipeline (Quartz build
   into `www/`, an nginx container, and the `kaichenpedia-api` node sidecar)

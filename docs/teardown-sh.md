@@ -9,8 +9,8 @@ Paperclip / OpenHands split-and-redeploy on `homeserver`.
 the reference and the launcher's Remove action running it without
 `--purge`. Since then: firefly-iii, home-assistant, homepage, jellyfin,
 metabase, n8n, open-webui, umami; then vaultwarden, immich, paperless-ngx,
-seafile, appflowy, plane; then kaichenpedia, design-systems, sources,
-gnosia-learn; then beszel, quiver-hub, syncthing, trigger-dev, coolify;
+seafile, appflowy, plane; then kaichenpedia (now a launcher app, no folder), design-systems,
+sources, gnosia-learn; then beszel, quiver-hub, syncthing, trigger-dev, coolify;
 then code-server, forgejo, openhands, adguard, remote-desktop, paperclip.
 monitoring, ntfy-control and the launcher itself get none: they are the
 box's own plumbing, so Remove would take down the thing that shows the
@@ -57,7 +57,6 @@ can copy the first working one.
 | `services/<service>/TROUBLESHOOT.md` | Layered triage and a **Nuke and pave** recipe. |
 | Launcher + ntfy-control | Allowlisted start / stop / restart from `services.json`. |
 | `services/jellyfin/enable-nvenc.sh` | One-off sudo GPU plumbing. `setup.sh` stays out of it on purpose. |
-| `services/kaichenpedia/deploy.sh` | Wiki poller, not a deploy. |
 | `services/monitoring/seed_kuma.py` | Central monitor seeder. |
 
 Nuke recipes exist for every service that has a TROUBLESHOOT.md except
@@ -87,7 +86,7 @@ run on autopilot.
   `tailscale set --operator`** — those are box-wide, not per-service.
 
 Keep as one-offs, do not generalize: `services/jellyfin/enable-nvenc.sh`,
-`services/kaichenpedia/deploy.sh`, `services/monitoring/seed_kuma.py`.
+`services/monitoring/seed_kuma.py`.
 
 ## Contract if `teardown.sh` ships
 

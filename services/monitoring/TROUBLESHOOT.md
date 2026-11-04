@@ -83,8 +83,8 @@ Walk the chain backwards:
   (Verified on the box: `301`, `200 "pong"`, `302` respectively.)
 - ollama is the one monitor still on loopback (never published via Serve).
 - **A monitor is red and the service is genuinely stopped, on purpose** —
-  `kaichenpedia` and `n8n` are intentionally down (their Kuma monitors were
-  paused when they were stopped). "Not running" is not automatically a fault;
+  `n8n` is intentionally down (its Kuma monitor was paused when it was
+  stopped). "Not running" is not automatically a fault;
   check DIRECTORY.md's loose-ends list before chasing one.
 
 ## Seeding failed

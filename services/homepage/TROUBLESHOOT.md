@@ -232,7 +232,7 @@ Error: connect ECONNREFUSED 127.0.0.1:3001
 **Expected on this box**, once per probe per page load, in both `docker logs
 homepage` and `config/logs/homepage.log`. Several services here are
 deliberately start-on-demand and are stopped right now — open-webui, n8n,
-manimkc, kaichenpedia, jellyfin and forgejo among them — and Homepage is
+manimkc, jellyfin and forgejo among them — and Homepage is
 correctly reporting each as `status: 500`. It is a stack trace for "the thing
 I was told to check is not running", not a fault in Homepage.
 
