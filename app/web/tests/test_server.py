@@ -8749,6 +8749,10 @@ class UpdateJobTest(UpdateTestBase):
         with self.assertRaises(server.DeployError) as ctx:
             server.start_update("oh")
         self.assertEqual(ctx.exception.status, 409)
+        # Keep the parked stub in place until the job's thread has reached
+        # it: on a slow runner that thread can start after tearDown has put
+        # the unstubbed-Popen guard back, which then fails the run.
+        self.wait_for_spawn(1)
 
 
 class UpdateHttpTest(UpdateTestBase):
