@@ -3445,27 +3445,55 @@ def _claim_deployd_poll():
 
 
 def _switch_steps(key, old, new):
-    """([steps before the deploy], [steps if it fails]) that stop the old
-    method's runtime when the new method would not replace it, and start
-    it again when the new deploy fails, so the box keeps the version that
-    was working. Empty when nothing is deployed or nothing needs stopping.
-    A script's own processes are its own business: nothing to stop."""
+    """(before, after, restore) step lists around the `ghapp.py deploy` of
+    a method switch the runner cannot swap by itself: `before` stops the
+    old method's runtime, `after` (success only) clears what it left, and
+    `restore` (on failure only) clears whatever the new method started and
+    brings the old runtime back, so the box keeps the version that was
+    working. All empty when nothing is deployed, the method is unchanged,
+    or the runner's own swap covers it. A script's own processes are its
+    own business: leaving `script` stops nothing."""
     was, now = ghapp.method_of(old), ghapp.method_of(new)
     if was == now or _deployed_record(key) is None:
-        return [], []
+        return [], [], []
+    name = ghapp.container_name(key)
     if was == "compose":
         src = os.path.join(ghapp.app_dir(key), "src")
         if not os.path.isfile(os.path.join(src, old["compose_file"])):
-            return [], []
+            return [], [], []
         return ([{"argv": sg_docker(ghapp.compose_argv(old, src, ["down"]))}],
-                [{"argv": sg_docker(ghapp.compose_argv(old, src, ["up", "--detach"])),
+                [],
+                [{"argv": sg_docker(["docker", "rm", "--force", name]),
+                  "on_failure": True, "optional": True},
+                 {"argv": sg_docker(ghapp.compose_argv(old, src, ["up", "--detach"])),
                   "on_failure": True}])
-    if was in SINGLE_CONTAINER_METHODS and now == "script":
-        name = ghapp.container_name(key)
+    if was not in SINGLE_CONTAINER_METHODS:
+        return [], [], []
+    if now == "script":
         return ([{"argv": sg_docker(["docker", "stop", name]), "optional": True}],
+                [],
                 [{"argv": sg_docker(["docker", "start", name]),
                   "on_failure": True, "optional": True}])
-    return [], []
+    if now == "compose":
+        # The runner's compose deploy force-removes app-<key> before `up`,
+        # and its own rollback only knows earlier compose stacks. Park the
+        # container under another name (stopped, so the port is free) and
+        # put it back if the stack does not come up. `name` is KEY_RE-shaped,
+        # so the one shell line below carries no request text.
+        prev = name + "-prev"
+        clear = ('ids=$(docker ps -aq --filter label=com.docker.compose.project=%s); '
+                 '[ -z "$ids" ] || docker rm --force $ids' % name)
+        return ([{"argv": sg_docker(["docker", "rm", "--force", prev]), "optional": True},
+                 {"argv": sg_docker(["docker", "rename", name, prev]), "optional": True},
+                 {"argv": sg_docker(["docker", "stop", prev]), "optional": True}],
+                [{"argv": sg_docker(["docker", "rm", "--force", prev]), "optional": True}],
+                [{"argv": sg_docker(["sh", "-c", clear]),
+                  "on_failure": True, "optional": True},
+                 {"argv": sg_docker(["docker", "rename", prev, name]),
+                  "on_failure": True, "optional": True},
+                 {"argv": sg_docker(["docker", "start", name]),
+                  "on_failure": True, "optional": True}])
+    return [], [], []
 
 
 def _start_method_deploy(key, old, new):
@@ -3473,13 +3501,13 @@ def _start_method_deploy(key, old, new):
     method changes in a way the runner cannot swap by itself, the same
     `ghapp.py deploy` wrapped in the steps that stop and restore the old
     runtime (see _switch_steps)."""
-    before, restore = _switch_steps(key, old, new)
+    before, after, restore = _switch_steps(key, old, new)
     if not before:
         return start_deploy(key)
     if not os.path.isfile(GHAPP_SCRIPT):
         raise DeployError(404, "ghapp.py not found")
     steps = before + [{"argv": build_command(GHAPP_SCRIPT, ["deploy", key]),
-                       "cwd": HERE}] + restore
+                       "cwd": HERE}] + after + restore
     job = register_job(key, "deploy")
     log("deploy %s started: %s (%s -> %s, %d steps)"
         % (job["id"], key, ghapp.method_of(old), ghapp.method_of(new), len(steps)))

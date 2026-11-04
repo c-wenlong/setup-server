@@ -9607,12 +9607,14 @@ class DeploymentUpdateRaceTest(DeploymentsBase):
             time.sleep(0.02)
         steps = seen[0]
         self.assertEqual([s["argv"][-1] if "on_failure" not in s else "restore"
-                          for s in steps], ["down", "api-box", "restore"])
+                          for s in steps], ["down", "api-box", "restore", "restore"])
         self.assertIn("--project-name", steps[0]["argv"])
         self.assertIn("app-api-box", steps[0]["argv"])
         self.assertEqual(steps[1]["argv"][-2:], ["deploy", "api-box"])
-        self.assertEqual(steps[2]["argv"][-2:], ["up", "--detach"])
-        self.assertTrue(steps[2]["on_failure"])
+        # On failure: clear whatever the new method started, then the stack.
+        self.assertEqual(steps[2]["argv"], ["docker", "rm", "--force", "app-api-box"])
+        self.assertEqual(steps[3]["argv"][-2:], ["up", "--detach"])
+        self.assertTrue(steps[3]["on_failure"])
         self.assertEqual(server._jobs[out["job_id"]]["key"], "api-box")
         self.assertEqual(self.deploys, [])          # not the plain path
 
@@ -9629,6 +9631,63 @@ class DeploymentUpdateRaceTest(DeploymentsBase):
         argvs = [s["argv"] for s in seen[0]]
         self.assertEqual(argvs[0], ["docker", "stop", "app-hello-app"])
         self.assertEqual(argvs[2], ["docker", "start", "app-hello-app"])
+
+    def test_container_to_compose_parks_the_container_until_the_stack_is_up(self):
+        self.deployed("hello-app")
+        server._have_docker_group = lambda: True
+        seen = self.capture_steps()
+        server.update_deployment("hello-app", {"method": "compose",
+                                               "compose_file": "compose.yml"})
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.02)
+        steps = seen[0]
+        argvs = [s["argv"] for s in steps]
+        self.assertEqual(argvs[:3], [
+            ["docker", "rm", "--force", "app-hello-app-prev"],
+            ["docker", "rename", "app-hello-app", "app-hello-app-prev"],
+            ["docker", "stop", "app-hello-app-prev"]])
+        self.assertEqual(argvs[3][-2:], ["deploy", "hello-app"])
+        # Success only: drop the parked container.
+        self.assertEqual(argvs[4], ["docker", "rm", "--force", "app-hello-app-prev"])
+        self.assertFalse(steps[4].get("on_failure"))
+        # Failure only: clear the new stack by its project label, then put
+        # the old container back under its name and start it.
+        self.assertEqual(argvs[5][:2], ["sh", "-c"])
+        self.assertIn("label=com.docker.compose.project=app-hello-app", argvs[5][2])
+        self.assertEqual(argvs[6], ["docker", "rename", "app-hello-app-prev", "app-hello-app"])
+        self.assertEqual(argvs[7], ["docker", "start", "app-hello-app"])
+        self.assertTrue(all(s.get("on_failure") for s in steps[5:]))
+
+    def test_a_failed_switch_runs_the_restore_steps_and_skips_the_cleanup(self):
+        self.deployed("hello-app")
+        server._have_docker_group = lambda: True
+        before, after, restore = server._switch_steps(
+            "hello-app", self.read_def("hello-app"),
+            dict(self.read_def("hello-app"), method="compose",
+                 compose_file="compose.yml"))
+        steps = before + [{"argv": ["ghapp.py", "deploy", "hello-app"]}] + after + restore
+        ran = []
+
+        class Done:
+            def __init__(self, code):
+                self.code = code
+
+            def wait(self, timeout=None):
+                return self.code
+
+        def fake(argv, **kwargs):
+            ran.append(list(argv))
+            return Done(1 if argv[0] == "ghapp.py" else 0)
+        subprocess.Popen = fake
+        job = server.register_job("hello-app", "deploy")
+        server._run_steps(job, steps)
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual([a[:2] for a in ran], [
+            ["docker", "rm"], ["docker", "rename"], ["docker", "stop"],
+            ["ghapp.py", "deploy"],
+            ["sh", "-c"], ["docker", "rename"], ["docker", "start"]])
 
     def test_same_method_or_never_deployed_is_the_plain_deploy(self):
         self.write_def("api-box", port=8304, method="compose",
