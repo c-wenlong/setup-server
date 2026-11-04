@@ -142,6 +142,10 @@ first, dated by merge.
 
 ### Fixed
 
+- **CI: Python 3.9 syntax job pinned to ubuntu-24.04.** `ubuntu-latest`
+  moved to 26.04, which has no Python 3.9 in `actions/python-versions`, so
+  the job failed at setup on every PR.
+
 - **gnosia-learn deploys died at `catalog migrate` after upstream's
   Postgres→SQLite migration.** The gnosia catalog is now one SQLite
   file and refuses a `postgres://` `DATABASE_URL` — the value this
