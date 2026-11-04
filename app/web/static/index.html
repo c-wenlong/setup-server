@@ -44,6 +44,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <link rel="stylesheet" href="view.css">
 <link rel="stylesheet" href="catalogue.css">
 <link rel="stylesheet" href="deployd.css">
+<link rel="stylesheet" href="gallery.css">
 <link rel="stylesheet" href="newapp.css">
 <link rel="stylesheet" href="ghsource.css">
 <link rel="stylesheet" href="home.css">
@@ -237,9 +238,14 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
         deploy sheet. -->
    <section class="cat" id="view-catalogue" aria-labelledby="cat-title" hidden></section>
 
-   <!-- Deploys page (#/deploys). Painted entirely by deployd.js: the engine's
-        state, the watched repos and the poller add/edit/delete controls. -->
+   <!-- Deploys page (#/deploys). deployd.js paints the engine's state and
+        the poller controls (under "Advanced: pollers"); gallery.js paints a
+        card per deployment between them. -->
    <section class="dps" id="view-deploys" aria-labelledby="dps-title" hidden></section>
+
+   <!-- One deployment's page (#/deploys/<key>). Painted entirely by
+        gallery.js: overview, the deployment method editor, and its logs. -->
+   <section class="gdp" id="view-deploy" aria-labelledby="gdp-title" hidden></section>
   </main>
   </div><!-- /.wrap -->
   </div><!-- /.main-col -->
@@ -297,6 +303,7 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
 <script src="home.js"></script>
 <script src="notes.js"></script>
 <script src="deployd.js"></script>
+<script src="gallery.js"></script>
 <script src="newapp.js"></script>
 <script src="ghsource.js"></script>
 <script src="catalogue.js"></script>

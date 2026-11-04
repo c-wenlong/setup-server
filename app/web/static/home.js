@@ -1108,7 +1108,7 @@
       return { page: 'service', key: key };
     }
     if (h === '#/catalogue') return { page: 'catalogue' };
-    if (h === '#/deploys') return { page: 'deploys' };
+    if (h === '#/deploys' || h.indexOf('#/deploys/') === 0) return { page: 'deploys' };
     return { page: 'home' };
   }
 

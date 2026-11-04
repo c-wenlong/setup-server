@@ -1,0 +1,207 @@
+/* gallery.css — the Deploys gallery (#gallery-mount) and one deployment's
+ * page (#view-deploy), both from gallery.js.
+ *
+ * Tokens come from app.css; the page header reuses home.css's .h-head, the
+ * sections app.css's .d-sec/.field chrome, and the log boxes deployd.css's
+ * .dep-log/.dep-log-tail. This file owns the cards, the status dots and the
+ * detail page's layout.
+ */
+
+/* ---------- gallery ---------- */
+
+.gal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 12px;
+}
+
+.gal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px 16px 15px;
+  color: inherit;
+  text-decoration: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  transition: border-color var(--dur) ease, background-color var(--dur) ease;
+}
+@media (hover: hover) and (pointer: fine) {
+  .gal-card:hover { border-color: var(--border-strong); }
+}
+.gal-card:focus-visible {
+  outline: 2px solid var(--accent-fg);
+  outline-offset: 2px;
+}
+.gal-card.gal-failed { border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); }
+
+.gal-top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.gal-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -.01em;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gal-badge {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+}
+
+.gal-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.gal-dot.is-live      { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.gal-dot.is-failed    { background: var(--bad); }
+.gal-dot.is-down      { background: var(--warn); }
+.gal-dot.is-paused    { background: var(--warn); opacity: .7; }
+.gal-dot.is-never     { background: transparent; border: 1.5px solid var(--faint); }
+.gal-dot.is-deploying { background: var(--accent-fg); animation: gal-pulse 1.2s ease-in-out infinite; }
+@keyframes gal-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  .gal-dot.is-deploying { animation: none; }
+}
+
+.gal-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.gal-sha,
+.gal-mono {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.gal-when { color: var(--faint); font-variant-numeric: tabular-nums; }
+.gal-state { margin-left: auto; color: var(--muted); white-space: nowrap; }
+.gal-failed .gal-state { color: var(--bad); }
+
+.gal-meta,
+.gal-url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gal-meta { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.gal-url { font-size: 12px; color: var(--faint); }
+
+/* The pollers table, folded under the gallery. */
+.dep-adv { margin-top: 6px; }
+.dep-adv-sum {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-height: 36px;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+.dep-adv-sum::-webkit-details-marker { display: none; }
+.dep-adv-sum::before {
+  content: '';
+  align-self: center;
+  width: 0; height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transition: transform var(--dur) ease;
+}
+.dep-adv[open] > .dep-adv-sum::before { transform: rotate(90deg); }
+.dep-adv-hint { font-weight: 400; font-size: 12px; color: var(--faint); }
+@media (hover: hover) and (pointer: fine) {
+  .dep-adv-sum:hover { color: var(--text); }
+}
+.dep-adv-sum:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
+
+/* ---------- one deployment ---------- */
+
+.gdp { display: flex; flex-direction: column; padding-bottom: 48px; max-width: 760px; }
+.gdp .d-back { align-self: flex-start; text-decoration: none; }
+.gdp-head { margin-bottom: 2px; }
+.gdp-sec:first-of-type { margin-top: 18px; }
+
+.gdp-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 9px 18px;
+  margin: 10px 0 0;
+  font-size: 13.5px;
+}
+.gdp-facts dt { color: var(--faint); font-size: 12.5px; padding-top: 1px; }
+.gdp-facts dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.gdp-state, .gdp-commit { display: inline-flex; align-items: center; gap: 8px; }
+.gdp-bad { color: var(--bad); }
+
+.gal-link { color: var(--accent-fg); text-decoration: none; }
+.gal-link:hover { text-decoration: underline; }
+.gal-link.gal-sha { color: var(--accent-fg); }
+
+.gdp-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.gdp-overview .gdp-bar { justify-content: flex-start; }
+.gdp-bar .h-btn[disabled], .gdp-bar .btn[disabled] { opacity: .5; cursor: default; }
+
+.gdp-err {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+
+.gdp-fields { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; }
+.gdp-fields .gdp-field:has(textarea) { grid-column: 1 / -1; }
+@media (max-width: 640px) {
+  .gdp-fields { grid-template-columns: 1fr; }
+}
+.gdp-hint { margin-top: 4px; }
+.gdp-mono { font-family: var(--mono); font-size: 14px; }
+.gdp-mono.field-area { min-height: 72px; }
+.field-input[aria-invalid="true"] {
+  border-color: var(--bad);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent);
+}
+.field-input:disabled { opacity: .6; }
+
+.gdp-log { margin-top: 8px; }
+.gdp-pre { max-height: 380px; color: var(--log-fg, var(--muted)); background: var(--log-bg, var(--bg)); }
