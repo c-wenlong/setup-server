@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # curl stub: health checks succeed. When asked for an http_code write-out,
-# prints 200 (the script greps for a 2xx/3xx).
+# prints 200 (the script greps for a 2xx/3xx). State in $STATE_DIR:
+#   health_fail — exists => requests to the local wiki port fail, like a
+#                 container that never came up
 echo "curl $*" >> "$CALLS_LOG"
 
-# /api/* answers like the kaichenpedia-api sidecar: a JSON error body proves
-# the nginx proxy reached the sidecar (vs the static server's HTML 404).
+if [ -f "$STATE_DIR/health_fail" ]; then
+  for a in "$@"; do
+    case "$a" in http://127.0.0.1:*) exit 7 ;; esac
+  done
+fi
+
+# /api/* answers like the app's route handlers: a JSON error body.
 for a in "$@"; do
   case "$a" in
     *"/api/"*) printf '{"error":"invalid path"}'; exit 0 ;;

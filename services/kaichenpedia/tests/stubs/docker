@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # docker stub. State in $STATE_DIR:
 #   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   build_fail      — exists => `docker build` fails
+#   images          — one tag per line: images `docker build` has produced
 #   compose_up / compose_down — touched by `compose ... up` / `compose ... down`
+#   compose_images  — the KAICHENPEDIA_IMAGE of each `compose up`, in order
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -11,6 +14,24 @@ case "$1" in
       exit 1
     fi
     ;;
+  build)
+    [ -f "$STATE_DIR/build_fail" ] && { echo "ERROR: failed to solve" >&2; exit 1; }
+    tag=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "--tag" ] && tag="$a"
+      prev="$a"
+    done
+    [ -n "$tag" ] && echo "$tag" >> "$STATE_DIR/images"
+    ;;
+  image)
+    case "$2" in
+      inspect) grep -qx -- "$3" "$STATE_DIR/images" 2>/dev/null || exit 1 ;;
+      ls)      cat "$STATE_DIR/images" 2>/dev/null ;;
+      rm)      grep -vx -- "$3" "$STATE_DIR/images" > "$STATE_DIR/images.tmp" 2>/dev/null
+               mv "$STATE_DIR/images.tmp" "$STATE_DIR/images" ;;
+    esac
+    ;;
   compose)
     case "$2" in
       version) echo "Docker Compose version v2.99-stub" ;;
@@ -18,7 +39,8 @@ case "$1" in
         # compose --project-directory <dir> up -d  (and ps/logs/etc.)
         for a in "$@"; do
           case "$a" in
-            up)   touch "$STATE_DIR/compose_up" ;;
+            up)   touch "$STATE_DIR/compose_up"
+                  echo "${KAICHENPEDIA_IMAGE:-}" >> "$STATE_DIR/compose_images" ;;
             down) touch "$STATE_DIR/compose_down"
                   # lock_probe: a lock dir path; its state at `down` goes
                   # to lock_at_down ("held" or "free").

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# setup.sh — one-shot deploy of kaichenpedia (personal wiki, Quartz static
-# site) behind Tailscale. Linux + macOS.
+# setup.sh — one-shot deploy of kaichenpedia (personal wiki, a Next.js app
+# built from the repo's site/Dockerfile) behind Tailscale. Linux + macOS.
 #
 # End state:
 #   - deploy clone of github.com/c-wenlong/kaichenpedia in ~/services/kaichenpedia/repo
 #     (machine-managed, hard-reset on every deploy — not a working copy)
-#   - static site built with Quartz, served by an nginx container binding
+#   - one container from site/Dockerfile (pages and /api/*), binding
 #     127.0.0.1:LOCAL_PORT only
 #   - auto-deploy: deployd (services/deployd) polls the repo's remote and
 #     re-runs this script when BRANCH moves; new commits go live on its
@@ -20,11 +20,13 @@
 #
 # Requirements beyond the repo baseline (curl, Docker, Tailscale): git with
 # non-interactive access to the private repo (gh auth setup-git, or a deploy
-# key), Node.js >= 22, python3.
+# key). Node and the build toolchain live inside the image.
 #
 # Idempotent: re-running refreshes the deploy script and repairs any
-# missing piece (and removes the old per-service deploy timer if a host
-# still has one); an existing .env and nginx.conf are never overwritten.
+# missing piece (and removes the old per-service deploy timer, the old
+# kaichenpedia-api sidecar and the old static build if a host still has
+# them); an existing .env is never overwritten. A pre-Docker install's
+# nginx.conf is left in place, unused.
 
 set -euo pipefail
 
@@ -43,26 +45,13 @@ ENV_FILE="$SERVICE_DIR/.env"
 # never invokes this while the flag is set, so clearing is always manual.
 rm -f "$HOME/services/deployd/state/kaichenpedia.disabled"
 
-# A re-run (e.g. under deployd, whose PATH is minimal) finds node where
-# the first install recorded it in .env — put that dir on PATH first.
-if [ -f "$ENV_FILE" ]; then
-  d="$(sed -n "s/^NODE_BIN=\(.*\)\$/\1/p" "$ENV_FILE" | sed "s/^'//; s/'\$//")"
-  [ -n "$d" ] && [ -d "$d" ] && PATH="$PATH:$d"
-fi
-
 # ---------------------------------------------------------------- preflight
 detect_os
 info "Preflight checks ($OS)"
 refuse_root
 command -v curl >/dev/null || die "curl is required."
 command -v git >/dev/null || die "git is required."
-command -v python3 >/dev/null || die "python3 is required (runs the repo's wiki -> site sync)."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
-
-command -v node >/dev/null || die "Node.js >= 22 is required (Quartz build). Install node, then re-run."
-node_major="$(node --version | sed -n 's/^v\([0-9]*\).*/\1/p')"
-[ -n "$node_major" ] && [ "$node_major" -ge 22 ] \
-  || die "Node.js >= 22 is required for Quartz (found: $(node --version))."
 
 require_docker_compose
 resolve_tailscale
@@ -74,7 +63,7 @@ if ! GIT_TERMINAL_PROMPT=0 git ls-remote --heads "$REPO_URL" >/dev/null 2>&1; th
 fi
 
 require_numeric HTTPS_PORT
-ok "$OS + curl + git (repo reachable) + node $node_major + python3 + Docker + Compose v2 + Tailscale (running)"
+ok "$OS + curl + git (repo reachable) + Docker + Compose v2 + Tailscale (running)"
 
 host="$(tailnet_host)"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
@@ -91,10 +80,9 @@ BRANCH=$BRANCH
 LOCAL_PORT=$LOCAL_PORT
 HTTPS_PORT=$HTTPS_PORT
 SERVICE_HOME=$HOME/services/kaichenpedia
-NODE_BIN=$(dirname "$(command -v node)")
 PUBLIC_URL=https://$host:$HTTPS_PORT/
 
-# --- kaichenpedia API secrets (consumed by the kaichenpedia-api container) ---
+# --- kaichenpedia API secrets (passed to the kaichenpedia container) ---
 # GH_TOKEN: GitHub classic PAT (repo scope). /api/save and the copilot
 # commit through the GitHub API, so those endpoints fail without it.
 #GH_TOKEN=
@@ -121,122 +109,51 @@ HTTPS_PORT="$(sed -n 's/^HTTPS_PORT=\(.*\)$/\1/p' "$ENV_FILE")"
 POLL_SECONDS="$(sed -n 's/^POLL_SECONDS=\(.*\)$/\1/p' "$ENV_FILE")"
 SERVICE_HOME="$(sed -n 's/^SERVICE_HOME=\(.*\)$/\1/p' "$ENV_FILE")"
 
-mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$SERVICE_HOME/www"
-
-# ---------------------------------------------------------------- nginx.conf
-NGINX_CONF="$SERVICE_HOME/nginx.conf"
-NGINX_CHANGED=0
-if [ -f "$NGINX_CONF" ]; then
-  ok "nginx.conf already exists, leaving untouched: $NGINX_CONF"
-else
-  info "Writing nginx.conf (Quartz links are extensionless — try_files adds .html; /api/ goes to the sidecar)"
-  cat > "$NGINX_CONF" <<'EOF'
-server {
-    listen 80;
-    server_name _;
-    root /usr/share/nginx/html/current;
-    index index.html;
-    error_page 404 /404.html;
-
-    # /api/* goes to the kaichenpedia-api sidecar (the repo's worker/server.ts).
-    # Variable proxy_pass + the Docker resolver re-resolve the sidecar's
-    # address per request — a literal upstream caches the container IP at
-    # config load and goes stale when Compose recreates it.
-    location /api/ {
-        resolver 127.0.0.11 valid=5s;
-        set $api http://kaichenpedia-api:8080;
-        proxy_pass $api;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    location / {
-        try_files $uri $uri/ $uri.html =404;
-    }
-}
-EOF
-  ok "Wrote $NGINX_CONF"
-fi
-
-# Installs predating the api sidecar have the stock conf above without the
-# /api/ block. Patch in place (never rewrite — the file may carry user
-# edits; a backup is left beside it).
-if ! grep -q 'location /api/' "$NGINX_CONF"; then
-  info "Adding /api/ proxy block to existing $NGINX_CONF"
-  cp "$NGINX_CONF" "$NGINX_CONF.bak"
-  python3 - "$NGINX_CONF" <<'PYEOF'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-api = """
-    # /api/* goes to the kaichenpedia-api sidecar (the repo's worker/server.ts).
-    # Variable proxy_pass + the Docker resolver re-resolve the sidecar's
-    # address per request — a literal upstream caches the container IP at
-    # config load and goes stale when Compose recreates it.
-    location /api/ {
-        resolver 127.0.0.11 valid=5s;
-        set $api http://kaichenpedia-api:8080;
-        proxy_pass $api;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-"""
-i = s.rfind("}")
-if i < 0:
-    sys.exit("nginx.conf has no closing brace — add the /api/ block by hand")
-open(p, "w").write(s[:i] + api + s[i:])
-PYEOF
-  NGINX_CHANGED=1
-  ok "Patched $NGINX_CONF"
-fi
+mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state"
 
 # ------------------------------------------------------------ deploy script
 # Code, not config: refreshed on every run (edit the repo copy, re-run setup).
 info "Installing deploy script -> $SERVICE_HOME/bin/deploy.sh"
-sed "s|__ENV_FILE__|$ENV_FILE|" "$SERVICE_DIR/deploy.sh" > "$SERVICE_HOME/bin/deploy.sh"
+sed -e "s|__ENV_FILE__|$ENV_FILE|" -e "s|__SERVICE_DIR__|$SERVICE_DIR|" \
+  "$SERVICE_DIR/deploy.sh" > "$SERVICE_HOME/bin/deploy.sh"
 chmod +x "$SERVICE_HOME/bin/deploy.sh"
 ok "Deploy script installed"
 
-# ------------------------------------------------------------ initial build
-info "Initial deploy (clone + npm ci + quartz build — a few minutes on first run)"
-sha_before="$(cat "$SERVICE_HOME/state/built-sha" 2>/dev/null || echo none)"
-"$SERVICE_HOME/bin/deploy.sh" || die "Initial deploy failed — see output above."
-sha_after="$(cat "$SERVICE_HOME/state/built-sha" 2>/dev/null || echo none)"
-ok "Site built: $SERVICE_HOME/www/current"
+# ------------------------------------------------------- build + container
+info "Building and starting the container (clone + docker build — a few minutes on first run)"
+"$SERVICE_HOME/bin/deploy.sh" || die "Deploy failed — see output above."
 
-# ---------------------------------------------------------------- container
-info "Starting containers (docker compose up -d)"
-docker compose --project-directory "$SERVICE_DIR" up -d
+# deploy.sh exits early when the image is already built for this sha. Bring
+# the container up anyway: that repairs a stopped or removed container, and
+# --remove-orphans drops the pre-Docker kaichenpedia-api sidecar.
+image="$(cat "$SERVICE_HOME/state/image" 2>/dev/null || true)"
+[ -n "$image" ] || die "deploy.sh recorded no image in $SERVICE_HOME/state/image"
+KAICHENPEDIA_IMAGE="$image" docker compose --project-directory "$SERVICE_DIR" up -d --remove-orphans
 
-# A bind-mounted conf change doesn't recreate the container — bounce it.
-if [ "$NGINX_CHANGED" = "1" ]; then
-  docker compose --project-directory "$SERVICE_DIR" restart kaichenpedia
-fi
-# `up -d` also leaves an unchanged api container running — restart it when
-# the deploy actually swapped builds, so new route code is loaded.
-if [ "$sha_before" != "$sha_after" ]; then
-  docker compose --project-directory "$SERVICE_DIR" restart kaichenpedia-api \
-    2>/dev/null || warn "could not restart kaichenpedia-api — check: docker logs kaichenpedia-api"
-fi
+info "Waiting for the wiki on 127.0.0.1:$LOCAL_PORT"
+wait_http "http://127.0.0.1:$LOCAL_PORT/" 30 2 || die "kaichenpedia did not come up. Logs: docker logs kaichenpedia"
+ok "Wiki is answering locally ($image)"
 
-info "Waiting for nginx on 127.0.0.1:$LOCAL_PORT"
-wait_http "http://127.0.0.1:$LOCAL_PORT/" 15 1 || die "nginx did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs"
-ok "Wiki is answering locally"
-
-# The api sidecar answers JSON through the nginx proxy — an HTML page here
-# means the proxy or sidecar is broken (static still works either way).
-info "Checking /api/ -> kaichenpedia-api sidecar"
+# /api/* is served by the same app: a JSON error body for an empty save
+# proves the route handlers are live.
+info "Checking /api/"
 api_ok=0
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for _ in 1 2 3 4 5; do
   body="$(curl -s -m 5 -X POST "http://127.0.0.1:$LOCAL_PORT/api/save" \
     -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)"
   case "$body" in *'"error"'*) api_ok=1; break ;; esac
   sleep 2
 done
 if [ "$api_ok" = "1" ]; then
-  ok "API sidecar answering through nginx"
+  ok "API answering"
 else
-  warn "/api/ not answering — save/copilot need it. Check: docker logs kaichenpedia-api"
+  warn "/api/ not answering — save/copilot need it. Check: docker logs kaichenpedia"
+fi
+
+# The pre-Docker static build is dead weight once the container serves.
+if [ -d "$SERVICE_HOME/www" ]; then
+  rm -rf "$SERVICE_HOME/www"
+  ok "Removed the old static build ($SERVICE_HOME/www)"
 fi
 
 grep -q '^GH_TOKEN=.' "$ENV_FILE" \
@@ -286,7 +203,8 @@ echo
 echo "Auto-deploy: deployd re-runs this when $REPO_URL ($BRANCH) moves"
 echo "(services/deployd polls every minute; ~/services/deployd/bin/deployd --status)."
 echo "Manage:"
-echo "  $SERVICE_HOME/bin/deploy.sh --force        # rebuild now"
+echo "  $SERVICE_HOME/bin/deploy.sh --force        # rebuild the image now"
 echo "  journalctl --user -u deployd -n 50         # poll + deploy logs (Linux)"
 echo "  tail -f ~/Library/Logs/deployd.log         # macOS"
 echo "  docker compose --project-directory $SERVICE_DIR ps|logs|restart"
+echo "  docker logs -f kaichenpedia"

@@ -14,14 +14,11 @@
     "parts": [
       {
         "container": "kaichenpedia"
-      },
-      {
-        "container": "kaichenpedia-api"
       }
     ],
     "kuma": "kaichenpedia"
   },
-  "description": "Personal wiki: a Quartz static build of the private kaichenpedia GitHub repo, served by nginx with a node sidecar running /api/* (in-browser editing + copilot). deployd polls GitHub every minute and redeploys on new commits, so pushing from any device is the publish step; ~/services/kaichenpedia/bin/deploy.sh --force does it now. An amber tile means the wiki is frozen at its last build.",
+  "description": "Personal wiki: a Next.js app built from the private kaichenpedia repo's site/Dockerfile and run as one container that serves the pages and /api/* (in-browser editing + copilot). deployd polls GitHub every minute and rebuilds the image on new commits; a failed build keeps the running container and an unhealthy one is rolled back, so pushing from any device is the publish step. ~/services/kaichenpedia/bin/deploy.sh --force rebuilds now. An amber tile means the container is down; a stale page with a green tile means a build is failing (see the deployd log).",
   "deploy": {
     "repo": "https://github.com/c-wenlong/kaichenpedia.git",
     "ref": "main",

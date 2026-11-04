@@ -1,10 +1,10 @@
 # kaichenpedia — personal wiki, auto-deployed from GitHub
 
-A [Quartz 4](https://quartz.jzhao.xyz) static build of the private
-[c-wenlong/kaichenpedia](https://github.com/c-wenlong/kaichenpedia) repo,
-served by nginx and published tailnet-only. Push to `main` from any device
-and the box picks it up on its daily poll — or immediately with
-`~/services/kaichenpedia/bin/deploy.sh --force`.
+A Next.js app built from the private
+[c-wenlong/kaichenpedia](https://github.com/c-wenlong/kaichenpedia) repo's
+`site/Dockerfile`, run as one container and published tailnet-only. Push
+to `main` from any device and deployd rebuilds it within a few minutes,
+or immediately with `~/services/kaichenpedia/bin/deploy.sh --force`.
 
 ## Architecture
 
@@ -17,19 +17,15 @@ git push (any device)
         │
 deployd ──► setup.sh ──► bin/deploy.sh
   (one poller for all             │ 1. git reset --hard origin/main
-   deploy blocks)                 │ 2. python3 scripts/sync_wiki_to_site.py   (wiki/ -> site/content/)
-                                │ 3. npm ci            (only when package-lock changes)
-                                │ 4. npx quartz build  (-> site/public/)
-                                │ 5. atomic swap        www/next -> www/current
-                                ▼
-                     ~/services/kaichenpedia/www/current
-                                │  bind mount (ro)
-                                ▼
-                    nginx (Docker) 127.0.0.1:8091 ── /api/* ──► kaichenpedia-api (Docker :8080)
-                                │                              worker/server.ts — same handler
-                                │                              code as the Cloudflare Worker;
-                                │                              in-browser edits + copilot
-                                ▼
+   deploy blocks)                 │ 2. docker build -f site/Dockerfile -t kaichenpedia:<sha> <repo>
+                                  │ 3. docker compose up -d   (KAICHENPEDIA_IMAGE=kaichenpedia:<sha>)
+                                  │ 4. health check; roll back to the previous image if it fails
+                                  ▼
+                    kaichenpedia (Docker) 127.0.0.1:8091 -> :8080
+                      Next.js standalone server: the pages and /api/*
+                      (in-browser edits + copilot) in one process
+                                  │
+                                  ▼
               Tailscale Serve  HTTPS :8091 (tailnet only)
         https://homeserver.tail-name.ts.net:8091
 ```
@@ -48,11 +44,8 @@ webhooks can't reach it. The push-to-deploy options were:
 
 ## Security model
 
-- nginx binds `127.0.0.1:8091` only; HTTPS + device auth come from Tailscale.
-- The `kaichenpedia-api` sidecar (node, `tsx worker/server.ts`) handles
-  `/api/*` only — no published port, reachable solely through the nginx
-  proxy on the compose network. It runs the same route handlers as the
-  Cloudflare deployment.
+- The container publishes `127.0.0.1:8091` only; HTTPS + device auth come
+  from Tailscale. It serves the pages and `/api/*` from the same process.
 - `COPILOT_SECRET` stays unset here: tailnet-only means `/api/*` runs in
   open mode (the UI never prompts). Set it if the site is ever published
   wider. `/api/*` POSTs still require `application/json` + a same-origin
@@ -71,28 +64,27 @@ webhooks can't reach it. The push-to-deploy options were:
 | Dependency | Why | Checked in preflight |
 |---|---|---|
 | git + non-interactive repo access | poller fetches the private repo unattended | `git ls-remote` with prompts disabled |
-| Node.js >= 22 (+ npm/npx) | Quartz build | version parse |
-| python3 | repo's `scripts/sync_wiki_to_site.py` | presence |
-| Docker + Compose v2 | nginx container | daemon reachable |
+| Docker + Compose v2 | builds the image and runs the container (Node lives inside the image) | daemon reachable |
 | Tailscale (running) | HTTPS publish | backend state |
 
 ## What setup.sh does
 
 1. Preflight (above), including proving the private repo is readable
    without a terminal prompt — fails early with the `gh auth` fix if not.
-2. Writes `.env` if absent (repo URL, branch, ports, poll interval, node
-   path, service home). Re-runs read `.env` as the source of truth.
-3. Writes `~/services/kaichenpedia/nginx.conf` if absent (`try_files`
-   maps Quartz's extensionless links to `.html` files; `/api/` proxies to
-   the `kaichenpedia-api` sidecar). Installs predating the sidecar get the
-   `/api/` block patched into their existing conf (backup beside it) —
-   never a rewrite.
-4. Installs `deploy.sh` -> `~/services/kaichenpedia/bin/` (refreshed every
+2. Writes `.env` if absent (repo URL, branch, ports, service home, the
+   commented-out API secrets). Re-runs read `.env` as the source of truth.
+3. Installs `deploy.sh` -> `~/services/kaichenpedia/bin/` (refreshed every
    run; edit the repo copy, then re-run setup.sh).
-5. Runs the initial deploy: clone, sync, `npm ci`, `quartz build`, swap.
-6. `docker compose up -d` (nginx + `kaichenpedia-api`, both
-   `restart: unless-stopped`) + local health check on the page and a JSON
-   probe through `POST /api/save`. Warns if `GH_TOKEN` is unset.
+4. Runs `deploy.sh`: clone, `docker build`, `docker compose up -d`,
+   health check. When the image for the current sha already exists it skips
+   the build.
+5. `docker compose up -d --remove-orphans` again with the recorded image,
+   which repairs a stopped or removed container and removes the old
+   `kaichenpedia-api` sidecar on hosts that had it. Then a local health
+   check on the page and a JSON probe through `POST /api/save`. Warns if
+   `GH_TOKEN` is unset.
+6. Removes `~/services/kaichenpedia/www`, the old Quartz build, on hosts
+   that had it. A pre-Docker `nginx.conf` is left alone, unused.
 7. Removes the old per-service `kaichenpedia-deploy` timer / LaunchAgent
    if a host still has one — deployd (`services/deployd`) owns scheduling
    now. Removal only happens once deployd itself is installed
@@ -116,23 +108,26 @@ manifest to match or pushes to the override never trigger a deploy.
 ## Ops
 
 ```sh
-~/services/kaichenpedia/bin/deploy.sh --force        # rebuild right now
+~/services/kaichenpedia/bin/deploy.sh --force        # rebuild the image right now
+docker logs -f kaichenpedia                          # the running app
 ~/services/deployd/bin/deployd --status              # what deployd last saw/deployed
 journalctl --user -u deployd -n 50                   # poll + deploy history (macOS: ~/Library/Logs/deployd.log)
 docker compose --project-directory ~/dev/setup-server/services/kaichenpedia ps|logs|restart
 tailscale serve status
-./teardown.sh               # Remove: unpublish + stop container; keeps clone, site, .env
-./teardown.sh --purge       # also delete the clone, site, units and .env (GitHub stays canonical)
+./teardown.sh               # Remove: unpublish + stop container; keeps clone, state, .env
+./teardown.sh --purge       # also delete the clone, state, units and .env (GitHub stays canonical)
 ```
 
-A failed build leaves the previous `www/current` serving untouched — broken
-pushes never take the site down. The last good build is also kept in
-`www/prev`.
+A failed build leaves the running container untouched, and a new container
+that does not answer its health check within about a minute is swapped back
+to the previous image, so broken pushes never take the site down. The
+running image and the one before it are kept; older `kaichenpedia:<sha>`
+images are removed after each successful deploy.
 
 ## Client side
 
 Nothing to install. Open
 `https://homeserver.tail-name.ts.net:8091` from any tailnet device.
 Editing happens wherever the kaichenpedia repo is cloned — push to `main`
-— it goes live on the next daily poll, or run
+— it goes live once deployd rebuilds it (a few minutes), or run
 `~/services/kaichenpedia/bin/deploy.sh` on the box to deploy now.

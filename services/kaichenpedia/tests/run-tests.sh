@@ -87,16 +87,6 @@ test_preflight_tailscale_down() {
   teardown
 }
 
-test_preflight_old_node() {
-  echo "• preflight fails when node is older than 22"
-  setup
-  echo "v18.17.0" > "$STATE_DIR/node_version"
-  run_deploy
-  check "exits non-zero"    [ "$CODE" -ne 0 ]
-  check "names the problem" out_has "Node.js >= 22"
-  teardown
-}
-
 test_preflight_git_auth() {
   echo "• preflight fails when the private repo is not readable non-interactively"
   setup
@@ -120,14 +110,16 @@ test_fresh_deploy() {
   check "deploy script installed"     [ -x "$HOME/services/kaichenpedia/bin/deploy.sh" ]
   check "env path baked into script"  grep -q "$SVC/.env" "$HOME/services/kaichenpedia/bin/deploy.sh"
   check "cloned the repo"             calls_have "git clone --branch main"
-  check "synced wiki -> site"         calls_have "sync_wiki_to_site.py"
-  check "installed deps (npm ci)"     calls_have "npm ci"
-  check "built with quartz"           calls_have "npx quartz build"
-  check "site swapped into current"   [ -f "$HOME/services/kaichenpedia/www/current/index.html" ]
+  check "service dir baked in"        grep -q "SERVICE_DIR=\"$SVC\"" "$HOME/services/kaichenpedia/bin/deploy.sh"
+  check "built site/Dockerfile"       calls_have "docker build --file $HOME/services/kaichenpedia/repo/site/Dockerfile --tag kaichenpedia:aaa1111"
+  check "no quartz build"             no_call "quartz"
+  check "recorded the image"          grep -qx kaichenpedia:aaa1111 "$HOME/services/kaichenpedia/state/image"
   check "recorded built sha"          grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
-  check "compose up invoked"          [ -f "$STATE_DIR/compose_up" ]
+  check "compose up with the image"   grep -qx kaichenpedia:aaa1111 "$STATE_DIR/compose_images"
+  check "orphans removed"             calls_have "up -d --remove-orphans"
+  check "no static build dir"         [ ! -d "$HOME/services/kaichenpedia/www" ]
   check "api probe hit the stub"      calls_have "/api/save"
-  check "api probe passed"            out_has "API sidecar answering through nginx"
+  check "api probe passed"            out_has "API answering"
   check "warns about missing GH_TOKEN" out_has "GH_TOKEN not set"
   if [ "$OS" = "Linux" ]; then
     check "no timer written"          [ ! -f "$HOME/.config/systemd/user/kaichenpedia-deploy.timer" ]
@@ -222,24 +214,6 @@ test_deploy_sha_mismatch() {
   teardown
 }
 
-test_path_restored_from_env() {
-  echo "• re-run under a minimal PATH finds node via the dir saved in .env"
-  setup
-  touch "$STATE_DIR/operator"
-  run_deploy
-  check "first run ok"            [ "$CODE" -eq 0 ]
-  nonode="$STATE_DIR/no-node-stubs"; mkdir -p "$nonode"
-  for s in "$STUBS"/*; do [ "${s##*/}" = node ] || ln -s "$s" "$nonode/${s##*/}"; done
-  nodebin="$STATE_DIR/saved-node-bin"; mkdir -p "$nodebin"
-  printf '#!/bin/sh\nexec "%s/node" "$@"\n' "$STUBS" > "$nodebin/node"; chmod +x "$nodebin/node"
-  grep -v '^NODE_BIN=' "$SVC/.env" > "$SVC/.env.tmp" && mv "$SVC/.env.tmp" "$SVC/.env"
-  printf "NODE_BIN='%s'\n" "$nodebin" >> "$SVC/.env"
-  OUT="$(printf '\n' | PATH="$nonode:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
-  check "exits zero without stub node" [ "$CODE" -eq 0 ]
-  check "found node via .env"          out_has "Preflight checks"
-  teardown
-}
-
 test_idempotent_rerun() {
   echo "• re-run: .env preserved, build skipped when nothing changed, no sudo"
   setup
@@ -251,15 +225,14 @@ test_idempotent_rerun() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "edited .env preserved"   env_has "CUSTOM-MARK"
   check "reports up to date"      out_has "up to date at aaa1111"
-  check "no rebuild"              no_call "npx quartz build"
-  check "no npm ci"               no_call "npm ci"
+  check "no rebuild"              no_call "docker build"
   check "never invoked sudo"      no_call "^sudo "
   check "compose up re-invoked"   [ -f "$STATE_DIR/compose_up" ]
   teardown
 }
 
 test_push_triggers_redeploy() {
-  echo "• poller: new commit on origin -> rebuild and swap (npm ci skipped)"
+  echo "• poller: new commit on origin -> new image, container swapped, old builds pruned"
   setup
   touch "$STATE_DIR/operator"
   run_deploy
@@ -268,11 +241,70 @@ test_push_triggers_redeploy() {
   run_poll
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the new sha"     out_has "deploying bbb2222"
-  check "rebuilt with quartz"     calls_have "npx quartz build"
-  check "npm ci skipped"          no_call "npm ci"
+  check "built the new image"     calls_have "docker build .*--tag kaichenpedia:bbb2222"
+  check "swapped to it"           [ "$(tail -1 "$STATE_DIR/compose_images")" = kaichenpedia:bbb2222 ]
   check "built sha updated"       grep -qx bbb2222 "$HOME/services/kaichenpedia/state/built-sha"
-  check "previous build kept"     [ -f "$HOME/services/kaichenpedia/www/prev/index.html" ]
-  check "current build swapped"   [ -f "$HOME/services/kaichenpedia/www/current/index.html" ]
+  check "image updated"           grep -qx kaichenpedia:bbb2222 "$HOME/services/kaichenpedia/state/image"
+  check "previous image kept"     grep -qx kaichenpedia:aaa1111 "$STATE_DIR/images"
+  echo "ccc3333" > "$STATE_DIR/remote_sha"
+  run_poll
+  check "third deploy ok"         [ "$CODE" -eq 0 ]
+  check "oldest image pruned"     sh -c "! grep -qx kaichenpedia:aaa1111 '$STATE_DIR/images'"
+  check "previous image kept"     grep -qx kaichenpedia:bbb2222 "$STATE_DIR/images"
+  teardown
+}
+
+test_build_failure_keeps_running() {
+  echo "• poller: a failed docker build leaves the running container alone"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  touch "$STATE_DIR/build_fail"
+  : > "$STATE_DIR/compose_images"
+  run_poll
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says the build failed"   out_has "build failed"
+  check "container not touched"   [ ! -s "$STATE_DIR/compose_images" ]
+  check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
+  check "image unchanged"         grep -qx kaichenpedia:aaa1111 "$HOME/services/kaichenpedia/state/image"
+  teardown
+}
+
+test_unhealthy_rolls_back() {
+  echo "• poller: a new container that never turns healthy is rolled back"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  touch "$STATE_DIR/health_fail"
+  : > "$STATE_DIR/compose_images"
+  run_poll
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "names the rollback"      out_has "rolling back to kaichenpedia:aaa1111"
+  check "tried the new image"     [ "$(head -1 "$STATE_DIR/compose_images")" = kaichenpedia:bbb2222 ]
+  check "restored the old one"    [ "$(tail -1 "$STATE_DIR/compose_images")" = kaichenpedia:aaa1111 ]
+  check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
+  check "image unchanged"         grep -qx kaichenpedia:aaa1111 "$HOME/services/kaichenpedia/state/image"
+  teardown
+}
+
+test_migrates_static_install() {
+  echo "• migration: a pre-Docker install (static build, same sha) gets an image and loses www/"
+  setup
+  touch "$STATE_DIR/operator"
+  KP_HOME="$HOME/services/kaichenpedia"
+  mkdir -p "$KP_HOME/www/current" "$KP_HOME/state"
+  echo "<html>old</html>" > "$KP_HOME/www/current/index.html"
+  echo aaa1111 > "$KP_HOME/state/built-sha"
+  echo "server { listen 80; }" > "$KP_HOME/nginx.conf"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "built despite same sha"  calls_have "docker build"
+  check "image recorded"          grep -qx kaichenpedia:aaa1111 "$KP_HOME/state/image"
+  check "static build removed"    [ ! -d "$KP_HOME/www" ]
+  check "says so"                 out_has "Removed the old static build"
+  check "nginx.conf left alone"   grep -q "listen 80" "$KP_HOME/nginx.conf"
   teardown
 }
 
@@ -402,7 +434,7 @@ EOF
 }
 
 state_all_there() {
-  [ -d "$(KP)/repo/.git" ] && [ -f "$(KP)/www/current/index.html" ] && [ -x "$(KP)/bin/deploy.sh" ] \
+  [ -d "$(KP)/repo/.git" ] && [ -f "$(KP)/state/image" ] && [ -x "$(KP)/bin/deploy.sh" ] \
     && [ -f "$(KP)/state/built-sha" ] && grep -q "my edit" "$(KP)/nginx.conf"
 }
 units_there() {
@@ -952,9 +984,9 @@ test_teardown_purge_rechecked_after_lock() {
   teardown
   deployed
   mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
-  run_purge_at_prompt "kaichenpedia" "mv '$(KP)/www' '$SANDBOX/www.saved' && ln -s '$HOME/elsewhere' '$(KP)/www'"
-  check "www/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  refuses the link"          out_has "www is a symlink"
+  run_purge_at_prompt "kaichenpedia" "mv '$(KP)/state' '$SANDBOX/state.saved' && ln -s '$HOME/elsewhere' '$(KP)/state'"
+  check "state/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  refuses the link"          out_has "state is a symlink"
   check "  nothing stopped"           [ ! -f "$STATE_DIR/compose_down" ] && no_call " off"
   check "  .env kept"                 [ -f "$SVC/.env" ]
   check "  link target kept"          [ -f "$HOME/elsewhere/keep" ]
@@ -1017,16 +1049,17 @@ test_teardown_macos_launch_agent() {
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
 test_preflight_tailscale_down
-test_preflight_old_node
 test_preflight_git_auth
 test_fresh_deploy
 test_legacy_poller_removed
 test_legacy_poller_kept_without_deployd
 test_deployd_disabled_flag
 test_deploy_sha_mismatch
-test_path_restored_from_env
 test_idempotent_rerun
 test_push_triggers_redeploy
+test_build_failure_keeps_running
+test_unhealthy_rolls_back
+test_migrates_static_install
 test_poll_lock
 test_port_override
 test_operator_escalation
