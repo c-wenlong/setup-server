@@ -17,7 +17,9 @@ and one runtime directory beside the other services:
 
     ~/services/apps/<key>/
         src/            the repo, checked out at the deployed commit
-        .env            passed to the container with --env-file (0600)
+        .env            passed to the container with --env-file (0600;
+                        not to static's nginx), and overlaid on the env of
+                        host-run commands (below)
         data/           mounted at `volume`, when the app declares one
         deployed.json   {sha, image, method, ref, at, release?, definition}:
                         what is running, written last. `definition` is the
@@ -52,7 +54,9 @@ Methods, and the fields each adds to the definition:
                 deployed.json, so neither `git clean` nor a same-commit
                 rebuild can delete what is being served), then serve it
                 read-only from a small nginx container on the app's port.
-                Rollback mounts the previous release.
+                That container gets no --env-file: it only serves files,
+                and the .env holds the build's secrets. Rollback mounts
+                the previous release, also when a switch off static fails.
     node        "version" (image tag suffix, e.g. "22-alpine"), "start"
     python      (e.g. "3.13-slim"), optional "build" — a generated
                 Dockerfile is rendered into the checkout, then the method
@@ -65,6 +69,20 @@ Methods, and the fields each adds to the definition:
 
 A definition's shell words (build/start/cmd) run via `sh -c` inside src/;
 every other word still reaches an argv only after validate() shape-checks it.
+
+Host-run commands (static's `build` and script's `cmd`; node/python's
+`build`/`start` run inside the generated Dockerfile and get none of this)
+run with the runner's own environment overlaid with the app's .env, read
+with `docker run --env-file` rules because the same file feeds that flag:
+`KEY=VALUE` taken literally (quotes kept, no expansion), blank and `#` lines
+skipped, a bare `KEY` taking KEY from the runner's env when set there, and a
+line whose name fails ENV_NAME_RE skipped with a warning naming only its
+line number. PATH is the runner's with ~/.local/bin, ~/.nix-profile/bin,
+/opt/homebrew/bin and /usr/local/bin put in front (each only if it exists,
+each once), since deployd's systemd user unit has a minimal PATH; a PATH in
+.env is ignored for host commands (one log line, no value), because in a
+container it would replace the image's own. Values go into the child's
+environment only, never an argv, so the echoed `$ ...` line carries none.
 
 Method switches belong to the runner, so every way a deploy starts (the
 gallery's save, a deployd poll, `ghapp.py deploy` by hand, a hand-edited
@@ -169,6 +187,13 @@ STATIC_DOCROOT = "/usr/share/nginx/html"
 DEPLOYD_ENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "services", "deployd", ".env")
 DEPLOYD_HOME = os.path.expanduser("~/services/deployd")
+
+# Tool dirs put in front of the runner's PATH for host-run commands (static
+# `build`, script `cmd`), each only when it exists: deployd runs the runner
+# from a systemd user unit whose PATH has none of them, so `uv`, `npm` or a
+# Homebrew tool would otherwise be "not found" under a poll but not by hand.
+HOST_PATH_DIRS = ("~/.local/bin", "~/.nix-profile/bin", "/opt/homebrew/bin",
+                  "/usr/local/bin")
 
 HEALTH_WAIT = 90        # seconds a new container gets to answer
 KEEP_IMAGES = 2         # current + one to roll back to
@@ -396,11 +421,13 @@ def build_argv(d, sha, src, dockerfile=None, context=None):
             ctx]
 
 
-def run_argv(d, image, container_port=None, mounts=()):
+def run_argv(d, image, container_port=None, mounts=(), env_file=True):
     """`docker run` for the app. 127.0.0.1 only, restart unless-stopped (a
     stopped app stays stopped across reboots, the same policy as the compose
     services). `mounts` are extra host:container[:opts] bind specs (static's
-    read-only docroot)."""
+    read-only docroot). `env_file=False` leaves the app's .env out: static's
+    nginx only serves files, and the .env there holds build-time secrets
+    (a passphrase baked into the output) it must not carry."""
     key = d["key"]
     inner = container_port or d["container_port"]
     argv = ["docker", "run", "--detach",
@@ -408,9 +435,9 @@ def run_argv(d, image, container_port=None, mounts=()):
             "--restart", "unless-stopped",
             "--publish", "127.0.0.1:%d:%d" % (d["port"], inner),
             "--label", "setup-server.app=%s" % key]
-    env_file = os.path.join(app_dir(key), ".env")
-    if os.path.isfile(env_file):
-        argv += ["--env-file", env_file]
+    env_path = os.path.join(app_dir(key), ".env")
+    if env_file and os.path.isfile(env_path):
+        argv += ["--env-file", env_path]
     if d.get("volume"):
         argv += ["--volume", "%s:%s" % (os.path.join(app_dir(key), "data"), d["volume"])]
     for spec in mounts:
@@ -463,10 +490,12 @@ def say(msg):
     print("==> " + msg, flush=True)
 
 
-def run(argv, check=True, capture=False, cwd=None):
-    """Run an argv (never a shell), echoing it to the job log first."""
+def run(argv, check=True, capture=False, cwd=None, env=None):
+    """Run an argv (never a shell), echoing it to the job log first. Only
+    the argv is echoed, never `env`: that is where host_env()'s values go,
+    so no value can reach the log through here."""
     print("$ " + " ".join(argv), flush=True)
-    res = subprocess.run(argv, cwd=cwd, text=True,
+    res = subprocess.run(argv, cwd=cwd, env=env, text=True,
                          stdout=subprocess.PIPE if capture else None,
                          stderr=subprocess.STDOUT if capture else None)
     if check and res.returncode != 0:
@@ -626,10 +655,86 @@ def inside_checkout(d, src, field):
     return real
 
 
-def run_sh(command, cwd):
-    """A definition's shell command, run `sh -c` inside the checkout. The
-    only place a definition's words go through a shell."""
-    run(["sh", "-c", command], cwd=cwd)
+def env_file_entries(path, base):
+    """[(name, value)] from an app's .env, read the way `docker run
+    --env-file` reads it, since the same file feeds that flag: a leading
+    UTF-8 BOM and each line's leading whitespace dropped, blank and `#`
+    lines skipped, `KEY=VALUE` split at the first `=` with the value kept
+    literally (quotes, spaces and `$` included, no expansion), and a bare
+    `KEY` taking KEY from `base` (the runner's env) when it is set there.
+    Stricter than Docker in one way: a line whose name fails ENV_NAME_RE,
+    or that is not UTF-8 or holds a NUL, is skipped with a warning naming
+    only its line number, since the rest of the line may be a value.
+    No file is an empty list."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return []
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    out = []
+    # Split on \n only and drop one trailing \r, as Go's bufio.ScanLines.
+    for num, chunk in enumerate(raw.split(b"\n"), 1):
+        if chunk.endswith(b"\r"):
+            chunk = chunk[:-1]
+        try:
+            line = chunk.decode("utf-8").lstrip()
+        except UnicodeDecodeError:
+            line = None
+        if line is not None and (not line or line.startswith("#")):
+            continue
+        name, has_value, value = (line or "").partition("=")
+        if line is None or "\0" in line or not ENV_NAME_RE.match(name):
+            say("skipping line %d of %s: not NAME=value with a valid name"
+                % (num, path))
+            continue
+        if has_value:
+            out.append((name, value))
+        elif name in base:
+            out.append((name, base[name]))
+    return out
+
+
+def host_path(path):
+    """The runner's PATH with HOST_PATH_DIRS that exist in front of it,
+    each directory once (first place wins) and empty entries dropped."""
+    dirs = [os.path.expanduser(p) for p in HOST_PATH_DIRS]
+    seen, parts = set(), []
+    for p in [p for p in dirs if os.path.isdir(p)] + path.split(os.pathsep):
+        if p and p not in seen:
+            seen.add(p)
+            parts.append(p)
+    return os.pathsep.join(parts)
+
+
+def host_env(key):
+    """The environment for a definition's host-run command: the runner's
+    own, overlaid with ~/services/apps/<key>/.env (env_file_entries), with
+    PATH from host_path(). A PATH in .env is ignored here, because the same
+    file goes into containers, where it does what the app wants; one log
+    line says so, without the value. Values only ever go into the child's
+    environment, never an argv, so the echoed argv holds none."""
+    base = dict(os.environ)
+    env = dict(base)
+    ignored_path = False
+    for name, value in env_file_entries(os.path.join(app_dir(key), ".env"),
+                                        base):
+        if name == "PATH":
+            ignored_path = True
+            continue
+        env[name] = value
+    if ignored_path:
+        say("PATH in .env is ignored for host commands (containers still get it)")
+    env["PATH"] = host_path(base.get("PATH") or os.defpath)
+    return env
+
+
+def run_sh(command, cwd, key):
+    """A definition's shell command, run `sh -c` inside the checkout on the
+    host, with host_env(key). The only place a definition's words go
+    through a shell."""
+    run(["sh", "-c", command], cwd=cwd, env=host_env(key))
 
 
 def healthy(d, timeout):
@@ -822,6 +927,14 @@ def prune_releases(key, keep_names):
             shutil.rmtree(os.path.join(app_dir(key), name), ignore_errors=True)
 
 
+def static_run_kw(key, name):
+    """run_argv() keywords for serving release `name` from the nginx
+    image: its port, the docroot read-only, and no --env-file (the .env
+    holds the build's secrets, and nginx needs none of it)."""
+    return {"container_port": STATIC_CONTAINER_PORT, "env_file": False,
+            "mounts": [release_dir(key, name) + ":" + STATIC_DOCROOT + ":ro"]}
+
+
 def deploy_static(d, src, sha, previous, prev_release):
     """Run the def's build in the checkout, copy its output to a fresh
     release dir outside it, then serve that read-only from the small nginx
@@ -829,7 +942,7 @@ def deploy_static(d, src, sha, previous, prev_release):
     failed build, pull or swap drops only the new release, and a failed swap
     rolls back to the previous release dir, not just its image."""
     key = d["key"]
-    run_sh(d["build"], src)
+    run_sh(d["build"], src, key)
     out_dir = inside_checkout(d, src, "output")
     if not os.path.isdir(out_dir):
         raise AppError("the build produced no %s directory" % d["output"])
@@ -852,14 +965,11 @@ def deploy_static(d, src, sha, previous, prev_release):
         # about to be deleted, so no container rollback then.
         prev_kw = None
         if prev_release:
-            prev_kw = {"container_port": STATIC_CONTAINER_PORT,
-                       "mounts": [release_dir(key, prev_release) + ":"
-                                  + STATIC_DOCROOT + ":ro"]}
+            prev_kw = static_run_kw(key, prev_release)
         else:
             previous = None
         swap(d, STATIC_IMAGE, previous, previous_run_kw=prev_kw,
-             container_port=STATIC_CONTAINER_PORT,
-             mounts=[release + ":" + STATIC_DOCROOT + ":ro"])
+             **static_run_kw(key, name))
     except (AppError, OSError):
         shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(release, ignore_errors=True)
@@ -1043,8 +1153,18 @@ def deploy_method(d, m, sha, src, prev):
     previous = current_image(key)
     prev_release = deployed_release(key)
     image = release = None
+    # Rolling another container method back onto a static deploy must run
+    # nginx the way static does (its port, its release mounted, no .env);
+    # with no recorded release there is nothing to serve, so no rollback.
+    prev_kw = None
+    if m != "static" and prev is not None \
+            and recorded_method(prev) == "static":
+        if prev_release:
+            prev_kw = static_run_kw(key, prev_release)
+        else:
+            previous = None
     if m == "script":
-        run_sh(d["cmd"], src)
+        run_sh(d["cmd"], src, key)
         if d.get("port") and d.get("health_path") \
                 and not healthy(d, HEALTH_WAIT):
             raise AppError("http://127.0.0.1:%d%s did not answer within %ds"
@@ -1059,7 +1179,7 @@ def deploy_method(d, m, sha, src, prev):
         image = d["image"]
         say("pulling %s" % image)
         run(["docker", "pull", image])
-        swap(d, image, previous)
+        swap(d, image, previous, previous_run_kw=prev_kw)
     elif m == "static":
         release = deploy_static(d, src, sha, previous, prev_release)
         image = STATIC_IMAGE
@@ -1069,7 +1189,7 @@ def deploy_method(d, m, sha, src, prev):
         say("building %s (generated %s)" % (image, GENERATED_DOCKERFILE))
         run(build_argv(d, sha, src, dockerfile=GENERATED_DOCKERFILE,
                        context="."))
-        swap(d, image, previous)
+        swap(d, image, previous, previous_run_kw=prev_kw)
     else:
         df_path = inside_checkout(d, src, "dockerfile")
         if not os.path.isfile(df_path):
@@ -1078,7 +1198,7 @@ def deploy_method(d, m, sha, src, prev):
         image = "%s:%s" % (image_repo(key), sha[:12])
         say("building %s" % image)
         run(build_argv(d, sha, src))
-        swap(d, image, previous)
+        swap(d, image, previous, previous_run_kw=prev_kw)
     return image, release, prev_release
 
 
