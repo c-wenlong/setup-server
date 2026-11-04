@@ -22,9 +22,9 @@ case "${1:-}" in
     printf '%s\trefs/heads/main\n' "$(cat "$STATE_DIR/remote_sha" 2>/dev/null || echo aaa1111)"
     ;;
   remote)
-    # git -C <dir> remote get-url origin — real git fails outside a repo
+    # git -C <dir> remote <sub> — real git fails outside a repo
     [ -d "$dir/.git" ] || exit 2
-    echo "https://git.test/sources.git"
+    [ "${2:-}" = "get-url" ] && echo "https://git.test/sources.git"
     ;;
   clone)
     # last argument is the target directory; fake a sources checkout whose

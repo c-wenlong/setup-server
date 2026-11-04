@@ -236,6 +236,29 @@ test_deployd_disabled_flag() {
   teardown
 }
 
+test_repo_url_migration() {
+  echo "• a pre-REPO_URL .env gains the resolved URL once; a saved value wins over env"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  sed -i.bak '/^REPO_URL=/d' "$SVC/.env"   # a .env from before the managed clone
+  : > "$CALLS_LOG"
+  OUT="$(printf '\n' | REPO_URL=https://git.test/explicit.git PATH="$STUBS:$PATH" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  check "re-run exits zero"          [ "$CODE" -eq 0 ]
+  check "explicit url checked"       calls_have "ls-remote --heads https://git.test/explicit.git"
+  check "resolved url appended"      env_has "REPO_URL=https://git.test/explicit.git"
+  check "deploy clone used it"       calls_have "remote set-url origin https://git.test/explicit.git"
+  # On a key the .env already has, an env override is refused, loudly.
+  : > "$CALLS_LOG"
+  OUT="$(printf '\n' | REPO_URL=https://git.test/other.git PATH="$STUBS:$PATH" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  check "still exits zero"           [ "$CODE" -eq 0 ]
+  check "warns it was ignored"       out_has "ignored — $SVC/.env already sets REPO_URL"
+  check "saved url kept"             env_has "REPO_URL=https://git.test/explicit.git"
+  check "key not duplicated"         sh -c '[ "$(grep -c "^REPO_URL=" "$1")" -eq 1 ]' _ "$SVC/.env"
+  check "other url never deployed"   no_call "other.git"
+  teardown
+}
+
 test_deploy_sha_mismatch() {
   echo "• deployd-requested sha: verified against origin/BRANCH"
   setup
@@ -353,6 +376,20 @@ test_poll_lock() {
   check "reports the skip"    out_has "another deploy is running"
   check "touched no git"      no_call "git -C .* rev-parse"
   rmdir "$HOME/services/sources/.deploy.lock"
+  teardown
+}
+
+test_repo_url_repointed() {
+  echo "• editing .env REPO_URL repoints the deploy clone's origin before fetch"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  set_env REPO_URL "https://git.test/moved.git"
+  : > "$CALLS_LOG"
+  run_poll --force
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "origin updated"          calls_have "remote set-url origin https://git.test/moved.git"
+  check "fetches after repoint"   calls_have "fetch --quiet origin main"
   teardown
 }
 
@@ -1186,6 +1223,7 @@ test_fresh_deploy
 test_legacy_poller_removed
 test_legacy_poller_kept_without_deployd
 test_deployd_disabled_flag
+test_repo_url_migration
 test_deploy_sha_mismatch
 test_path_restored_from_env
 test_idempotent_rerun
@@ -1193,6 +1231,7 @@ test_push_triggers_redeploy
 test_force_rebuild_same_sha
 test_new_layout_build_path
 test_poll_lock
+test_repo_url_repointed
 test_fetch_clone_ignored
 test_port_override
 test_operator_escalation

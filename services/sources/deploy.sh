@@ -78,6 +78,9 @@ if [ ! -d "$REPO_DIR/.git" ]; then
   git clone --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
 fi
 
+# The clone keeps whichever URL it was cloned with; repoint origin at the
+# resolved REPO_URL every run so editing .env actually moves the remote.
+git -C "$REPO_DIR" remote set-url origin "$REPO_URL"
 git -C "$REPO_DIR" fetch --quiet origin "$BRANCH"
 remote_sha="$(git -C "$REPO_DIR" rev-parse "origin/$BRANCH")"
 # deployd asked for a specific remote sha (DEPLOY_SHA). If the fetch could

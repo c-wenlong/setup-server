@@ -85,15 +85,23 @@ require_tailscale_up
 # The deploy clone feeds the build, so the fetch clone at SOURCE_REPO is
 # no longer required to exist: when it does, and it looks like the sources
 # repo, its origin remote seeds REPO_URL (the URL that already
-# authenticates on this box). A saved .env wins over the default path on
-# re-runs: only an explicit SOURCE_REPO=... or REPO_URL=... overrides it.
+# authenticates on this box). A saved .env is the source of truth on
+# re-runs: explicit env vars only apply where the .env has nothing saved
+# (a fresh install, or a key it lacks).
 if [ -f "$ENV_FILE" ]; then
   if [ -z "${SOURCE_REPO_SET+x}" ]; then
     saved_repo="$(sed -n 's/^SOURCE_REPO=\(.*\)$/\1/p' "$ENV_FILE")"
     [ -n "$saved_repo" ] && SOURCE_REPO="$saved_repo"
   fi
+  # .env wins over an explicit REPO_URL=... on re-runs, like every other
+  # key — say so rather than dropping it silently.
   saved_url="$(sed -n 's/^REPO_URL=\(.*\)$/\1/p' "$ENV_FILE")"
-  [ -n "$saved_url" ] && REPO_URL="$saved_url"
+  if [ -n "$saved_url" ]; then
+    if [ -n "${REPO_URL:-}" ] && [ "$REPO_URL" != "$saved_url" ]; then
+      warn "REPO_URL=$REPO_URL ignored — $ENV_FILE already sets REPO_URL=$saved_url (edit it to change the remote)"
+    fi
+    REPO_URL="$saved_url"
+  fi
 fi
 if [ -d "$SOURCE_REPO/.git" ] \
     && { [ -f "$SOURCE_REPO/apps/web/build/build_site.py" ] || [ -f "$SOURCE_REPO/scripts/build_site.py" ]; }; then
@@ -142,6 +150,14 @@ EOF
   printf 'SITE_PASSPHRASE=%q\n' "$SITE_PASSPHRASE" >> "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
+fi
+
+# A .env written before the managed clone has no REPO_URL line: persist the
+# value resolved in preflight once, so the URL checked above is the URL
+# deploy.sh uses and the key is edited in place like every other one.
+if ! grep -q '^REPO_URL=' "$ENV_FILE"; then
+  printf 'REPO_URL=%s\n' "$REPO_URL" >> "$ENV_FILE"
+  ok "Migrated REPO_URL=$REPO_URL into $ENV_FILE"
 fi
 
 # Everything below reads the .env (source of truth on re-runs).
