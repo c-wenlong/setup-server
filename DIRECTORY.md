@@ -159,6 +159,11 @@ Supporting services (no Tailscale Serve entry):
 - **n8n intentionally stopped** (2026-09-08, via ntfy-control; Kuma monitor
   paused). Start it from the panel or `docker start n8n` when needed —
   scheduled workflows don't run while it's down.
+- **kaichenpedia as a launcher app (2026-11-04)** lost two controls the
+  `services/` tile had: launcher Stop/Start no longer pauses or resumes its
+  Uptime Kuma monitor (app tiles carry no `control.kuma`, so a deliberate
+  stop will alert), and ntfy-control cannot start/stop it (its allowlist
+  is `services.json`). Pause the monitor in Kuma by hand when stopping it.
 - **AdGuard Home**: shipped 2026-09-11 (see the :3080 row); the remaining
   step is adding `100.77.77.77` as a nameserver in the Tailscale admin
   console, which is what makes it filter anything.

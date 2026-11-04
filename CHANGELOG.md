@@ -117,7 +117,9 @@ first, dated by merge.
   container's environment into the app's `.env` (never printed), warms the
   build, swaps containers under deployd's poll lock and puts the old
   container back if the new one does not answer. The Uptime Kuma monitor
-  stays; ntfy-control no longer lists it (its allowlist is `services.json`).
+  stays, but app tiles carry no `control.kuma`, so launcher Stop/Start no
+  longer pauses or resumes it; ntfy-control no longer lists it (its
+  allowlist is `services.json`).
 
 - **kaichenpedia: one container built from the repo's `site/Dockerfile`.**
   The wiki moved from Quartz to Next.js, so the old pipeline (Quartz build
