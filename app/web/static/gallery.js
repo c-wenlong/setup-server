@@ -36,6 +36,8 @@
   var tick = null;
   var current = null;         // the detail payload on screen
   var form = null;            // the method form's state on the detail page
+  var checkPending = false;   // a Refresh fetch is in flight on the detail
+  var commitsOpen = false;    // the behind list's expanded state survives repaints
   var saveNote = '';          // shown under the rebuilt form after a save
   var lastFetch = 0;          // the tick and app.js's list poll both refresh
 
@@ -95,9 +97,10 @@
     return a;
   }
 
-  function call(method, path, body, done) {
+  function call(method, path, body, done, timeout) {
     var xhr = new XMLHttpRequest();
-    var timer = setTimeout(function () { xhr.abort(); }, FETCH_TIMEOUT);
+    var timer = setTimeout(function () { xhr.abort(); },
+                           timeout || FETCH_TIMEOUT);
     xhr.open(method, path, true);
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.onreadystatechange = function () {
@@ -330,6 +333,27 @@
       ? extLink(ghLink(d.github, '/tree/' + encodeURIComponent(d.ref || 'main')), repoLabel)
       : text(make('span', 'gal-mono'), repoLabel));
     if (d.url) factRow(dl, 'URL', extLink(d.url, hostOf(d.url)));
+    if (d.check) {
+      var ck = d.check;
+      var label;
+      if (ck.behind > 0) {
+        label = ck.behind + (ck.behind === 1 ? ' commit' : ' commits') + ' behind';
+      } else if (ck.behind === 0 && ck.ahead > 0) {
+        label = ck.ahead + (ck.ahead === 1 ? ' commit' : ' commits') +
+                ' ahead of ' + (ck.ref || d.ref || 'main');
+      } else if (ck.behind === 0) {
+        label = 'Up to date';
+      } else if (ck.stale_deployed) {
+        label = 'Deployed commit no longer on ' + (ck.ref || 'main');
+      } else if (!d.deployed || !d.deployed.sha) {
+        label = 'Nothing deployed yet';
+      } else {
+        label = 'Could not compare';
+      }
+      if (ck.checked_at) label += ' · checked ' + ago(ck.checked_at);
+      factRow(dl, 'Remote', ck.behind > 0
+        ? text(make('span', 'gdp-warn'), label) : label);
+    }
     if (d.fail) {
       var f = 'Exit ' + (d.fail.rc == null ? '?' : d.fail.rc);
       if (d.fail.sha) f += ' at ' + sha7(d.fail.sha);
@@ -373,8 +397,68 @@
       });
     }
     bar.appendChild(btn);
+    var chk = make('button', 'h-btn');
+    chk.type = 'button';
+    chk.setAttribute('data-fid', 'check-remote');
+    text(chk, checkPending ? 'Checking…' : 'Refresh');
+    chk.disabled = checkPending;
+    chk.title = 'Fetch ' + (d.ref || 'main') + ' and count commits the deploy is behind';
+    chk.addEventListener('click', function () {
+      checkPending = true;
+      chk.disabled = true;
+      text(chk, 'Checking…');
+      err.hidden = true;
+      /* The server bounds the whole check (lock wait included) to 90s;
+         waiting a little past it keeps a slow-but-fine fetch from
+         looking like a failure. */
+      call('POST', 'api/deployments/' + encodeURIComponent(d.key) + '/check', null,
+        function (data, status) {
+          checkPending = false;
+          chk.disabled = false;
+          text(chk, 'Refresh');
+          if (status === 200 && data && data.key) {
+            refreshDetail();
+            return;
+          }
+          text(err, (data && data.error) || 'Check failed (HTTP ' + status + ').');
+          err.hidden = false;
+        }, 100000);
+    });
+    bar.appendChild(chk);
     sec.appendChild(bar);
     sec.appendChild(err);
+
+    /* The commit list the Refresh produced: one row per commit the deploy
+       lacks, expandable. Rendered whenever the check has commits, whether
+       they came from this click or a cached earlier one. */
+    if (d.check && d.check.commits && d.check.commits.length) {
+      var det = make('details', 'gdp-behind');
+      /* The ticker repaints the whole section; without this, an expanded
+         list collapses under the reader every poll. */
+      det.open = commitsOpen;
+      det.addEventListener('toggle', function () { commitsOpen = det.open; });
+      var sum = make('summary');
+      var n = d.check.behind != null ? d.check.behind : d.check.commits.length;
+      text(sum, n + (n === 1 ? ' commit' : ' commits') +
+                ' on ' + (d.check.ref || d.ref || 'main') + ' not yet deployed');
+      det.appendChild(sum);
+      var ul = make('ul', 'gdp-commits');
+      d.check.commits.forEach(function (cm) {
+        var li = make('li');
+        if (d.github) {
+          li.appendChild(extLink(ghLink(d.github, '/commit/' + cm.sha),
+                                 sha7(cm.sha), 'gal-link gal-sha'));
+        } else {
+          li.appendChild(text(make('span', 'gal-sha'), sha7(cm.sha)));
+        }
+        li.appendChild(text(make('span', 'gdp-subject'), cm.subject));
+        li.appendChild(text(make('span', 'gal-when'),
+          (cm.author || '') + (cm.at ? ' · ' + ago(cm.at) : '')));
+        ul.appendChild(li);
+      });
+      det.appendChild(ul);
+      sec.appendChild(det);
+    }
   }
 
   /* --- the method form --- */
@@ -864,6 +948,8 @@
     token++;
     current = null;
     form = null;
+    checkPending = false;
+    commitsOpen = false;
     if (tick) { clearInterval(tick); tick = null; }
     if (view && next.page !== 'detail') view.textContent = '';
     if (next.page === 'list') {
