@@ -17,13 +17,15 @@
 #
 # Build pipeline:
 #   git reset --hard origin/BRANCH
-#   docker build -f site/Dockerfile -t kaichenpedia:<sha> <repo root>
-#   docker compose up -d   (KAICHENPEDIA_IMAGE=kaichenpedia:<sha>)
-#   health check 127.0.0.1:LOCAL_PORT
+#   docker build -f site/Dockerfile -t kaichenpedia:<sha>-<build time> <repo root>
+#   probe: run the new image on a spare loopback port and health-check it
+#   docker compose up -d   (KAICHENPEDIA_IMAGE=<that tag>), health check again
 #
-# A failed build leaves the running container untouched. A new container
-# that never turns healthy is rolled back to the previous image. Either way
-# this exits non-zero, so deployd backs off and retries the sha.
+# The live container is only replaced by an image that already answered as
+# a probe, so a broken build or a crashing image never takes the site down
+# (including the first run on a pre-Docker install, which has nothing to
+# roll back to). If the swap itself fails, the previous image is restored.
+# Every failure exits non-zero, so deployd backs off and retries the sha.
 
 set -euo pipefail
 
@@ -61,14 +63,18 @@ compose_up() {
     up -d --remove-orphans
 }
 
+# healthy URL: poll for up to ~a minute.
 healthy() {
   local i
   for i in $(seq 1 30); do
-    curl -fsS -o /dev/null --max-time 5 "$HEALTH_URL" 2>/dev/null && return 0
+    curl -fsS -o /dev/null --max-time 5 "$1" 2>/dev/null && return 0
     sleep 2
   done
   return 1
 }
+
+PROBE="kaichenpedia-probe"
+drop_probe() { docker rm -f "$PROBE" >/dev/null 2>&1 || true; }
 
 # ------------------------------------------------------------- fetch/compare
 if [ ! -d "$REPO_DIR/.git" ]; then
@@ -95,11 +101,17 @@ prev_image="$(cat "$BUILD_STATE/image" 2>/dev/null || true)"
 if [ "$remote_sha" = "$built_sha" ] && [ -n "$prev_image" ] && [ "$FORCE" -eq 0 ] \
     && docker image inspect "$prev_image" >/dev/null 2>&1; then
   echo "up to date at $built_sha"
+  # Still under the lock: make sure the recorded image is what runs. That
+  # repairs a stopped or removed container, and --remove-orphans drops the
+  # pre-Docker kaichenpedia-api sidecar.
+  compose_up "$prev_image"
   exit 0
 fi
 
 # -------------------------------------------------------------------- build
-image="$IMAGE_REPO:$(printf '%s' "$remote_sha" | cut -c1-12)"
+# Unique per build: a --force rebuild of the same commit must not move the
+# tag the running (and rollback) image is known by.
+image="$IMAGE_REPO:$(printf '%s' "$remote_sha" | cut -c1-12)-$(date -u +%Y%m%d%H%M%S)"
 echo "deploying $remote_sha (was: $built_sha)"
 git -C "$REPO_DIR" reset --hard --quiet "origin/$BRANCH"
 
@@ -109,14 +121,35 @@ if ! docker build --file "$REPO_DIR/site/Dockerfile" --tag "$image" "$REPO_DIR";
   exit 1
 fi
 
+# -------------------------------------------------------------------- probe
+# Prove the new image starts and answers before the live container is
+# touched. Its port is picked by Docker on loopback; its logs are printed
+# here on failure, so the deploy log keeps the startup error.
+drop_probe
+trap 'drop_probe; rmdir "$LOCK" 2>/dev/null || true' EXIT
+echo "probing $image"
+if ! docker run -d --name "$PROBE" --publish 127.0.0.1::8080 \
+    -e PORT=8080 -e HOSTNAME=0.0.0.0 "$image" >/dev/null; then
+  echo "$image would not start — the running container was left as it was" >&2
+  exit 1
+fi
+probe_port="$(docker port "$PROBE" 8080/tcp 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1)"
+if [ -z "$probe_port" ] || ! healthy "http://127.0.0.1:$probe_port/"; then
+  echo "$image did not answer as a probe — the running container was left as it was" >&2
+  echo "--- probe logs ---" >&2
+  docker logs --tail 80 "$PROBE" >&2 2>&1 || true
+  exit 1
+fi
+drop_probe
+
 # --------------------------------------------------------------------- swap
 mkdir -p "$BUILD_STATE"
 echo "starting $image"
-compose_up "$image"
-if ! healthy; then
-  echo "$image did not answer on $HEALTH_URL" >&2
-  if [ -n "$prev_image" ] && [ "$prev_image" != "$image" ] \
-      && docker image inspect "$prev_image" >/dev/null 2>&1; then
+if ! compose_up "$image" || ! healthy "$HEALTH_URL"; then
+  echo "$image did not take over on $HEALTH_URL" >&2
+  echo "--- container logs ---" >&2
+  docker logs --tail 80 kaichenpedia >&2 2>&1 || true
+  if [ -n "$prev_image" ] && docker image inspect "$prev_image" >/dev/null 2>&1; then
     echo "rolling back to $prev_image" >&2
     compose_up "$prev_image" || true
   fi

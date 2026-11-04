@@ -66,10 +66,14 @@ Run it by hand to see the full error:
 - `npm run build` errors inside `docker build` usually mean a bad
   markdown/frontmatter push or a broken site change — reproduce locally
   with `npm run build` in the wiki repo's `site/`, fix, push again.
-- `did not answer on http://127.0.0.1:8091/` then `rolling back` → the new
-  image built but crashed or hung on start. `docker logs kaichenpedia`
-  right after the attempt shows why (missing env var, port clash, runtime
-  error); the rollback keeps the old image serving meanwhile.
+- `did not answer as a probe` → the new image built but crashed or hung
+  on start. deploy.sh runs every new image as a throwaway probe container
+  before touching the live one, and prints the probe's last 80 log lines
+  into the deploy log (`~/services/deployd/state/kaichenpedia.log`). The
+  live container was not touched.
+- `did not take over` then `rolling back` → the probe passed but the swap
+  failed (port clash, a bad value in `.env`). The live container's logs
+  are printed before the rollback.
 - Disk filling up → `docker image ls kaichenpedia`: deploy.sh keeps two
   images and prunes the rest, but build cache grows; `docker builder prune`
   is safe.
@@ -82,11 +86,13 @@ Run it by hand to see the full error:
   `exited` with a date and exit code 0 means someone stopped it on purpose;
   `docker start kaichenpedia` brings it back.
 - `docker ps | grep kaichenpedia` — container gone entirely?
-  `docker compose --project-directory ~/dev/setup-server/services/kaichenpedia up -d`
+  `~/services/kaichenpedia/bin/deploy.sh` brings the recorded image back up.
 - Container restarting → `docker logs kaichenpedia`. A missing or mistyped
   env var in `.env` is the usual cause; fix it and run
-  `docker compose --project-directory ~/dev/setup-server/services/kaichenpedia up -d`
-  (setup.sh exports the image tag for you on a re-run).
+  `~/services/kaichenpedia/bin/deploy.sh`, which recreates the container
+  from the recorded image (`state/image`) without rebuilding. Plain
+  `docker compose up` would look for `kaichenpedia:local`, which is never
+  built.
 - `state/image` names an image that `docker image ls kaichenpedia` does not
   have (pruned by hand) → `bin/deploy.sh --force` rebuilds it.
 
@@ -125,9 +131,10 @@ removed by the next `setup.sh` (`--remove-orphans`).
 
 The image before the current one is kept. To go back to it by hand:
 ```sh
-docker image ls kaichenpedia            # pick the previous tag
+docker image ls kaichenpedia            # tags are <sha>-<build time>; pick the previous one
 cd ~/dev/setup-server/services/kaichenpedia
 KAICHENPEDIA_IMAGE=kaichenpedia:<tag> docker compose up -d
+echo kaichenpedia:<tag> > ~/services/kaichenpedia/state/image   # so deploy.sh repairs to it
 ```
 (Any later successful deploy replaces it — pin by stopping deployd first:
 `systemctl --user stop deployd.timer`. To undo a bad commit for good,

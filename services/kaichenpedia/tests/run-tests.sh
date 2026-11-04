@@ -65,6 +65,12 @@ calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
 env_lacks()  { ! grep -q "$1" "$SVC/.env"; }
+# Image tags are kaichenpedia:<sha>-<build time>; match on the sha.
+state_img()  { grep -q "^kaichenpedia:$1-" "$HOME/services/kaichenpedia/state/image"; }
+has_img()    { grep -q "^kaichenpedia:$1-" "$STATE_DIR/images"; }
+lacks_img()  { ! grep -q "^kaichenpedia:$1-" "$STATE_DIR/images"; }
+last_up()    { tail -1 "$STATE_DIR/compose_images" | grep -q "^kaichenpedia:$1-"; }
+first_up()   { head -1 "$STATE_DIR/compose_images" | grep -q "^kaichenpedia:$1-"; }
 
 # ----------------------------------------------------------------- tests
 test_preflight_docker_perms() {
@@ -111,11 +117,15 @@ test_fresh_deploy() {
   check "env path baked into script"  grep -q "$SVC/.env" "$HOME/services/kaichenpedia/bin/deploy.sh"
   check "cloned the repo"             calls_have "git clone --branch main"
   check "service dir baked in"        grep -q "SERVICE_DIR=\"$SVC\"" "$HOME/services/kaichenpedia/bin/deploy.sh"
-  check "built site/Dockerfile"       calls_have "docker build --file $HOME/services/kaichenpedia/repo/site/Dockerfile --tag kaichenpedia:aaa1111"
+  check "built site/Dockerfile"       calls_have "docker build --file $HOME/services/kaichenpedia/repo/site/Dockerfile --tag kaichenpedia:aaa1111-"
+  check "probed before swapping"      grep -q "^kaichenpedia:aaa1111-" "$STATE_DIR/probe_runs"
+  check "probe on loopback only"      calls_have "docker run -d --name kaichenpedia-probe --publish 127.0.0.1::8080"
+  check "probe health checked"        calls_have "http://127.0.0.1:49153/"
+  check "probe removed"               calls_have "docker rm -f kaichenpedia-probe"
   check "no quartz build"             no_call "quartz"
-  check "recorded the image"          grep -qx kaichenpedia:aaa1111 "$HOME/services/kaichenpedia/state/image"
+  check "recorded the image"          state_img aaa1111
   check "recorded built sha"          grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
-  check "compose up with the image"   grep -qx kaichenpedia:aaa1111 "$STATE_DIR/compose_images"
+  check "compose up with the image"   last_up aaa1111
   check "orphans removed"             calls_have "up -d --remove-orphans"
   check "no static build dir"         [ ! -d "$HOME/services/kaichenpedia/www" ]
   check "api probe hit the stub"      calls_have "/api/save"
@@ -241,16 +251,16 @@ test_push_triggers_redeploy() {
   run_poll
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the new sha"     out_has "deploying bbb2222"
-  check "built the new image"     calls_have "docker build .*--tag kaichenpedia:bbb2222"
-  check "swapped to it"           [ "$(tail -1 "$STATE_DIR/compose_images")" = kaichenpedia:bbb2222 ]
+  check "built the new image"     calls_have "docker build .*--tag kaichenpedia:bbb2222-"
+  check "swapped to it"           last_up bbb2222
   check "built sha updated"       grep -qx bbb2222 "$HOME/services/kaichenpedia/state/built-sha"
-  check "image updated"           grep -qx kaichenpedia:bbb2222 "$HOME/services/kaichenpedia/state/image"
-  check "previous image kept"     grep -qx kaichenpedia:aaa1111 "$STATE_DIR/images"
+  check "image updated"           state_img bbb2222
+  check "previous image kept"     has_img aaa1111
   echo "ccc3333" > "$STATE_DIR/remote_sha"
   run_poll
   check "third deploy ok"         [ "$CODE" -eq 0 ]
-  check "oldest image pruned"     sh -c "! grep -qx kaichenpedia:aaa1111 '$STATE_DIR/images'"
-  check "previous image kept"     grep -qx kaichenpedia:bbb2222 "$STATE_DIR/images"
+  check "oldest image pruned"     lacks_img aaa1111
+  check "previous image kept"     has_img bbb2222
   teardown
 }
 
@@ -267,25 +277,109 @@ test_build_failure_keeps_running() {
   check "says the build failed"   out_has "build failed"
   check "container not touched"   [ ! -s "$STATE_DIR/compose_images" ]
   check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
-  check "image unchanged"         grep -qx kaichenpedia:aaa1111 "$HOME/services/kaichenpedia/state/image"
+  check "image unchanged"         state_img aaa1111
   teardown
 }
 
 test_unhealthy_rolls_back() {
-  echo "• poller: a new container that never turns healthy is rolled back"
+  echo "• poller: a new image that never answers as a probe never touches the live container"
   setup
   touch "$STATE_DIR/operator"
   run_deploy
   echo "bbb2222" > "$STATE_DIR/remote_sha"
-  touch "$STATE_DIR/health_fail"
+  echo 49153 > "$STATE_DIR/fail_ports"
   : > "$STATE_DIR/compose_images"
   run_poll
   check "exits non-zero"          [ "$CODE" -ne 0 ]
-  check "names the rollback"      out_has "rolling back to kaichenpedia:aaa1111"
-  check "tried the new image"     [ "$(head -1 "$STATE_DIR/compose_images")" = kaichenpedia:bbb2222 ]
-  check "restored the old one"    [ "$(tail -1 "$STATE_DIR/compose_images")" = kaichenpedia:aaa1111 ]
+  check "says the probe failed"   out_has "did not answer as a probe"
+  check "prints the probe logs"   out_has "stub log line from logs --tail 80 kaichenpedia-probe"
+  check "live container untouched" [ ! -s "$STATE_DIR/compose_images" ]
+  check "probe removed"           calls_have "docker rm -f kaichenpedia-probe"
   check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
-  check "image unchanged"         grep -qx kaichenpedia:aaa1111 "$HOME/services/kaichenpedia/state/image"
+  check "image unchanged"         state_img aaa1111
+  teardown
+}
+
+test_image_will_not_start() {
+  echo "• poller: an image that will not start at all leaves the live container alone"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  touch "$STATE_DIR/run_fail"
+  : > "$STATE_DIR/compose_images"
+  run_poll
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says it would not start" out_has "would not start"
+  check "live container untouched" [ ! -s "$STATE_DIR/compose_images" ]
+  teardown
+}
+
+test_swap_failure_rolls_back() {
+  echo "• poller: probe passes but the swap fails -> logs printed, previous image restored"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  touch "$STATE_DIR/compose_fail"
+  : > "$STATE_DIR/compose_images"
+  run_poll
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says it did not take over" out_has "did not take over"
+  check "prints container logs"   out_has "stub log line from logs --tail 80 kaichenpedia"
+  check "names the rollback"      out_has "rolling back to kaichenpedia:aaa1111-"
+  check "tried the new image"     first_up bbb2222
+  check "restored the old one"    last_up aaa1111
+  check "image unchanged"         state_img aaa1111
+  teardown
+}
+
+test_unhealthy_after_swap_rolls_back() {
+  echo "• poller: swapped container never answers on the live port -> rolled back"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
+  echo 8091 > "$STATE_DIR/fail_ports"
+  : > "$STATE_DIR/compose_images"
+  run_poll
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "restored the old one"    last_up aaa1111
+  check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/kaichenpedia/state/built-sha"
+  teardown
+}
+
+test_force_rebuild_same_commit() {
+  echo "• deploy.sh --force at an unchanged commit: new tag, old image kept for rollback"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  first="$(cat "$HOME/services/kaichenpedia/state/image")"
+  sleep_until_next_second() { local s; s="$(date -u +%S)"; while [ "$(date -u +%S)" = "$s" ]; do /bin/sleep 0.2; done; }
+  sleep_until_next_second
+  run_poll --force
+  second="$(cat "$HOME/services/kaichenpedia/state/image")"
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "rebuilt"                 [ "$(grep -c '^docker build' "$CALLS_LOG")" -ge 2 ]
+  check "new tag"                 [ "$first" != "$second" ]
+  check "same commit"             state_img aaa1111
+  check "old image kept"          grep -qx "$first" "$STATE_DIR/images"
+  teardown
+}
+
+test_up_to_date_repairs_container() {
+  echo "• deploy.sh with nothing new: no build, but the recorded image is brought up (under the lock)"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  : > "$STATE_DIR/compose_images"
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "reports up to date"      out_has "up to date at aaa1111"
+  check "no build"                no_call "docker build"
+  check "compose up with recorded image" last_up aaa1111
+  check "orphans removed"         calls_have "up -d --remove-orphans"
   teardown
 }
 
@@ -301,10 +395,28 @@ test_migrates_static_install() {
   run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "built despite same sha"  calls_have "docker build"
-  check "image recorded"          grep -qx kaichenpedia:aaa1111 "$KP_HOME/state/image"
+  check "image recorded"          state_img aaa1111
   check "static build removed"    [ ! -d "$KP_HOME/www" ]
   check "says so"                 out_has "Removed the old static build"
   check "nginx.conf left alone"   grep -q "listen 80" "$KP_HOME/nginx.conf"
+  teardown
+}
+
+test_migration_probe_failure_keeps_legacy() {
+  echo "• migration: if the first image fails its probe, the old nginx stack keeps serving"
+  setup
+  touch "$STATE_DIR/operator"
+  KP_HOME="$HOME/services/kaichenpedia"
+  mkdir -p "$KP_HOME/www/current" "$KP_HOME/state"
+  echo "<html>old</html>" > "$KP_HOME/www/current/index.html"
+  echo 60258b3 > "$KP_HOME/state/built-sha"
+  echo 49153 > "$STATE_DIR/fail_ports"
+  run_deploy
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "compose never ran"       [ ! -f "$STATE_DIR/compose_up" ]
+  check "static build kept"       [ -f "$KP_HOME/www/current/index.html" ]
+  check "no image recorded"       [ ! -f "$KP_HOME/state/image" ]
+  check "built sha unchanged"     grep -qx 60258b3 "$KP_HOME/state/built-sha"
   teardown
 }
 
@@ -1059,7 +1171,13 @@ test_idempotent_rerun
 test_push_triggers_redeploy
 test_build_failure_keeps_running
 test_unhealthy_rolls_back
+test_image_will_not_start
+test_swap_failure_rolls_back
+test_unhealthy_after_swap_rolls_back
+test_force_rebuild_same_commit
+test_up_to_date_repairs_container
 test_migrates_static_install
+test_migration_probe_failure_keeps_legacy
 test_poll_lock
 test_port_override
 test_operator_escalation

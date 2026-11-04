@@ -17,9 +17,9 @@ git push (any device)
         │
 deployd ──► setup.sh ──► bin/deploy.sh
   (one poller for all             │ 1. git reset --hard origin/main
-   deploy blocks)                 │ 2. docker build -f site/Dockerfile -t kaichenpedia:<sha> <repo>
-                                  │ 3. docker compose up -d   (KAICHENPEDIA_IMAGE=kaichenpedia:<sha>)
-                                  │ 4. health check; roll back to the previous image if it fails
+   deploy blocks)                 │ 2. docker build -f site/Dockerfile -t kaichenpedia:<sha>-<time> <repo>
+                                  │ 3. probe: run the new image on a spare loopback port, health-check
+                                  │ 4. docker compose up -d with it; roll back if the swap fails
                                   ▼
                     kaichenpedia (Docker) 127.0.0.1:8091 -> :8080
                       Next.js standalone server: the pages and /api/*
@@ -75,14 +75,13 @@ webhooks can't reach it. The push-to-deploy options were:
    commented-out API secrets). Re-runs read `.env` as the source of truth.
 3. Installs `deploy.sh` -> `~/services/kaichenpedia/bin/` (refreshed every
    run; edit the repo copy, then re-run setup.sh).
-4. Runs `deploy.sh`: clone, `docker build`, `docker compose up -d`,
-   health check. When the image for the current sha already exists it skips
-   the build.
-5. `docker compose up -d --remove-orphans` again with the recorded image,
-   which repairs a stopped or removed container and removes the old
-   `kaichenpedia-api` sidecar on hosts that had it. Then a local health
-   check on the page and a JSON probe through `POST /api/save`. Warns if
-   `GH_TOKEN` is unset.
+4. Runs `deploy.sh`: clone, `docker build`, a probe run of the new image,
+   then `docker compose up -d --remove-orphans` (which also removes the old
+   `kaichenpedia-api` sidecar on hosts that had it). When the image for the
+   current sha already exists it skips the build and just brings that image
+   up, which repairs a stopped or removed container.
+5. A local health check on the page and a JSON probe through
+   `POST /api/save`. Warns if `GH_TOKEN` is unset.
 6. Removes `~/services/kaichenpedia/www`, the old Quartz build, on hosts
    that had it. A pre-Docker `nginx.conf` is left alone, unused.
 7. Removes the old per-service `kaichenpedia-deploy` timer / LaunchAgent
@@ -118,9 +117,11 @@ tailscale serve status
 ./teardown.sh --purge       # also delete the clone, state, units and .env (GitHub stays canonical)
 ```
 
-A failed build leaves the running container untouched, and a new container
-that does not answer its health check within about a minute is swapped back
-to the previous image, so broken pushes never take the site down. The
+A failed build, or a new image that does not answer within about a minute
+when run as a probe, leaves the running container untouched; if the swap
+itself fails, the previous image is restored. Broken pushes never take the
+site down, including the first deploy on a pre-Docker host, where the old
+nginx stack keeps serving until the new image has passed its probe. The
 running image and the one before it are kept; older `kaichenpedia:<sha>`
 images are removed after each successful deploy.
 

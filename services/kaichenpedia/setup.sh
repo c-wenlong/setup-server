@@ -123,12 +123,11 @@ ok "Deploy script installed"
 info "Building and starting the container (clone + docker build — a few minutes on first run)"
 "$SERVICE_HOME/bin/deploy.sh" || die "Deploy failed — see output above."
 
-# deploy.sh exits early when the image is already built for this sha. Bring
-# the container up anyway: that repairs a stopped or removed container, and
-# --remove-orphans drops the pre-Docker kaichenpedia-api sidecar.
+# deploy.sh brings the recorded image up even when nothing changed (that
+# repairs a stopped or removed container and drops the pre-Docker
+# kaichenpedia-api sidecar), all under its own lock.
 image="$(cat "$SERVICE_HOME/state/image" 2>/dev/null || true)"
 [ -n "$image" ] || die "deploy.sh recorded no image in $SERVICE_HOME/state/image"
-KAICHENPEDIA_IMAGE="$image" docker compose --project-directory "$SERVICE_DIR" up -d --remove-orphans
 
 info "Waiting for the wiki on 127.0.0.1:$LOCAL_PORT"
 wait_http "http://127.0.0.1:$LOCAL_PORT/" 30 2 || die "kaichenpedia did not come up. Logs: docker logs kaichenpedia"
