@@ -1123,6 +1123,49 @@ class DeployTest(SandboxTest):
         server.start_deploy("alpha")  # must not raise
         self.assertEqual(len(self.spawned), 2)
 
+    def _register_deployd(self):
+        """deployd as a registry service whose setup.sh exits at once, so
+        its deploy job runs to completion under RecordedProc."""
+        self.make_script("deployd/setup.sh")
+        self.write_registry({"services": [
+            {"key": "deployd", "name": "deployd", "tagline": "t",
+             "icon": "code", "url": None, "health": None, "marker": None,
+             "setup": "deployd/setup.sh"}]})
+        subprocess.Popen = lambda argv, **kw: (
+            self.spawned.append((argv, kw)), RecordedProc(0))[1]
+
+    def test_a_paused_deployd_timer_is_re_stopped_after_its_deploy(self):
+        """Saving POLL_SECONDS while paused must not resume polling:
+        setup.sh's `enable --now` restarts the timer, so the job re-stops
+        it on the way out."""
+        self._register_deployd()
+        server.deployd_timer = lambda: "inactive"
+        payload = self._wait_job(server.start_deploy("deployd"))
+        self.assertEqual(payload["status"], "done")
+        self.assertIn(["systemctl", "--user", "stop", "deployd.timer"],
+                      [argv for argv, _ in self.spawned])
+        self.assertIn("stop deployd.timer", payload["log"])
+
+    def test_an_active_deployd_timer_is_left_alone(self):
+        self._register_deployd()
+        server.deployd_timer = lambda: "active"
+        payload = self._wait_job(server.start_deploy("deployd"))
+        self.assertEqual(payload["status"], "done")
+        self.assertNotIn(["systemctl", "--user", "stop", "deployd.timer"],
+                         [argv for argv, _ in self.spawned])
+        # And a deploy that is not deployd's never touches the timer at
+        # all, paused or not.
+        server.deployd_timer = lambda: "inactive"
+        self.make_script("alpha/setup.sh")
+        self.write_registry({"services": [
+            {"key": "alpha", "name": "alpha", "tagline": "t", "icon": "code",
+             "url": None, "health": None, "marker": None,
+             "setup": "alpha/setup.sh"}]})
+        payload = self._wait_job(server.start_deploy("alpha"))
+        self.assertEqual(payload["status"], "done")
+        self.assertFalse(any("systemctl" in " ".join(argv)
+                             for argv, _ in self.spawned))
+
     def test_job_payload_shape(self):
         jid = server.start_deploy("alpha")
         payload = server.job_payload(jid)
@@ -7712,6 +7755,74 @@ class DeploydTest(SandboxTest):
     def test_timer_passthrough(self):
         server.deployd_timer = lambda: "active"
         self.assertEqual(server.deployd_payload()["timer"], "active")
+
+    def _poll_env(self, seconds):
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            fh.write("POLL_SECONDS=%d\n" % seconds)
+
+    def _tick_json(self, rec):
+        state = self.state_dir()
+        with open(os.path.join(state, "tick.json"), "w") as fh:
+            json.dump(rec, fh)
+
+    def test_poll_block_defaults(self):
+        poll = server.deployd_payload()["poll"]
+        self.assertEqual(poll, {"seconds": None, "tick": None,
+                                "running": False, "next_due": None})
+
+    def test_poll_seconds_and_tick(self):
+        self._poll_env(120)
+        now = time.time()
+        self._tick_json({"started": now - 90, "finished": now - 84, "rc": 0})
+        poll = server.deployd_payload()["poll"]
+        self.assertEqual(poll["seconds"], 120)
+        self.assertEqual(poll["tick"]["rc"], 0)
+        self.assertFalse(poll["running"])
+        self.assertAlmostEqual(poll["next_due"], now + 30, places=3)
+
+    def test_poll_running_has_no_next_due(self):
+        self._poll_env(60)
+        self._tick_json({"started": time.time() - 5})   # no finished yet
+        poll = server.deployd_payload()["poll"]
+        self.assertTrue(poll["running"])
+        self.assertIsNone(poll["next_due"])
+        # A start older than the stale-lock window is a dead tick, not a
+        # running one — it reports and still projects the next due time.
+        self._tick_json({"started": time.time() - 4000})
+        poll = server.deployd_payload()["poll"]
+        self.assertFalse(poll["running"])
+        self.assertIsNotNone(poll["next_due"])
+
+    def test_poll_no_next_due_while_the_timer_is_stopped(self):
+        self._poll_env(60)
+        now = time.time()
+        self._tick_json({"started": now - 70, "finished": now - 60, "rc": 0})
+        for state in ("inactive", "failed"):
+            server.deployd_timer = lambda s=state: s
+            self.assertIsNone(
+                server.deployd_payload()["poll"]["next_due"], state)
+        # Active (or unknowable, None on macOS) still projects a next tick.
+        server.deployd_timer = lambda: "active"
+        self.assertAlmostEqual(server.deployd_payload()["poll"]["next_due"],
+                               now - 10, places=3)
+        server.deployd_timer = lambda: None
+        self.assertIsNotNone(server.deployd_payload()["poll"]["next_due"])
+
+    def test_poll_junk_env_and_tick(self):
+        os.makedirs(os.path.join(server.REPO_ROOT, "services", "deployd"),
+                    exist_ok=True)
+        with open(os.path.join(server.REPO_ROOT, "services", "deployd",
+                               ".env"), "w") as fh:
+            fh.write("POLL_SECONDS=soon\n")
+        with open(os.path.join(self.state_dir(), "tick.json"), "w") as fh:
+            fh.write("not json")
+        poll = server.deployd_payload()["poll"]
+        self.assertIsNone(poll["seconds"])
+        self.assertIsNone(poll["tick"])
+        self.assertFalse(poll["running"])
 
 
 class DeploydHttpTest(HttpTest):

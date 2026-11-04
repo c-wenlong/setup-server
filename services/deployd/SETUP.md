@@ -91,7 +91,7 @@ the wiring.
 |---|---|---|
 | `SETUP_REPO` | the checkout this setup.sh sits in | the repo pulled + scanned each tick |
 | `SERVICE_HOME` | `~/services/deployd` | state + lock + installed bin |
-| `POLL_SECONDS` | `60` | poll cadence (baked into the timer — re-run setup.sh to change) |
+| `POLL_SECONDS` | `60` | poll cadence (baked into the timer — re-run setup.sh to change; the Deploys page's Edit does both) |
 | `RETRY_SECONDS` | `900` | backoff before retrying a failed deploy of the same sha |
 | `DEPLOY_TIMEOUT` | `1800` | per-cmd cap in seconds |
 | `PATH_PREFIX` | dirs of git/python3/uv/curl/docker/tailscale at setup time | prepended to PATH for the poller and every cmd (systemd/launchd PATHs lack userland tools) |
@@ -122,8 +122,11 @@ by hand.
   is not a row in the launcher's app list (`"hidden": true` in `app.json`,
   `NO_TILE` in `scripts/check-structure.sh`): the launcher's **Deploys** page
   (`#/deploys`, in the sidebar) is its UI, with the timer's state, Pause /
-  Resume, every watched repo and add / edit / delete for
-  `state/pollers.json` entries. No Kuma monitor (nothing HTTP to probe; a dead timer is surfaced by
+  Resume, the cadence line (interval, last tick, next due — read from
+  `state/tick.json`, which each poll writes) and an Edit that rewrites
+  `POLL_SECONDS` and re-runs setup.sh, plus every watched repo and add /
+  edit / delete for `state/pollers.json` entries. No Kuma monitor
+  (nothing HTTP to probe; a dead timer is surfaced by
   the deploys not happening, and `--status` shows recorded state).
 - `deployd` deliberately does not stop a poll mid-deploy; teardown refuses
   while the lock is fresh rather than kill another service's setup.sh.

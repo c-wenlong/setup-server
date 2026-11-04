@@ -309,6 +309,33 @@ test_poll_remote_down() {
   teardown
 }
 
+tick_json_ok() {
+  python3 - "$DSTATE/tick.json" "$1" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert isinstance(rec.get("started"), (int, float)), rec
+assert isinstance(rec.get("finished"), (int, float)), rec
+assert rec["finished"] >= rec["started"], rec
+assert rec.get("rc") == int(sys.argv[2]), rec
+PY
+}
+
+test_poll_tick_json() {
+  echo "• poll: state/tick.json records each poll's start, finish and rc"
+  setup
+  run_poll
+  check "clean tick"              [ "$CODE" -eq 0 ]
+  check "tick.json written"       [ -f "$DSTATE/tick.json" ]
+  check "started+finished+rc=0"   tick_json_ok 0
+  touch "$STATE_DIR/fail_svc_a"
+  printf '%s\t%s\n' "$SHA_A2" "refs/heads/main" \
+    > "$STATE_DIR/remote_https___a_invalid_repo_git"
+  run_poll
+  check "failing tick reported"   [ "$CODE" -eq 1 ]
+  check "rc=1 recorded"           tick_json_ok 1
+  teardown
+}
+
 test_poll_checkout_pull_and_self_update() {
   echo "• poll: checkout pull refreshes config; services/deployd/ change re-runs setup.sh"
   setup
@@ -674,6 +701,7 @@ for t in \
   test_poll_deploys_on_change_only \
   test_poll_failure_backoff \
   test_poll_remote_down \
+  test_poll_tick_json \
   test_poll_checkout_pull_and_self_update \
   test_poll_self_update_retry \
   test_poll_launcher_restart \

@@ -112,6 +112,14 @@
     return Math.round(h / 24) + ' d ago';
   }
 
+  function fmtDur(s) {
+    s = Math.max(0, Math.round(s));
+    if (s < 60) return s + 's';
+    var m = Math.round(s / 60);
+    if (m < 60) return m + ' min';
+    return Math.round(m / 60) + ' h';
+  }
+
   function chip(state) {
     var c = make('span', 'dep-state dep-state-' + state);
     text(c, STATE_LABEL[state] || state);
@@ -742,9 +750,11 @@
      through app.js's confirm sheet as the deployd service's stop/start. */
   function paintHeader(data) {
     if (!pageEngine) return;
+    var poll = (data && data.poll) || {};
     var n = (data.watched || []).length;
     text(pageSub, 'Watching ' + n + (n === 1 ? ' repo' : ' repos') +
-      '. Each one redeploys when its branch on GitHub moves; checked every minute.');
+      '. Each one redeploys when its branch on GitHub moves; checked every ' +
+      fmtDur(poll.seconds || 60) + '.');
     pageEngine.textContent = '';
     var t = data.timer;
     var a = app();
@@ -790,6 +800,130 @@
       });
       pageEngine.appendChild(b);
     }
+    paintPollLine(poll);
+  }
+
+  /* Cadence readout + the Edit that rewrites the timer. The pieces:
+     interval and last/next poll from state/tick.json (deployd writes it
+     each poll), the edit goes PATCH .env -> re-run setup.sh as a normal
+     deploy job — that is what regenerates the unit with the new
+     OnUnitActiveSec, so the UI just calls the two existing endpoints. */
+  function paintPollLine(poll) {
+    var meta = make('p', 'dep-poll');
+    var bits = [];
+    if (poll.seconds) bits.push('every ' + fmtDur(poll.seconds));
+    if (poll.tick && poll.tick.started) {
+      var last = 'last poll ' + ago(poll.tick.started);
+      if (typeof poll.tick.finished === 'number') {
+        last += ', took ' +
+          fmtDur(poll.tick.finished - poll.tick.started);
+        if (poll.tick.rc) last += ' (failed)';
+      } else if (poll.running) {
+        last += ', still running';
+      }
+      bits.push(last);
+    } else {
+      bits.push('no poll recorded yet');
+    }
+    if (!poll.running && typeof poll.next_due === 'number') {
+      var left = Math.round(poll.next_due - Date.now() / 1000);
+      if (left > 0) bits.push('next in ~' + fmtDur(left));
+    }
+    text(meta, bits.join(' · '));
+    var row = make('div', 'dep-pollrow');
+    row.appendChild(meta);
+    var eb = make('button', 'h-btn dep-poll-edit');
+    eb.type = 'button';
+    text(eb, 'Edit');
+    eb.title = 'Change how often deployd polls';
+    eb.addEventListener('click', function () { openIntervalEditor(poll.seconds); });
+    row.appendChild(eb);
+    pageEngine.appendChild(row);
+  }
+
+  function openIntervalEditor(seconds) {
+    if (editing || !pageEngine) return;
+    editing = { interval: true };
+    var form = make('div', 'dep-form dep-iform');
+    form.setAttribute('data-editor', '1');
+    var lab = make('label', 'dep-field');
+    var cap = make('span', 'dep-field-cap');
+    text(cap, 'Poll every');
+    lab.appendChild(cap);
+    var input = make('input', 'dep-input');
+    input.type = 'number';
+    input.min = '5';
+    input.step = '1';
+    input.value = seconds || 60;
+    lab.appendChild(input);
+    var unit = make('span', 'dep-field-cap');
+    text(unit, 'seconds');
+    lab.appendChild(unit);
+    form.appendChild(lab);
+    var note = make('p', 'dep-form-note');
+    text(note, 'Saving rewrites POLL_SECONDS in deployd’s .env and re-runs ' +
+               'setup.sh so the timer picks it up.');
+    form.appendChild(note);
+    var err = make('p', 'dep-form-err');
+    err.hidden = true;
+    form.appendChild(err);
+    var bar = make('div', 'dep-form-bar');
+    var cancel = make('button', 'btn');
+    cancel.type = 'button';
+    text(cancel, 'Cancel');
+    var save = make('button', 'btn btn-primary');
+    save.type = 'button';
+    text(save, 'Save and apply');
+    bar.appendChild(cancel);
+    bar.appendChild(save);
+    form.appendChild(bar);
+    pageEngine.appendChild(form);
+    input.focus();
+    input.select();
+    /* `mine` is the editor this save belongs to: a user who navigated away
+       and opened another editor before the response lands must not have it
+       closed out from under them. */
+    var mine = editing;
+    cancel.addEventListener('click', function () {
+      if (editing === mine) editing = null;
+      refresh();
+    });
+    save.addEventListener('click', function () {
+      var v = parseInt(input.value, 10);
+      if (!isFinite(v) || String(v) !== input.value.trim() || v < 5) {
+        err.hidden = false;
+        text(err, 'Whole seconds, 5 or more.');
+        return;
+      }
+      save.disabled = true;
+      cancel.disabled = true;
+      callDeployd('PATCH', 'api/services/deployd/env/POLL_SECONDS',
+        { value: String(v) }, function (d, status) {
+          if (status !== 200) {
+            save.disabled = false;
+            cancel.disabled = false;
+            err.hidden = false;
+            text(err, (d && d.error) || 'Save failed (HTTP ' + status + ').');
+            return;
+          }
+          callDeployd('POST', 'api/services/deployd/deploy', null,
+            function (d2, s2) {
+              if (s2 !== 202 || !d2 || !d2.job_id) {
+                save.disabled = false;
+                cancel.disabled = false;
+                err.hidden = false;
+                text(err, (d2 && d2.error) ||
+                     'Apply failed (HTTP ' + s2 + ').');
+                return;
+              }
+              if (editing === mine) editing = null;
+              if (window.LauncherApp && LauncherApp.watchJob) {
+                LauncherApp.watchJob('deployd', d2.job_id, 'deploy');
+              }
+              refresh();
+            });
+        });
+    });
   }
 
   var TIMER_LOOK = {
