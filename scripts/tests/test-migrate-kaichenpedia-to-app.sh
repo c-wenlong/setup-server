@@ -67,7 +67,16 @@ setup() {
   mkdir -p "$HOME/services/kaichenpedia/bin" "$(dirname "$OLD_ENV")"
   printf '#!/usr/bin/env bash\nENV_FILE="%s"\nSERVICE_DIR="x"\n' "$OLD_ENV" \
     > "$HOME/services/kaichenpedia/bin/deploy.sh"
-  printf 'GH_TOKEN="%s"\nexport COPILOT_MODEL=claude\nLOCAL_PORT=8091\n' "$SECRET" > "$OLD_ENV"
+  printf 'GH_TOKEN="%s" # wiki token\nexport COPILOT_MODEL=claude\nLOCAL_PORT=8091\n' "$SECRET" > "$OLD_ENV"
+
+  # The installed deployd binary, whose baked-in .env agrees with the
+  # default state dir this checkout resolves.
+  mkdir -p "$HOME/services/deployd/bin" "$SB/deployd-checkout/services/deployd"
+  printf 'SETUP_REPO=%s\nSERVICE_HOME=%s\n' "$SB/deployd-checkout" "$HOME/services/deployd" \
+    > "$SB/deployd-checkout/services/deployd/.env"
+  printf '#!/usr/bin/env python3\nENV_BAKED = "%s"  # setup.sh rewrites this\n' \
+    "$SB/deployd-checkout/services/deployd/.env" > "$HOME/services/deployd/bin/deployd"
+  export SANDBOX_SCRIPT="$R/scripts/migrate-kaichenpedia-to-app.sh"
 
   # The running old container: its env as docker reports it.
   touch "$STATE_DIR/old-exists" "$STATE_DIR/old-running" "$STATE_DIR/network"
@@ -98,7 +107,7 @@ case "$1" in
       *Config.Env*) cat "$S/old-env.json" ;;
       *State.Running*)
         if [ "$name" = kaichenpedia ]; then [ -f "$S/old-running" ] && echo true || echo false
-        else echo true; fi ;;
+        else [ -f "$S/new-stopped" ] && echo false || echo true; fi ;;
       *.Image*) echo "sha256:0123456789abcdef0123456789abcdef" ;;
     esac ;;
   ps)
@@ -115,6 +124,7 @@ case "$1" in
       esac
     done ;;
   run)
+    if [ -f "$S/interrupt-run" ]; then pkill -TERM -f "$SANDBOX_SCRIPT"; sleep 1; exit 125; fi
     [ -f "$S/fail-run" ] && { echo "port is already allocated" >&2; exit 125; }
     [ -f "$S/old-running" ] && { echo "port 8091 still held by kaichenpedia" >&2; exit 125; }
     touch "$S/new-exists"; echo cid ;;
@@ -257,6 +267,22 @@ check ".env unchanged"                      cmp -s "$SB/env.before" "$(ENVF)"
 check "no env values printed"               no_secrets
 teardown
 
+echo "• already migrated but the app is stopped: nothing undone"
+setup
+migrate
+check "first run exits zero"                [ "$CODE" -eq 0 ]
+touch "$STATE_DIR/new-stopped" "$STATE_DIR/fail-run"
+: > "$CALLS_LOG"
+migrate
+check "exits zero"                          [ "$CODE" -eq 0 ]
+check "says it is not running"              out_has "is not running"
+check "definition kept"                     test -f "$(DEF)"
+check "poller row kept"                     grep -q "ghapp.py deploy kaichenpedia" "$(POLLERS)"
+check "deployed.json kept"                  test -f "$HOME/services/apps/kaichenpedia/deployed.json"
+check "no new container attempted"          calls_lack "docker run"
+check "no container removed"                calls_lack "docker rm"
+teardown
+
 echo "• deploy fails: the old site comes back"
 setup
 touch "$STATE_DIR/fail-run"
@@ -298,7 +324,7 @@ setup
 rm -f "$STATE_DIR/old-exists" "$STATE_DIR/old-running"
 migrate
 check "exits zero"                          [ "$CODE" -eq 0 ]
-check "token from the old .env (unquoted)"  grep -qx "GH_TOKEN=$SECRET" "$(ENVF)"
+check "token read as the shell read it"    grep -qx "GH_TOKEN=$SECRET" "$(ENVF)"
 check "export prefix handled"               grep -qx "COPILOT_MODEL=claude" "$(ENVF)"
 check "LOCAL_PORT not carried over"         sh -c "! grep -q '^LOCAL_PORT=' '$(ENVF)'"
 check "no stop of a missing container"      calls_lack "docker stop"
@@ -338,6 +364,43 @@ check "exits non-zero"                      [ "$CODE" -ne 0 ]
 check "names the lock"                      out_has ".poll.lock is still held"
 check "deployd's lock left in place"        test -d "$HOME/services/deployd/.poll.lock"
 check "nothing written"                     test ! -e "$(ENVF)"
+teardown
+
+echo "• interrupted mid-swap: the exit trap restores the old site"
+setup
+touch "$STATE_DIR/interrupt-run"
+migrate
+check "exits non-zero"                      [ "$CODE" -ne 0 ]
+check "says it was interrupted"             out_has "interrupted before the new container answered"
+check "old container running again"         test -f "$STATE_DIR/old-running"
+check "definition removed"                  test ! -e "$(DEF)"
+check "poller row dropped"                  sh -c "! grep -q kaichenpedia '$(POLLERS)'"
+check "poller not left paused"              test ! -e "$D/kaichenpedia.disabled"
+check "deployd lock released"               test ! -e "$HOME/services/deployd/.poll.lock"
+teardown
+
+echo "• a stale lock that will not go: dies instead of spinning"
+setup
+mkdir -p "$HOME/services/deployd/.poll.lock"
+touch "$HOME/services/deployd/.poll.lock/x"
+touch -t 202001010000 "$HOME/services/deployd/.poll.lock"
+migrate
+check "exits non-zero"                      [ "$CODE" -ne 0 ]
+check "says to remove it by hand"           out_has "remove it by hand"
+check "nothing written"                     test ! -e "$(ENVF)"
+teardown
+
+echo "• deployd configured elsewhere: refuses before changing anything"
+setup
+mkdir -p "$SB/custom-deployd/state"
+printf 'SETUP_REPO=%s\nSERVICE_HOME=%s\n' "$SB/deployd-checkout" "$SB/custom-deployd" \
+  > "$SB/deployd-checkout/services/deployd/.env"
+migrate
+check "exits non-zero"                      [ "$CODE" -ne 0 ]
+check "names deployd's real state dir"      out_has "$SB/custom-deployd/state"
+check "names the checkout to run from"      out_has "Run the script from the checkout deployd uses: $SB/deployd-checkout"
+check "nothing written"                     test ! -e "$(ENVF)"
+check "no lock taken anywhere"              test ! -e "$SB/custom-deployd/.poll.lock"
 teardown
 
 echo "• refuses root"

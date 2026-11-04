@@ -19,22 +19,28 @@
 #   deployd state/pollers.json "kaichenpedia"    cmd app/web/ghapp.py deploy
 #
 # Steps:
-#   1. preflight (regular user, docker, git, python3, tailscale) and take
-#      deployd's poll lock, so no tick runs the old setup.sh mid-migration
-#   2. write the app's .env from the running container's environment (or
-#      the old .env file when the container is gone); never printed
+#   1. preflight (regular user, docker, git, python3, tailscale); refuse
+#      when this checkout resolves a different deployd state dir than the
+#      installed deployd uses; take deployd's poll lock, so no tick runs the
+#      old setup.sh mid-migration
+#   2. write the app's .env from the running container's environment (or,
+#      when the container is gone, the old .env sourced the way deploy.sh
+#      sourced it); values are never printed
 #   3. warm the build: check out the target commit into the app's src/ and
 #      run the very `docker build` ghapp.py will run, so the swap is seconds
 #   4. write the definition and the (paused) deployd poller
 #   5. stop the old container and run `ghapp.py deploy kaichenpedia`
 #   6. success: remove the old container and its compose network, drop
-#      deployd's old failure record. Failure: remove the new container, start
-#      the old one again, undo step 4 and exit non-zero
+#      deployd's old failure record. Failure, or an interrupt (exit trap)
+#      anywhere from step 4 on: remove the new container, start the old one
+#      again, undo only what step 4 added, and exit non-zero
 #
-# Usage, from any checkout of this repo:
+# Usage, from the checkout deployd uses (any checkout when its deployd .env
+# resolves the same state dir):
 #   ./scripts/migrate-kaichenpedia-to-app.sh
 #
-# Idempotent: a re-run after success only finishes any cleanup it finds. It
+# Idempotent: once a deploy is recorded, a re-run only finishes any cleanup
+# it finds (and changes nothing at all while the app is stopped). It
 # never deletes ~/services/kaichenpedia/ (old clone and build state) or any
 # .env; it prints their paths so they can be removed by hand.
 
@@ -116,6 +122,10 @@ def check_existing_def():
 verb = sys.argv[1]
 
 if verb == "state-dir":
+    # deployd's state dir as this checkout resolves it, or, given a .env
+    # path, as that deployd .env resolves it (same decoding either way).
+    if len(sys.argv) > 2:
+        ghapp.DEPLOYD_ENV = sys.argv[2]
     print(ghapp.deployd_state_dir() or "")
 
 elif verb == "env":
@@ -140,8 +150,25 @@ elif verb == "env":
     else:
         for path in sys.argv[2:]:
             if path and os.path.isfile(path):
-                with open(path, encoding="utf-8") as fh:
-                    values = server.parse_env(fh.read())   # compose/shell style
+                # The old deploy.sh read this file with `set -a; . .env`, so
+                # source it the same way (quotes, inline comments, escapes
+                # all mean what they meant then) in a clean shell, and hand
+                # back only the wanted keys, NUL-separated, never printed.
+                res = subprocess.run(
+                    ["bash", "-c", 'set -a; . "$1" >/dev/null 2>&1 || exit 3; shift; '
+                     'for k in "$@"; do printf "%s=%s\\0" "$k" "${!k-}"; done',
+                     "_", path] + ENV_KEYS,
+                    capture_output=True, text=True,
+                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                         "HOME": os.environ.get("HOME", "")})
+                if res.returncode != 0:
+                    fail("could not read %s as a shell file (exit %d); fix it "
+                         "or write %s by hand" % (path, res.returncode, ENV_FILE))
+                values = {}
+                for pair in res.stdout.split("\0"):
+                    if pair:
+                        name, _, value = pair.partition("=")
+                        values[name] = value
                 source = path
                 break
     if values is None:
@@ -195,18 +222,30 @@ elif verb == "wire":
     print("definition %s, poller app/web/ghapp.py deploy %s"
           % (ghapp.def_path(KEY), KEY))
 
+elif verb == "snapshot":
+    # "<def> <poller row> <paused>" as 0/1 before `wire`, so `unwire` can
+    # undo only what this run added and keep whatever was already there.
+    state = ghapp.deployd_state_dir()
+    rows = server._deployd_overrides(state) if state else {}
+    print("%d %d %d" % (os.path.exists(ghapp.def_path(KEY)), KEY in rows,
+                        bool(state) and os.path.exists(
+                            os.path.join(state, KEY + ".disabled"))))
+
 elif verb == "unwire":
-    # Undo `wire` after a failed deploy. argv[2] == "1": deployd's
-    # .disabled marker was already there before this run, so keep it.
-    try:
-        os.remove(ghapp.def_path(KEY))
-    except OSError:
-        pass
-    try:
-        server.deployd_restore_poller(KEY)
-    except Exception as exc:          # deployd absent: nothing to restore
-        print("could not drop the poller row: %s" % exc, file=sys.stderr)
-    if sys.argv[2] != "1":
+    # Undo `wire` after a failed or interrupted deploy. argv[2:5] is the
+    # snapshot: a 1 means that piece predates this run, so it stays.
+    had_def, had_row, had_paused = (a == "1" for a in sys.argv[2:5])
+    if not had_def:
+        try:
+            os.remove(ghapp.def_path(KEY))
+        except OSError:
+            pass
+    if not had_row:
+        try:
+            server.deployd_restore_poller(KEY)
+        except Exception as exc:          # deployd absent: nothing to restore
+            print("could not drop the poller row: %s" % exc, file=sys.stderr)
+    if not had_paused:
         ghapp.set_paused(KEY, False)
 
 elif verb == "check-def":
@@ -229,20 +268,62 @@ resolve_tailscale
 [ -f "$GHAPP" ] || die "no $GHAPP in this checkout"
 helper check-def || die "refusing to overwrite another app's definition"
 
-# ----------------------------------------------------- deployd's poll lock
+# ------------------------------------------------- which deployd, its lock
+# The deployd that actually runs here: its installed binary has its .env
+# path baked in (ENV_BAKED), and that .env names its SERVICE_HOME. This
+# checkout must resolve the same state dir, or the poller row and lock
+# would land somewhere the real deployd never reads.
+installed_deployd_env() {
+  local f bin
+  {
+    echo "$HOME/services/deployd/bin/deployd"
+    for f in "$HOME/.config/systemd/user/deployd.service" "$HOME"/Library/LaunchAgents/*deployd*.plist; do
+      [ -f "$f" ] && sed -n 's#.*[=> ]\(/[^ <]*/bin/deployd\)\([ <].*\)\{0,1\}$#\1#p' "$f"
+    done
+  } | while IFS= read -r bin; do
+    [ -f "$bin" ] && sed -n 's/^ENV_BAKED = "\(\/[^"]*\)".*/\1/p' "$bin" | head -1
+  done | head -1
+}
+real_dir() { (cd "$1" 2>/dev/null && pwd -P); }
+
+DEPLOYD_STATE="$(helper state-dir)"
+INSTALLED_ENV="$(installed_deployd_env || true)"
+if [ -n "$INSTALLED_ENV" ] && [ -f "$INSTALLED_ENV" ]; then
+  installed_state="$(helper state-dir "$INSTALLED_ENV")"
+  if [ -n "$installed_state" ] \
+      && [ "$(real_dir "$installed_state")" != "$(real_dir "${DEPLOYD_STATE:-/nonexistent}")" ]; then
+    die "deployd here keeps its state in $installed_state (config $INSTALLED_ENV), but this checkout resolves ${DEPLOYD_STATE:-none}. Run the script from the checkout deployd uses: ${INSTALLED_ENV%/services/deployd/.env}"
+  fi
+fi
+
 # Held for the whole run: a tick in the middle would run the old setup.sh
 # (recreating the old container on the port) or the new poller early.
-DEPLOYD_STATE="$(helper state-dir)"
 LOCK=""
+SHA_FILE=""
+ROLLBACK=0
 release_lock() { [ -n "$LOCK" ] && rmdir "$LOCK" 2>/dev/null || true; }
-trap release_lock EXIT
+on_exit() {
+  local rc=$?
+  if [ "$ROLLBACK" -eq 1 ]; then
+    warn "interrupted before the new container answered: restoring the old deployment"
+    restore
+  fi
+  [ -n "$SHA_FILE" ] && rm -f "$SHA_FILE"
+  release_lock
+  exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if [ -n "$DEPLOYD_STATE" ]; then
   lock="$(dirname "$DEPLOYD_STATE")/.poll.lock"
   waited=0
   while ! mkdir "$lock" 2>/dev/null; do
     if [ -n "$(find "$lock" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
       warn "reclaiming a stale deployd poll lock (>60 min old)"
-      rmdir "$lock" 2>/dev/null || true
+      rmdir "$lock" 2>/dev/null \
+        || die "could not remove the stale lock $lock: check no deployd is running, then remove it by hand"
       continue
     fi
     [ "$waited" -eq 0 ] && info "waiting for the running deployd tick to finish"
@@ -282,6 +363,26 @@ cleanup_old() {
   fi
 }
 
+# Put the box back the way this run found it: no new container, the old one
+# running again if it was, and only the definition/poller pieces this run
+# added taken back out. Safe to call twice.
+SNAPSHOT="1 1 1"
+was_running=0
+restore() {
+  ROLLBACK=0
+  docker rm --force "$NEW_CONTAINER" >/dev/null 2>&1 || true
+  if [ "$was_running" -eq 1 ] && ! container_running "$OLD_CONTAINER"; then
+    if docker start "$OLD_CONTAINER" >/dev/null; then
+      ok "started $OLD_CONTAINER again"
+    else
+      warn "could not start $OLD_CONTAINER: run docker start $OLD_CONTAINER"
+    fi
+  fi
+  # shellcheck disable=SC2086  # three 0/1 words, split on purpose
+  helper unwire $SNAPSHOT \
+    || warn "could not undo the definition/poller: see $DEF_FILE and deployd's pollers.json"
+}
+
 summary() {
   echo
   info "kaichenpedia now runs as launcher app $KEY ($NEW_CONTAINER on 127.0.0.1:$PORT)"
@@ -305,9 +406,16 @@ summary() {
 }
 
 # --------------------------------------------------------- already migrated
-if [ -f "$DEF_FILE" ] && [ -f "$APP_DIR/deployed.json" ] && container_running "$NEW_CONTAINER"; then
-  ok "already migrated: $NEW_CONTAINER is running from $DEF_FILE"
-  cleanup_old
+# A recorded deploy means the move already happened, whether or not the app
+# runs right now: never redo it, and never undo a saved app.
+if [ -f "$DEF_FILE" ] && [ -f "$APP_DIR/deployed.json" ]; then
+  if container_running "$NEW_CONTAINER"; then
+    ok "already migrated: $NEW_CONTAINER is running from $DEF_FILE"
+    cleanup_old
+  else
+    warn "already migrated, but $NEW_CONTAINER is not running: start or redeploy it from the launcher"
+    warn "left any old $OLD_CONTAINER container as it is"
+  fi
   summary
   exit 0
 fi
@@ -320,20 +428,17 @@ helper env "${candidates[@]}" || die "could not build the app's .env; nothing el
 
 info "Warming the build cache (the old site keeps serving meanwhile)"
 SHA_FILE="$(mktemp)"
-release_all() { rm -f "$SHA_FILE"; release_lock; }
-trap release_all EXIT
 helper warm "$SHA_FILE" || die "warm-up build failed; the old site was not touched"
 SHA="$(cat "$SHA_FILE")"
 ok "image for ${SHA:0:12} built"
 
 # --------------------------------------------------------- def + poller
-had_disabled=0
-[ -n "$DEPLOYD_STATE" ] && [ -e "$DEPLOYD_STATE/$KEY.disabled" ] && had_disabled=1
+SNAPSHOT="$(helper snapshot)" || die "could not read the current definition/poller state"
 info "Writing the launcher definition and deployd poller"
+ROLLBACK=1      # from here until the new container answers, exit = restore
 helper wire || die "could not write the definition or poller; the old site was not touched"
 
 # ---------------------------------------------------------------- swap
-was_running=0
 if container_running "$OLD_CONTAINER"; then
   was_running=1
   info "Stopping $OLD_CONTAINER (frees 127.0.0.1:$PORT; kept until the new one answers)"
@@ -346,14 +451,10 @@ started="$(date +%s)"
 info "Deploying with ghapp.py at ${SHA:0:12}"
 if ! DEPLOY_SHA="$SHA" python3 "$GHAPP" deploy "$KEY"; then
   warn "ghapp.py deploy failed: restoring the old deployment"
-  docker rm --force "$NEW_CONTAINER" >/dev/null 2>&1 || true
-  if [ "$was_running" -eq 1 ]; then
-    docker start "$OLD_CONTAINER" >/dev/null && ok "started $OLD_CONTAINER again" \
-      || warn "could not start $OLD_CONTAINER: run docker start $OLD_CONTAINER"
-  fi
-  helper unwire "$had_disabled" || warn "could not undo the definition/poller: see $DEF_FILE and deployd's pollers.json"
+  restore
   die "migration failed; the old deployment is back. $APP_DIR (.env, src/) was kept for the next try"
 fi
+ROLLBACK=0
 ok "$NEW_CONTAINER answered after $(( $(date +%s) - started ))s of downtime"
 
 cleanup_old
