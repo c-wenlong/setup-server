@@ -467,7 +467,9 @@ class MethodDeployTest(Sandbox):
         run = self.argv_with("docker", "run")[-1]
         self.assertIn("127.0.0.1:8301:80", run)
         mount = run[run.index("--volume") + 1]
-        release = os.path.join(ghapp.app_dir("hello-app"), "site-" + SHA[:12])
+        name = self.deployed()["release"]
+        self.assertRegex(name, r"^site-%s-\d+$" % SHA[:12])
+        release = os.path.join(ghapp.app_dir("hello-app"), name)
         # Outside src/: the next deploy's `git clean -ffdxq` cannot touch it.
         self.assertEqual(mount, release + ":/usr/share/nginx/html:ro")
         self.assertFalse(release.startswith(src + os.sep))
@@ -475,24 +477,54 @@ class MethodDeployTest(Sandbox):
             self.assertEqual(fh.read(), "v2")
         self.assertEqual(self.deployed()["image"], ghapp.STATIC_IMAGE)
 
+    def live_release(self, sha=None, content="v1"):
+        """A release a previous static deploy left serving, recorded in
+        deployed.json the way deploy() writes it."""
+        sha = sha or self.OLD_SHA
+        name = "site-%s-1000" % sha[:12]
+        path = os.path.join(ghapp.app_dir("hello-app"), name)
+        os.makedirs(path)
+        with open(os.path.join(path, "index.html"), "w") as fh:
+            fh.write(content)
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
+            json.dump({"sha": sha, "method": "static", "release": name}, fh)
+        return name, path
+
     def test_static_failed_build_leaves_the_live_release_alone(self):
         self.write_method("static")
         self.make_src("hello-app")
-        live = os.path.join(ghapp.app_dir("hello-app"), "site-" + self.OLD_SHA[:12])
-        os.makedirs(live)
+        _, live = self.live_release()
         self.run_codes["sh -c make site"] = 2
         with self.assertRaises(ghapp.AppError):
             ghapp.deploy("hello-app")
         self.assertTrue(os.path.isdir(live))
         self.assertFalse(self.argv_with("docker", "run"))
 
+    def test_static_same_commit_rebuild_never_touches_the_live_release(self):
+        self.write_method("static")
+        self.make_file("hello-app", "public/index.html", "v2")
+        name, live = self.live_release(sha=SHA)       # same commit as DEPLOY_SHA
+        self.run_codes["docker pull"] = 1             # fail after the copy
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        with open(os.path.join(live, "index.html")) as fh:
+            self.assertEqual(fh.read(), "v1")
+        sites = [n for n in os.listdir(ghapp.app_dir("hello-app")) if n.startswith("site-")]
+        self.assertEqual(sites, [name])               # the new release was dropped
+
+    def test_static_same_commit_rebuild_gets_its_own_release(self):
+        self.write_method("static")
+        self.make_file("hello-app", "public/index.html", "v2")
+        name, live = self.live_release(sha=SHA)
+        ghapp.deploy("hello-app")
+        new = self.deployed()["release"]
+        self.assertNotEqual(new, name)
+        self.assertTrue(os.path.isdir(live))          # kept as the rollback one
+
     def test_static_unhealthy_rolls_back_to_the_previous_release(self):
         self.write_method("static")
         self.make_file("hello-app", "public/index.html", "v2")
-        prev = os.path.join(ghapp.app_dir("hello-app"), "site-" + self.OLD_SHA[:12])
-        os.makedirs(prev)
-        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
-            json.dump({"sha": self.OLD_SHA}, fh)
+        name, prev = self.live_release()
         self.quiet_out["docker inspect"] = (0, "sha256:" + "d" * 64)
         ghapp.healthy = lambda d, t: False
         with self.assertRaises(ghapp.AppError):
@@ -501,18 +533,27 @@ class MethodDeployTest(Sandbox):
         self.assertEqual(back[-1], "sha256:" + "d" * 64)
         self.assertEqual(back[back.index("--volume") + 1],
                          prev + ":/usr/share/nginx/html:ro")
+        sites = [n for n in os.listdir(ghapp.app_dir("hello-app")) if n.startswith("site-")]
+        self.assertEqual(sites, [name])
+
+    def test_static_without_a_recorded_release_does_not_roll_back(self):
+        self.write_method("static")
+        self.make_file("hello-app", "public/index.html")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "e" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(len(self.argv_with("docker", "run")), 1)
 
     def test_static_success_prunes_all_but_current_and_previous(self):
         self.write_method("static")
         self.make_file("hello-app", "public/index.html")
         app = ghapp.app_dir("hello-app")
-        for name in ("site-" + self.OLD_SHA[:12], "site-bbbbbbbbbbbb"):
-            os.makedirs(os.path.join(app, name))
-        with open(os.path.join(app, "deployed.json"), "w") as fh:
-            json.dump({"sha": self.OLD_SHA}, fh)
+        prev, _ = self.live_release()
+        os.makedirs(os.path.join(app, "site-bbbbbbbbbbbb-5"))
         ghapp.deploy("hello-app")
         sites = sorted(n for n in os.listdir(app) if n.startswith("site-"))
-        self.assertEqual(sites, sorted(["site-" + SHA[:12], "site-" + self.OLD_SHA[:12]]))
+        self.assertEqual(sites, sorted([self.deployed()["release"], prev]))
 
     def test_static_output_symlink_out_of_the_checkout_is_refused(self):
         self.write_method("static")
