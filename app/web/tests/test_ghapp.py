@@ -1077,6 +1077,42 @@ class MethodSwitchTest(Sandbox):
         self.assertEqual(self.record()["method"], "compose")   # untouched
         self.assertTrue(self.logged("bringing the old compose stack back"))
 
+    def test_compose_restore_needs_no_fetch_from_the_old_repo(self):
+        # Repo and method changed together: the old remote may be gone, and
+        # src/ already holds the commit the stack ran from.
+        self.write_def(method_def("image", repo="c-wenlong/elsewhere"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("compose")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        run = self.index("docker", "run")
+        tail = self.calls[run:]
+        self.assertFalse([c for c in tail if "fetch" in c or "set-url" in c])
+        self.assertIn(["git", "-C", self.src(), "checkout", "--quiet", "--force",
+                       "--detach", self.OLD_SHA], tail)
+        self.assertTrue([c for c in tail if c[-2:] == ["up", "--detach"]])
+
+    def test_compose_restore_fetches_only_when_the_commit_is_missing(self):
+        self.write_def(method_def("image"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("compose")
+        ghapp.healthy = lambda d, t: False
+        real, missing = ghapp.run, [True]
+
+        def run(argv, check=True, capture=False, cwd=None):
+            if self.OLD_SHA in argv and "checkout" in argv and missing:
+                missing.pop()
+                self.calls.append(list(argv))
+                raise ghapp.AppError("git exited 128")
+            return real(argv, check, capture, cwd)
+        ghapp.run = run
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        fetch = self.index("fetch", "origin", self.OLD_SHA)
+        self.assertGreater(fetch, self.index("docker", "run"))
+        self.assertGreater(self.index("compose", "up", "--detach"), fetch)
+
     def test_a_failed_compose_down_restores_and_never_deploys(self):
         self.write_def(method_def("image"))
         self.make_file("hello-app", "docker-compose.yml")
@@ -1162,15 +1198,14 @@ class MethodSwitchTest(Sandbox):
         ghapp.deploy("hello-app")
         # Never a name another app could own: KEY_RE has no dot.
         self.assertIsNone(ghapp.KEY_RE.match("hello-app.parked"))
-        park = [["docker", "rm", "--force", "app-hello-app.parked"],
-                ["docker", "rename", "app-hello-app", "app-hello-app.parked"],
+        park = [["docker", "rename", "app-hello-app", "app-hello-app.parked"],
                 ["docker", "stop", "app-hello-app.parked"]]
         first = self.calls.index(park[0])
-        self.assertEqual(self.calls[first:first + 3], park)
+        self.assertEqual(self.calls[first:first + 2], park)
         up = self.index("compose", "up", "--detach")
         self.assertLess(first, up)
         # Success only: the parked container goes once the stack answers.
-        drop = len(self.calls) - 1 - self.calls[::-1].index(park[0])
+        drop = self.calls.index(["docker", "rm", "--force", "app-hello-app.parked"])
         self.assertGreater(drop, up)
         self.assertNotIn(["docker", "start", "app-hello-app"], self.calls)
         # An earlier dockerfile sha holds no stack: no compose rollback.
@@ -1196,6 +1231,41 @@ class MethodSwitchTest(Sandbox):
         self.assertEqual(len(self.argv_with("compose", "up")), 1)
         self.assertEqual(self.index("checkout", "--detach", self.OLD_SHA), -1)
         self.assertEqual(self.record()["method"], "node")
+
+    def test_a_stale_parked_container_beside_a_live_one_is_replaced(self):
+        self.write_def(method_def("compose"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("dockerfile")
+        self.quiet_out["docker ps --all --filter name=^/app-hello-app"] = (
+            0, "app-hello-app\napp-hello-app.parked\n")
+        ghapp.deploy("hello-app")
+        rm = self.calls.index(["docker", "rm", "--force", "app-hello-app.parked"])
+        self.assertLess(rm, self.calls.index(
+            ["docker", "rename", "app-hello-app", "app-hello-app.parked"]))
+
+    def test_a_retry_after_an_interrupted_switch_keeps_the_parked_container(self):
+        # A deployd timeout killed the last switch after the rename: the
+        # parked container is still the working version.
+        self.write_def(method_def("compose"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("dockerfile")
+        self.quiet_out["docker ps --all --filter name=^/app-hello-app"] = (
+            0, "app-hello-app.parked\n")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        up = self.index("compose", "up", "--detach")
+        before = self.calls[:up]
+        self.assertNotIn(["docker", "rm", "--force", "app-hello-app.parked"], before)
+        self.assertNotIn(["docker", "rename", "app-hello-app",
+                          "app-hello-app.parked"], before)
+        self.assertIn(["docker", "stop", "app-hello-app.parked"], before)
+        # ...and the failure still puts it back under its own name.
+        tail = self.calls[up:]
+        self.assertIn(["docker", "rename", "app-hello-app.parked",
+                       "app-hello-app"], tail)
+        self.assertIn(["docker", "start", "app-hello-app"], tail)
+        self.assertTrue(self.logged("still parked from an interrupted switch"))
 
     # ---- script -> anything, same method, nothing deployed
 

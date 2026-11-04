@@ -960,8 +960,14 @@ def switch_steps(key, prev, now):
                 return
             try:
                 # The failed deploy checked out the new sha; the old file
-                # lives at the old one.
-                checkout(old, old_sha, src)
+                # lives at the old one, which src/ already holds (it ran
+                # from there). No fetch: when the switch also moved repos,
+                # the old remote may be gone and the stack must still
+                # come back. Fetch only if the commit really is missing.
+                try:
+                    check_out(old_sha, src)
+                except AppError:
+                    checkout(old, old_sha, src)
                 if not compose_file_path(old, src):
                     raise AppError("no %s at %s" % (old["compose_file"],
                                                     old_sha[:12]))
@@ -993,7 +999,22 @@ def switch_steps(key, prev, now):
         def park():
             say("method change %s -> compose: parking %s as %s until the "
                 "stack is up" % (was, name, parked))
-            try_run(["docker", "rm", "--force", parked])
+            code, out = quiet(["docker", "ps", "--all",
+                               "--filter", "name=^/%s" % name,
+                               "--format", "{{.Names}}"])
+            names = set(out.split()) if code == 0 else set()
+            if parked in names and name not in names:
+                # An earlier switch was killed (a deployd timeout) before
+                # it could put the container back: the parked one is still
+                # the working version, and the deployed.json that brought
+                # us here still says so. Keep it.
+                say("%s is still parked from an interrupted switch; keeping "
+                    "it" % parked)
+                try_run(["docker", "stop", parked])
+                return
+            if parked in names:
+                # A live app-<key> exists too, so this one is stale.
+                try_run(["docker", "rm", "--force", parked])
             try_run(["docker", "rename", name, parked])
             try_run(["docker", "stop", parked])
 
