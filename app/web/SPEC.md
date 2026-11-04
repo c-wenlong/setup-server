@@ -878,3 +878,42 @@ No `.env` value is in any of it: definitions only ever hold `env_names`.
 Ports never move. `ghapp_entries` now reads every method (its description
 used to read `d["dockerfile"]`, which a method switch would break), and a
 script definition with no port gets no URL or probe.
+
+## v16: Deployments gallery, the screens (2026-11-04)
+
+Step 3 of [#137](https://github.com/c-wenlong/setup-server/issues/137),
+the front end for v15. `static/gallery.js` (+ `gallery.css`), the same
+module contract as deployd.js: an IIFE, relative URLs, every API string
+through `textContent`, and only `LauncherApp.watchJob` borrowed from
+app.js.
+
+**`#/deploys`** keeps deployd.js's header (engine pill, Pause/Resume,
++ Add poller, + New app). Under it, a responsive card grid from
+`GET api/deployments`: state dot, name, method badge, short sha and how
+long ago, `repo@ref` and the URL's host. A card opens its page. The
+pollers table and every poller control stay on the page, folded under
+**Advanced: pollers** (+ Add poller opens the fold).
+
+**`#/deploys/<key>`** (`#view-deploy`), three sections:
+
+1. **Overview**: state, deployed commit (linked to it on GitHub), source
+   branch, URL, deployd's last failure, a paused note, and **Redeploy**
+   (`POST .../redeploy`, the job streams in the sheet). While a job runs
+   the button reattaches to its log instead.
+2. **Deployment method**: a method picker that swaps in that method's
+   fields (repo and branch first, then the method's own, then the health
+   path), seeded from the definition or a starting value, each with a
+   hint. **Save and redeploy** stays off until something changed, sends
+   `PUT api/deployments/<key>`, shows a 400 inline and marks the field the
+   validator named, and hands a 202's job to `watchJob`. The form is never
+   rebuilt by the refresh tick, so typing survives it. A service's picker
+   is fixed on Script with a note that moving services onto methods comes
+   later; its command saves through `POST api/deployd/pollers/<key>`.
+3. **Logs**: the newest launcher jobs and deployd's last run, each in a
+   monospace box whose open state and scroll survive the refresh.
+
+Both views refresh every 30 s and when app.js re-polls its list (a job
+the sheet watched has ended). app.js and home.js treat `#/deploys/<key>`
+as the Deploys page (grid hidden, nav and breadcrumb on Deploys). There
+is no JS test harness in this repo; the logic is kept to painting and
+the server stays the only validator.

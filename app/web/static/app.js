@@ -2078,10 +2078,12 @@
     return String(location.hash || '') === '#/catalogue';
   }
 
-  /* #/deploys is painted by deployd.js, the same arrangement as the
+  /* #/deploys is painted by deployd.js and gallery.js, and #/deploys/<key>
+     (one deployment's page) by gallery.js, the same arrangement as the
      catalogue. deployd's old detail URL lands there too. */
   function isDeploysRoute() {
-    return String(location.hash || '') === '#/deploys';
+    var h = String(location.hash || '');
+    return h === '#/deploys' || h.indexOf('#/deploys/') === 0;
   }
 
   function showGrid(on) {

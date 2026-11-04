@@ -8,8 +8,10 @@
  *
  * What it draws depends on which page is open:
  *   #/deploys          — its own top-level page (#view-deploys): header with
- *                         the engine's state and Pause/Resume, then the whole
- *                         watched table plus the poller controls:
+ *                         the engine's state and Pause/Resume, the mount
+ *                         gallery.js paints its cards into, then (folded
+ *                         under "Advanced: pollers") the whole watched table
+ *                         plus the poller controls:
  *                         add/edit/delete via state/pollers.json (never the
  *                         checkout deployd ff-pulls), pause/resume via the
  *                         <key>.disabled marker, Deploy-now via
@@ -34,6 +36,7 @@
   var pageSub = null;
   var pageEngine = null;
   var pageAdd = null;        // + Add poller: off until a payload has painted
+  var pageAdv = null;        // the "Advanced: pollers" fold around pageBody
   var mount = detailMount;   // where paint() draws: detail section or page body
 
   var TICK_MS = 60000;       // deploys are slow; the app's own poll is 30s
@@ -696,6 +699,7 @@
     add.appendChild(text(make('span'), '+ Add poller'));
     add.addEventListener('click', function () {
       if (editing || !mount) return;
+      if (pageAdv) pageAdv.open = true;
       var sec = mount.querySelector('.dep-page');
       if (!sec) return;
       var form = openEditor(null, null);
@@ -708,8 +712,22 @@
     head.appendChild(add);
     head.appendChild(newApp);
     page.appendChild(head);
+    /* gallery.js paints the cards here: one per deployment, each opening
+       its own page at #/deploys/<key>. */
+    var gallery = make('div', 'gal-mount');
+    gallery.id = 'gallery-mount';
+    page.appendChild(gallery);
+    /* The raw watch list (repo, ref, cmd per key) and every poller control
+       stay one tap away, folded under the gallery. */
+    pageAdv = make('details', 'dep-adv');
+    var sum = make('summary', 'dep-adv-sum');
+    sum.appendChild(text(make('span'), 'Advanced: pollers'));
+    sum.appendChild(text(make('span', 'dep-adv-hint'),
+      'what deployd watches: repo, branch and command per key'));
+    pageAdv.appendChild(sum);
     pageBody = make('div', 'dep-pagebody');
-    page.appendChild(pageBody);
+    pageAdv.appendChild(pageBody);
+    page.appendChild(pageAdv);
   }
 
   function engineService() {
