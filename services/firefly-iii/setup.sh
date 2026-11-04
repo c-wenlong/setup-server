@@ -70,8 +70,8 @@ set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-8097}"
 IMPORTER_PORT="${IMPORTER_PORT:-8099}"
-# HTTPS follows the matching local port unless set explicitly (the n8n and
-# kaichenpedia convention), so overriding only LOCAL_PORT or IMPORTER_PORT
+# HTTPS follows the matching local port unless set explicitly (the n8n
+# convention), so overriding only LOCAL_PORT or IMPORTER_PORT
 # cannot split a pair. Unlike immich, .env stores both HTTPS ports and they
 # are read back below, so a re-run needs no HTTPS_PORT_EXPLICIT bookkeeping ,
 # it lands back on whatever .env already settled on.

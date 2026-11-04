@@ -153,33 +153,6 @@
       "description": "Quiver's remote-control hub (swe remote serve): the phone PWA for watching and steering coding-agent sessions, with an inbox and a Usage tab, and the hub MacBook satellites dial. Pinned uv install under ~/.local/share/quiver-hub, systemd user unit, loopback-only behind Serve on :8477. Runs with --public-url, so 'Pair with Tailscale' works behind Serve; approve the code on the box with swe remote devices --approve. services/quiver-hub/pair.sh mints a token for satellites."
     },
     {
-      "key": "kaichenpedia",
-      "name": "kaichenpedia",
-      "tagline": "Wiki",
-      "group": "mine",
-      "icon": "book",
-      "author": "c-wenlong",
-      "url": "https://HOST:8091/",
-      "health": "http://127.0.0.1:8091/",
-      "marker": "~/services/kaichenpedia",
-      "setup": "services/kaichenpedia/setup.sh",
-      "env": "services/kaichenpedia/.env",
-      "control": {
-        "parts": [
-          {
-            "container": "kaichenpedia"
-          }
-        ],
-        "kuma": "kaichenpedia"
-      },
-      "description": "Personal wiki: a Next.js app built from the private kaichenpedia repo's site/Dockerfile and run as one container that serves the pages and /api/* (in-browser editing + copilot). deployd polls GitHub every minute and rebuilds the image on new commits; a failed build keeps the running container and an unhealthy one is rolled back, so pushing from any device is the publish step. ~/services/kaichenpedia/bin/deploy.sh --force rebuilds now. An amber tile means the container is down; a stale page with a green tile means a build is failing (see the deployd log).",
-      "deploy": {
-        "repo": "https://github.com/c-wenlong/kaichenpedia.git",
-        "ref": "main",
-        "cmd": "services/kaichenpedia/setup.sh"
-      }
-    },
-    {
       "key": "gnosia-learn",
       "name": "Gnosia",
       "tagline": "Study",

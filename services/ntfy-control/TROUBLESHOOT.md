@@ -20,9 +20,10 @@ control registry: 19 services from /home/user/dev/setup-server/app/web/services.
 
 Trust that line over this one — controllable as of 2026-09-12 (19, up from
 the original 6): `adguard`, `beszel`, `code-server`, `firefly-iii`, `forgejo`,
-`home-assistant`, `homepage`, `immich`, `jellyfin`, `kaichenpedia`, `manimkc`,
-`n8n`, `open-webui`, `paperless-ngx`, `remote-desktop`, `seafile`,
-`syncthing`, `uptime-kuma`, `vaultwarden`.
+`home-assistant`, `homepage`, `immich`, `jellyfin`, `manimkc`, `n8n`,
+`open-webui`, `paperless-ngx`, `remote-desktop`, `seafile`, `syncthing`,
+`uptime-kuma`, `vaultwarden`. kaichenpedia left the list on 2026-11-04,
+when it became a launcher app: the allowlist is `services.json` only.
 Send `panel` for the button menu, or `pick stop` for a picker.
 
 `ntfy`, `ollama` and `launcher` are **locked out in code** (`HARD_LOCKED` in
@@ -118,9 +119,9 @@ either `no control registry found — nothing is controllable` or
   crash-on-start is a service problem, not a control problem. See that
   service's TROUBLESHOOT.md.
 - Remember `restart: unless-stopped`: a service stopped via ntfy stays
-  stopped across reboots until you `start` it again. `kaichenpedia` and `n8n`
-  are currently stopped this way on purpose — the panel showing them down is
-  correct, not a fault.
+  stopped across reboots until you `start` it again. `n8n` is currently
+  stopped this way on purpose — the panel showing it down is correct, not a
+  fault.
 - Kuma still red for a service you stopped from here → the pause step
   failed (see Layer 2). Pause it by hand in the Kuma UI, or the monitor will
   page about downtime you asked for.

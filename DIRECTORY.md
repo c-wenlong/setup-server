@@ -33,7 +33,7 @@ no Docker).
 | :3003 | [monitoring](services/monitoring/) — ntfy | Push notifications (topic `alerts`) to phone/web | 3003 | Docker (host net) |
 | :5678 | [n8n](services/n8n/) | Workflow automation; workflows can call all local services | 5678 | Docker (host net) |
 | :8030 | [trigger-dev](services/trigger-dev/) | Trigger.dev v4: TypeScript background jobs and cron, dashboard + supervisor. Slim stack (no s2-lite — streams on Redis; events stay in Postgres). ClickHouse still runs because v4.6.0 refuses to boot without `CLICKHOUSE_URL`, unpublished, replication off. Official wants 6+8 GB; this box has 7.7 GB. Webapp loopback-only behind Serve. **Local registry on 127.0.0.1:5000** (not Serve-published) so `npx trigger.dev@4.6.0 deploy` from this box can push task images. Magic-link login, no SMTP — links in `docker logs trigger-webapp`. Sign-ups locked to `WHITELISTED_EMAILS`. Deployed 2026-09-15 | 8030 + 5000 | Docker (webapp + postgres + redis + electric + minio + clickhouse + registry + supervisor + docker-proxy; only webapp and registry published, both loopback) |
-| :8091 | [kaichenpedia](services/kaichenpedia/) | Personal wiki (Next.js app built from the private kaichenpedia repo's `site/Dockerfile`); deployd polls GitHub and rebuilds the image on new commits, rolling back an unhealthy one (`bin/deploy.sh --force` rebuilds now) | 8091 | Docker (image built from the repo) + deployd |
+| :8091 | kaichenpedia (launcher app, `~/services/launcher/apps/kaichenpedia.json`) | Personal wiki (Next.js app built from the private kaichenpedia repo's `site/Dockerfile`). A launcher app on the `dockerfile` method since 2026-11-04, edited from the Deploys gallery; the repo no longer has a `services/kaichenpedia/` folder, so a rebuilt box re-adds it from the gallery (`scripts/migrate-kaichenpedia-to-app.sh` did the one-time move). Keeps :8091, outside the 8300-8399 app block, because that is its URL. deployd redeploys it on new commits through `app/web/ghapp.py`, rolling back an unhealthy image | 8091 | Docker (`app-kaichenpedia`, image built from the repo) + deployd |
 | :8090 | manimkc (`~/dev/manimkc/server/`) | Video-gen job server: JSON brief → narrated ManimGL video → Seafile `manimkc` library | 8090 | systemd user unit |
 | :8092 | [beszel](services/beszel/) | Resource monitoring: CPU/RAM/GPU/disk/net/temps, history + ntfy-able alerts (complements Kuma's uptime checks) | 8092 | Docker (host net, loopback-bound) + native agent on 127.0.0.1:45876 (systemd user unit) |
 | :443**/home/** + :8093 | [launcher](app/web/) | One-tap app launcher: a sidebar shell around an ops home page (box health strip for memory, disk and load, with a disk-full alert; every service in a list grouped Running / Stopped / Not installed, with Open / Start / Install on the row and Restart / Stop / Update in a ⌘K action menu); services not installed yet get an Install that runs their `setup.sh`; detail pages reveal and **edit** a service's `.env` values in place (pencil per row — the fix for a password reset that left the file stale); flags services whose image tag moved upstream (6-hourly registry digest check) and offers a one-tap **Update** (pull + re-run setup.sh). **The short URL to bookmark on the phone.** Shares :443 with code-server via a `--set-path=/home` handler, which leaves `/` untouched | 8093 | systemd user unit (Python 3 stdlib, no deps) |
@@ -92,7 +92,8 @@ Supporting services (no Tailscale Serve entry):
   the same number, picked by the launcher's allocator, which skips anything
   a registry URL names, a Serve handler holds or a process listens on.
   Never hand-pick a service port in this block. The live list is
-  `ls ~/services/launcher/apps/` on the box.
+  `ls ~/services/launcher/apps/` on the box. One app sits outside it:
+  kaichenpedia kept :8091 when it moved from `services/` to a launcher app.
 - Before claiming a port for a new service: check this table, then
   `ss -ltn` and `tailscale serve status` on the box, then add rows here,
   a monitor line in `services/monitoring/seed_kuma.py`, and a row in README.md.
@@ -158,15 +159,11 @@ Supporting services (no Tailscale Serve entry):
 - **n8n intentionally stopped** (2026-09-08, via ntfy-control; Kuma monitor
   paused). Start it from the panel or `docker start n8n` when needed —
   scheduled workflows don't run while it's down.
-- **kaichenpedia intentionally stopped** (2026-09-08, via ntfy-control; Kuma
-  monitor paused, container `Exited (0)`). Not needed up right now. Start it
-  from the ntfy panel or `docker start kaichenpedia`.
-  ⚠️ Correction: an earlier note here claimed the daily poller only redeploys
-  while the container is running. That is false — measured 2026-09-11, the
-  timer built a fresh commit at 23:58 with the container stopped for two
-  days. So a recent `built-sha` says nothing about what is being *served*;
-  only the container's state does. Both this and n8n show as
-  amber "Paused" tiles in the launcher, which is accurate, not a fault.
+- **kaichenpedia as a launcher app (2026-11-04)** lost two controls the
+  `services/` tile had: launcher Stop/Start no longer pauses or resumes its
+  Uptime Kuma monitor (app tiles carry no `control.kuma`, so a deliberate
+  stop will alert), and ntfy-control cannot start/stop it (its allowlist
+  is `services.json`). Pause the monitor in Kuma by hand when stopping it.
 - **AdGuard Home**: shipped 2026-09-11 (see the :3080 row); the remaining
   step is adding `100.77.77.77` as a nameserver in the Tailscale admin
   console, which is what makes it filter anything.

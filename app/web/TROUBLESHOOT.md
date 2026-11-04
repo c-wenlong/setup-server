@@ -264,8 +264,8 @@ changes both.
   (Home Assistant's case) or resume the monitor by hand.
   `SharedControlRegistryTest.test_every_container_part_is_declared_by_a_compose_file`
   now fails the unit suite on any such mismatch.
-- **A stopped service shows an amber "Paused" tile** — `kaichenpedia` and
-  `n8n` are intentionally stopped. That tile is accurate, not a fault.
+- **A stopped service shows an amber "Paused" tile** — `n8n` is
+  intentionally stopped. That tile is accurate, not a fault.
 - **`Permission denied` from a container action** — see the docker-group note
   at the end of the next section; the same `sg docker` workaround covers both
   deploys and lifecycle actions.

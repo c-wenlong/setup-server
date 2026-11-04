@@ -46,7 +46,7 @@ control_listener.py  (systemd user unit / launchd, Restart=always)
 | `paperless-ngx` | containers `paperless-ngx`, `paperless-redis` |
 | `firefly-iii` | containers `firefly-iii-importer`, `firefly-iii`, `firefly-iii-db` |
 | `remote-desktop` | containers `guacamole`, `guacd` |
-| `open-webui`, `n8n`, `kaichenpedia`, `uptime-kuma`, `jellyfin`, `vaultwarden`, `adguard`, `homepage`, `home-assistant`, `forgejo` | their containers |
+| `open-webui`, `n8n`, `uptime-kuma`, `jellyfin`, `vaultwarden`, `adguard`, `homepage`, `home-assistant`, `forgejo` | their containers |
 | `code-server`, `syncthing`, `manimkc` | `systemctl --user` unit |
 | `beszel` | `beszel-agent.service` (systemd) + `beszel` container, moved together in order |
 
