@@ -9207,6 +9207,17 @@ class DeploymentsBase(GithubAppsBase):
         os.makedirs(ghapp.app_dir("hello-app"), exist_ok=True)
         with open(os.path.join(ghapp.app_dir("hello-app"), ".env"), "w") as fh:
             fh.write("API_TOKEN=hunter2-very-secret\n")
+        # The recorder also writes the row, as the real upsert would, so a
+        # later save reads back what the last one wrote.
+        def upsert(key, body):
+            self.pollers[key] = body
+            path = os.path.join(self.state, "pollers.json")
+            with open(path) as fh:
+                doc = json.load(fh)
+            doc["pollers"][key] = body
+            with open(path, "w") as fh:
+                json.dump(doc, fh)
+        server.deployd_upsert_poller = upsert
 
     def write_def(self, key, **fields):
         d = {"version": 1, "key": key, "name": key, "repo": "c-wenlong/hello",
@@ -9457,9 +9468,6 @@ class DeploymentUpdateTest(DeploymentsBase):
         self.assertEqual(self.pollers["hello-app"], {
             "repo": "https://github.com/c-wenlong/hello.git", "ref": "next",
             "cmd": "app/web/ghapp.py deploy hello-app"})
-        # (The recorder does not write pollers.json; deployd's would.)
-        with open(os.path.join(self.state, "pollers.json"), "w") as fh:
-            json.dump({"version": 1, "pollers": {"hello-app": self.pollers["hello-app"]}}, fh)
         self.pollers.clear()
         server.update_deployment("hello-app", {"context": "site"})
         self.assertEqual(self.pollers, {})     # same repo and ref: untouched
@@ -9527,3 +9535,108 @@ class DeploymentsHttpTest(DeploymentsBase):
         status, doc = self.call("POST", "/api/deployments/hello-app/redeploy")
         self.assertEqual((status, doc["job_id"]), (202, "job-1"))
         self.assertEqual(self.call("PUT", "/api/nothing", {})[0], 404)
+
+
+class DeploymentUpdateRaceTest(DeploymentsBase):
+    """The review's three cases: overlapping saves, a deployd tick holding
+    the old source, and method switches the runner cannot swap alone."""
+
+    def test_a_second_save_of_the_same_app_is_refused(self):
+        before = open(ghapp.def_path("hello-app")).read()
+        server._deployment_edits.add("hello-app")
+        try:
+            with self.assertRaises(server.DeployError) as ctx:
+                server.update_deployment("hello-app", {"context": "site"})
+        finally:
+            server._deployment_edits.discard("hello-app")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(open(ghapp.def_path("hello-app")).read(), before)
+        # ...and the slot is released after a save, failed or not.
+        with self.assertRaises(server.DeployError):
+            server.update_deployment("hello-app", {"dockerfile": "../x"})
+        server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(server._deployment_edits, set())
+
+    def test_a_source_change_waits_out_a_deployd_tick(self):
+        lock = os.path.join(server.DEPLOYD_HOME, ".poll.lock")
+        os.mkdir(lock)
+        before = open(ghapp.def_path("hello-app")).read()
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_deployment("hello-app", {"ref": "next"})
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(open(ghapp.def_path("hello-app")).read(), before)
+        self.assertEqual((self.deploys, self.pollers), ([], {}))
+        # A change that keeps repo and ref does not need the tick's lock.
+        server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(self.deploys, ["hello-app"])
+        os.rmdir(lock)
+        server.update_deployment("hello-app", {"ref": "next"})
+        self.assertFalse(os.path.exists(lock))     # taken and given back
+        self.assertEqual(self.pollers["hello-app"]["ref"], "next")
+
+    def test_a_failed_start_moves_the_poller_back(self):
+        def refuse(key):
+            raise server.DeployError(429, "too many jobs running (max 2)")
+        server.start_deploy = refuse
+        with self.assertRaises(server.DeployError):
+            server.update_deployment("hello-app", {"ref": "next"})
+        self.assertEqual(self.read_def("hello-app")["ref"], "main")
+        self.assertEqual(self.pollers["hello-app"]["ref"], "main")
+
+    def capture_steps(self):
+        seen = []
+        saved = server._run_steps
+        server._run_steps = lambda job, steps: seen.append(steps)
+        self.addCleanup(setattr, server, "_run_steps", saved)
+        return seen
+
+    def test_leaving_compose_stops_the_stack_and_restores_it_on_failure(self):
+        self.write_def("api-box", port=8304, method="compose",
+                       compose_file="deploy/compose.yml", container_port=8000)
+        self.deployed("api-box")
+        src = os.path.join(ghapp.app_dir("api-box"), "src", "deploy")
+        os.makedirs(src)
+        open(os.path.join(src, "compose.yml"), "w").close()
+        server._have_docker_group = lambda: True
+        seen = self.capture_steps()
+        out = server.update_deployment("api-box", {"method": "image",
+                                                   "image": "nginx:1.27"})
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.02)
+        steps = seen[0]
+        self.assertEqual([s["argv"][-1] if "on_failure" not in s else "restore"
+                          for s in steps], ["down", "api-box", "restore"])
+        self.assertIn("--project-name", steps[0]["argv"])
+        self.assertIn("app-api-box", steps[0]["argv"])
+        self.assertEqual(steps[1]["argv"][-2:], ["deploy", "api-box"])
+        self.assertEqual(steps[2]["argv"][-2:], ["up", "--detach"])
+        self.assertTrue(steps[2]["on_failure"])
+        self.assertEqual(server._jobs[out["job_id"]]["key"], "api-box")
+        self.assertEqual(self.deploys, [])          # not the plain path
+
+    def test_container_to_script_stops_the_container_first(self):
+        self.deployed("hello-app")
+        server._have_docker_group = lambda: True
+        seen = self.capture_steps()
+        server.update_deployment("hello-app", {"method": "script",
+                                               "cmd": "make deploy"})
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.02)
+        argvs = [s["argv"] for s in seen[0]]
+        self.assertEqual(argvs[0], ["docker", "stop", "app-hello-app"])
+        self.assertEqual(argvs[2], ["docker", "start", "app-hello-app"])
+
+    def test_same_method_or_never_deployed_is_the_plain_deploy(self):
+        self.write_def("api-box", port=8304, method="compose",
+                       compose_file="deploy/compose.yml", container_port=8000)
+        seen = self.capture_steps()
+        # Not deployed yet: nothing runs to stop.
+        server.update_deployment("api-box", {"method": "image", "image": "nginx:1.27"})
+        self.deployed("hello-app")
+        server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(seen, [])
+        self.assertEqual(self.deploys, ["api-box", "hello-app"])

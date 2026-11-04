@@ -3412,6 +3412,96 @@ def _sync_app_poller(d):
         log("github app %s: poller not updated (%s)" % (key, exc))
 
 
+# One save per app at a time, from validation until its deploy job exists:
+# a second PUT for the same key is refused rather than allowed to rewrite
+# the definition under a deploy the first one is starting.
+_deployment_edits = set()
+_deployment_edits_lock = threading.Lock()
+
+# Runtimes a method starts and another method does not replace on its own:
+# ghapp's single-container swap only ever removes app-<key>, so a compose
+# stack (or a container under a script) would keep holding the app's port.
+SINGLE_CONTAINER_METHODS = ("dockerfile", "image", "static", "node", "python")
+
+
+def _claim_deployd_poll():
+    """deployd's own poll lock (the `.poll.lock` dir a tick holds), or None
+    when deployd is not installed here. 409 while a tick runs: that tick may
+    already hold this app's old repo/ref and the commit it resolved there,
+    and would deploy them over a source change saved now."""
+    home = _deployd_env().get("SERVICE_HOME") or DEPLOYD_HOME
+    if not os.path.isdir(home):
+        return None
+    lock = os.path.join(home, ".poll.lock")
+    try:
+        os.mkdir(lock)
+    except FileExistsError:
+        raise DeployError(409, "deployd is polling right now: save again in a "
+                          "minute")
+    except OSError as exc:
+        log("deployd poll lock not taken (%s); saving without it" % exc)
+        return None
+    return lock
+
+
+def _switch_steps(key, old, new):
+    """([steps before the deploy], [steps if it fails]) that stop the old
+    method's runtime when the new method would not replace it, and start
+    it again when the new deploy fails, so the box keeps the version that
+    was working. Empty when nothing is deployed or nothing needs stopping.
+    A script's own processes are its own business: nothing to stop."""
+    was, now = ghapp.method_of(old), ghapp.method_of(new)
+    if was == now or _deployed_record(key) is None:
+        return [], []
+    if was == "compose":
+        src = os.path.join(ghapp.app_dir(key), "src")
+        if not os.path.isfile(os.path.join(src, old["compose_file"])):
+            return [], []
+        return ([{"argv": sg_docker(ghapp.compose_argv(old, src, ["down"]))}],
+                [{"argv": sg_docker(ghapp.compose_argv(old, src, ["up", "--detach"])),
+                  "on_failure": True}])
+    if was in SINGLE_CONTAINER_METHODS and now == "script":
+        name = ghapp.container_name(key)
+        return ([{"argv": sg_docker(["docker", "stop", name]), "optional": True}],
+                [{"argv": sg_docker(["docker", "start", name]),
+                  "on_failure": True, "optional": True}])
+    return [], []
+
+
+def _start_method_deploy(key, old, new):
+    """The deploy job for a saved definition: start_deploy, or when the
+    method changes in a way the runner cannot swap by itself, the same
+    `ghapp.py deploy` wrapped in the steps that stop and restore the old
+    runtime (see _switch_steps)."""
+    before, restore = _switch_steps(key, old, new)
+    if not before:
+        return start_deploy(key)
+    if not os.path.isfile(GHAPP_SCRIPT):
+        raise DeployError(404, "ghapp.py not found")
+    steps = before + [{"argv": build_command(GHAPP_SCRIPT, ["deploy", key]),
+                       "cwd": HERE}] + restore
+    job = register_job(key, "deploy")
+    log("deploy %s started: %s (%s -> %s, %d steps)"
+        % (job["id"], key, ghapp.method_of(old), ghapp.method_of(new), len(steps)))
+    threading.Thread(target=_run_steps, args=(job, steps), daemon=True).start()
+    return job["id"]
+
+
+def _restore_definition(key, old, new):
+    """Put `old` back if the file still holds `new` (nothing else saved
+    since), under the same flock a deploy reads it under. Best effort."""
+    with _ghapp_lock:
+        try:
+            with open(ghapp.def_path(key), encoding="utf-8") as fh:
+                if json.load(fh) != new:
+                    return
+            with ghapp.Lock(key):
+                _write_json_atomically(ghapp.def_path(key), old, ".app.")
+        except (OSError, ValueError, ghapp.AppError) as exc:
+            log("deployment %s: the previous definition was not restored (%s)"
+                % (key, exc))
+
+
 def update_deployment(key, body):
     """PUT api/deployments/{key}: merge `body` over the stored definition
     (null drops a field), validate with ghapp.validate, write it, then
@@ -3419,57 +3509,78 @@ def update_deployment(key, body):
     cannot start leaves the stored definition exactly as it was."""
     if not isinstance(body, dict):
         raise DeployError(400, "body must be a JSON object")
-    item, extra = _find_deployment(key)
+    item, _ = _find_deployment(key)
     if item["kind"] != "app":
         raise DeployError(400, "%s is deployed by deployd: change its cmd with "
                           "POST api/deployd/pollers/%s" % (key, key))
+    with _deployment_edits_lock:
+        if key in _deployment_edits:
+            raise DeployError(409, "another save of %s is in progress" % key)
+        _deployment_edits.add(key)
+    try:
+        return _update_claimed(key, body)
+    finally:
+        with _deployment_edits_lock:
+            _deployment_edits.discard(key)
+
+
+def _update_claimed(key, body):
+    """update_deployment's work, with this key's save slot held."""
     with _ghapp_lock:
         try:
             old = ghapp.load(key)
         except ghapp.AppError as exc:
             raise DeployError(409, str(exc))
-        new = dict(old)
-        for field, value in body.items():
-            if not isinstance(field, str):
-                raise DeployError(400, "field names must be strings")
-            if field in DEPLOYMENT_IMMUTABLE:
-                if value != old.get(field):
-                    raise DeployError(400, "%s cannot be changed here" % field)
-                continue
-            if value is None:
-                new.pop(field, None)
-            else:
-                new[field] = value
-        try:
-            ghapp.validate(new)
-        except ghapp.AppError as exc:
-            raise DeployError(400, str(exc))
-        if jobs_by_key().get(key, {}).get("status") == "running":
-            raise DeployError(409, "a job is already running for %s" % key)
-        # Held while the file changes: a deploy deployd started reads the
-        # definition under the same lock, so it sees all of one or the other.
-        try:
-            with ghapp.Lock(key):
-                _write_json_atomically(ghapp.def_path(key), new, ".app.")
-        except ghapp.AppError:
-            raise DeployError(409, "a deploy of %s is running: try again when "
-                              "it ends" % key)
-    # Outside _ghapp_lock: start_deploy may take it itself (adopt_app).
+    new = dict(old)
+    for field, value in body.items():
+        if not isinstance(field, str):
+            raise DeployError(400, "field names must be strings")
+        if field in DEPLOYMENT_IMMUTABLE:
+            if value != old.get(field):
+                raise DeployError(400, "%s cannot be changed here" % field)
+            continue
+        if value is None:
+            new.pop(field, None)
+        else:
+            new[field] = value
     try:
-        job_id = start_deploy(key)
-    except DeployError:
-        # The deploy never started (job slots full, a race): put the old
-        # definition back unless something else has rewritten it since.
+        ghapp.validate(new)
+    except ghapp.AppError as exc:
+        raise DeployError(400, str(exc))
+    if jobs_by_key().get(key, {}).get("status") == "running":
+        raise DeployError(409, "a job is already running for %s" % key)
+    moved = (new["repo"], new["ref"]) != (old["repo"], old["ref"])
+    poll = _claim_deployd_poll() if moved else None
+    try:
+        # Held while the file changes: a deploy deployd started reads the
+        # definition under the same flock, so it sees all of one or the other.
         with _ghapp_lock:
             try:
-                with open(ghapp.def_path(key), encoding="utf-8") as fh:
-                    still_mine = json.load(fh) == new
-            except (OSError, ValueError):
-                still_mine = False
-            if still_mine:
-                _write_json_atomically(ghapp.def_path(key), old, ".app.")
+                with ghapp.Lock(key):
+                    _write_json_atomically(ghapp.def_path(key), new, ".app.")
+            except ghapp.AppError:
+                raise DeployError(409, "a deploy of %s is running: try again "
+                                  "when it ends" % key)
+        if moved:
+            _sync_app_poller(new)
+    finally:
+        if poll:
+            try:
+                os.rmdir(poll)
+            except OSError:
+                pass
+    # Outside _ghapp_lock: start_deploy may take it itself (adopt_app). The
+    # save slot is still held, so no other PUT can rewrite the definition
+    # before this job exists.
+    try:
+        job_id = _start_method_deploy(key, old, new)
+    except DeployError:
+        # The deploy never started (job slots full, a race): put the old
+        # definition, and the poller's old source, back.
+        _restore_definition(key, old, new)
+        if moved:
+            _sync_app_poller(old)
         raise
-    _sync_app_poller(new)
     log("deployment %s updated (%s method)" % (key, ghapp.method_of(new)))
     return {"key": key, "job_id": job_id}
 

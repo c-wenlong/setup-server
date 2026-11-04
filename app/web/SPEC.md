@@ -862,6 +862,18 @@ within `JOB_LINGER`, since `ghapp.py` writes no `.fail` of its own),
 | `PUT api/deployments/{key}` | apps only. The body's fields are merged over the stored definition (`null` drops one; `key`, `name` and `port` must be absent or unchanged), `ghapp.validate` is the only gate (400 with its message), the file is rewritten under the app's flock, then `ghapp.py deploy <key>` starts; 202 `{key, job_id}`. A deploy that cannot start puts the old definition back. A new repo or ref moves the app's own poller. A service is a 400 naming its poller endpoint |
 | `POST api/deployments/{key}/redeploy` | 202 `{key, job_id}`: `start_deploy` for an app, `deployd --force` for a service |
 
+**Saving safely.** One save per app at a time: a second PUT for a key
+whose save is still between validation and its job starting is a 409, so
+it cannot rewrite the definition under the deploy the first one starts.
+A repo or ref change first takes deployd's own `.poll.lock` (409 while a
+tick runs): a tick already holding the old source and the commit it
+resolved there would otherwise deploy them over the new one. A method
+change the runner cannot swap alone wraps the deploy in steps: leaving
+`compose` runs `docker compose down` on the old stack first and `up -d`
+again if the deploy fails; a container method moving to `script` stops
+`app-<key>` first and starts it again on failure. A script's own
+processes are its own, so leaving `script` stops nothing.
+
 No `.env` value is in any of it: definitions only ever hold `env_names`.
 Ports never move. `ghapp_entries` now reads every method (its description
 used to read `d["dockerfile"]`, which a method switch would break), and a
