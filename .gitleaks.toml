@@ -28,18 +28,23 @@ useDefault = true
 #      variable plus the literal words 'wrong-password' — a deliberately
 #      invalid credential that exists only so the check can prove it does
 #      not authenticate.
+#   3. scripts/tests/test-migrate-sources-to-app.sh plants a fake old
+#      SITE_PASSPHRASE ("passphrase-TOPSECRET-123") so the suite can prove
+#      the migration never prints or copies it. A sandbox-only literal.
 # ---------------------------------------------------------------------------
 [allowlist]
-description = "Scoped false positives: HA stub JWT and hermes' fake wrong-password curl credential (see comments above)."
+description = "Scoped false positives: HA stub JWT, hermes' fake wrong-password curl credential and the sources migration test's planted passphrase (see comments above)."
 targetRules = ["curl-auth-user", "generic-api-key", "jwt", "jwt-base64"]
 condition = "AND"
 paths = [
   '''^services/home-assistant/tests/stubs/curl$''',
   '''^services/hermes-agent/tests/run-tests\.sh$''',
+  '''^scripts/tests/test-migrate-sources-to-app\.sh$''',
 ]
 regexes = [
   '''eyJhbGciOiJIUzI1NiJ9\.stub''',
   '''\$user:wrong-password''',
+  '''passphrase-TOPSECRET-123''',
 ]
 
 # ---------------------------------------------------------------------------

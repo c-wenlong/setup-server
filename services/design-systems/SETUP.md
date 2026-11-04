@@ -54,9 +54,8 @@ immediately with `~/services/design-systems/bin/deploy.sh --force`.
 
 ## Why the working clone, not a deploy clone
 
-Same reasoning as `services/sources/`: the clone already exists at
-`~/dev/design-systems` and a second copy would double ~300 MB of LFS media
-for nothing. `deploy.sh` pulls `main` forward (`--ff-only`, best effort)
+The clone already exists at `~/dev/design-systems` and a second copy would
+double ~300 MB of LFS media for nothing. `deploy.sh` pulls `main` forward (`--ff-only`, best effort)
 and builds whatever the working tree holds — uncommitted edits included,
 which is exactly what the repo's own `make serve` does. It never commits,
 resets or writes git state. (It does write build outputs into the
@@ -99,7 +98,7 @@ skips the wait entirely.
   That is within the repo's rules — AGENTS.md forbids publishing them
   *publicly* (the Pages site strips the gallery for that reason). The
   tailnet is the perimeter: anything on the tailnet can browse the full
-  library. Treat it like the sources passphrase site, minus the passphrase.
+  library, the same boundary the sources site uses.
 - `.env` holds only paths and ports (no secrets), but is still written
   `0600` and gitignored like every service's.
 

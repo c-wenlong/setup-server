@@ -133,6 +133,22 @@ first, dated by merge.
 
 ### Changed
 
+- **sources is a launcher app now, not a `services/` folder.** It runs on
+  the `static` method (`app/web/ghapp.py`, container `app-sources` on
+  `127.0.0.1:8098`, same URL, the :8098 and :443 `/` Serve handlers
+  untouched), with the old nginx config expressed as the method's new
+  fields: `proxies` sends `/api/` to the sources-trigger on host :8089 and
+  `cache_control` is `no-cache`. The build links the fetch clone's
+  `jobs.db` from `SOURCE_REPO` in the app's `.env`, as deploy.sh did.
+  `services/sources/` is gone. `scripts/migrate-sources-to-app.sh` is the
+  one-time move: it writes the definition, poller and `.env` (from the old
+  `.env`, values never printed; `SITE_PASSPHRASE` is not carried, the site
+  is no longer encrypted), checks uv, npm and node are on the PATH
+  ghapp.py gives the build, swaps containers under deployd's poll lock
+  (putting the old container back if the new site does not answer), and
+  only then points sources-trigger at `ghapp.py deploy sources` with a
+  systemd drop-in, restarted once no `sources-manual-*` unit runs. The Kuma monitor stays; app tiles carry no `control.kuma`.
+
 - **kaichenpedia is a launcher app now, not a `services/` folder.** It runs
   on the `dockerfile` method (`app/web/ghapp.py`, container
   `app-kaichenpedia` on `127.0.0.1:8091`, same URL and Serve port), so its

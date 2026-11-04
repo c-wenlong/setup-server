@@ -23,10 +23,10 @@
 #   LOCAL_PORT=9000 HTTPS_PORT=9000 ./setup.sh
 #   SOURCE_REPO=~/elsewhere/design-systems ./setup.sh
 #
-# Unlike services/sources/ this site serves readable files — there is no
-# SITE_PASSPHRASE. The tailnet is the access boundary (the repo is private;
-# its AGENTS.md forbids publishing the gallery or systems/ publicly, which
-# is exactly what a tailnet-only publish is not).
+# This site serves readable files, with no passphrase. The tailnet is the
+# access boundary (the repo is private; its AGENTS.md forbids publishing the
+# gallery or systems/ publicly, which is exactly what a tailnet-only publish
+# is not).
 #
 # Requirements beyond the repo baseline (curl, Docker, Tailscale): git,
 # python3 (the gallery/scorecard generators are stdlib-only; Pillow is used
