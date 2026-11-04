@@ -528,6 +528,12 @@ summary() {
     seen="$seen $f"
     echo "    $f  (old .env: holds the old SITE_PASSPHRASE, delete it yourself)"
   done < <(old_env_candidates)
+  for f in "$REPO_ROOT" "$DEPLOY_ROOT"; do
+    [ -f "$f/services/sources/docker-compose.override.yml" ] || continue
+    case " $seen " in *" $f/o "*) continue ;; esac
+    seen="$seen $f/o"
+    echo "    $f/services/sources/docker-compose.override.yml  (gitignored, old compose override)"
+  done
   return 0
 }
 

@@ -316,12 +316,15 @@ check "old .env not deleted"                test -f "$OLD_ENV"
 check "old home not deleted"                test -d "$HOME/services/sources/www"
 
 echo "• re-run is a no-op"
+mkdir -p "$R/services/sources"
+touch "$R/services/sources/docker-compose.override.yml"
 : > "$CALLS_LOG"
 cp "$(ENVF)" "$SB/env.before"
 cp "$(DROPIN)" "$SB/dropin.before"
 migrate
 check "exits zero"                          [ "$CODE" -eq 0 ]
 check "says already migrated"               out_has "already migrated"
+check "lists the old compose override"      out_has "$R/services/sources/docker-compose.override.yml"
 check "no build"                            calls_lack "uv run"
 check "no stop"                             calls_lack "docker stop"
 check "no new container"                    calls_lack "docker run"
