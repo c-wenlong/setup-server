@@ -1669,3 +1669,294 @@ class DeploydShaTest(Sandbox):
         ghapp.deploy("hello-app")
         self.assertTrue(self.argv_with("fetch", "origin", SHA))
         self.assertFalse(self.argv_with("merge-base"))
+
+
+class StaticProxyTest(Sandbox):
+    """static's optional proxies + cache_control: validation, the nginx
+    config they generate beside each release, the host-gateway mapping,
+    and a rollback serving the previous release with ITS config."""
+
+    API = [{"path": "/api/", "port": 8089}]
+    OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["DEPLOY_SHA"] = SHA
+        ghapp.healthy = lambda d, t: True
+
+    def deployed(self):
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json")) as fh:
+            return json.load(fh)
+
+    def deploy_quietly(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            ghapp.deploy("hello-app")
+
+    # --- validation
+
+    def test_good_proxies_and_cache_control_pass(self):
+        ghapp.validate(method_def("static", proxies=self.API,
+                                  cache_control="no-cache"))
+        ghapp.validate(method_def("static", proxies=[], cache_control=None))
+        ghapp.validate(method_def("static", proxies=None))
+        ghapp.validate(method_def("static", proxies=[
+            {"path": "/api", "port": 1}, {"path": "/a.b/c_d~e-f/", "port": 65535}]))
+        ghapp.validate(method_def("static",
+                                  cache_control="max-age=60, must-revalidate"))
+        ten = [{"path": "/p%d/" % i, "port": 9000 + i} for i in range(10)]
+        ghapp.validate(method_def("static", proxies=ten))
+
+    def test_bad_proxies_are_refused(self):
+        bad = [
+            "/api/",                                       # not a list
+            {"path": "/api/", "port": 8089},
+            [{"path": "/", "port": 8089}],                 # would shadow the site
+            [{"path": "", "port": 8089}],
+            [{"path": "api/", "port": 8089}],              # not rooted
+            [{"path": "/a b/", "port": 8089}],
+            [{"path": "/api/;", "port": 8089}],
+            [{"path": "/api/{", "port": 8089}],
+            [{"path": '/api/"', "port": 8089}],
+            [{"path": "/api//x", "port": 8089}],
+            [{"path": "/../x/", "port": 8089}],            # never matches
+            [{"path": "/./", "port": 8089}],
+            [{"path": "/api/", "port": 0}],
+            [{"path": "/api/", "port": 65536}],
+            [{"path": "/api/", "port": "8089"}],
+            [{"path": "/api/", "port": True}],             # bool is not a port
+            [{"path": "/api/", "port": 80.5}],
+            [{"path": "/api/"}],
+            [{"path": "/api/", "port": 8089, "host": "evil"}],
+            [{"path": "/api/", "port": 8089}, {"path": "/api/", "port": 9}],
+            [{"path": "/api/\n", "port": 8089}],             # `$` alone allows it
+            [{"path": "/api/\n", "port": 8089}, {"path": "/api/", "port": 9}],
+            ["/api/"],
+            [{"path": "/p%d/" % i, "port": 9000 + i} for i in range(11)],
+        ]
+        for v in bad:
+            with self.assertRaises(ghapp.AppError, msg=v) as ctx:
+                ghapp.validate(method_def("static", proxies=v))
+            self.assertTrue(str(ctx.exception).startswith("bad proxies"), v)
+
+    def test_bad_cache_control_is_refused(self):
+        for v in ("", "   ", 'no-cache"; add_header X "y', "no-cache;", "a\nb", "no-cache\n",
+                  "x" * 101, 3, ["no-cache"], "no{cache}"):
+            with self.assertRaises(ghapp.AppError, msg=v) as ctx:
+                ghapp.validate(method_def("static", cache_control=v))
+            self.assertTrue(str(ctx.exception).startswith("bad cache_control"))
+
+    # --- the generated config
+
+    def test_no_extras_means_no_config_and_no_add_host(self):
+        self.assertIsNone(ghapp.static_conf(method_def("static")))
+        self.assertIsNone(ghapp.static_conf(method_def("static", proxies=[])))
+        self.write_def(method_def("static"))
+        self.make_file("hello-app", "public/index.html")
+        self.deploy_quietly()
+        run = self.argv_with("docker", "run")[-1]
+        self.assertNotIn("--add-host", run)
+        self.assertEqual(run.count("--volume"), 1)     # the docroot only
+        app = ghapp.app_dir("hello-app")
+        self.assertFalse([n for n in os.listdir(app) if n.endswith(".nginx.conf")])
+
+    def test_config_holds_the_proxy_blocks_and_header(self):
+        text = ghapp.static_conf(method_def("static", proxies=[
+            {"path": "/api/", "port": 8089}, {"path": "/hooks", "port": 9000}],
+            cache_control="no-cache"))
+        self.assertIn("    location /api/ {\n"
+                      "        proxy_pass http://host.docker.internal:8089;\n"
+                      "        proxy_http_version 1.1;\n"
+                      "        proxy_buffering off;\n"
+                      "        proxy_read_timeout 600s;\n"
+                      "        proxy_set_header Host $host;\n"
+                      "    }\n", text)
+        self.assertIn("location /hooks {\n"
+                      "        proxy_pass http://host.docker.internal:9000;\n", text)
+        # No URI part: the request path reaches the target unchanged.
+        for line in text.splitlines():
+            if "proxy_pass" in line:
+                self.assertRegex(line, r"proxy_pass http://host\.docker\.internal:\d+;$")
+        files = text[text.index("    location / {"):]
+        files = files[:files.index("    }") + 5]
+        self.assertEqual(files, "    location / {\n"
+                                "        root   /usr/share/nginx/html;\n"
+                                "        index  index.html index.htm;\n"
+                                '        add_header Cache-Control "no-cache";\n'
+                                "    }")
+        self.assertIn("error_page   500 502 503 504  /50x.html;", text)
+        self.assertEqual(text.count("{"), text.count("}"))
+
+    def test_cache_control_alone_adds_only_the_header(self):
+        text = ghapp.static_conf(method_def("static", cache_control="no-cache"))
+        self.assertNotIn("proxy_pass", text)
+        self.assertIn('add_header Cache-Control "no-cache";', text)
+        self.write_def(method_def("static", cache_control="no-cache"))
+        self.make_file("hello-app", "public/index.html")
+        self.deploy_quietly()
+        run = self.argv_with("docker", "run")[-1]
+        self.assertNotIn("--add-host", run)               # nothing to reach
+        name = self.deployed()["release"]
+        conf = os.path.join(ghapp.app_dir("hello-app"), name + ".nginx.conf")
+        self.assertIn(conf + ":/etc/nginx/conf.d/default.conf:ro", run)
+
+    def test_proxies_mount_the_config_beside_the_release_and_add_the_host(self):
+        self.write_def(method_def("static", proxies=self.API,
+                                  cache_control="no-cache"))
+        self.make_file("hello-app", "public/index.html", "v2")
+        self.deploy_quietly()
+        run = self.argv_with("docker", "run")[-1]
+        name = self.deployed()["release"]
+        app = ghapp.app_dir("hello-app")
+        release = os.path.join(app, name)
+        conf = release + ".nginx.conf"
+        vols = [run[i + 1] for i, w in enumerate(run) if w == "--volume"]
+        self.assertEqual(vols, [release + ":/usr/share/nginx/html:ro",
+                                conf + ":/etc/nginx/conf.d/default.conf:ro"])
+        self.assertEqual(run[run.index("--add-host") + 1],
+                         "host.docker.internal:host-gateway")
+        self.assertEqual(run[-1], ghapp.STATIC_IMAGE)
+        self.assertNotIn("--env-file", run)
+        # Beside the release, never inside it (nginx would serve it).
+        self.assertFalse(os.path.exists(os.path.join(release, "default.conf")))
+        self.assertEqual(sorted(os.listdir(release)), ["index.html"])
+        with open(conf) as fh:
+            self.assertEqual(fh.read(), ghapp.static_conf(
+                method_def("static", proxies=self.API, cache_control="no-cache")))
+        self.assertEqual(os.stat(conf).st_mode & 0o777, 0o644)
+
+    def test_rollback_serves_the_previous_release_with_its_own_config(self):
+        app = ghapp.app_dir("hello-app")
+        # The previous release proxied; this deploy's definition does not.
+        prev = "site-%s-1000" % self.OLD_SHA[:12]
+        os.makedirs(os.path.join(app, prev))
+        old_conf = os.path.join(app, prev + ".nginx.conf")
+        with open(old_conf, "w") as fh:
+            fh.write(ghapp.static_conf(method_def("static", proxies=self.API)))
+        with open(os.path.join(app, "deployed.json"), "w") as fh:
+            json.dump({"sha": self.OLD_SHA, "method": "static", "release": prev}, fh)
+        self.write_def(method_def("static", cache_control="no-cache"))
+        self.make_file("hello-app", "public/index.html")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "d" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            self.deploy_quietly()
+        new, back = self.argv_with("docker", "run")
+        self.assertNotIn("--add-host", new)
+        self.assertEqual(back[-1], "sha256:" + "d" * 64)
+        vols = [back[i + 1] for i, w in enumerate(back) if w == "--volume"]
+        self.assertEqual(vols, [os.path.join(app, prev) + ":/usr/share/nginx/html:ro",
+                                old_conf + ":/etc/nginx/conf.d/default.conf:ro"])
+        self.assertEqual(back[back.index("--add-host") + 1],
+                         "host.docker.internal:host-gateway")
+        # The failed release and its config are gone; the old pair stays.
+        self.assertEqual(sorted(n for n in os.listdir(app) if n.startswith("site-")),
+                         sorted([prev, prev + ".nginx.conf"]))
+
+    def test_rollback_to_a_release_without_config_uses_the_default(self):
+        app = ghapp.app_dir("hello-app")
+        prev = "site-%s-1000" % self.OLD_SHA[:12]
+        os.makedirs(os.path.join(app, prev))
+        with open(os.path.join(app, "deployed.json"), "w") as fh:
+            json.dump({"sha": self.OLD_SHA, "method": "static", "release": prev}, fh)
+        self.write_def(method_def("static", proxies=self.API))
+        self.make_file("hello-app", "public/index.html")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "d" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            self.deploy_quietly()
+        new, back = self.argv_with("docker", "run")
+        self.assertIn("--add-host", new)
+        self.assertNotIn("--add-host", back)
+        self.assertEqual(back.count("--volume"), 1)
+
+    def test_switch_off_static_rollback_keeps_the_release_config(self):
+        app = ghapp.app_dir("hello-app")
+        prev = "site-%s-1000" % self.OLD_SHA[:12]
+        os.makedirs(os.path.join(app, prev))
+        with open(os.path.join(app, prev + ".nginx.conf"), "w") as fh:
+            fh.write(ghapp.static_conf(method_def("static", proxies=self.API)))
+        with open(os.path.join(app, "deployed.json"), "w") as fh:
+            json.dump({"sha": self.OLD_SHA, "method": "static", "release": prev}, fh)
+        self.write_def(method_def("image"))
+        self.make_src("hello-app")
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "f" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            self.deploy_quietly()
+        new, back = self.argv_with("docker", "run")
+        self.assertNotIn("--add-host", new)
+        self.assertIn("127.0.0.1:8301:80", back)
+        self.assertIn("--add-host", back)
+        self.assertIn(os.path.join(app, prev + ".nginx.conf")
+                      + ":/etc/nginx/conf.d/default.conf:ro", back)
+
+    def test_prune_drops_old_configs_with_their_releases(self):
+        app = ghapp.app_dir("hello-app")
+        prev = "site-%s-1000" % self.OLD_SHA[:12]
+        stale = "site-bbbbbbbbbbbb-5"
+        for n in (prev, stale):
+            os.makedirs(os.path.join(app, n))
+            open(os.path.join(app, n + ".nginx.conf"), "w").close()
+        open(os.path.join(app, stale + ".nginx.conf.tmp"), "w").close()
+        with open(os.path.join(app, "deployed.json"), "w") as fh:
+            json.dump({"sha": self.OLD_SHA, "method": "static", "release": prev}, fh)
+        self.write_def(method_def("static", proxies=self.API))
+        self.make_file("hello-app", "public/index.html")
+        self.deploy_quietly()
+        cur = self.deployed()["release"]
+        self.assertEqual(sorted(n for n in os.listdir(app) if n.startswith("site-")),
+                         sorted([cur, cur + ".nginx.conf", prev, prev + ".nginx.conf"]))
+
+    def test_a_failed_pull_drops_the_new_config_too(self):
+        self.write_def(method_def("static", proxies=self.API))
+        self.make_file("hello-app", "public/index.html")
+        self.run_codes["docker pull"] = 1
+        with self.assertRaises(ghapp.AppError):
+            self.deploy_quietly()
+        app = ghapp.app_dir("hello-app")
+        self.assertFalse([n for n in os.listdir(app) if n.startswith("site-")])
+
+    def test_add_host_only_reaches_run_argv_when_asked(self):
+        self.assertNotIn("--add-host", ghapp.run_argv(good(), "img:1"))
+        argv = ghapp.run_argv(good(), "img:1", add_host=True)
+        self.assertEqual(argv[argv.index("--add-host") + 1],
+                         "host.docker.internal:host-gateway")
+        self.assertEqual(argv[-1], "img:1")
+
+
+class ForceFlagTest(Sandbox):
+    """`ghapp.py deploy <key> --force`: accepted, changes nothing."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["GHAPP_SG"] = "1"     # skip the docker-group re-exec
+        self.addCleanup(os.environ.pop, "GHAPP_SG", None)
+        self.seen = []
+        self._deploy, self._remove = ghapp.deploy, ghapp.remove
+        ghapp.deploy = lambda key: self.seen.append(("deploy", key))
+        ghapp.remove = lambda key: self.seen.append(("remove", key))
+
+    def tearDown(self):
+        ghapp.deploy, ghapp.remove = self._deploy, self._remove
+        super().tearDown()
+
+    def main(self, *args):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = ghapp.main(["ghapp.py"] + list(args))
+        return code, err.getvalue()
+
+    def test_force_is_a_no_op_on_deploy(self):
+        self.assertEqual(self.main("deploy", "hello-app", "--force")[0], 0)
+        self.assertEqual(self.main("deploy", "hello-app")[0], 0)
+        self.assertEqual(self.seen, [("deploy", "hello-app")] * 2)
+
+    def test_force_is_not_a_remove_flag_or_any_other_word(self):
+        for args in (("remove", "hello-app", "--force"),
+                     ("deploy", "hello-app", "--forc"),
+                     ("deploy", "hello-app", "--force", "x"),
+                     ("deploy", "--force", "hello-app")):
+            code, err = self.main(*args)
+            self.assertEqual(code, 2, args)
+            self.assertIn("deploy <key> [--force]", err)
+        self.assertEqual(self.seen, [])

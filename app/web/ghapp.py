@@ -57,6 +57,26 @@ Methods, and the fields each adds to the definition:
                 That container gets no --env-file: it only serves files,
                 and the .env holds the build's secrets. Rollback mounts
                 the previous release, also when a switch off static fails.
+                Two optional fields shape the nginx config:
+                  "proxies": [{"path": "/api/", "port": 8089}, ...] (max
+                    10): each path becomes a `location <path>` that
+                    proxies to that port on the HOST (never an arbitrary
+                    URL) through host.docker.internal, with no URI part on
+                    proxy_pass (the request path reaches the target
+                    unchanged), buffering off (streamed replies pass
+                    through as they come) and a 600s read timeout. The
+                    container then gets --add-host
+                    host.docker.internal:host-gateway, and the host
+                    service must accept connections from the docker
+                    bridge (listen on 0.0.0.0, not 127.0.0.1).
+                  "cache_control": "no-cache": sent as Cache-Control on
+                    the files `location /`.
+                With either set, the generated server block (files exactly
+                as the image's default config serves them, plus these) is
+                written beside the release as <release>.nginx.conf and
+                mounted read-only over the default; a rollback mounts the
+                previous release's own file, so it serves identically.
+                With neither, nginx runs on its default config as before.
     node        "version" (image tag suffix, e.g. "22-alpine"), "start"
     python      (e.g. "3.13-slim"), optional "build" — a generated
                 Dockerfile is rendered into the checkout, then the method
@@ -109,9 +129,13 @@ method and a failed switch leaves the version that was working:
 
 Usage (cwd does not matter):
 
-    ghapp.py deploy <key>     fetch the ref (or $DEPLOY_SHA, which must be on
+    ghapp.py deploy <key> [--force]
+                              fetch the ref (or $DEPLOY_SHA, which must be on
                               origin/<ref>), switch methods if needed, run
-                              the method, health-check, publish, record
+                              the method, health-check, publish, record.
+                              --force is accepted and changes nothing: a
+                              deploy always rebuilds (callers written for
+                              a skip-if-unchanged deploy.sh pass it)
     ghapp.py remove <key>     stop the container or compose stack and drop
                               its Serve port; keep src/, .env, data/ and the
                               definition
@@ -182,6 +206,18 @@ GENERATED_DOCKERFILE = ".ghapp.Dockerfile"
 STATIC_IMAGE = "nginx:1.27-alpine"
 STATIC_CONTAINER_PORT = 80
 STATIC_DOCROOT = "/usr/share/nginx/html"
+STATIC_CONF = "/etc/nginx/conf.d/default.conf"
+# The static method's optional nginx extras. A proxy target is a HOST port
+# reached through Docker's host gateway, never a URL; its path is plain
+# URL-safe segments (no spaces, quotes, braces or `;`, so it cannot reshape
+# the generated config) and never `/` itself, which would shadow the site.
+# Both regexes are applied with fullmatch(): `$` alone lets a trailing
+# newline through.
+PROXY_HOST = "host.docker.internal"
+PROXY_ADD_HOST = PROXY_HOST + ":host-gateway"
+PROXY_PATH_RE = re.compile(r"^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?$")
+MAX_PROXIES = 10
+CACHE_CONTROL_RE = re.compile(r"^[A-Za-z0-9 ,=-]{1,100}$")
 
 # deployd's .env (read for SERVICE_HOME, never sourced) and its default home.
 DEPLOYD_ENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -260,6 +296,32 @@ def _cmd_field(d, field, required=True):
         raise AppError("bad %s %r" % (field, v))
 
 
+def _proxies_field(d):
+    """static's optional `proxies`: at most MAX_PROXIES {"path", "port"}
+    objects, each path a PROXY_PATH_RE prefix with no `.`/`..` segment
+    (nginx normalises those away, so such a location could never match),
+    each port a host TCP port, no path twice. Absent or null is none."""
+    v = d.get("proxies")
+    if v is None:
+        return
+    if not isinstance(v, list) or len(v) > MAX_PROXIES:
+        raise AppError("bad proxies %r" % (v,))
+    seen = set()
+    for p in v:
+        if not isinstance(p, dict) or set(p) != {"path", "port"}:
+            raise AppError("bad proxies entry %r" % (p,))
+        path, port = p["path"], p["port"]
+        if not isinstance(path, str) or not PROXY_PATH_RE.fullmatch(path) \
+                or any(seg in (".", "..") for seg in path.split("/")):
+            raise AppError("bad proxies path %r" % (path,))
+        if path in seen:
+            raise AppError("bad proxies path %r (listed twice)" % (path,))
+        seen.add(path)
+        if not isinstance(port, int) or isinstance(port, bool) \
+                or not 1 <= port <= 65535:
+            raise AppError("bad proxies port %r" % (port,))
+
+
 def validate(d):
     """A definition dict -> the same dict, or raise AppError. Every word that
     reaches an argv is shape-checked here first; which fields are required
@@ -298,6 +360,11 @@ def validate(d):
     elif m == "static":
         _cmd_field(d, "build")
         _rel_field(d, "output")
+        _proxies_field(d)
+        cc = d.get("cache_control")
+        if cc is not None and (not isinstance(cc, str) or not cc.strip()
+                               or not CACHE_CONTROL_RE.fullmatch(cc)):
+            raise AppError("bad cache_control %r" % (cc,))
     elif m in ("node", "python"):
         v = d.get("version")
         if not isinstance(v, str) or not VERSION_RE.match(v):
@@ -421,13 +488,16 @@ def build_argv(d, sha, src, dockerfile=None, context=None):
             ctx]
 
 
-def run_argv(d, image, container_port=None, mounts=(), env_file=True):
+def run_argv(d, image, container_port=None, mounts=(), env_file=True,
+             add_host=False):
     """`docker run` for the app. 127.0.0.1 only, restart unless-stopped (a
     stopped app stays stopped across reboots, the same policy as the compose
     services). `mounts` are extra host:container[:opts] bind specs (static's
-    read-only docroot). `env_file=False` leaves the app's .env out: static's
-    nginx only serves files, and the .env there holds build-time secrets
-    (a passphrase baked into the output) it must not carry."""
+    read-only docroot and nginx config). `env_file=False` leaves the app's
+    .env out: static's nginx only serves files, and the .env there holds
+    build-time secrets (a passphrase baked into the output) it must not
+    carry. `add_host` maps host.docker.internal to the host gateway, for
+    static's proxies (Linux Docker has no such name by default)."""
     key = d["key"]
     inner = container_port or d["container_port"]
     argv = ["docker", "run", "--detach",
@@ -442,6 +512,8 @@ def run_argv(d, image, container_port=None, mounts=(), env_file=True):
         argv += ["--volume", "%s:%s" % (os.path.join(app_dir(key), "data"), d["volume"])]
     for spec in mounts:
         argv += ["--volume", spec]
+    if add_host:
+        argv += ["--add-host", PROXY_ADD_HOST]
     return argv + [image]
 
 
@@ -550,7 +622,7 @@ def fetch(d, sha, src, verify=False):
     origin/<ref>, or its tip). Otherwise a sha the fetch could not bring
     down, or one from another branch, would deploy something deployd did
     not ask for while it records the request as done. Raising instead makes
-    deployd's fail/backoff retry, the same as services/kaichenpedia/deploy.sh."""
+    deployd retry it with its usual failure backoff."""
     if not os.path.isdir(os.path.join(src, ".git")):
         os.makedirs(os.path.dirname(src), exist_ok=True)
         run(["git", "clone", "--no-checkout", "--filter=blob:none",
@@ -915,24 +987,120 @@ def deployed_release(key):
     return None
 
 
+CONF_SUFFIX = ".nginx.conf"
+
+
+def release_conf(key, name):
+    """The nginx config generated for release `name`, kept BESIDE the
+    release (inside it, nginx would serve it as a file). Only a definition
+    with proxies or cache_control has one."""
+    return release_dir(key, name) + CONF_SUFFIX
+
+
 def prune_releases(key, keep_names):
-    """Drop static releases that are neither current nor the rollback one."""
+    """Drop static releases (and their nginx configs) that are neither
+    current nor the rollback one."""
     keep = {n for n in keep_names if n}
     try:
         names = os.listdir(app_dir(key))
     except OSError:
         return
     for name in names:
-        if name.startswith("site-") and name not in keep:
-            shutil.rmtree(os.path.join(app_dir(key), name), ignore_errors=True)
+        if not name.startswith("site-"):
+            continue
+        owner = name[:-len(CONF_SUFFIX)] if name.endswith(CONF_SUFFIX) else name
+        if owner in keep:
+            continue
+        path = os.path.join(app_dir(key), name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def static_conf(d):
+    """The nginx server block for a static definition, or None when it has
+    neither proxies nor cache_control (the image's own default config then
+    serves it, exactly as before these fields existed). The files side
+    mirrors that default config (root, index, the 50x page); the only
+    addition there is the Cache-Control header. Every word written here
+    passed validate(): paths and the header value hold no quote, brace,
+    `;` or whitespace that could reshape the config."""
+    proxies = d.get("proxies") or []
+    cache = d.get("cache_control")
+    if not proxies and not cache:
+        return None
+    # IPv4 listen only: the image adds [::]:80 to its default when the
+    # container has IPv6, but the port is published on 127.0.0.1 anyway,
+    # and a [::] listen fails outright in a container without IPv6.
+    lines = ["# Generated by ghapp.py for %s (static method), one per release."
+             % d["key"],
+             "# Edit the app's definition, not this file.",
+             "server {",
+             "    listen       %d;" % STATIC_CONTAINER_PORT,
+             "    server_name  localhost;",
+             ""]
+    for p in proxies:
+        # No URI part on proxy_pass: the request path reaches the target
+        # unchanged. Buffering off lets a streamed reply (NDJSON) through
+        # as it is written; 600s outlasts a synchronous call of up to 300s.
+        lines += ["    location %s {" % p["path"],
+                  "        proxy_pass http://%s:%d;" % (PROXY_HOST, p["port"]),
+                  "        proxy_http_version 1.1;",
+                  "        proxy_buffering off;",
+                  "        proxy_read_timeout 600s;",
+                  "        proxy_set_header Host $host;",
+                  "    }",
+                  ""]
+    lines += ["    location / {",
+              "        root   %s;" % STATIC_DOCROOT,
+              "        index  index.html index.htm;"]
+    if cache:
+        lines.append('        add_header Cache-Control "%s";' % cache)
+    lines += ["    }",
+              "",
+              "    error_page   500 502 503 504  /50x.html;",
+              "    location = /50x.html {",
+              "        root   %s;" % STATIC_DOCROOT,
+              "    }",
+              "}"]
+    return "\n".join(lines) + "\n"
+
+
+def write_release_conf(key, name, text):
+    """Write release `name`'s nginx config: once, before its container
+    starts, and never rewritten (a file bind mount pins the inode)."""
+    path = release_conf(key, name)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
 
 
 def static_run_kw(key, name):
     """run_argv() keywords for serving release `name` from the nginx
     image: its port, the docroot read-only, and no --env-file (the .env
-    holds the build's secrets, and nginx needs none of it)."""
-    return {"container_port": STATIC_CONTAINER_PORT, "env_file": False,
-            "mounts": [release_dir(key, name) + ":" + STATIC_DOCROOT + ":ro"]}
+    holds the build's secrets, and nginx needs none of it). When the
+    release has its own nginx config, that is mounted over the default,
+    plus the host-gateway mapping when the config proxies: decided from
+    the release's file, never the current definition, so a rollback serves
+    exactly what that release served."""
+    kw = {"container_port": STATIC_CONTAINER_PORT, "env_file": False,
+          "mounts": [release_dir(key, name) + ":" + STATIC_DOCROOT + ":ro"]}
+    conf = release_conf(key, name)
+    try:
+        with open(conf, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return kw
+    kw["mounts"].append(conf + ":" + STATIC_CONF + ":ro")
+    if "proxy_pass http://%s:" % PROXY_HOST in text:
+        kw["add_host"] = True
+    return kw
 
 
 def deploy_static(d, src, sha, previous, prev_release):
@@ -949,12 +1117,16 @@ def deploy_static(d, src, sha, previous, prev_release):
     name = new_release_name(key, sha)
     release = release_dir(key, name)
     tmp = release + ".tmp"
+    conf = release_conf(key, name)
     try:
         # symlinks=True: a link inside the output is copied as a link and
         # then resolves inside the container's filesystem; dereferencing it
         # here would copy whatever HOST path it pointed at into the release.
         shutil.copytree(out_dir, tmp, symlinks=True)
         os.replace(tmp, release)
+        text = static_conf(d)
+        if text is not None:
+            write_release_conf(key, name, text)
         run(["docker", "pull", STATIC_IMAGE])
         say("serving %s from %s on 127.0.0.1:%d"
             % (d["output"], STATIC_IMAGE, d["port"]))
@@ -973,6 +1145,11 @@ def deploy_static(d, src, sha, previous, prev_release):
     except (AppError, OSError):
         shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(release, ignore_errors=True)
+        for path in (conf, conf + ".tmp"):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         raise
     return name
 
@@ -1331,9 +1508,16 @@ def reexec_with_docker_group(argv):
     os.execv(sg, [sg, "docker", "-c", cmd])
 
 
+USAGE = "usage: ghapp.py deploy <key> [--force] | remove <key>"
+
+
 def main(argv):
+    # deploy's --force is a no-op (a deploy always rebuilds), accepted so a
+    # caller written for a skip-if-unchanged deploy.sh can keep passing it.
+    if argv[1:2] == ["deploy"] and len(argv) == 4 and argv[3] == "--force":
+        argv = argv[:3]
     if len(argv) != 3 or argv[1] not in ("deploy", "remove"):
-        print("usage: ghapp.py deploy|remove <key>", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         return 2
     reexec_with_docker_group(argv)
     try:

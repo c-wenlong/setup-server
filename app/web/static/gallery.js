@@ -177,7 +177,13 @@
         { name: 'build', label: 'Build command', def: 'npm ci && npm run build', mono: true,
           hint: 'Runs with sh -c in the checked-out repo.' },
         { name: 'output', label: 'Output directory', def: 'dist', mono: true,
-          hint: 'The folder the build writes, relative to the repo root.' }] },
+          hint: 'The folder the build writes, relative to the repo root.' },
+        { name: 'cache_control', label: 'Cache-Control header', def: '', mono: true,
+          optional: true, placeholder: 'no-cache',
+          hint: 'Optional. Sent with every file, e.g. no-cache so a new deploy shows on the next load.' },
+        { name: 'proxies', label: 'Proxy rules', kind: 'proxies', optional: true, max: 10,
+          hint: 'Optional. Requests under a path go to that port on this box, path unchanged. ' +
+                'The service there must accept connections from Docker (listen on 0.0.0.0).' }] },
     node: { label: 'Node',
       blurb: 'A Dockerfile is generated from node:<version>, then built and run.',
       fields: [
@@ -541,6 +547,93 @@
     return { wrap: p, input: inp, field: f };
   }
 
+  /* An editable list of {path, port} rows (static's proxies). Same row
+     shape as inputFor's, plus read() for collect() and setDisabled() for
+     the save lock. A row left fully blank is dropped; no rows reads as
+     null, so an app without proxies stays without the field. A port that
+     is not digits is sent as typed, and the server's 400 points here. */
+  function proxiesFor(f, value) {
+    var p = make('div', 'field gdp-field gdp-proxies');
+    p.appendChild(text(make('div', 'field-label'), f.label + (f.optional ? ' (optional)' : '')));
+    var list = make('div', 'gdp-proxy-list');
+    list.setAttribute('data-field', f.name);
+    list.tabIndex = -1;
+    p.appendChild(list);
+    var add = make('button', 'btn gdp-proxy-add');
+    add.type = 'button';
+    text(add, 'Add proxy rule');
+    p.appendChild(add);
+    if (f.hint) p.appendChild(text(make('p', 'field-hint gdp-hint'), f.hint));
+    var rows = [];
+    var locked = false;
+
+    function cell(cls, val, ph, label) {
+      var inp = make('input', 'field-input gdp-mono ' + cls);
+      inp.type = 'text';
+      inp.setAttribute('autocomplete', 'off');
+      inp.setAttribute('autocapitalize', 'off');
+      inp.setAttribute('spellcheck', 'false');
+      inp.setAttribute('aria-label', label);
+      inp.placeholder = ph;
+      inp.value = val;
+      inp.addEventListener('input', markDirty);
+      return inp;
+    }
+    function sync() { add.disabled = locked || rows.length >= (f.max || 10); }
+    function addRow(path, port) {
+      var r = make('div', 'gdp-proxy-row');
+      var row = { wrap: r,
+                  path: cell('gdp-proxy-path', path, '/api/', 'Proxy path'),
+                  port: cell('gdp-proxy-port', port, '8089', 'Host port') };
+      row.rm = make('button', 'btn gdp-proxy-rm');
+      row.rm.type = 'button';
+      text(row.rm, 'Remove');
+      row.rm.setAttribute('aria-label', 'Remove this proxy rule');
+      row.rm.addEventListener('click', function () {
+        list.removeChild(r);
+        rows.splice(rows.indexOf(row), 1);
+        sync();
+        markDirty();
+        add.focus();
+      });
+      r.appendChild(row.path);
+      r.appendChild(row.port);
+      r.appendChild(row.rm);
+      list.appendChild(r);
+      rows.push(row);
+      sync();
+      return row;
+    }
+    (Array.isArray(value) ? value : []).forEach(function (e) {
+      e = e || {};
+      addRow(e.path == null ? '' : String(e.path), e.port == null ? '' : String(e.port));
+    });
+    add.addEventListener('click', function () {
+      addRow('', '').path.focus();
+      markDirty();
+    });
+    function read() {
+      var out = [];
+      for (var i = 0; i < rows.length; i++) {
+        var path = rows[i].path.value.trim();
+        var port = rows[i].port.value.trim();
+        if (!path && !port) continue;
+        out.push({ path: path, port: /^\d+$/.test(port) ? parseInt(port, 10) : port });
+      }
+      return out.length ? out : null;
+    }
+    function setDisabled(on) {
+      locked = on;
+      for (var i = 0; i < rows.length; i++) {
+        rows[i].path.disabled = on;
+        rows[i].port.disabled = on;
+        rows[i].rm.disabled = on;
+      }
+      sync();
+    }
+    return { wrap: p, input: list, field: f, read: read, setDisabled: setDisabled };
+  }
+
   /* The body a Save sends: the chosen method, the common fields and that
      method's own. An empty optional field is sent as null (absent); a port
      that reads as digits goes as a number. Nothing else is interpreted. */
@@ -549,6 +642,7 @@
     var inputs = form.inputs;
     for (var i = 0; i < inputs.length; i++) {
       var f = inputs[i].field;
+      if (inputs[i].read) { body[f.name] = inputs[i].read(); continue; }
       var v = inputs[i].input.value.trim();
       if (f.name === 'container_port' && /^\d+$/.test(v)) v = parseInt(v, 10);
       else if (v === '' && f.optional) v = null;
@@ -588,9 +682,14 @@
     for (var g = 0; g < groups.length; g++) {
       for (var i = 0; i < groups[g].length; i++) {
         var f = groups[g][i];
-        var multi = f.name === 'cmd';
-        var row = inputFor(f, seedValue(def, f), { multiline: multi });
-        row.input.addEventListener('input', markDirty);
+        var row;
+        if (f.kind === 'proxies') {
+          /* Absent in `base` is no rows, the same as null. */
+          row = proxiesFor(f, Object.prototype.hasOwnProperty.call(def, f.name) ? def[f.name] : null);
+        } else {
+          row = inputFor(f, seedValue(def, f), { multiline: f.name === 'cmd' });
+          row.input.addEventListener('input', markDirty);
+        }
         form.inputs.push(row);
         form.fieldsBox.appendChild(row.wrap);
       }
@@ -672,7 +771,10 @@
     function lock(on) {
       sel.disabled = on;
       reset.disabled = on || JSON.stringify(collect()) === mine.clean;
-      for (var i = 0; i < mine.inputs.length; i++) mine.inputs[i].input.disabled = on;
+      for (var i = 0; i < mine.inputs.length; i++) {
+        if (mine.inputs[i].setDisabled) mine.inputs[i].setDisabled(on);
+        else mine.inputs[i].input.disabled = on;
+      }
     }
     save.addEventListener('click', function () {
       var body = collect();

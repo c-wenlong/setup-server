@@ -10,6 +10,16 @@ first, dated by merge.
 
 ### Added
 
+- **Static apps: proxy rules and a Cache-Control header.** A static
+  definition may carry `proxies` (up to 10 `{"path": "/api/", "port":
+  8089}` rules, each proxied unbuffered with a 600 s timeout to that port on
+  the host through `host.docker.internal`) and `cache_control` (sent on
+  every file). ghapp.py writes the nginx config beside each release and a
+  rollback mounts the previous release's own config, so it serves exactly
+  as before; with neither field nginx keeps its default config. The
+  Deploys gallery's static form edits both. `ghapp.py deploy <key>
+  --force` is now accepted as a no-op (app/web/SPEC.md v19).
+
 - **Deploys: poll cadence in the header, editable.** deployd now writes
   `state/tick.json` each poll ({started, finished, rc}), and the Deploys
   page shows it: `every 60s · last poll 40s ago, took 5s · next in ~20s`,

@@ -1005,3 +1005,64 @@ keep passing it.
 **No value is printed.** Values go into the child's environment only,
 never an argv, so the job log's echoed `$ sh -c ...` line carries none,
 and no warning includes a value.
+
+## v19: static proxy rules and a Cache-Control header (2026-11-05)
+
+Part of [#137](https://github.com/c-wenlong/setup-server/issues/137). A
+static site sometimes needs a small API next to its files (a "Run now"
+button that calls a service on the host) and a cache policy for a shell
+that changes every deploy. Two optional static fields cover both, so such
+a site no longer needs a hand-written nginx config and its own service
+folder.
+
+**Fields.** Both are validated by `ghapp.validate` only, under the static
+method (server.py adds no rules):
+
+| Field | Shape | Becomes |
+|---|---|---|
+| `proxies` | list of at most 10 `{"path", "port"}` objects, nothing else in them | one `location <path>` each, `proxy_pass http://host.docker.internal:<port>` |
+| `cache_control` | `^[A-Za-z0-9 ,=-]{1,100}$`, not blank | `add_header Cache-Control "<value>"` on the files `location /` |
+
+A proxy path matches `^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?$`, so it is
+never `/` itself (that would shadow the site) and holds no quote, brace,
+`;` or space that could reshape the config. A `.` or `..` segment is also
+refused: nginx normalises those away, so such a location could never
+match. The port is an int from 1 to 65535 (a bool is refused) and no path
+may appear twice. Targets are host ports only, never URLs.
+
+**Each proxy block** is `proxy_pass` with no URI part (the request path
+reaches the target unchanged), `proxy_http_version 1.1`,
+`proxy_buffering off` (a streamed NDJSON reply passes through as it is
+written), `proxy_read_timeout 600s` (a synchronous call can take 300 s)
+and `proxy_set_header Host $host`. With any proxy the container also gets
+`--add-host host.docker.internal:host-gateway`, which works on Linux Docker
+and Docker Desktop. The host service must accept connections from the
+Docker bridge: listen on `0.0.0.0` (the sources trigger listens on
+`0.0.0.0:8089`), not `127.0.0.1`.
+
+**The config.** With either field set, `ghapp.py` writes the server block
+beside the release as `site-<sha12>-<ms>.nginx.conf` (outside the
+docroot, or nginx would serve it) and mounts it read-only over
+`/etc/nginx/conf.d/default.conf`. The files side mirrors the image's
+default config (root, `index index.html index.htm`, the 50x page) plus the
+header; it listens on IPv4 only, since the port is published on
+`127.0.0.1` and a `[::]` listen fails in a container without IPv6. With
+neither field, nginx runs on its default config as before and nothing is
+written.
+
+**Rollback serves identically.** `static_run_kw` reads the release's own
+config file, never the current definition: a rollback (a failed health
+check, or a failed switch off static) mounts the previous release with
+the config and add-host it was served with, and a release from before
+these fields gets the image default again. Prune and a failed deploy drop
+a release's config with it.
+
+**Gallery.** The static form gains a Cache-Control text field and an
+editable list of proxy rules (path and port per row, Add and Remove, at
+most 10). An empty field and an empty list send null, so an app without
+them stays without them; a 400 shows inline and marks the field.
+
+**`ghapp.py deploy <key> --force`** is accepted and does nothing extra (a
+deploy always rebuilds), so a caller written for a skip-if-unchanged
+`deploy.sh --force` can point at the runner unchanged. `remove` takes no
+flag.
