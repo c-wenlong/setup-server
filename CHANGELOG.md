@@ -157,6 +157,15 @@ first, dated by merge.
 
 ### Fixed
 
+- **sources: the Jobs page is back.** The deploy clone build (PR #139)
+  lost it because `build_site.py` only ships Jobs when
+  `data/jobs/jobs.db` exists in the repo it runs in, and that gitignored
+  file lives only in the fetch clone where the daily scrape writes it.
+  `deploy.sh` now symlinks the fetch clone's `jobs.db` into the deploy
+  clone before building (the build opens it read-only) and removes the
+  link when the fetch clone has no `jobs.db`, so a stale link cannot
+  keep a dead Jobs page alive.
+
 - **CI: Python 3.9 syntax job pinned to ubuntu-24.04.** `ubuntu-latest`
   moved to 26.04, which has no Python 3.9 in `actions/python-versions`, so
   the job failed at setup on every PR.

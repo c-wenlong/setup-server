@@ -84,6 +84,19 @@ Run it by hand to see the full error:
   itself is in a bad state; fix it upstream and push (or inspect the
   deploy clone: `git -C ~/services/sources/repo status`).
 
+**Jobs missing from the sidebar.**
+The build ships Jobs only when `data/jobs/jobs.db` exists in the deploy
+clone, and `deploy.sh` links it in from the fetch clone each run.
+- `ls -l ~/services/sources/repo/data/jobs/jobs.db` → should be a symlink
+  into `SOURCE_REPO` (default `~/dev/sources`). Missing or dangling means
+  the fetch clone has no `data/jobs/jobs.db`: check
+  `ls -l ~/dev/sources/data/jobs/jobs.db` and, if it is absent, let the
+  daily scrape run (or re-run it) first.
+- The fetch clone has the file but the link does not → rebuild:
+  `~/services/sources/bin/deploy.sh --force`. Its log line says which way
+  it went ("jobs.db linked from the fetch clone" vs "no jobs.db in the
+  fetch clone").
+
 ## Layer 2 — local serving broken
 
 **`curl http://127.0.0.1:8098/` fails.**

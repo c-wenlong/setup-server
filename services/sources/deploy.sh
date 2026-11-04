@@ -21,13 +21,16 @@
 # cannot, because no fetch job ever writes this clone. That is also why
 # this script takes no sources-fetch.lock: there is no half-fetched tree
 # to protect the build against. The clone is hard-reset to origin/BRANCH
-# each deploy — it is a build input, not a working copy.
+# each deploy — it is a build input, not a working copy. The one thing
+# still read from the fetch clone is data/jobs/jobs.db, read-only, via the
+# symlink below.
 #
 # Build pipeline:
 #   git clone (first run only) / git fetch origin BRANCH
 #   verify DEPLOY_SHA is an ancestor of origin/BRANCH (deployd retries
 #     rather than deploy the wrong sha)
 #   git reset --hard origin/BRANCH
+#   link data/jobs/jobs.db from the fetch clone (or drop a stale link)
 #   uv sync --quiet                        # in the deploy clone
 #   uv run apps/web/build/build_site.py --out www/next   # scripts/ before 2026-10
 #   repoint www/current -> releases/<sha>  # atomic: one rename over the old symlink
@@ -102,6 +105,22 @@ fi
 # -------------------------------------------------------------------- build
 echo "deploying $remote_sha (was: $built_sha)"
 git -C "$REPO_DIR" reset --hard --quiet "origin/$BRANCH"
+
+# build_site.py ships the Jobs page only when data/jobs/jobs.db exists in
+# the repo it runs in. That file is gitignored, and the daily scrape writes
+# it only in the fetch clone ($SOURCE_REPO), so link it into the deploy
+# clone. The build opens it read-only, so a symlink is safe. When the
+# fetch clone has no jobs.db, remove any stale link so the build ships
+# without Jobs rather than a stale page.
+JOBS_DB="$REPO_DIR/data/jobs/jobs.db"
+if [ -n "${SOURCE_REPO:-}" ] && [ -f "$SOURCE_REPO/data/jobs/jobs.db" ]; then
+  mkdir -p "$REPO_DIR/data/jobs"
+  ln -sfn "$SOURCE_REPO/data/jobs/jobs.db" "$JOBS_DB"
+  echo "jobs.db linked from the fetch clone"
+else
+  rm -f "$JOBS_DB"
+  echo "no jobs.db in the fetch clone: building without Jobs"
+fi
 
 echo "syncing deps (uv sync)"
 ( cd "$REPO_DIR" && uv sync --quiet )

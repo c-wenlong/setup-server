@@ -26,11 +26,13 @@ weekly fetch timer ──┐                    push from any device
                            all deploy blocks)    │    deploy clone ~/services/sources/repo
                                                  │ 2. git fetch + verify DEPLOY_SHA
                                                  │ 3. git reset --hard origin/main
-                                                 │ 4. uv sync --quiet
-                                                 │ 5. uv run apps/web/build/build_site.py --out www/next
+                                                 │ 4. link data/jobs/jobs.db from the
+                                                 │    fetch clone, if it has one
+                                                 │ 5. uv sync --quiet
+                                                 │ 6. uv run apps/web/build/build_site.py --out www/next
                                                  │    (gzip + AES-256-GCM per file;
                                                  │     SITE_PASSPHRASE from .env)
-                                                 │ 6. atomic repoint  current -> releases/<sha>
+                                                 │ 7. atomic repoint  current -> releases/<sha>
                                                  │        ▼
                                                  │  ~/services/sources/www/current
                                                  │        │  bind mount (ro)
@@ -54,7 +56,11 @@ machine-managed clone at `~/services/sources/repo`: fetched and hard-reset to `o
 by anything else, and safe to delete — it re-clones on the next deploy.
 `~/dev/sources` only seeds `REPO_URL` at setup time (its origin remote
 carries the auth that already works on this box); after that it can be
-dirty, locked or gone and deploys still run.
+dirty, locked or gone and deploys still run. The one file the deploy
+still reads from it is `data/jobs/jobs.db`: gitignored and written only
+by the daily scrape in the fetch clone, so `deploy.sh` symlinks it into
+the deploy clone before building (the build opens it read-only). Without
+it the site builds normally, just with no Jobs page.
 
 ## Why polling, not a webhook
 
@@ -108,7 +114,8 @@ not trigger a deploy.
 4. Installs `deploy.sh` -> `~/services/sources/bin/` (refreshed every run;
    edit the repo copy, then re-run setup.sh).
 5. Runs the initial deploy: clone `~/services/sources/repo`, fetch,
-   `reset --hard origin/BRANCH`, `uv sync`, `build_site.py`, swap.
+   `reset --hard origin/BRANCH`, link `data/jobs/jobs.db` from the fetch
+   clone when present, `uv sync`, `build_site.py`, swap.
 6. `docker compose up -d` (nginx, `restart: unless-stopped`) + local health
    check.
 7. Removes the old per-service `sources-deploy` timer / LaunchAgent if a
@@ -126,7 +133,8 @@ cd services/sources && SITE_PASSPHRASE='the site passphrase' ./setup.sh
 ```
 
 Overrides: `LOCAL_PORT` / `HTTPS_PORT` (default 8098), `SOURCE_REPO`
-(default `~/dev/sources`; fetch-clone path, only seeds `REPO_URL`),
+(default `~/dev/sources`; fetch-clone path, seeds `REPO_URL` and supplies
+`data/jobs/jobs.db` for the Jobs page),
 `REPO_URL` (default: `SOURCE_REPO`'s origin, else
 `https://github.com/c-wenlong/sources`), `BRANCH` (main). Overriding
 `BRANCH` or `REPO_URL` desyncs auto-deploy: deployd polls the repo/ref
