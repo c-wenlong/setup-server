@@ -3478,9 +3478,11 @@ def _switch_steps(key, old, new):
         # The runner's compose deploy force-removes app-<key> before `up`,
         # and its own rollback only knows earlier compose stacks. Park the
         # container under another name (stopped, so the port is free) and
-        # put it back if the stack does not come up. `name` is KEY_RE-shaped,
-        # so the one shell line below carries no request text.
-        prev = name + "-prev"
+        # put it back if the stack does not come up. KEY_RE allows no dot,
+        # so "<name>.parked" can never be another app's container (nor a
+        # compose one, which compose names with dashes); and `name` is
+        # KEY_RE-shaped, so the one shell line below carries no request text.
+        prev = name + ".parked"
         clear = ('ids=$(docker ps -aq --filter label=com.docker.compose.project=%s); '
                  '[ -z "$ids" ] || docker rm --force $ids' % name)
         return ([{"argv": sg_docker(["docker", "rm", "--force", prev]), "optional": True},

@@ -9644,19 +9644,22 @@ class DeploymentUpdateRaceTest(DeploymentsBase):
             time.sleep(0.02)
         steps = seen[0]
         argvs = [s["argv"] for s in steps]
+        # Never a name another app could own: app-<key> with a dotted key
+        # is impossible (the review's app-hello-prev was app hello-prev's).
+        self.assertIsNone(ghapp.KEY_RE.match("hello-app.parked"))
         self.assertEqual(argvs[:3], [
-            ["docker", "rm", "--force", "app-hello-app-prev"],
-            ["docker", "rename", "app-hello-app", "app-hello-app-prev"],
-            ["docker", "stop", "app-hello-app-prev"]])
+            ["docker", "rm", "--force", "app-hello-app.parked"],
+            ["docker", "rename", "app-hello-app", "app-hello-app.parked"],
+            ["docker", "stop", "app-hello-app.parked"]])
         self.assertEqual(argvs[3][-2:], ["deploy", "hello-app"])
         # Success only: drop the parked container.
-        self.assertEqual(argvs[4], ["docker", "rm", "--force", "app-hello-app-prev"])
+        self.assertEqual(argvs[4], ["docker", "rm", "--force", "app-hello-app.parked"])
         self.assertFalse(steps[4].get("on_failure"))
         # Failure only: clear the new stack by its project label, then put
         # the old container back under its name and start it.
         self.assertEqual(argvs[5][:2], ["sh", "-c"])
         self.assertIn("label=com.docker.compose.project=app-hello-app", argvs[5][2])
-        self.assertEqual(argvs[6], ["docker", "rename", "app-hello-app-prev", "app-hello-app"])
+        self.assertEqual(argvs[6], ["docker", "rename", "app-hello-app.parked", "app-hello-app"])
         self.assertEqual(argvs[7], ["docker", "start", "app-hello-app"])
         self.assertTrue(all(s.get("on_failure") for s in steps[5:]))
 
