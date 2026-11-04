@@ -9,8 +9,9 @@ Paperclip / OpenHands split-and-redeploy on `homeserver`.
 the reference and the launcher's Remove action running it without
 `--purge`. Since then: firefly-iii, home-assistant, homepage, jellyfin,
 metabase, n8n, open-webui, umami; then vaultwarden, immich, paperless-ngx,
-seafile, appflowy, plane; then kaichenpedia (now a launcher app, no folder), design-systems,
-sources, gnosia-learn; then beszel, quiver-hub, syncthing, trigger-dev, coolify;
+seafile, appflowy, plane; then kaichenpedia and sources (both now launcher
+apps, no folder), design-systems, gnosia-learn; then beszel, quiver-hub,
+syncthing, trigger-dev, coolify;
 then code-server, forgejo, openhands, adguard, remote-desktop, paperclip.
 monitoring, ntfy-control and the launcher itself get none: they are the
 box's own plumbing, so Remove would take down the thing that shows the
