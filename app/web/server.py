@@ -3307,15 +3307,19 @@ def deployd_payload():
         pass
     seconds = _deployd_poll_seconds(env)
     tick = _deployd_tick(state_dir)
+    timer = deployd_timer()
     # A tick older than the stale-lock window cannot still be running: the
     # poller would have had its lock reclaimed long ago.
     running = bool(tick and "finished" not in tick
                    and time.time() - tick["started"] < 3600)
+    # A paused or failed timer has no next poll to promise, whatever the
+    # last tick's arithmetic says.
     next_due = (tick["started"] + seconds
-                if tick and seconds and not running else None)
+                if tick and seconds and not running
+                and timer not in ("inactive", "failed") else None)
     return {
         "installed": os.path.isdir(state_dir),
-        "timer": deployd_timer(),
+        "timer": timer,
         "poll": {"seconds": seconds, "tick": tick,
                  "running": running, "next_due": next_due},
         "self_update_pending": os.path.exists(
@@ -4588,6 +4592,12 @@ def start_deploy(key):
 
     job = register_job(key, "deploy")
     job_id, log_path = job["id"], job["log_path"]
+    # A deployd deploy submitted while its timer is paused must not resume
+    # polling: setup.sh runs `enable --now` unconditionally, so the job
+    # re-stops the timer on the way out.
+    job["restore_timer_stop"] = (
+        key == "deployd"
+        and deployd_timer() in ("inactive", "deactivating"))
     # What is about to run, frozen now: a pull or a registry edit while the
     # deploy runs must not change which revision and script the receipt names.
     job["source"] = deploy_source(svc, script)
@@ -4656,6 +4666,8 @@ def _reap(job, proc, logfile, argv=None, cwd=None):
             log("receipt for %s not written: %s" % (job["key"], exc))
         if previous and previous.get("removed_at"):
             _resume_after_reinstall(job)
+    if job.get("restore_timer_stop"):
+        _restore_stopped_timer(job)
     _finish(job, code)
 
 
@@ -4817,6 +4829,39 @@ def is_removed(receipt, active):
     """
     return bool(isinstance(receipt, dict) and receipt.get("removed_at")
                 and not active)
+
+
+def _restore_stopped_timer(job):
+    """Re-stop deployd.timer after a deploy submitted while it was paused.
+
+    setup.sh's `enable --now` restarts it, so the paused state is
+    re-applied here. Runs whether the deploy won or lost — the user's
+    stop still stands either way — and the outcome lands in the job log
+    like the Kuma resumes.
+    """
+    try:
+        logfile = open(job["log_path"], "ab", buffering=0)
+    except OSError:
+        return
+    try:
+        logfile.write(b"$ systemctl --user stop deployd.timer\n")
+        try:
+            proc = subprocess.Popen(
+                ["systemctl", "--user", "stop", "deployd.timer"],
+                stdout=logfile, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL)
+            code = proc.wait()
+        except Exception as exc:
+            code = -1
+            logfile.write(("could not run: %s\n" % exc).encode())
+        if code != 0:
+            logfile.write(("[warning: deployd.timer is still running "
+                           "(exited %d); stop it from the service page]\n"
+                           % code).encode())
+            log("deployd timer re-stop after %s exited %d"
+                % (job["id"], code))
+    finally:
+        logfile.close()
 
 
 def _resume_after_reinstall(job):

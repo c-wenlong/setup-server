@@ -880,7 +880,14 @@
     pageEngine.appendChild(form);
     input.focus();
     input.select();
-    cancel.addEventListener('click', function () { editing = null; refresh(); });
+    /* `mine` is the editor this save belongs to: a user who navigated away
+       and opened another editor before the response lands must not have it
+       closed out from under them. */
+    var mine = editing;
+    cancel.addEventListener('click', function () {
+      if (editing === mine) editing = null;
+      refresh();
+    });
     save.addEventListener('click', function () {
       var v = parseInt(input.value, 10);
       if (!isFinite(v) || String(v) !== input.value.trim() || v < 5) {
@@ -901,9 +908,16 @@
           }
           callDeployd('POST', 'api/services/deployd/deploy', null,
             function (d2, s2) {
-              editing = null;
-              if (s2 === 202 && d2 && d2.job_id &&
-                  window.LauncherApp && LauncherApp.watchJob) {
+              if (s2 !== 202 || !d2 || !d2.job_id) {
+                save.disabled = false;
+                cancel.disabled = false;
+                err.hidden = false;
+                text(err, (d2 && d2.error) ||
+                     'Apply failed (HTTP ' + s2 + ').');
+                return;
+              }
+              if (editing === mine) editing = null;
+              if (window.LauncherApp && LauncherApp.watchJob) {
                 LauncherApp.watchJob('deployd', d2.job_id, 'deploy');
               }
               refresh();
