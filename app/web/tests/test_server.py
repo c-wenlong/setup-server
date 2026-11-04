@@ -143,6 +143,8 @@ class SandboxTest(unittest.TestCase):
             "DISK_TTL": server.DISK_TTL,
             "DISK_TIMEOUT": server.DISK_TIMEOUT,
             "_du_fs_bytes": server._du_fs_bytes,
+            "fetch_page_icon": server.fetch_page_icon,
+            "FAVICON_TTL": server.FAVICON_TTL,
             "_docker_df": server._docker_df,
             "_audit_scan": server._audit_scan,
             "_start_audit": server._start_audit,
@@ -197,6 +199,11 @@ class SandboxTest(unittest.TestCase):
         # through the unstubbed-Popen guard a beat after its test ended.
         # Audit tests put the real spawn back over a stubbed _audit_scan.
         server._start_audit = lambda: None
+        # Same reason again: an active tile's favicon discovery fetches the
+        # service's page from a daemon worker — a real one would read this
+        # box's live pages a beat after its test ended. The favicon tests
+        # put the real fetch back over a stubbed opener.
+        server.fetch_page_icon = lambda page_url: None
 
         self.write_registry(self.REGISTRY)
         server._registry_cache["mtime"] = None
@@ -234,6 +241,8 @@ class SandboxTest(unittest.TestCase):
         server._docker_map_cache["map"] = {}
         server._disk_samples.clear()
         server._disk_inflight.clear()
+        server._favicon_cache.clear()
+        server._favicon_inflight.clear()
         with server._audit_lock:
             server._audit.update({"at": 0.0, "running": False,
                                   "result": None, "error": None})
@@ -607,6 +616,253 @@ class FaviconResolutionTest(SandboxTest):
         self.assertEqual(tiles["a"]["favicon"],
                          "https://box.ts.net:8098/favicon.svg")
         self.assertIsNone(tiles["b"]["favicon"])
+
+
+class PickIconTest(unittest.TestCase):
+    """pick_icon ranks <link rel=icon> candidates the way a browser would."""
+
+    def test_svg_beats_a_bigger_png(self):
+        html = ('<link rel="icon" type="image/png" sizes="512x512"'
+                ' href="/big.png">'
+                '<link rel="icon" type="image/svg+xml" href="/mark.svg">')
+        self.assertEqual(server.pick_icon(html), "/mark.svg")
+
+    def test_largest_declared_size_wins(self):
+        html = ('<link rel="icon" sizes="32x32" href="/small.png">'
+                '<link rel="icon" sizes="192x192 512x512" href="/big.png">')
+        self.assertEqual(server.pick_icon(html), "/big.png")
+
+    def test_undeclared_apple_touch_counts_as_180(self):
+        html = ('<link rel="icon" sizes="32x32" href="/small.png">'
+                '<link rel="apple-touch-icon" href="/touch.png">')
+        self.assertEqual(server.pick_icon(html), "/touch.png")
+
+    def test_mask_icon_is_ignored(self):
+        html = ('<link rel="mask-icon" href="/mask.svg" color="#000">'
+                '<link rel="icon" href="/plain.png">')
+        self.assertEqual(server.pick_icon(html), "/plain.png")
+
+    def test_data_href_is_skipped(self):
+        html = ('<link rel="icon" href="data:image/png;base64,AAAA">'
+                '<link rel="icon" href="/plain.png">')
+        self.assertEqual(server.pick_icon(html), "/plain.png")
+
+    def test_shortcut_icon_mixed_case_multi_token(self):
+        self.assertEqual(
+            server.pick_icon('<link rel="Shortcut Icon" href="/favicon.ico">'),
+            "/favicon.ico")
+
+    def test_no_links_is_none(self):
+        self.assertIsNone(server.pick_icon("<html><head></head></html>"))
+
+
+class _PageResp:
+    """A urlopen-shaped answer for _favicon_opener stubs."""
+
+    def __init__(self, url, body, content_type="text/html; charset=utf-8"):
+        import email.message
+        self._url = url
+        self._body = body.encode("utf-8") if isinstance(body, str) else body
+        self.headers = email.message.Message()
+        self.headers["Content-Type"] = content_type
+
+    def read(self, limit=-1):
+        return self._body if limit < 0 else self._body[:limit]
+
+    def geturl(self):
+        return self._url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _PageOpener:
+    """An opener whose answers (or failures) are keyed by request URL."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def open(self, req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        result = self.mapping[url]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class FetchPageIconTest(unittest.TestCase):
+    """fetch_page_icon over a stubbed redirect-following opener."""
+
+    def setUp(self):
+        self._real = server._favicon_opener
+
+    def tearDown(self):
+        server._favicon_opener = self._real
+
+    def stub_pages(self, mapping):
+        server._favicon_opener = _PageOpener(mapping)
+
+    def test_relative_href_resolves_against_post_redirect_url(self):
+        self.stub_pages({"http://127.0.0.1:8108/gallery/": _PageResp(
+            "http://127.0.0.1:8108/docs/",
+            '<link rel="icon" href="assets/f.svg">')})
+        self.assertEqual(
+            server.fetch_page_icon("http://127.0.0.1:8108/gallery/"),
+            "http://127.0.0.1:8108/docs/assets/f.svg")
+
+    def test_non_html_answer_is_none(self):
+        self.stub_pages({"http://127.0.0.1:1/": _PageResp(
+            "http://127.0.0.1:1/", "{}", "application/json")})
+        self.assertIsNone(server.fetch_page_icon("http://127.0.0.1:1/"))
+
+    def test_no_declared_icon_falls_back_to_favicon_ico(self):
+        self.stub_pages({"http://127.0.0.1:1/app/": _PageResp(
+            "http://127.0.0.1:1/app/", "<html><body>hi</body></html>")})
+        self.assertEqual(server.fetch_page_icon("http://127.0.0.1:1/app/"),
+                         "http://127.0.0.1:1/favicon.ico")
+
+    def test_any_exception_is_none(self):
+        self.stub_pages({"http://127.0.0.1:1/": OSError("refused")})
+        self.assertIsNone(server.fetch_page_icon("http://127.0.0.1:1/"))
+
+
+class FaviconPageTest(SandboxTest):
+    """favicon_page builds the loopback page a tile's icon is read from."""
+
+    def test_health_origin_carries_the_public_path(self):
+        svc = {"key": "design-systems",
+               "url": "https://HOST:8108/gallery/",
+               "health": "http://127.0.0.1:8108/gallery/"}
+        self.assertEqual(server.favicon_page(svc, "box.ts.net"),
+                         "http://127.0.0.1:8108/gallery/")
+
+    def test_health_api_path_is_replaced_by_public_path(self):
+        svc = {"key": "quiver-hub", "url": "https://HOST:8477/",
+               "health": "http://127.0.0.1:8477/v1/status"}
+        self.assertEqual(server.favicon_page(svc, "box.ts.net"),
+                         "http://127.0.0.1:8477/")
+
+    def test_non_loopback_health_is_none(self):
+        svc = {"key": "a", "url": "https://HOST:1/",
+               "health": "http://10.0.0.5:1/"}
+        self.assertIsNone(server.favicon_page(svc, "box.ts.net"))
+
+    def test_missing_url_is_none(self):
+        svc = {"key": "a", "url": None,
+               "health": "http://127.0.0.1:1/"}
+        self.assertIsNone(server.favicon_page(svc, "box.ts.net"))
+
+    def test_missing_health_is_none(self):
+        svc = {"key": "a", "url": "https://HOST:1/", "health": None}
+        self.assertIsNone(server.favicon_page(svc, "box.ts.net"))
+
+
+class TileFaviconTest(SandboxTest):
+    """tile_favicon precedence: manifest override, then live discovery."""
+
+    SVC = {"key": "design-systems", "url": "https://HOST:8108/gallery/",
+           "health": "http://127.0.0.1:8108/gallery/"}
+    PAGE = "http://127.0.0.1:8108/gallery/"
+
+    def seed(self, ref):
+        server._favicon_cache[self.PAGE] = (time.time(), ref)
+
+    def test_manifest_favicon_wins_over_discovery(self):
+        svc = dict(self.SVC, favicon="/assets/favicon.svg")
+        self.seed("/media/docs/assets/favicon.svg")
+        self.assertEqual(server.tile_favicon(svc, "box.ts.net", True),
+                         "https://box.ts.net:8108/assets/favicon.svg")
+
+    def test_root_relative_ref_joins_onto_public_url(self):
+        self.seed("/media/docs/assets/favicon.svg")
+        self.assertEqual(server.tile_favicon(self.SVC, "box.ts.net", True),
+                         "https://box.ts.net:8108/media/docs/assets/"
+                         "favicon.svg")
+
+    def test_inactive_service_never_discovers(self):
+        self.assertIsNone(server.tile_favicon(self.SVC, "box.ts.net", False))
+        self.assertNotIn(self.PAGE, server._favicon_inflight)
+        self.assertNotIn(self.PAGE, server._favicon_cache)
+
+    def test_cross_origin_ref_stays_absolute(self):
+        self.seed("https://cdn.example.com/mark.png")
+        self.assertEqual(server.tile_favicon(self.SVC, "box.ts.net", True),
+                         "https://cdn.example.com/mark.png")
+
+    def test_payload_uses_the_same_precedence(self):
+        self.write_registry({"services": [dict(self.SVC, name="D",
+                                               tagline="t", icon="palette",
+                                               marker=None, setup=None)]})
+        server.probe_all = lambda urls: {
+            u: u == "http://127.0.0.1:8108/gallery/" for u in urls}
+        server.magicdns_host = lambda: "box.ts.net"
+        self.seed("/media/docs/assets/favicon.svg")
+        tiles = server.services_payload()["services"]
+        self.assertEqual(tiles[0]["favicon"],
+                         "https://box.ts.net:8108/media/docs/assets/"
+                         "favicon.svg")
+
+
+class CachedFaviconTest(SandboxTest):
+    """cached_favicon: never blocks, one worker per page, stale-while-fetch."""
+
+    PAGE = "http://127.0.0.1:8108/gallery/"
+
+    def setUp(self):
+        super().setUp()
+        self.fetches = []
+        self.release = threading.Event()
+        # Restore the real fetch path; the page fetch itself is stubbed so
+        # the worker thread never touches a socket.
+        server.fetch_page_icon = self._fetch
+
+    def _fetch(self, page_url):
+        self.fetches.append(page_url)
+        self.release.wait(5)
+        return "http://127.0.0.1:8108/media/docs/assets/favicon.svg"
+
+    def tearDown(self):
+        # Let any parked worker finish before the sandbox goes away.
+        self.release.set()
+        deadline = time.time() + 5
+        while server._favicon_inflight and time.time() < deadline:
+            time.sleep(0.01)
+        super().tearDown()
+
+    def wait_idle(self):
+        deadline = time.time() + 5
+        while server._favicon_inflight and time.time() < deadline:
+            time.sleep(0.01)
+
+    def test_cold_call_returns_none_and_starts_one_worker(self):
+        self.assertIsNone(server.cached_favicon(self.PAGE))
+        self.assertIn(self.PAGE, server._favicon_inflight)
+        # A second call while the worker is parked starts no other.
+        self.assertIsNone(server.cached_favicon(self.PAGE))
+        self.release.set()
+        self.wait_idle()
+        self.assertEqual(self.fetches, [self.PAGE])
+
+    def test_finished_worker_populates_the_cache(self):
+        self.assertIsNone(server.cached_favicon(self.PAGE))
+        self.release.set()
+        self.wait_idle()
+        self.assertEqual(server.cached_favicon(self.PAGE),
+                         "/media/docs/assets/favicon.svg")
+        self.assertEqual(self.fetches, [self.PAGE])
+
+    def test_stale_entry_serves_while_refreshing(self):
+        server._favicon_cache[self.PAGE] = (
+            time.time() - server.FAVICON_TTL - 1, "/old.svg")
+        self.assertEqual(server.cached_favicon(self.PAGE), "/old.svg")
+        self.assertIn(self.PAGE, server._favicon_inflight)
+        self.release.set()
+        self.wait_idle()
+        self.assertEqual(server.cached_favicon(self.PAGE),
+                         "/media/docs/assets/favicon.svg")
 
 
 # ---------------------------------------------------------------- allowlist
