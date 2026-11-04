@@ -426,7 +426,7 @@ class MethodDeployTest(Sandbox):
         self.make_file("hello-app", "docker-compose.yml")
         with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"),
                   "w") as fh:
-            json.dump({"sha": self.OLD_SHA}, fh)
+            json.dump({"sha": self.OLD_SHA, "method": "compose"}, fh)
         ghapp.healthy = lambda d, t: False
         with self.assertRaises(ghapp.AppError):
             ghapp.deploy("hello-app")
@@ -977,3 +977,341 @@ class MethodRemoveTest(Sandbox):
         ghapp.remove("hello-app")
         self.assertFalse(os.path.exists(self.marker))
         self.assertFalse(self.argv_with("serve"))
+
+
+class MethodSwitchTest(Sandbox):
+    """deploy() owns method switches: it reads the method the previous
+    deployed.json recorded and stops, clears or restores the old runtime
+    around the new method, whatever started the deploy (the gallery, a
+    deployd poll, `ghapp.py deploy` by hand)."""
+
+    OLD_SHA = "a" * 40
+
+    def setUp(self):
+        super().setUp()
+        os.environ["DEPLOY_SHA"] = SHA
+        ghapp.healthy = lambda d, t: True
+        self.log = []
+        self._say = ghapp.say
+        ghapp.say = lambda msg: self.log.append(msg)
+
+    def tearDown(self):
+        ghapp.say = self._say
+        super().tearDown()
+
+    def app(self):
+        return ghapp.app_dir("hello-app")
+
+    def src(self):
+        return os.path.join(self.app(), "src")
+
+    def previous(self, method, definition=None, sha=None, **extra):
+        """A deployed.json the way an earlier deploy left it. `definition`
+        False leaves the field out, as a record from before it existed."""
+        os.makedirs(self.app(), exist_ok=True)
+        rec = {"sha": sha or self.OLD_SHA, "image": None, "method": method,
+               "ref": "main", "at": "2026-11-01T00:00:00Z"}
+        if definition is not False:
+            rec["definition"] = definition or (
+                good() if method == "dockerfile" else method_def(method))
+        rec.update(extra)
+        with open(os.path.join(self.app(), "deployed.json"), "w") as fh:
+            json.dump(rec, fh)
+
+    def record(self):
+        with open(os.path.join(self.app(), "deployed.json")) as fh:
+            return json.load(fh)
+
+    def index(self, *words):
+        """Position of the first call holding every word, or -1."""
+        for i, c in enumerate(self.calls):
+            if all(w in c for w in words):
+                return i
+        return -1
+
+    def logged(self, text):
+        return any(text in line for line in self.log)
+
+    # ---- compose -> anything
+
+    def test_compose_to_image_downs_the_old_stack_first(self):
+        # The earlier compose deploy is a real one: its record carries the
+        # definition the switch takes the stack down by.
+        self.write_def(method_def("compose", compose_file="deploy/compose.yml"))
+        self.make_file("hello-app", "deploy/compose.yml")
+        ghapp.deploy("hello-app")
+        self.assertEqual(self.record()["definition"]["compose_file"],
+                         "deploy/compose.yml")
+        self.calls[:] = []
+        self.write_def(method_def("image"))
+        ghapp.deploy("hello-app")
+        down = self.index("compose", "down")
+        self.assertGreaterEqual(down, 0)
+        argv = self.calls[down]
+        self.assertEqual(argv[argv.index("--project-name") + 1], "app-hello-app")
+        self.assertEqual(argv[argv.index("--file") + 1],
+                         os.path.join(self.src(), "deploy", "compose.yml"))
+        # Before the checkout moves src/ off the commit the stack ran from.
+        self.assertLess(down, self.index("checkout", "--force", SHA))
+        self.assertLess(down, self.index("docker", "run"))
+        self.assertEqual(self.index("compose", "up"), -1)    # no restore
+        self.assertEqual(self.record()["method"], "image")
+        self.assertTrue(self.logged("method change compose -> image"))
+
+    def test_compose_to_image_failure_restores_the_old_stack(self):
+        self.write_def(method_def("image"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("compose")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        run = self.index("docker", "run")
+        rm = max(i for i, c in enumerate(self.calls)
+                 if c == ["docker", "rm", "--force", "app-hello-app"])
+        back = self.index("checkout", "--detach", self.OLD_SHA)
+        up = self.index("compose", "up", "--detach")
+        # Clear what the image method started, re-check-out the commit the
+        # stack ran from, then bring it up again.
+        self.assertTrue(run < rm < back < up, (run, rm, back, up))
+        self.assertEqual(self.calls[up][-2:], ["up", "--detach"])
+        self.assertEqual(self.record()["method"], "compose")   # untouched
+        self.assertTrue(self.logged("bringing the old compose stack back"))
+
+    def test_a_failed_compose_down_restores_and_never_deploys(self):
+        self.write_def(method_def("image"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("compose")
+        self.run_codes["docker compose"] = 1
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(self.index("docker", "pull"), -1)
+        self.assertGreaterEqual(self.index("compose", "up", "--detach"), 0)
+
+    def test_compose_record_without_definition_downs_by_project_label(self):
+        self.write_def(method_def("image"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("compose", definition=False)
+        self.quiet_out["docker ps --all --filter label=com.docker.compose."
+                       "project=app-hello-app"] = (0, "app-hello-app-web-1\n")
+        ghapp.deploy("hello-app")
+        self.assertEqual(self.index("compose", "down"), -1)
+        rm = self.calls.index(["docker", "rm", "--force", "app-hello-app-web-1"])
+        self.assertLess(rm, self.index("docker", "run"))
+        self.assertTrue(self.logged("predates `definition`"))
+
+    def test_compose_record_without_definition_cannot_restore_and_says_so(self):
+        self.write_def(method_def("image"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("compose", definition=False)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(self.index("compose", "up"), -1)
+        self.assertEqual(self.index("checkout", "--detach", self.OLD_SHA), -1)
+        self.assertTrue(self.logged("not restoring the old stack"))
+
+    def test_compose_restore_without_the_old_file_says_so(self):
+        self.write_def(method_def("image"))
+        self.make_file("hello-app", "Dockerfile")       # no compose file
+        self.previous("compose")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertEqual(self.index("compose", "up"), -1)
+        self.assertTrue(self.logged("the old compose stack was not restored"))
+
+    # ---- container -> script
+
+    def test_container_to_script_stops_the_container_first(self):
+        self.write_def(method_def("script"))
+        self.make_src("hello-app")
+        self.previous("dockerfile")
+        ghapp.deploy("hello-app")
+        stop = self.calls.index(["docker", "stop", "app-hello-app"])
+        self.assertLess(stop, self.index("sh", "-c", "./run.sh"))
+        self.assertNotIn(["docker", "start", "app-hello-app"], self.calls)
+        self.assertNotIn(["docker", "rm", "--force", "app-hello-app"], self.calls)
+        self.assertEqual(self.record()["method"], "script")
+
+    def test_container_to_script_failure_starts_it_again(self):
+        self.write_def(method_def("script"))
+        self.make_src("hello-app")
+        self.previous("image")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        start = self.calls.index(["docker", "start", "app-hello-app"])
+        self.assertGreater(start, self.index("sh", "-c", "./run.sh"))
+        self.assertEqual(self.record()["method"], "image")
+
+    def test_a_stop_that_fails_is_noted_not_fatal(self):
+        self.write_def(method_def("script"))
+        self.make_src("hello-app")
+        self.previous("static")
+        self.run_codes["docker stop"] = 1        # nothing was running
+        ghapp.deploy("hello-app")
+        self.assertTrue(self.logged("docker stop app-hello-app exited 1"))
+        self.assertEqual(self.record()["method"], "script")
+
+    # ---- container -> compose
+
+    def test_container_to_compose_parks_until_the_stack_is_up(self):
+        self.write_def(method_def("compose"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("dockerfile")
+        ghapp.deploy("hello-app")
+        # Never a name another app could own: KEY_RE has no dot.
+        self.assertIsNone(ghapp.KEY_RE.match("hello-app.parked"))
+        park = [["docker", "rm", "--force", "app-hello-app.parked"],
+                ["docker", "rename", "app-hello-app", "app-hello-app.parked"],
+                ["docker", "stop", "app-hello-app.parked"]]
+        first = self.calls.index(park[0])
+        self.assertEqual(self.calls[first:first + 3], park)
+        up = self.index("compose", "up", "--detach")
+        self.assertLess(first, up)
+        # Success only: the parked container goes once the stack answers.
+        drop = len(self.calls) - 1 - self.calls[::-1].index(park[0])
+        self.assertGreater(drop, up)
+        self.assertNotIn(["docker", "start", "app-hello-app"], self.calls)
+        # An earlier dockerfile sha holds no stack: no compose rollback.
+        self.assertEqual(self.index("checkout", "--detach", self.OLD_SHA), -1)
+        self.assertEqual(self.record()["method"], "compose")
+
+    def test_container_to_compose_failure_puts_the_container_back(self):
+        self.write_def(method_def("compose"))
+        self.make_file("hello-app", "docker-compose.yml")
+        self.previous("node")
+        self.quiet_out["docker ps --all --filter label=com.docker.compose."
+                       "project=app-hello-app"] = (0, "app-hello-app-web-1\n")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        up = self.index("compose", "up", "--detach")
+        tail = self.calls[up:]
+        clear = tail.index(["docker", "rm", "--force", "app-hello-app-web-1"])
+        back = tail.index(["docker", "rename", "app-hello-app.parked",
+                           "app-hello-app"])
+        start = tail.index(["docker", "start", "app-hello-app"])
+        self.assertTrue(clear < back < start)
+        self.assertEqual(len(self.argv_with("compose", "up")), 1)
+        self.assertEqual(self.index("checkout", "--detach", self.OLD_SHA), -1)
+        self.assertEqual(self.record()["method"], "node")
+
+    # ---- script -> anything, same method, nothing deployed
+
+    def test_leaving_script_stops_nothing_and_says_so(self):
+        self.write_def(method_def("image"))
+        self.make_src("hello-app")
+        self.previous("script")
+        ghapp.deploy("hello-app")
+        self.assertEqual(self.index("docker", "stop"), -1)
+        self.assertEqual(self.index("compose", "down"), -1)
+        self.assertEqual(self.index("rename"), -1)
+        self.assertTrue(self.logged("a script's own processes are not managed"))
+        self.assertEqual(self.record()["method"], "image")
+
+    def test_same_method_or_container_to_container_needs_no_switch(self):
+        self.write_def(good())
+        self.make_src("hello-app")
+        for was in ("dockerfile", "image", None):
+            if was:
+                self.previous(was)
+            self.calls[:] = []
+            self.log[:] = []
+            ghapp.deploy("hello-app")
+            self.assertEqual(self.index("docker", "stop"), -1, was)
+            self.assertEqual(self.index("rename"), -1, was)
+            self.assertFalse(self.logged("method change"), was)
+            os.remove(os.path.join(self.app(), "deployed.json"))
+
+    def test_a_record_from_before_methods_is_dockerfile(self):
+        self.write_def(method_def("compose"))
+        self.make_file("hello-app", "docker-compose.yml")
+        os.makedirs(self.app(), exist_ok=True)
+        with open(os.path.join(self.app(), "deployed.json"), "w") as fh:
+            json.dump({"sha": self.OLD_SHA, "image": "launcher-app/x:1"}, fh)
+        ghapp.deploy("hello-app")
+        self.assertIn(["docker", "rename", "app-hello-app",
+                       "app-hello-app.parked"], self.calls)
+
+    # ---- the record
+
+    def test_every_deploy_records_the_definition_it_ran(self):
+        d = method_def("node", env_names=["API_TOKEN"])
+        self.write_def(d)
+        self.make_src("hello-app")
+        with open(os.path.join(self.app(), ".env"), "w") as fh:
+            fh.write("API_TOKEN=hunter2-very-secret\n")
+        ghapp.deploy("hello-app")
+        rec = self.record()
+        self.assertEqual(rec["definition"], d)
+        self.assertEqual((rec["sha"], rec["method"], rec["ref"]),
+                         (SHA, "node", "main"))
+        # A definition holds names, never values: nothing from .env lands.
+        self.assertNotIn("hunter2", json.dumps(rec))
+
+
+class DeploydShaTest(Sandbox):
+    """$DEPLOY_SHA must be on origin/<ref>: deployd records the sha it asked
+    for as done, so a commit the fetch could not bring down (or one off the
+    branch) must fail the deploy and let deployd retry."""
+
+    OTHER = "f" * 40
+
+    def setUp(self):
+        super().setUp()
+        self.write_def(good())
+        self.src = self.make_src("hello-app")
+        ghapp.healthy = lambda d, t: True
+
+    def git(self, *tail):
+        return " ".join(["git", "-C", self.src] + list(tail))
+
+    def test_an_ancestor_of_the_ref_is_accepted(self):
+        os.environ["DEPLOY_SHA"] = SHA
+        ghapp.deploy("hello-app")
+        fetch = self.argv_with("fetch", "origin")
+        self.assertEqual(fetch[0][-1], "+main:refs/remotes/origin/main")
+        self.assertFalse(self.argv_with("fetch", "origin", SHA))
+        check = self.argv_with("merge-base", "--is-ancestor")[0]
+        self.assertEqual(check[-2:], [SHA, "refs/remotes/origin/main"])
+        self.assertLess(self.calls.index(fetch[0]), self.calls.index(check))
+        self.assertLess(self.calls.index(check),
+                        self.calls.index(self.argv_with("checkout", "--force")[0]))
+        self.assertTrue(self.argv_with("docker", "build"))
+        self.assertFalse(self.argv_with("ls-remote"))
+
+    def test_a_sha_off_the_ref_fails_before_anything_changes(self):
+        os.environ["DEPLOY_SHA"] = SHA
+        self.quiet_out[self.git("merge-base")] = (1, "")
+        self.quiet_out[self.git("rev-parse")] = (0, self.OTHER + "\n")
+        # A compose stack is deployed: a refused sha must not take it down.
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
+            json.dump({"sha": "a" * 40, "method": "compose",
+                       "definition": method_def("compose")}, fh)
+        with self.assertRaises(ghapp.AppError) as ctx:
+            ghapp.deploy("hello-app")
+        self.assertEqual(str(ctx.exception),
+                         "deployd asked for %s but origin/main is at %s (fetch "
+                         "failed or diverged); failing so it retries"
+                         % (SHA, self.OTHER))
+        self.assertFalse(self.argv_with("checkout", "--force"))
+        self.assertFalse(self.argv_with("docker"))
+        # ...and the CLI exits non-zero, which is what deployd backs off on.
+        os.environ["GHAPP_SG"] = "1"     # skip the docker-group re-exec
+        self.addCleanup(os.environ.pop, "GHAPP_SG", None)
+        self.assertEqual(ghapp.main(["ghapp.py", "deploy", "hello-app"]), 1)
+
+    def test_a_fetch_that_fails_fails_the_deploy(self):
+        os.environ["DEPLOY_SHA"] = SHA
+        self.run_codes[self.git("fetch")] = 128
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertFalse(self.argv_with("merge-base"))
+        self.assertFalse(self.argv_with("docker", "build"))
+
+    def test_without_deploy_sha_the_resolved_sha_is_fetched_directly(self):
+        self.quiet_out["git ls-remote"] = (0, "%s\trefs/heads/main\n" % SHA)
+        ghapp.deploy("hello-app")
+        self.assertTrue(self.argv_with("fetch", "origin", SHA))
+        self.assertFalse(self.argv_with("merge-base"))
