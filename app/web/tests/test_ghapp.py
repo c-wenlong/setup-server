@@ -1728,6 +1728,8 @@ class StaticProxyTest(Sandbox):
             [{"path": "/api/"}],
             [{"path": "/api/", "port": 8089, "host": "evil"}],
             [{"path": "/api/", "port": 8089}, {"path": "/api/", "port": 9}],
+            [{"path": "/api/\n", "port": 8089}],             # `$` alone allows it
+            [{"path": "/api/\n", "port": 8089}, {"path": "/api/", "port": 9}],
             ["/api/"],
             [{"path": "/p%d/" % i, "port": 9000 + i} for i in range(11)],
         ]
@@ -1737,7 +1739,7 @@ class StaticProxyTest(Sandbox):
             self.assertTrue(str(ctx.exception).startswith("bad proxies"), v)
 
     def test_bad_cache_control_is_refused(self):
-        for v in ("", "   ", 'no-cache"; add_header X "y', "no-cache;", "a\nb",
+        for v in ("", "   ", 'no-cache"; add_header X "y', "no-cache;", "a\nb", "no-cache\n",
                   "x" * 101, 3, ["no-cache"], "no{cache}"):
             with self.assertRaises(ghapp.AppError, msg=v) as ctx:
                 ghapp.validate(method_def("static", cache_control=v))

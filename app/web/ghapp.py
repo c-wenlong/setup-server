@@ -211,6 +211,8 @@ STATIC_CONF = "/etc/nginx/conf.d/default.conf"
 # reached through Docker's host gateway, never a URL; its path is plain
 # URL-safe segments (no spaces, quotes, braces or `;`, so it cannot reshape
 # the generated config) and never `/` itself, which would shadow the site.
+# Both regexes are applied with fullmatch(): `$` alone lets a trailing
+# newline through.
 PROXY_HOST = "host.docker.internal"
 PROXY_ADD_HOST = PROXY_HOST + ":host-gateway"
 PROXY_PATH_RE = re.compile(r"^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?$")
@@ -309,7 +311,7 @@ def _proxies_field(d):
         if not isinstance(p, dict) or set(p) != {"path", "port"}:
             raise AppError("bad proxies entry %r" % (p,))
         path, port = p["path"], p["port"]
-        if not isinstance(path, str) or not PROXY_PATH_RE.match(path) \
+        if not isinstance(path, str) or not PROXY_PATH_RE.fullmatch(path) \
                 or any(seg in (".", "..") for seg in path.split("/")):
             raise AppError("bad proxies path %r" % (path,))
         if path in seen:
@@ -361,7 +363,7 @@ def validate(d):
         _proxies_field(d)
         cc = d.get("cache_control")
         if cc is not None and (not isinstance(cc, str) or not cc.strip()
-                               or not CACHE_CONTROL_RE.match(cc)):
+                               or not CACHE_CONTROL_RE.fullmatch(cc)):
             raise AppError("bad cache_control %r" % (cc,))
     elif m in ("node", "python"):
         v = d.get("version")
