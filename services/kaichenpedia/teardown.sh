@@ -9,8 +9,8 @@
 #      --now` on kaichenpedia-deploy.timer, then `stop` on the static
 #      kaichenpedia-deploy.service (Linux), or `launchctl bootout` + `disable` of com.kaichenpedia.deploy
 #      (macOS)
-#   3. `docker compose down` — the nginx container and its network go
-#   4. keep .env, the unit files, the repo clone and the built site, so
+#   3. `docker compose down` — the kaichenpedia container and its network go
+#   4. keep .env, the unit files, the repo clone and the built image, so
 #      ./setup.sh brings it back as it was
 #
 # Usage:

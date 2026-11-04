@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — pull kaichenpedia from GitHub and rebuild the wiki if it changed.
+# deploy.sh — pull kaichenpedia from GitHub and rebuild its container if it
+# changed.
 #
 # The server is tailnet-only, so GitHub webhooks can't reach it; instead
 # deployd (services/deployd) polls the remote and re-runs setup.sh when
@@ -10,35 +11,36 @@
 #   deploy.sh            # build only if origin/BRANCH has new commits
 #   deploy.sh --force    # rebuild even without new commits
 #
-# Installed by setup.sh into $SERVICE_HOME/bin/ (ENV_FILE is baked in at
-# install time — edit the copy in the setup-server repo, then re-run setup.sh).
+# Installed by setup.sh into $SERVICE_HOME/bin/ (ENV_FILE and SERVICE_DIR
+# are baked in at install time — edit the copy in the setup-server repo,
+# then re-run setup.sh).
 #
-# Build pipeline (mirrors the repo's own Cloudflare deploy):
+# Build pipeline:
 #   git reset --hard origin/BRANCH
-#   python3 scripts/sync_wiki_to_site.py     # wiki/ -> site/content/
-#   npm ci                                   # only when package-lock changes
-#   npx quartz build                         # site/public/
-#   swap site/public into www/current        # atomic: next -> current
+#   docker build -f site/Dockerfile -t kaichenpedia:<sha>-<build time> <repo root>
+#   probe: run the new image on a spare loopback port and health-check it
+#   docker compose up -d   (KAICHENPEDIA_IMAGE=<that tag>), health check again
 #
-# Note: this script does not restart the kaichenpedia-api sidecar — after a
-# manual --force deploy, setup.sh's next run (or deployd's) restarts it when
-# state/built-sha moved. To bounce it now:
-#   docker compose --project-directory <setup-server>/services/kaichenpedia restart kaichenpedia-api
+# The live container is only replaced by an image that already answered as
+# a probe, so a broken build or a crashing image never takes the site down
+# (including the first run on a pre-Docker install, which has nothing to
+# roll back to). If the swap itself fails, the previous image is restored.
+# Every failure exits non-zero, so deployd backs off and retries the sha.
 
 set -euo pipefail
 
 ENV_FILE="__ENV_FILE__"
+SERVICE_DIR="__SERVICE_DIR__"
 [ -f "$ENV_FILE" ] || { echo "env file missing: $ENV_FILE (re-run setup.sh)" >&2; exit 1; }
 set -a; . "$ENV_FILE"; set +a
 
-# systemd/launchd PATH won't include a nix/nvm/brew node — use the baked path.
-export PATH="$NODE_BIN:$PATH"
 export GIT_TERMINAL_PROMPT=0   # fail loudly instead of hanging on a prompt
 
 REPO_DIR="$SERVICE_HOME/repo"
-WWW_DIR="$SERVICE_HOME/www"
 BUILD_STATE="$SERVICE_HOME/state"
 LOCK="$SERVICE_HOME/.deploy.lock"
+IMAGE_REPO="kaichenpedia"
+HEALTH_URL="http://127.0.0.1:${LOCAL_PORT:-8091}/"
 
 # --------------------------------------------------------------------- lock
 # mkdir is the portable atomic lock (macOS has no flock). A lock older than
@@ -55,6 +57,24 @@ trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
+
+compose_up() {
+  KAICHENPEDIA_IMAGE="$1" docker compose --project-directory "$SERVICE_DIR" \
+    up -d --remove-orphans
+}
+
+# healthy URL: poll for up to ~a minute.
+healthy() {
+  local i
+  for i in $(seq 1 30); do
+    curl -fsS -o /dev/null --max-time 5 "$1" 2>/dev/null && return 0
+    sleep 2
+  done
+  return 1
+}
+
+PROBE="kaichenpedia-probe"
+drop_probe() { docker rm -f "$PROBE" >/dev/null 2>&1 || true; }
 
 # ------------------------------------------------------------- fetch/compare
 if [ ! -d "$REPO_DIR/.git" ]; then
@@ -74,39 +94,75 @@ if [ -n "${DEPLOY_SHA:-}" ] \
   exit 1
 fi
 built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
+prev_image="$(cat "$BUILD_STATE/image" 2>/dev/null || true)"
 
-if [ "$remote_sha" = "$built_sha" ] && [ -d "$WWW_DIR/current" ] && [ "$FORCE" -eq 0 ]; then
+# Up to date means the sha matches AND its image still exists locally (a
+# pre-Docker install recorded a built-sha for a static build, not an image).
+if [ "$remote_sha" = "$built_sha" ] && [ -n "$prev_image" ] && [ "$FORCE" -eq 0 ] \
+    && docker image inspect "$prev_image" >/dev/null 2>&1; then
   echo "up to date at $built_sha"
+  # Still under the lock: make sure the recorded image is what runs. That
+  # repairs a stopped or removed container, and --remove-orphans drops the
+  # pre-Docker kaichenpedia-api sidecar.
+  compose_up "$prev_image"
   exit 0
 fi
 
 # -------------------------------------------------------------------- build
+# Unique per build: a --force rebuild of the same commit must not move the
+# tag the running (and rollback) image is known by.
+image="$IMAGE_REPO:$(printf '%s' "$remote_sha" | cut -c1-12)-$(date -u +%Y%m%d%H%M%S)"
 echo "deploying $remote_sha (was: $built_sha)"
 git -C "$REPO_DIR" reset --hard --quiet "origin/$BRANCH"
 
-echo "syncing wiki/ -> site/content/"
-python3 "$REPO_DIR/scripts/sync_wiki_to_site.py"
-
-cd "$REPO_DIR/site"
-mkdir -p "$BUILD_STATE"
-lock_sum="$(cksum package-lock.json | awk '{print $1}')"
-if [ ! -d node_modules ] || [ "$lock_sum" != "$(cat "$BUILD_STATE/npm-lock-cksum" 2>/dev/null || echo none)" ]; then
-  echo "installing site dependencies (npm ci)"
-  npm ci --no-audit --no-fund
-  echo "$lock_sum" > "$BUILD_STATE/npm-lock-cksum"
+echo "building $image from site/Dockerfile"
+if ! docker build --file "$REPO_DIR/site/Dockerfile" --tag "$image" "$REPO_DIR"; then
+  echo "build failed — the running container was left as it was" >&2
+  exit 1
 fi
 
-echo "building site (quartz)"
-npx quartz build
+# -------------------------------------------------------------------- probe
+# Prove the new image starts and answers before the live container is
+# touched. Its port is picked by Docker on loopback; its logs are printed
+# here on failure, so the deploy log keeps the startup error.
+drop_probe
+trap 'drop_probe; rmdir "$LOCK" 2>/dev/null || true' EXIT
+echo "probing $image"
+if ! docker run -d --name "$PROBE" --publish 127.0.0.1::8080 \
+    -e PORT=8080 -e HOSTNAME=0.0.0.0 "$image" >/dev/null; then
+  echo "$image would not start — the running container was left as it was" >&2
+  exit 1
+fi
+probe_port="$(docker port "$PROBE" 8080/tcp 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1)"
+if [ -z "$probe_port" ] || ! healthy "http://127.0.0.1:$probe_port/"; then
+  echo "$image did not answer as a probe — the running container was left as it was" >&2
+  echo "--- probe logs ---" >&2
+  docker logs --tail 80 "$PROBE" >&2 2>&1 || true
+  exit 1
+fi
+drop_probe
 
 # --------------------------------------------------------------------- swap
-# nginx serves $WWW_DIR/current (bind mount of the parent keeps the swap
-# atomic — never mv the mounted dir itself).
-mkdir -p "$WWW_DIR"
-rm -rf "$WWW_DIR/next" "$WWW_DIR/prev"
-cp -R "$REPO_DIR/site/public" "$WWW_DIR/next"
-[ -d "$WWW_DIR/current" ] && mv "$WWW_DIR/current" "$WWW_DIR/prev"
-mv "$WWW_DIR/next" "$WWW_DIR/current"
+mkdir -p "$BUILD_STATE"
+echo "starting $image"
+if ! compose_up "$image" || ! healthy "$HEALTH_URL"; then
+  echo "$image did not take over on $HEALTH_URL" >&2
+  echo "--- container logs ---" >&2
+  docker logs --tail 80 kaichenpedia >&2 2>&1 || true
+  if [ -n "$prev_image" ] && docker image inspect "$prev_image" >/dev/null 2>&1; then
+    echo "rolling back to $prev_image" >&2
+    compose_up "$prev_image" || true
+  fi
+  exit 1
+fi
 
+echo "$image" > "$BUILD_STATE/image"
 echo "$remote_sha" > "$BUILD_STATE/built-sha"
+
+# Keep the running image and the one before it; drop older builds.
+docker image ls "$IMAGE_REPO" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+  | while read -r old; do
+      [ "$old" = "$image" ] || [ "$old" = "$prev_image" ] || docker image rm "$old" >/dev/null 2>&1 || true
+    done
+
 echo "deployed $remote_sha"

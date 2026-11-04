@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# sleep stub: health-check retries return at once.
+exit 0

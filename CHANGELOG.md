@@ -106,6 +106,19 @@ first, dated by merge.
 
 ### Changed
 
+- **kaichenpedia: one container built from the repo's `site/Dockerfile`.**
+  The wiki moved from Quartz to Next.js, so the old pipeline (Quartz build
+  into `www/`, an nginx container, and the `kaichenpedia-api` node sidecar)
+  stopped deploying: every push since the migration failed at
+  `npx quartz build` and the box kept serving the Nov 3 build. `deploy.sh`
+  now builds `kaichenpedia:<sha>` from the repo root, recreates the single
+  `kaichenpedia` container on `127.0.0.1:8091`, health-checks it, and rolls
+  back to the previous image if it never answers; a failed build leaves the
+  running container alone. Two images are kept, older ones pruned.
+  `setup.sh` drops the Node/python3/nginx steps, removes the old sidecar
+  (`--remove-orphans`) and the old static build, and leaves a pre-Docker
+  `nginx.conf` in place unused.
+
 - **Launcher: new logo.** `icons/launcher.svg` (three fused white tiles
   sliding right with fading echoes, on near-black) replaces the temporary
   tiles-and-dot mark, with `favicon.png`, `launcher.png` and

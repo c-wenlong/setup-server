@@ -3,17 +3,14 @@
 Layered triage: deploy pipeline → local serving → publish → client. Work
 top-down; each layer assumes the one above it is healthy.
 
-**Before anything else: the nginx container is intentionally stopped** on this
-box (since 2026-09-08, via ntfy-control; its Kuma monitor is paused and the
-launcher shows it as an amber "Paused" tile). `Exited (0)`, connection refused
-on :8091, and a blank Kuma graph are all the expected state, not a fault.
-Start it from the ntfy panel, the launcher's start button, or
-`docker start kaichenpedia`.
+**A stale page with a green tile means a build is failing, not that the
+site is down.** deploy.sh never touches the running container when a build
+fails, and rolls back a new one that does not turn healthy, so the last good
+version keeps serving. Check the deployd log (Layer 1) before the container.
 
-Note that **deployd keeps redeploying while the container is stopped** —
-it pulls from GitHub and rebuilds into `www/current` on every push. So a
-fresh `built-sha` proves the pipeline works and says nothing about whether
-anything is being served.
+If the container has been stopped on purpose (ntfy-control or the launcher's
+stop button), `Exited (0)` and connection refused on :8091 are expected:
+`docker start kaichenpedia` brings it back.
 
 ## Quick status
 
@@ -21,8 +18,9 @@ anything is being served.
 ~/services/deployd/bin/deployd --status                # what deployd last saw/deployed
 systemctl --user list-timers deployd.timer             # deployd scheduled?
 journalctl --user -u deployd -n 30                     # last poll + deploy runs
-cat ~/services/kaichenpedia/state/built-sha              # what was last built
-docker inspect -f '{{.State.Status}}' kaichenpedia       # nginx up?
+cat ~/services/kaichenpedia/state/built-sha              # what was last deployed
+cat ~/services/kaichenpedia/state/image                  # the image it runs
+docker inspect -f '{{.State.Status}} {{.Config.Image}}' kaichenpedia   # up, and on which image?
 curl -sI http://127.0.0.1:8091/ | head -1                # serving locally?
 tailscale serve status                                   # :8091 published?
 ```
@@ -63,11 +61,22 @@ Run it by hand to see the full error:
 ```sh
 ~/services/kaichenpedia/bin/deploy.sh --force
 ```
-- `npm ci` / network errors → transient; the next timer tick retries.
-- Quartz build errors usually mean a bad markdown/frontmatter push — fix in
-  the wiki repo and push again.
-- Node errors after a system update → `node --version` must be >= 22 and
-  live where `.env`'s `NODE_BIN` points; if node moved, update `NODE_BIN`.
+- Network errors pulling the base image or npm packages → transient;
+  deployd retries the sha after its backoff.
+- `npm run build` errors inside `docker build` usually mean a bad
+  markdown/frontmatter push or a broken site change — reproduce locally
+  with `npm run build` in the wiki repo's `site/`, fix, push again.
+- `did not answer as a probe` → the new image built but crashed or hung
+  on start. deploy.sh runs every new image as a throwaway probe container
+  before touching the live one, and prints the probe's last 80 log lines
+  into the deploy log (`~/services/deployd/state/kaichenpedia.log`). The
+  live container was not touched.
+- `did not take over` then `rolling back` → the probe passed but the swap
+  failed (port clash, a bad value in `.env`). The live container's logs
+  are printed before the rollback.
+- Disk filling up → `docker image ls kaichenpedia`: deploy.sh keeps two
+  images and prunes the rest, but build cache grows; `docker builder prune`
+  is safe.
 
 ## Layer 2 — local serving broken
 
@@ -77,16 +86,20 @@ Run it by hand to see the full error:
   `exited` with a date and exit code 0 means someone stopped it on purpose;
   `docker start kaichenpedia` brings it back.
 - `docker ps | grep kaichenpedia` — container gone entirely?
-  `docker compose --project-directory ~/dev/setup-server/services/kaichenpedia up -d`
-- Container restarting → `docker logs kaichenpedia`; an nginx config error
-  means `~/services/kaichenpedia/nginx.conf` was edited badly (delete it and
-  re-run setup.sh to regenerate the default).
-- 403/404 on `/` → `~/services/kaichenpedia/www/current/index.html` missing:
-  the initial build never completed; run `bin/deploy.sh --force`.
+  `~/services/kaichenpedia/bin/deploy.sh` brings the recorded image back up.
+- Container restarting → `docker logs kaichenpedia`. A missing or mistyped
+  env var in `.env` is the usual cause; fix it and run
+  `~/services/kaichenpedia/bin/deploy.sh`, which recreates the container
+  from the recorded image (`state/image`) without rebuilding. Plain
+  `docker compose up` would look for `kaichenpedia:local`, which is never
+  built.
+- `state/image` names an image that `docker image ls kaichenpedia` does not
+  have (pruned by hand) → `bin/deploy.sh --force` rebuilds it.
 
-**Pages 404 but the homepage works.** The `try_files $uri $uri/ $uri.html`
-line in nginx.conf is what resolves Quartz's extensionless links — restore
-it if the config was customized.
+**`/api/*` answers HTML or 404.** The app serves `/api/*` itself now; there
+is no nginx proxy or `kaichenpedia-api` sidecar. A leftover
+`kaichenpedia-api` container from before the migration is harmless and is
+removed by the next `setup.sh` (`--remove-orphans`).
 
 ## Layer 3 — publish broken
 
@@ -111,24 +124,27 @@ it if the config was customized.
 
 - Other tailnet services (e.g. `:3002`) reachable? If not, it's the client's
   Tailscale, not this service.
-- Hard-refresh: Quartz sites use a service worker-ish SPA router; stale
-  assets clear with a forced reload.
+- Hard-refresh: a tab opened before a deploy can hold old client chunks;
+  a forced reload fetches the new ones.
 
 ## Rollback
 
-The previous build stays in `www/prev`:
+The image before the current one is kept. To go back to it by hand:
 ```sh
-cd ~/services/kaichenpedia/www
-mv current bad && mv prev current
+docker image ls kaichenpedia            # tags are <sha>-<build time>; pick the previous one
+cd ~/dev/setup-server/services/kaichenpedia
+KAICHENPEDIA_IMAGE=kaichenpedia:<tag> docker compose up -d
+echo kaichenpedia:<tag> > ~/services/kaichenpedia/state/image   # so deploy.sh repairs to it
 ```
-(Any later successful deploy overwrites the rollback — pin by stopping
-deployd first: `systemctl --user stop deployd.timer`.)
+(Any later successful deploy replaces it — pin by stopping deployd first:
+`systemctl --user stop deployd.timer`. To undo a bad commit for good,
+revert it in the wiki repo; the wiki's Run Log page lists the revert
+command for every run.)
 
 ## Nuke and pave
 
 ```sh
 cd ~/dev/setup-server/services/kaichenpedia
-cp ~/services/kaichenpedia/nginx.conf ~/kaichenpedia-nginx.conf.bak   # only if you edited it
 ./teardown.sh --purge     # asks you to type "kaichenpedia"
 ./setup.sh
 ```
@@ -136,7 +152,8 @@ cp ~/services/kaichenpedia/nginx.conf ~/kaichenpedia-nginx.conf.bak   # only if 
 `--purge` unpublishes the Serve port(s) pointing at the wiki, removes the
 legacy `kaichenpedia-deploy` timer/service if one still exists, runs `docker compose down`,
 then deletes what setup.sh / deploy.sh made under `SERVICE_HOME` (`repo/`,
-`www/`, `bin/`, `state/`, `nginx.conf`, `.deploy.lock`), the two unit files and
+`bin/`, `state/`, `.deploy.lock`, and `www/` / `nginx.conf` left by a
+pre-Docker install), the two unit files and
 `.env`. A file you put in `SERVICE_HOME` yourself is kept. Plain `./teardown.sh` (what the launcher's
 Remove runs) stops everything but keeps all of that on disk.
 
