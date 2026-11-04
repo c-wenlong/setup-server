@@ -144,6 +144,7 @@ class SandboxTest(unittest.TestCase):
             "DISK_TIMEOUT": server.DISK_TIMEOUT,
             "_du_fs_bytes": server._du_fs_bytes,
             "fetch_page_icon": server.fetch_page_icon,
+            "cached_favicon": server.cached_favicon,
             "FAVICON_TTL": server.FAVICON_TTL,
             "_docker_df": server._docker_df,
             "_audit_scan": server._audit_scan,
@@ -199,10 +200,13 @@ class SandboxTest(unittest.TestCase):
         # through the unstubbed-Popen guard a beat after its test ended.
         # Audit tests put the real spawn back over a stubbed _audit_scan.
         server._start_audit = lambda: None
-        # Same reason again: an active tile's favicon discovery fetches the
-        # service's page from a daemon worker — a real one would read this
-        # box's live pages a beat after its test ended. The favicon tests
-        # put the real fetch back over a stubbed opener.
+        # Same reason again, at the cache boundary: an active tile's
+        # discovery call would otherwise spawn a daemon worker that fetches
+        # this box's live pages a beat after its test ended. Stubbing the
+        # cache read itself means payload tests never start that thread;
+        # the favicon tests put the real functions back (and wait for any
+        # worker they started before restoring globals).
+        server.cached_favicon = lambda page_url: None
         server.fetch_page_icon = lambda page_url: None
 
         self.write_registry(self.REGISTRY)
@@ -663,11 +667,20 @@ class _PageResp:
         import email.message
         self._url = url
         self._body = body.encode("utf-8") if isinstance(body, str) else body
+        self._pos = 0
         self.headers = email.message.Message()
         self.headers["Content-Type"] = content_type
 
     def read(self, limit=-1):
         return self._body if limit < 0 else self._body[:limit]
+
+    def read1(self, limit=-1):
+        if self._pos >= len(self._body):
+            return b""
+        end = len(self._body) if limit < 0 else self._pos + limit
+        chunk = self._body[self._pos:end]
+        self._pos += len(chunk)
+        return chunk
 
     def geturl(self):
         return self._url
@@ -728,6 +741,47 @@ class FetchPageIconTest(unittest.TestCase):
         self.stub_pages({"http://127.0.0.1:1/": OSError("refused")})
         self.assertIsNone(server.fetch_page_icon("http://127.0.0.1:1/"))
 
+    def test_base_href_rebases_a_relative_icon(self):
+        self.stub_pages({"http://127.0.0.1:1/": _PageResp(
+            "http://127.0.0.1:1/",
+            '<base href="/ui/"><link rel="icon" href="favicon.png">')})
+        self.assertEqual(server.fetch_page_icon("http://127.0.0.1:1/"),
+                         "http://127.0.0.1:1/ui/favicon.png")
+
+    def test_base_href_does_not_move_the_favicon_ico_fallback(self):
+        self.stub_pages({"http://127.0.0.1:1/": _PageResp(
+            "http://127.0.0.1:1/",
+            '<html><head><base href="/ui/"></head></html>')})
+        self.assertEqual(server.fetch_page_icon("http://127.0.0.1:1/"),
+                         "http://127.0.0.1:1/favicon.ico")
+
+    def test_trickling_body_stops_at_the_deadline(self):
+        reads = []
+
+        class Trickle(_PageResp):
+            def read1(self, limit=-1):
+                reads.append(limit)
+                return b'<link rel="icon" href="/f.svg">'
+
+        self.stub_pages({"http://127.0.0.1:1/":
+                         Trickle("http://127.0.0.1:1/", "")})
+        real_monotonic = time.monotonic
+        clock = {"now": 0.0}
+
+        def fake_monotonic():
+            clock["now"] += 0.6
+            return clock["now"]
+
+        time.monotonic = fake_monotonic
+        try:
+            got = server.fetch_page_icon("http://127.0.0.1:1/")
+        finally:
+            time.monotonic = real_monotonic
+        # The deadline cut the stream off; the icon in the first chunk still
+        # wins, and the loop did not spin unbounded.
+        self.assertEqual(got, "http://127.0.0.1:1/f.svg")
+        self.assertLessEqual(len(reads), 10)
+
 
 class FaviconPageTest(SandboxTest):
     """favicon_page builds the loopback page a tile's icon is read from."""
@@ -767,6 +821,12 @@ class TileFaviconTest(SandboxTest):
            "health": "http://127.0.0.1:8108/gallery/"}
     PAGE = "http://127.0.0.1:8108/gallery/"
 
+    def setUp(self):
+        super().setUp()
+        # Discovery tests need the real cache read (seeded below); the page
+        # fetch behind it stays stubbed to None so no worker starts.
+        server.cached_favicon = self._saved["cached_favicon"]
+
     def seed(self, ref):
         server._favicon_cache[self.PAGE] = (time.time(), ref)
 
@@ -792,6 +852,17 @@ class TileFaviconTest(SandboxTest):
         self.assertEqual(server.tile_favicon(self.SVC, "box.ts.net", True),
                          "https://cdn.example.com/mark.png")
 
+    def test_discovered_ref_is_never_env_or_host_expanded(self):
+        # A page can put "{OWNER_PASSWORD}" in its own href; the discovered
+        # ref must reach the tile verbatim, never substitute_env'd.
+        self.make_env("design-systems/.env", "OWNER_PASSWORD=s3cret\n")
+        svc = dict(self.SVC, env="design-systems/.env")
+        self.seed("/{OWNER_PASSWORD}-{HOST}.png")
+        got = server.tile_favicon(svc, "box.ts.net", True)
+        self.assertNotIn("s3cret", got)
+        self.assertIn("{OWNER_PASSWORD}", got)
+        self.assertTrue(got.startswith("https://box.ts.net:8108/"))
+
     def test_payload_uses_the_same_precedence(self):
         self.write_registry({"services": [dict(self.SVC, name="D",
                                                tagline="t", icon="palette",
@@ -815,8 +886,9 @@ class CachedFaviconTest(SandboxTest):
         super().setUp()
         self.fetches = []
         self.release = threading.Event()
-        # Restore the real fetch path; the page fetch itself is stubbed so
-        # the worker thread never touches a socket.
+        # Restore the real cache read; the page fetch behind the worker is
+        # stubbed so the thread never touches a socket.
+        server.cached_favicon = self._saved["cached_favicon"]
         server.fetch_page_icon = self._fetch
 
     def _fetch(self, page_url):

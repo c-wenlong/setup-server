@@ -837,6 +837,9 @@ def resolve_favicon(svc, host):
 
 FAVICON_TTL = 600.0           # a favicon changes on a deploy's timescale
 FAVICON_MAX_BYTES = 256 * 1024   # <head> sits at the top; bound the read
+FAVICON_FETCH_DEADLINE = 5.0  # total seconds a page fetch may take; a
+                              # trickling body is capped here, not by the
+                              # per-socket-op PROBE_TIMEOUT
 FAVICON_MAX_WORKERS = 4     # a cold catalogue must not storm the services
 
 _favicon_cache = {}         # page_url -> (checked_at, ref|None)
@@ -850,13 +853,22 @@ _favicon_opener = urllib.request.build_opener()
 
 
 class _IconLinks(html.parser.HTMLParser):
-    """The page's <link> tags, reduced to what pick_icon ranks on."""
+    """The page's <link> tags, reduced to what pick_icon ranks on, plus the
+    first <base href> — relative icon hrefs resolve against it."""
 
     def __init__(self):
         super().__init__()
         self.links = []
+        self.base = None
 
     def handle_starttag(self, tag, attrs):
+        if tag == "base":
+            if self.base is None:
+                fields = dict(attrs)
+                href = (fields.get("href") or "").strip()
+                if href:
+                    self.base = href
+            return
         if tag != "link":
             return
         fields = {}
@@ -880,17 +892,26 @@ def pick_icon(html_text):
     with no sizes counts as 180 (Apple's default render size), a plain icon
     as 0. Ties keep document order.
     """
+    return _rank_icon_links(_icon_links(html_text).links)
+
+
+def _icon_links(html_text):
+    """The parsed _IconLinks for a page; tolerant of malformed markup — a
+    parser failure is not worth surfacing, whatever was collected before
+    the choke still ranks."""
     parser = _IconLinks()
     try:
         parser.feed(html_text)
         parser.close()
     except Exception:
-        # A malformed page is not a failure worth surfacing: rank whatever
-        # was collected before the parser choked.
         pass
+    return parser
+
+
+def _rank_icon_links(links):
     best = None
     best_rank = None
-    for link in parser.links:
+    for link in links:
         rel = link["rel"]
         if "icon" in rel:
             kind = "icon"
@@ -936,15 +957,35 @@ def fetch_page_icon(page_url):
         with _favicon_opener.open(req, timeout=PROBE_TIMEOUT) as resp:
             if resp.headers.get_content_type() != "text/html":
                 return None
-            raw = resp.read(FAVICON_MAX_BYTES)
+            # read1 in bounded chunks against a total deadline: PROBE_TIMEOUT
+            # caps each socket op but a trickling body would otherwise hold
+            # a worker slot forever. Past the deadline, parse what arrived —
+            # the <head> is at the top.
+            deadline = time.monotonic() + FAVICON_FETCH_DEADLINE
+            chunks = []
+            total = 0
+            while total < FAVICON_MAX_BYTES:
+                if time.monotonic() >= deadline:
+                    break
+                chunk = resp.read1(16384)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
             charset = resp.headers.get_content_charset() or "utf-8"
-            text = raw.decode(charset, errors="replace")
+            text = b"".join(chunks).decode(charset, errors="replace")
             base = resp.geturl()
     except Exception:
         return None
-    href = pick_icon(text)
+    parsed = _icon_links(text)
+    href = _rank_icon_links(parsed.links)
     if href is None:
-        href = "/favicon.ico"
+        # No declared icon: the browser default, always on the page's own
+        # (post-redirect) origin — a <base> pointing elsewhere must not
+        # move it.
+        return urllib.parse.urljoin(base, "/favicon.ico")
+    if parsed.base:
+        base = urllib.parse.urljoin(base, parsed.base)
     return urllib.parse.urljoin(base, href)
 
 
@@ -1033,7 +1074,7 @@ def tile_favicon(svc, host, active):
     Precedence: the manifest `favicon` override wins (resolve_favicon,
     unchanged); without one, only an ACTIVE service gets discovery — a
     stopped one has no page to ask — and the cached ref joins onto the
-    tile's public url through the same resolver a manifest path would.
+    tile's public url verbatim, with no token expansion.
     """
     override = resolve_favicon(svc, host)
     if override:
@@ -1046,7 +1087,18 @@ def tile_favicon(svc, host, active):
     ref = cached_favicon(page)
     if not ref:
         return None
-    return resolve_favicon(dict(svc, favicon=ref), host)
+    # Join the discovered ref directly — NOT via resolve_favicon, whose
+    # substitute_env/substitute_host would expand a "{TOKEN}" a hostile or
+    # templated page could put in its own href into a leaked .env value.
+    # resolve_url still gets the public base (manifest url, intended to
+    # carry tokens); the ref contributes only path/query verbatim.
+    base = resolve_url(svc, host)
+    if not base:
+        return None
+    url = urllib.parse.urljoin(base, ref)
+    if urllib.parse.urlsplit(url).scheme in ("http", "https"):
+        return url
+    return None
 
 
 # ------------------------------------------------------------------ probes
