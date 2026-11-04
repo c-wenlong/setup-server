@@ -227,5 +227,15 @@
 }
 .field-input:disabled { opacity: .6; }
 
+/* static's proxy rules: path, port, Remove per row; full width. */
+.gdp-fields .gdp-proxies { grid-column: 1 / -1; }
+.gdp-proxy-list { display: grid; gap: 8px; margin: 6px 0 8px; border-radius: 8px; }
+.gdp-proxy-list:empty { margin: 0; }
+.gdp-proxy-list[aria-invalid="true"] {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent);
+}
+.gdp-proxy-row { display: grid; grid-template-columns: minmax(0, 1fr) 8em auto; gap: 8px; align-items: center; }
+.gdp-proxy-add[disabled], .gdp-proxy-rm[disabled] { opacity: .5; cursor: default; }
+
 .gdp-log { margin-top: 8px; }
 .gdp-pre { max-height: 380px; color: var(--log-fg, var(--muted)); background: var(--log-bg, var(--bg)); }
