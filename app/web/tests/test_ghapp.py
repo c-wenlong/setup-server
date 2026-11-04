@@ -392,6 +392,10 @@ class MethodDeployTest(Sandbox):
         ghapp.deploy("hello-app")
         ups = self.argv_with("compose", "up", "--detach")
         self.assertEqual(len(ups), 1)
+        # --build: a `build:` service rebuilds the new commit;
+        # --remove-orphans: a renamed service cannot keep the port.
+        self.assertIn("--build", ups[0])
+        self.assertIn("--remove-orphans", ups[0])
         self.assertEqual(ups[0][ups[0].index("--project-name") + 1], "app-hello-app")
         self.assertEqual(ups[0][ups[0].index("--file") + 1],
                          os.path.join(src, "docker-compose.yml"))
@@ -431,6 +435,8 @@ class MethodDeployTest(Sandbox):
         self.assertTrue(back)
         ups = self.argv_with("compose", "up", "--detach")
         self.assertEqual(len(ups), 2)
+        self.assertIn("--build", ups[1])            # rollback rebuilds old sha
+        self.assertIn("--remove-orphans", ups[1])
         self.assertFalse(os.path.exists(
             os.path.join(ghapp.app_dir("hello-app"), "deployed.json.tmp")))
 
@@ -451,10 +457,9 @@ class MethodDeployTest(Sandbox):
         logs = self.argv_with("compose", "logs")
         self.assertEqual(logs[0][-1], "web")
 
-    def test_static_builds_then_serves_output_read_only(self):
+    def test_static_builds_then_serves_a_release_outside_src(self):
         self.write_method("static")
-        src = self.make_src("hello-app")
-        os.makedirs(os.path.join(src, "public"))
+        src = self.make_file("hello-app", "public/index.html", "v2")
         ghapp.deploy("hello-app")
         idx = self.calls.index(self.argv_with("sh", "-c", "make site")[0])
         self.assertEqual(self.cwds[idx], src)
@@ -462,9 +467,94 @@ class MethodDeployTest(Sandbox):
         run = self.argv_with("docker", "run")[-1]
         self.assertIn("127.0.0.1:8301:80", run)
         mount = run[run.index("--volume") + 1]
-        self.assertTrue(mount.endswith(":/usr/share/nginx/html:ro"), mount)
-        self.assertTrue(mount.startswith(os.path.join(src, "public")), mount)
+        release = os.path.join(ghapp.app_dir("hello-app"), "site-" + SHA[:12])
+        # Outside src/: the next deploy's `git clean -ffdxq` cannot touch it.
+        self.assertEqual(mount, release + ":/usr/share/nginx/html:ro")
+        self.assertFalse(release.startswith(src + os.sep))
+        with open(os.path.join(release, "index.html")) as fh:
+            self.assertEqual(fh.read(), "v2")
         self.assertEqual(self.deployed()["image"], ghapp.STATIC_IMAGE)
+
+    def test_static_failed_build_leaves_the_live_release_alone(self):
+        self.write_method("static")
+        self.make_src("hello-app")
+        live = os.path.join(ghapp.app_dir("hello-app"), "site-" + self.OLD_SHA[:12])
+        os.makedirs(live)
+        self.run_codes["sh -c make site"] = 2
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertTrue(os.path.isdir(live))
+        self.assertFalse(self.argv_with("docker", "run"))
+
+    def test_static_unhealthy_rolls_back_to_the_previous_release(self):
+        self.write_method("static")
+        self.make_file("hello-app", "public/index.html", "v2")
+        prev = os.path.join(ghapp.app_dir("hello-app"), "site-" + self.OLD_SHA[:12])
+        os.makedirs(prev)
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
+            json.dump({"sha": self.OLD_SHA}, fh)
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "d" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        back = self.argv_with("docker", "run")[-1]
+        self.assertEqual(back[-1], "sha256:" + "d" * 64)
+        self.assertEqual(back[back.index("--volume") + 1],
+                         prev + ":/usr/share/nginx/html:ro")
+
+    def test_static_success_prunes_all_but_current_and_previous(self):
+        self.write_method("static")
+        self.make_file("hello-app", "public/index.html")
+        app = ghapp.app_dir("hello-app")
+        for name in ("site-" + self.OLD_SHA[:12], "site-bbbbbbbbbbbb"):
+            os.makedirs(os.path.join(app, name))
+        with open(os.path.join(app, "deployed.json"), "w") as fh:
+            json.dump({"sha": self.OLD_SHA}, fh)
+        ghapp.deploy("hello-app")
+        sites = sorted(n for n in os.listdir(app) if n.startswith("site-"))
+        self.assertEqual(sites, sorted(["site-" + SHA[:12], "site-" + self.OLD_SHA[:12]]))
+
+    def test_static_output_symlink_out_of_the_checkout_is_refused(self):
+        self.write_method("static")
+        src = self.make_src("hello-app")
+        os.symlink(self.tmp, os.path.join(src, "public"))
+        with self.assertRaises(ghapp.AppError) as ctx:
+            ghapp.deploy("hello-app")
+        self.assertIn("escapes the checkout", str(ctx.exception))
+        self.assertFalse(self.argv_with("docker", "run"))
+
+    def test_dockerfile_symlink_out_of_the_checkout_is_refused(self):
+        self.write_def(good())
+        src = self.make_src("hello-app", "real/Dockerfile")
+        outside = os.path.join(self.tmp, "host-Dockerfile")
+        open(outside, "w").close()
+        os.symlink(outside, os.path.join(src, "Dockerfile"))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertFalse(self.argv_with("docker", "build"))
+
+    def test_compose_file_symlink_out_of_the_checkout_is_refused(self):
+        self.write_method("compose")
+        src = self.make_src("hello-app")
+        outside = os.path.join(self.tmp, "host.yml")
+        open(outside, "w").close()
+        os.symlink(outside, os.path.join(src, "docker-compose.yml"))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        self.assertFalse(self.argv_with("compose", "up"))
+
+    def test_generated_dockerfile_never_writes_through_a_symlink(self):
+        self.write_method("node")
+        src = self.make_src("hello-app")
+        victim = os.path.join(ghapp.app_dir("hello-app"), ".env")
+        with open(victim, "w") as fh:
+            fh.write("SECRET=keep\n")
+        os.symlink(victim, os.path.join(src, ghapp.GENERATED_DOCKERFILE))
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        with open(victim) as fh:
+            self.assertEqual(fh.read(), "SECRET=keep\n")
+        self.assertFalse(self.argv_with("docker", "build"))
 
     def test_static_missing_output_dir_stops_before_running(self):
         self.write_method("static")
@@ -824,6 +914,7 @@ class MethodRemoveTest(Sandbox):
         down = self.argv_with("compose", "down")
         self.assertEqual(len(down), 1)
         self.assertIn("app-hello-app", down[0])
+        self.assertIn("--remove-orphans", down[0])
         self.assertFalse(os.path.exists(self.marker))
 
     def test_compose_remove_without_the_file_uses_the_project_label(self):
