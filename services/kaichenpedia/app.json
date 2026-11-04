@@ -4,7 +4,6 @@
   "tagline": "Wiki",
   "group": "mine",
   "icon": "book",
-  "favicon": "/favicon.ico",
   "author": "c-wenlong",
   "url": "https://HOST:8091/",
   "health": "http://127.0.0.1:8091/",

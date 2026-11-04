@@ -1184,6 +1184,18 @@ no_external_listener() {
   fi
 }
 
+# The Vite build hashes its bundle name, so read a <script src> from
+# index.html and fetch that rather than a fixed path.
+js_bundle_responds() {
+  local port="$1" src
+  src="$(curl -fsS "http://127.0.0.1:$port/" \
+    | sed -n 's/.*<script[^>]* src="\([^"]*\)".*/\1/p' | head -n 1)"
+  [ -n "$src" ] || return 1
+  src="${src#./}"
+  case "$src" in /*) ;; *) src="/$src" ;; esac
+  curl -fsS -o /dev/null "http://127.0.0.1:$port$src"
+}
+
 test_live() {
   echo "• live: verify the real deployment on this machine"
   local ts port url svc_home
@@ -1194,7 +1206,7 @@ test_live() {
   svc_home="$(sed -n 's/^SERVICE_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   live_check "container running"        sh -c "docker inspect -f '{{.State.Status}}' sources | grep -qx running"
   live_check "local index responds"     curl -fsS "http://127.0.0.1:$port/"
-  live_check "app.js responds"          curl -fsS "http://127.0.0.1:$port/app.js"
+  live_check "JS bundle responds"       js_bundle_responds "$port"
   live_check "catalog blob responds"    sh -c "curl -fsS -o /dev/null 'http://127.0.0.1:$port/d/catalog.bin'"
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches deploy clone" sh -c "[ \"\$(git -C '$svc_home/repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
