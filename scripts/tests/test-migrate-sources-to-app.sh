@@ -142,7 +142,10 @@ case "$1" in
     [ -f "$S/fail-run" ] && { echo "port is already allocated" >&2; exit 125; }
     [ -f "$S/old-running" ] && { echo "port 8098 still held by sources" >&2; exit 125; }
     touch "$S/new-exists"; echo cid ;;
-  image) exit 0 ;;
+  image)
+    # prune_images runs after ghapp.py wrote deployed.json
+    if [ -f "$S/interrupt-after-record" ]; then pkill -TERM -f "$SANDBOX_SCRIPT"; command -p sleep 1; fi
+    exit 0 ;;
   network)
     case "$2" in
       inspect) [ -f "$S/network" ] ;;
@@ -415,6 +418,47 @@ check "exits zero"                          [ "$CODE" -eq 0 ]
 check "definition written"                  test -f "$(DEF)"
 check "drop-in written"                     test -f "$(DROPIN)"
 check "old container removed"               test ! -e "$STATE_DIR/old-exists"
+teardown
+
+echo "• a pre-existing poller row on another ref is put back as it was"
+setup
+cat > "$(POLLERS)" <<JSON
+{"pollers": {"sources": {"cmd": "app/web/ghapp.py deploy sources", "ref": "staging",
+ "repo": "https://github.com/c-wenlong/sources.git"}}, "version": 1}
+JSON
+touch "$STATE_DIR/fail-build"
+migrate
+check "exits non-zero"                      [ "$CODE" -ne 0 ]
+check "row kept"                            grep -q "ghapp.py deploy sources" "$(POLLERS)"
+check "its ref is back to staging"          [ "$(json_get "$(POLLERS)" 'd["pollers"]["sources"]["ref"]')" = staging ]
+teardown
+
+echo "• a definition already there and a deploy killed after deployed.json: not a finished move"
+setup
+mkdir -p "$HOME/services/launcher/apps"
+python3 - "$R" "$(DEF)" <<'PYDEF'
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/app/web")
+d = {"version": 1, "key": "sources", "name": "sources", "repo": "c-wenlong/sources",
+     "ref": "main", "method": "static",
+     "build": "mkdir -p apps/web/dist && echo x > apps/web/dist/index.html",
+     "output": "apps/web/dist",
+     "port": 8098, "health_path": "/", "volume": None}
+json.dump(d, open(sys.argv[2], "w"))
+PYDEF
+# the deploy "succeeds" as far as deployed.json, then the script is killed
+touch "$STATE_DIR/interrupt-after-record"
+migrate
+check "exits non-zero"                      [ "$CODE" -ne 0 ]
+check "the pre-existing definition stays"   test -f "$(DEF)"
+check "the deploy got as far as the record" calls_have "docker image ls launcher-app/sources"
+check "the half-written record is gone"     test ! -e "$HOME/services/apps/sources/deployed.json"
+check "the old site is back"                test -f "$STATE_DIR/old-running"
+rm -f "$STATE_DIR/interrupt-after-record"
+: > "$CALLS_LOG"
+migrate
+check "a re-run does the move"              calls_have "docker stop sources"
+check "and finishes"                        [ "$CODE" -eq 0 ]
 teardown
 
 echo "• nginx never answers: same restore"

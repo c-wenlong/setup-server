@@ -287,30 +287,56 @@ elif verb == "wire":
           % (ghapp.def_path(KEY), KEY))
 
 elif verb == "snapshot":
-    # "<def> <poller row> <paused>" as 0/1 before `wire`, so `unwire` can
-    # undo only what this run added and keep whatever was already there.
+    # "<def> <poller row> <paused> <deploy record>" as 0/1 before `wire`,
+    # so `unwire` can undo only what this run added and keep whatever was
+    # already there. An existing poller row is saved whole to argv[2]:
+    # `wire` may rewrite its repo/ref, and a rollback puts it back as it was.
+    import json
     state = ghapp.deployd_state_dir()
     rows = server._deployd_overrides(state) if state else {}
-    print("%d %d %d" % (os.path.exists(ghapp.def_path(KEY)), KEY in rows,
-                        bool(state) and os.path.exists(
-                            os.path.join(state, KEY + ".disabled"))))
+    if KEY in rows:
+        with open(sys.argv[2], "w", encoding="utf-8") as fh:
+            json.dump(rows[KEY], fh)
+    print("%d %d %d %d" % (os.path.exists(ghapp.def_path(KEY)), KEY in rows,
+                           bool(state) and os.path.exists(
+                               os.path.join(state, KEY + ".disabled")),
+                           os.path.exists(os.path.join(ghapp.app_dir(KEY),
+                                                       "deployed.json"))))
 
 elif verb == "unwire":
-    # Undo `wire` after a failed or interrupted deploy. argv[2:5] is the
-    # snapshot: a 1 means that piece predates this run, so it stays.
-    had_def, had_row, had_paused = (a == "1" for a in sys.argv[2:5])
+    # Undo `wire` after a failed or interrupted deploy. argv[2] is the saved
+    # poller row, argv[3:7] the snapshot: a 1 means that piece predates this
+    # run, so it stays (a saved row goes back exactly as it was).
+    import json
+    had_def, had_row, had_paused, had_record = (a == "1" for a in sys.argv[3:7])
     if not had_def:
         try:
             os.remove(ghapp.def_path(KEY))
         except OSError:
             pass
-    if not had_row:
-        try:
+    try:
+        if not had_row:
             server.deployd_restore_poller(KEY)
-        except Exception as exc:          # deployd absent: nothing to restore
-            print("could not drop the poller row: %s" % exc, file=sys.stderr)
+        else:
+            with open(sys.argv[2], encoding="utf-8") as fh:
+                saved = json.load(fh)
+            state = ghapp.deployd_state_dir()
+            with server._deployd_pollers_lock:
+                rows = server._deployd_overrides(state)
+                if rows.get(KEY) != saved:
+                    rows[KEY] = saved
+                    server._deployd_write_overrides(state, rows)
+    except Exception as exc:          # deployd absent: nothing to restore
+        print("could not restore the poller row: %s" % exc, file=sys.stderr)
     if not had_paused:
         ghapp.set_paused(KEY, False)
+    if not had_record:
+        # A deploy killed after writing deployed.json must not read as a
+        # finished move on the next run.
+        try:
+            os.remove(os.path.join(ghapp.app_dir(KEY), "deployed.json"))
+        except OSError:
+            pass
 
 elif verb == "check-def":
     check_existing_def()
@@ -405,6 +431,7 @@ on_exit() {
   fi
   [ -n "${DROPIN_SAVED:-}" ] && rm -f "$DROPIN_SAVED"
   [ -n "${SHA_FILE:-}" ] && rm -f "$SHA_FILE"
+  [ -n "${ROW_FILE:-}" ] && rm -f "$ROW_FILE"
   release_lock
   exit "$rc"
 }
@@ -535,7 +562,8 @@ cleanup_old() {
 # running again if it was, and only the definition/poller pieces this run
 # added taken back out. Safe to call twice. (The trigger drop-in is only
 # written after the new site answers, so there is none to undo here.)
-SNAPSHOT="1 1 1"
+SNAPSHOT="1 1 1 1"
+ROW_FILE=""
 was_running=0
 restore() {
   ROLLBACK=0
@@ -547,8 +575,8 @@ restore() {
       warn "could not start $OLD_CONTAINER: run docker start $OLD_CONTAINER"
     fi
   fi
-  # shellcheck disable=SC2086  # three 0/1 words, split on purpose
-  helper unwire $SNAPSHOT \
+  # shellcheck disable=SC2086  # four 0/1 words, split on purpose
+  helper unwire "$ROW_FILE" $SNAPSHOT \
     || warn "could not undo the definition/poller: see $DEF_FILE and deployd's pollers.json"
 }
 
@@ -608,7 +636,8 @@ SHA="$(cat "$SHA_FILE")"
 ok "checked out ${SHA:0:12}"
 
 # ----------------------------------------------------------- def + poller
-SNAPSHOT="$(helper snapshot)" || die "could not read the current definition/poller state"
+ROW_FILE="$(mktemp)"
+SNAPSHOT="$(helper snapshot "$ROW_FILE")" || die "could not read the current definition/poller state"
 info "Writing the launcher definition and deployd poller"
 ROLLBACK=1      # from here until the new container answers, exit = restore
 helper wire || die "could not write the definition or poller; the old site was not touched"
