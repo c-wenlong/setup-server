@@ -2,13 +2,15 @@
  *
  * Three sources, in order:
  *
- *   1. The service's own live favicon, for tiles that opt in: services.json
- *      `favicon` arrives already resolved to an absolute https URL by the
- *      backend (a path in app.json is joined onto the tile's url). The
- *      tile shows whatever the service serves today, so a favicon update
- *      in that repo propagates here instead of waiting for a re-vendor.
- *      The tile first paints source 2 or 3, then upgrades in place once
- *      the live image has provably loaded — see liveImg().
+ *   1. The service's own live favicon: services.json `favicon` arrives
+ *      already resolved to an absolute https URL by the backend — the
+ *      manifest override when set, else the <link rel="icon"> the backend
+ *      discovered on the service's own page while it was up (a path is
+ *      joined onto the tile's url). The tile shows whatever the service
+ *      serves today, so a favicon update in that repo propagates here
+ *      instead of waiting for a re-vendor. The tile first paints source 2
+ *      or 3, then upgrades in place once the live image has provably
+ *      loaded — see liveImg().
  *   2. Vendored brand marks in static/icons/ — real app logos, in their own
  *      colours, keyed by service `key` (immich -> icons/immich.svg). Returned
  *      as an <img>. Files are local; nothing here touches the network, so the
@@ -92,8 +94,9 @@
     'metabase':      { file: 'metabase' },                    /* #509ee3    */
     'plane':         { file: 'plane' },                       /* #5275fc    */
     'umami':         { file: 'umami', dark: true },           /* black ink  */
-    /* Bespoke mark: three swatch cards on a slate plate — reads on both
-       tile themes, so no -dark pair. No upstream brand (private repo). */
+    /* The designs repo's own favicon, copied unchanged (a Next.js build
+       asset): white-and-spectrum mark on a near-black plate, reads on
+       both tile themes, so no -dark pair. */
     'design-systems': { file: 'design-systems' },
     /* Red-gradient lobster, reads on both tile themes. */
     'openclaw':      { file: 'openclaw' },

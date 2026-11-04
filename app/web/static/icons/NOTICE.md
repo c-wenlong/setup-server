@@ -60,9 +60,8 @@ convention (`<key>.svg` = light theme, `<key>-dark.svg` = dark theme) they
 trade places. Upstream's `-dark`/`-light` suffixes are not consistent about
 whether they name the ink or the background; each file was checked by eye.
 
-No upstream mark exists for `kaichenpedia`, `manimkc`, `gnosia-learn`,
-`sources` or `design-systems`. `kaichenpedia.png`, `manimkc.png` and
-`gnosia-learn.png` in this
+No upstream mark exists for `kaichenpedia`, `manimkc` or `gnosia-learn`.
+`kaichenpedia.png`, `manimkc.png` and `gnosia-learn.png` in this
 directory are bespoke raster icons (not from the vendored collection above,
 so the licence table does not cover them):
 `kaichenpedia.png` is cropped from the kaichenpedia repo's own artwork,
@@ -70,8 +69,8 @@ so the licence table does not cover them):
 mark (`apps/web/public/brand/mark.png`) from the gnosia repo, and
 `sources.svg` is the sources repo's own `site/favicon.svg` copied unchanged —
 each service's own artwork, the repo owner's in each case.
-`design-systems.svg` is drawn for this launcher (three swatch cards on a
-slate plate) — the repo is private and has no brand of its own.
+`design-systems.svg` is the designs repo's own favicon copied unchanged
+(the docs site's `/media/docs/assets/favicon.svg`, a Next.js build asset).
 `launcher.svg` is the launcher's own mark (three fused white tiles sliding
 right, with three fading echoes behind them, on near-black), original to
 this repo.

@@ -50,6 +50,7 @@ import datetime
 import base64
 import grp
 import hashlib
+import html.parser
 import http.server
 import json
 import mimetypes
@@ -816,6 +817,281 @@ def resolve_favicon(svc, host):
     ref = substitute_host(substitute_env(raw, env), host)
     if urllib.parse.urlsplit(ref).scheme in ("http", "https"):
         return ref
+    base = resolve_url(svc, host)
+    if not base:
+        return None
+    url = urllib.parse.urljoin(base, ref)
+    if urllib.parse.urlsplit(url).scheme in ("http", "https"):
+        return url
+    return None
+
+
+# ------------------------------------------------- live favicon discovery
+#
+# A manifest `favicon` stays the explicit override. Without one the launcher
+# still wants the service's own current mark, so while a service is ACTIVE
+# its own page is asked which icon it declares — the same <link rel="icon">
+# a browser would honour. The fetch runs on a daemon worker behind a TTL
+# cache (the _sample_disk shape): a request reads the cached ref, never a
+# socket, so /api/services is exactly as fast with discovery as without.
+
+FAVICON_TTL = 600.0           # a favicon changes on a deploy's timescale
+FAVICON_MAX_BYTES = 256 * 1024   # <head> sits at the top; bound the read
+FAVICON_FETCH_DEADLINE = 5.0  # total seconds a page fetch may take; a
+                              # trickling body is capped here, not by the
+                              # per-socket-op PROBE_TIMEOUT
+FAVICON_MAX_WORKERS = 4     # a cold catalogue must not storm the services
+
+_favicon_cache = {}         # page_url -> (checked_at, ref|None)
+_favicon_inflight = set()   # page_urls whose fetch worker is running/queued
+_favicon_lock = threading.Lock()
+_favicon_slots = threading.BoundedSemaphore(FAVICON_MAX_WORKERS)
+
+# Unlike _opener, this one FOLLOWS redirects: a moved page still gets to say
+# which icon it uses, and the href resolves against the post-redirect URL.
+_favicon_opener = urllib.request.build_opener()
+
+
+class _IconLinks(html.parser.HTMLParser):
+    """The page's <link> tags, reduced to what pick_icon ranks on, plus the
+    first <base href> — relative icon hrefs resolve against it."""
+
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self.base = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "base":
+            if self.base is None:
+                fields = dict(attrs)
+                href = (fields.get("href") or "").strip()
+                if href:
+                    self.base = href
+            return
+        if tag != "link":
+            return
+        fields = {}
+        for name, value in attrs:
+            fields[name.lower()] = value or ""
+        self.links.append({
+            "rel": fields.get("rel", "").lower().split(),
+            "href": fields.get("href", "").strip(),
+            "type": fields.get("type", "").lower().strip(),
+            "sizes": fields.get("sizes", "").lower().split(),
+        })
+
+
+def pick_icon(html_text):
+    """The raw href of the page's best icon <link>, or None.
+
+    Candidates are rel="icon" (any casing, any extra tokens — "Shortcut
+    Icon" counts) and the apple-touch icons; mask-icon is monochrome and
+    ignored. SVG first (type, .svg path or sizes="any" — scalable beats a
+    declared size), then the largest declared NxM size; an apple-touch-icon
+    with no sizes counts as 180 (Apple's default render size), a plain icon
+    as 0. Ties keep document order.
+    """
+    return _rank_icon_links(_icon_links(html_text).links)
+
+
+def _icon_links(html_text):
+    """The parsed _IconLinks for a page; tolerant of malformed markup — a
+    parser failure is not worth surfacing, whatever was collected before
+    the choke still ranks."""
+    parser = _IconLinks()
+    try:
+        parser.feed(html_text)
+        parser.close()
+    except Exception:
+        pass
+    return parser
+
+
+def _rank_icon_links(links):
+    best = None
+    best_rank = None
+    for link in links:
+        rel = link["rel"]
+        if "icon" in rel:
+            kind = "icon"
+        elif ("apple-touch-icon" in rel
+              or "apple-touch-icon-precomposed" in rel):
+            kind = "apple-touch-icon"
+        else:
+            continue
+        href = link["href"]
+        if not href:
+            continue
+        if urllib.parse.urlsplit(href).scheme not in ("", "http", "https"):
+            continue
+        is_svg = (link["type"] == "image/svg+xml"
+                  or urllib.parse.urlsplit(href).path.endswith(".svg")
+                  or "any" in link["sizes"])
+        size = 0
+        for entry in link["sizes"]:
+            dims = entry.split("x")
+            try:
+                size = max(size, int(dims[0]))
+            except (ValueError, IndexError):
+                continue
+        if not link["sizes"] and kind == "apple-touch-icon":
+            size = 180
+        rank = (1 if is_svg else 0, size)
+        if best is None or rank > best_rank:
+            best = href
+            best_rank = rank
+    return best
+
+
+def fetch_page_icon(page_url):
+    """Fetch page_url and return its icon, absolute; None on any failure.
+
+    When the page declares no icon the browser default answers:
+    /favicon.ico on the (post-redirect) origin. Only a text/html answer is
+    parsed; anything else — JSON health endpoints, SPA octet-streams — has
+    no icon to declare.
+    """
+    req = urllib.request.Request(page_url, headers={"Accept": "text/html"})
+    try:
+        with _favicon_opener.open(req, timeout=PROBE_TIMEOUT) as resp:
+            if resp.headers.get_content_type() != "text/html":
+                return None
+            # read1 in bounded chunks against a total deadline: PROBE_TIMEOUT
+            # caps each socket op but a trickling body would otherwise hold
+            # a worker slot forever. Past the deadline, parse what arrived —
+            # the <head> is at the top.
+            deadline = time.monotonic() + FAVICON_FETCH_DEADLINE
+            chunks = []
+            total = 0
+            while total < FAVICON_MAX_BYTES:
+                if time.monotonic() >= deadline:
+                    break
+                chunk = resp.read1(16384)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            charset = resp.headers.get_content_charset() or "utf-8"
+            text = b"".join(chunks).decode(charset, errors="replace")
+            base = resp.geturl()
+    except Exception:
+        return None
+    parsed = _icon_links(text)
+    href = _rank_icon_links(parsed.links)
+    if href is None:
+        # No declared icon: the browser default, always on the page's own
+        # (post-redirect) origin — a <base> pointing elsewhere must not
+        # move it.
+        return urllib.parse.urljoin(base, "/favicon.ico")
+    if parsed.base:
+        base = urllib.parse.urljoin(base, parsed.base)
+    return urllib.parse.urljoin(base, href)
+
+
+def favicon_page(svc, host):
+    """The loopback page to read <link rel=icon> from, or None.
+
+    Health proves which loopback port serves the app but its path may be an
+    API endpoint (quiver-hub probes /v1/status), so the page fetched is the
+    loopback origin carrying the PUBLIC url's path and query. Both halves
+    must resolve, and health must be loopback — anything else is not this
+    box's page to fetch.
+    """
+    health = resolve_health(svc)
+    public = resolve_url(svc, host)
+    if not health or not public:
+        return None
+    try:
+        h = urllib.parse.urlsplit(health)
+        host_ok = h.hostname in ("127.0.0.1", "localhost")
+        p = urllib.parse.urlsplit(public)
+    except ValueError:
+        return None
+    if not host_ok:
+        return None
+    return urllib.parse.urlunsplit(
+        (h.scheme, h.netloc, p.path or "/", p.query, ""))
+
+
+def _favicon_ref(page_url):
+    """Fetch page_url's icon and trim it to the value the cache keeps.
+
+    An icon on the loopback page's own origin stores as a root-relative
+    ref (path + query only): it then joins onto the PUBLIC url — whose
+    host is the tailnet name, not 127.0.0.1 — exactly the way a manifest
+    `favicon` path does. A cross-origin icon stays absolute; either way,
+    only http(s) is kept, because the frontend puts it into <img src>.
+    """
+    url = fetch_page_icon(page_url)
+    if not url:
+        return None
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https"):
+        return None
+    p = urllib.parse.urlsplit(page_url)
+    if (u.scheme, u.netloc) == (p.scheme, p.netloc):
+        return urllib.parse.urlunsplit(("", "", u.path, u.query, ""))
+    return url
+
+
+def _favicon_worker(page_url):
+    ref = None
+    try:
+        with _favicon_slots:
+            ref = _favicon_ref(page_url)
+    except Exception:
+        ref = None
+    finally:
+        with _favicon_lock:
+            _favicon_cache[page_url] = (time.time(), ref)
+            _favicon_inflight.discard(page_url)
+
+
+def cached_favicon(page_url):
+    """The cached discovered ref for page_url; never blocks.
+
+    A cold or expired entry starts a daemon worker and answers the stale
+    value (None on the very first poll), so the tile paints its vendored
+    mark now and a later poll upgrades it — the same contract as
+    _sample_disk.
+    """
+    with _favicon_lock:
+        hit = _favicon_cache.get(page_url)
+        if hit and time.time() - hit[0] < FAVICON_TTL:
+            return hit[1]
+        if page_url in _favicon_inflight:
+            return hit[1] if hit else None
+        _favicon_inflight.add(page_url)
+    threading.Thread(target=_favicon_worker, args=(page_url,), daemon=True,
+                     name="favicon-fetch").start()
+    return hit[1] if hit else None
+
+
+def tile_favicon(svc, host, active):
+    """The tile's live favicon URL, or None.
+
+    Precedence: the manifest `favicon` override wins (resolve_favicon,
+    unchanged); without one, only an ACTIVE service gets discovery — a
+    stopped one has no page to ask — and the cached ref joins onto the
+    tile's public url verbatim, with no token expansion.
+    """
+    override = resolve_favicon(svc, host)
+    if override:
+        return override
+    if not active:
+        return None
+    page = favicon_page(svc, host)
+    if not page:
+        return None
+    ref = cached_favicon(page)
+    if not ref:
+        return None
+    # Join the discovered ref directly — NOT via resolve_favicon, whose
+    # substitute_env/substitute_host would expand a "{TOKEN}" a hostile or
+    # templated page could put in its own href into a leaked .env value.
+    # resolve_url still gets the public base (manifest url, intended to
+    # carry tokens); the ref contributes only path/query verbatim.
     base = resolve_url(svc, host)
     if not base:
         return None
@@ -1894,11 +2170,12 @@ def services_payload():
             # tab. Always present, null when the registry row has none.
             "author": svc.get("author"),
             "icon": svc.get("icon"),
-            # Live favicon URL for tiles that opt in: the <img> upgrades to
-            # the service's own current mark once it loads, so a favicon
-            # update in that repo propagates here instead of waiting for a
-            # re-vendor. The vendored mark or glyph shows until then.
-            "favicon": resolve_favicon(svc, host),
+            # Live favicon URL for the tile: the manifest `favicon` override
+            # when set, else the <link rel="icon"> discovered on the
+            # service's own page while it is active. The <img> upgrades once
+            # the live file loads, so a favicon update in that repo
+            # propagates here; the vendored mark or glyph shows until then.
+            "favicon": tile_favicon(svc, host, active),
             "url": resolve_url(svc, host),
             "state": derive_state(svc.get("setup"), installed, active),
             "installed": installed,
@@ -2006,7 +2283,9 @@ def service_detail(key):
         "tagline": svc.get("tagline"),
         "group": effective_group(svc, oentry),
         "icon": svc.get("icon"),
-        "favicon": resolve_favicon(svc, host),
+        # Same precedence as the grid: manifest `favicon` override first,
+        # else the icon discovered on the service's own page while active.
+        "favicon": tile_favicon(svc, host, active),
         "url": resolve_url(svc, host),
         "state": derive_state(svc.get("setup"), installed, active),
         "installed": installed,
