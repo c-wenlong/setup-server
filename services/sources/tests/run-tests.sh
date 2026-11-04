@@ -437,6 +437,60 @@ test_fetch_clone_ignored() {
   teardown
 }
 
+test_jobs_db_linked() {
+  echo "• jobs.db in the fetch clone: linked into the deploy clone, Jobs built"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SOURCE_REPO/data/jobs"
+  echo "fake db" > "$SOURCE_REPO/data/jobs/jobs.db"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "announces the link"      out_has "jobs.db linked from the fetch clone"
+  check "jobs.db is a symlink"    [ -L "$HOME/services/sources/repo/data/jobs/jobs.db" ]
+  check "link targets fetch clone" sh -c '[ "$(readlink "$1")" = "$2" ]' _ "$HOME/services/sources/repo/data/jobs/jobs.db" "$SOURCE_REPO/data/jobs/jobs.db"
+  check "Jobs page shipped"       [ -f "$HOME/services/sources/www/current/d/jobs.bin" ]
+  # A relative SOURCE_REPO saved in .env: the -f check resolves it from
+  # the caller's cwd, but a relative symlink target would resolve under
+  # data/jobs/ in the deploy clone. The link must be absolute.
+  mkdir -p "$SANDBOX/fetchclone/data/jobs"
+  echo "fake db" > "$SANDBOX/fetchclone/data/jobs/jobs.db"
+  set_env SOURCE_REPO "fetchclone"
+  ( cd "$SANDBOX" && PATH="$STUBS:$PATH" bash "$HOME/services/sources/bin/deploy.sh" --force ) >/dev/null 2>&1
+  CODE=$?
+  check "relative src deploys"    [ "$CODE" -eq 0 ]
+  link="$(readlink "$HOME/services/sources/repo/data/jobs/jobs.db")"
+  check "link is absolute"        [ "${link#/}" != "$link" ]
+  check "link lands on real file" [ "$link" = "$(cd "$SANDBOX/fetchclone" && pwd)/data/jobs/jobs.db" ]
+  check "Jobs page rebuilt"       [ -f "$HOME/services/sources/www/current/d/jobs.bin" ]
+  teardown
+}
+
+test_jobs_db_absent() {
+  echo "• no jobs.db in the fetch clone: no link, build ships without Jobs (stale link dropped)"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "says no Jobs"                out_has "no jobs.db in the fetch clone"
+  check "no link in the clone"        [ ! -e "$HOME/services/sources/repo/data/jobs/jobs.db" ]
+  check "no Jobs page"                [ ! -f "$HOME/services/sources/www/current/d/jobs.bin" ]
+  # A deploy that had Jobs, then the fetch clone's jobs.db goes away: the
+  # stale link must be removed on the next run, not kept.
+  mkdir -p "$SOURCE_REPO/data/jobs"
+  echo "fake db" > "$SOURCE_REPO/data/jobs/jobs.db"
+  run_poll --force
+  check "deploy with Jobs ok"         [ "$CODE" -eq 0 ]
+  check "jobs.bin built"              [ -f "$HOME/services/sources/www/current/d/jobs.bin" ]
+  rm "$SOURCE_REPO/data/jobs/jobs.db"
+  : > "$CALLS_LOG"
+  run_poll --force
+  check "re-deploy exits zero"        [ "$CODE" -eq 0 ]
+  check "says no Jobs"                out_has "no jobs.db in the fetch clone"
+  check "stale link removed"          sh -c '[ ! -e "$1" ] && [ ! -L "$1" ]' _ "$HOME/services/sources/repo/data/jobs/jobs.db"
+  check "new release has no Jobs"     [ ! -f "$HOME/services/sources/www/current/d/jobs.bin" ]
+  teardown
+}
+
 test_port_override() {
   echo "• LOCAL_PORT override (HTTPS follows local by default)"
   setup
@@ -1245,6 +1299,8 @@ test_new_layout_build_path
 test_poll_lock
 test_repo_url_repointed
 test_fetch_clone_ignored
+test_jobs_db_linked
+test_jobs_db_absent
 test_port_override
 test_operator_escalation
 # teardown tests assert the systemd poller path; the launchd path is not
