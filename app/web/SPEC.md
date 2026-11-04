@@ -870,8 +870,11 @@ tick runs): a tick already holding the old source and the commit it
 resolved there would otherwise deploy them over the new one. A method
 change the runner cannot swap alone wraps the deploy in steps: leaving
 `compose` runs `docker compose down` on the old stack first and `up -d`
-again if the deploy fails; a container method moving to `script` stops
-`app-<key>` first and starts it again on failure. A script's own
+again if the deploy fails; a container method moving to `compose` parks
+`app-<key>` as `app-<key>-prev` (stopped, so the port is free), drops it
+once the stack is up, and on failure clears the new stack by its project
+label and puts the container back; a container method moving to `script`
+stops `app-<key>` first and starts it again on failure. A script's own
 processes are its own, so leaving `script` stops nothing.
 
 No `.env` value is in any of it: definitions only ever hold `env_names`.
