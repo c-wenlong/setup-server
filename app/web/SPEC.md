@@ -834,3 +834,53 @@ each app's data, the docker `df` split, each top-level folder's size, and
 "System and other". It fetches on open and polls only while `scanning`,
 so a first open fills in as the walk lands and a closed sheet costs the
 box nothing. **Scan again** re-walks on demand.
+
+## v15: Deployments gallery, the API (2026-11-04)
+
+Step 2 of [#137](https://github.com/c-wenlong/setup-server/issues/137):
+read and change how each app deploys, and redeploy it. The UI is v16.
+
+**What is a deployment.** Two kinds, apps first, each sorted by key:
+
+- `app`: every valid definition on this box (`~/services/launcher/apps/
+  <key>.json`, run by `ghapp.py` through its `method`). A definition
+  whose key `services.json` also has is shadowed there and left out:
+  `start_deploy` would run that service's `setup.sh`.
+- `service`: everything else deployd watches (manifest `deploy` blocks
+  after `state/pollers.json` overrides, plus custom pollers), with the
+  same scan `GET api/deployd` uses. An app's own `ghapp.py deploy` poller
+  is not listed twice. Shown as method `script`; its `cmd` is edited
+  through the existing `POST api/deployd/pollers/{key}`, never here, and
+  nothing writes `services/*/app.json`.
+
+**State**, most urgent first: `deploying` (a launcher job runs for the
+key), `failed` (deployd's `.fail` record, or a launcher job that failed
+within `JOB_LINGER`, since `ghapp.py` writes no `.fail` of its own),
+`never` (no deployed sha), `paused` (`state/<key>.disabled`), `live`.
+
+| Route | Does |
+|---|---|
+| `GET api/deployments` | `{deployments: [...], methods}`; each item `{key, name, kind, method, repo, github, ref, deployed: {sha, at} \| null, state, job, url, healthy}`. `github` is `owner/name` when the repo is on GitHub (for commit links), `healthy` the cached loopback probe (`null` with nothing to probe) |
+| `GET api/deployments/{key}` | the item plus `definition` (an app's stored definition with `method` filled in; a service's `{key, method: "script", repo, ref, cmd, source}`), `editable` (`via` the endpoint that saves it, `immutable` fields), `record` (`deployed.json`), deployd's `fail`, `paused`, and `logs: {deployd, jobs}` (the `state/<key>.log` tail, ANSI stripped, and the newest 3 launcher jobs for the key with 16 KB tails each, from the in-memory job registry) |
+| `PUT api/deployments/{key}` | apps only. The body's fields are merged over the stored definition (`null` drops one; `key`, `name` and `port` must be absent or unchanged), `ghapp.validate` is the only gate (400 with its message), the file is rewritten under the app's flock, then `ghapp.py deploy <key>` starts; 202 `{key, job_id}`. A deploy that cannot start puts the old definition back. A new repo or ref moves the app's own poller. A service is a 400 naming its poller endpoint |
+| `POST api/deployments/{key}/redeploy` | 202 `{key, job_id}`: `start_deploy` for an app, `deployd --force` for a service |
+
+**Saving safely.** One save per app at a time: a second PUT for a key
+whose save is still between validation and its job starting is a 409, so
+it cannot rewrite the definition under the deploy the first one starts.
+A repo or ref change first takes deployd's own `.poll.lock` (409 while a
+tick runs): a tick already holding the old source and the commit it
+resolved there would otherwise deploy them over the new one. A method
+change the runner cannot swap alone wraps the deploy in steps: leaving
+`compose` runs `docker compose down` on the old stack first and `up -d`
+again if the deploy fails; a container method moving to `compose` parks
+`app-<key>` as `app-<key>.parked` (a dot no key can hold; stopped, so the port is free), drops it
+once the stack is up, and on failure clears the new stack by its project
+label and puts the container back; a container method moving to `script`
+stops `app-<key>` first and starts it again on failure. A script's own
+processes are its own, so leaving `script` stops nothing.
+
+No `.env` value is in any of it: definitions only ever hold `env_names`.
+Ports never move. `ghapp_entries` now reads every method (its description
+used to read `d["dockerfile"]`, which a method switch would break), and a
+script definition with no port gets no URL or probe.

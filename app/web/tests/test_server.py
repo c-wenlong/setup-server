@@ -9503,3 +9503,534 @@ class GhApiTest(unittest.TestCase):
         with self.assertRaises(server.DeployError) as ctx:
             server.gh_api("user/repos")
         self.assertEqual(ctx.exception.status, 503)
+
+
+# ---------------------------------------------------------------- deployments
+
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+
+
+class DeploymentsBase(GithubAppsBase):
+    """The Deploys gallery API over two launcher apps and one deployd-watched
+    service. Definitions are written straight to the sandboxed apps dir;
+    start_deploy and the deployd poller writes are the base's recorders."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = os.path.join(server.DEPLOYD_HOME, "state")
+        os.makedirs(self.state, exist_ok=True)
+        # forgejo: a services.json entry deployd watches through its manifest.
+        path = os.path.join(server.REPO_ROOT, "services", "forgejo")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "app.json"), "w") as fh:
+            json.dump({"key": "forgejo", "deploy": {
+                "repo": "https://github.com/c-wenlong/setup-server.git",
+                "ref": "main", "cmd": "services/forgejo/setup.sh"}}, fh)
+        self.write_def("hello-app", name="Hello", port=8302)
+        self.write_def("static-app", name="Docs", port=8303, method="static",
+                       build="npm run build", output="dist")
+        # hello-app's own poller, the way create_app wires it: a custom
+        # pollers.json row that must not show up again as a service.
+        with open(os.path.join(self.state, "pollers.json"), "w") as fh:
+            json.dump({"version": 1, "pollers": {"hello-app": {
+                "repo": "https://github.com/c-wenlong/hello.git", "ref": "main",
+                "cmd": "app/web/ghapp.py deploy hello-app"}}}, fh)
+        os.makedirs(ghapp.app_dir("hello-app"), exist_ok=True)
+        with open(os.path.join(ghapp.app_dir("hello-app"), ".env"), "w") as fh:
+            fh.write("API_TOKEN=hunter2-very-secret\n")
+        # The recorder also writes the row, as the real upsert would, so a
+        # later save reads back what the last one wrote.
+        def upsert(key, body):
+            self.pollers[key] = body
+            path = os.path.join(self.state, "pollers.json")
+            with open(path) as fh:
+                doc = json.load(fh)
+            doc["pollers"][key] = body
+            with open(path, "w") as fh:
+                json.dump(doc, fh)
+        server.deployd_upsert_poller = upsert
+
+    def write_def(self, key, **fields):
+        d = {"version": 1, "key": key, "name": key, "repo": "c-wenlong/hello",
+             "ref": "main", "dockerfile": "Dockerfile", "context": ".",
+             "container_port": 3000, "port": 8302, "health_path": "/",
+             "volume": None, "env_names": ["API_TOKEN"]}
+        d.update(fields)
+        os.makedirs(ghapp.DEFS_DIR, exist_ok=True)
+        with open(ghapp.def_path(key), "w") as fh:
+            json.dump(d, fh)
+        return d
+
+    def read_def(self, key):
+        with open(ghapp.def_path(key)) as fh:
+            return json.load(fh)
+
+    def deployed(self, key, sha=SHA_A):
+        os.makedirs(ghapp.app_dir(key), exist_ok=True)
+        with open(os.path.join(ghapp.app_dir(key), "deployed.json"), "w") as fh:
+            json.dump({"sha": sha, "image": "x", "method": "dockerfile",
+                       "ref": "main", "at": "2026-05-01T10:00:00Z"}, fh)
+
+    def mark(self, key, ext, text=""):
+        with open(os.path.join(self.state, "%s.%s" % (key, ext)), "w") as fh:
+            fh.write(text)
+
+    def items(self):
+        return {i["key"]: i for i in server.deployments_payload()["deployments"]}
+
+
+class DeploymentsListTest(DeploymentsBase):
+
+    def test_apps_and_services_one_card_each(self):
+        payload = server.deployments_payload()
+        self.assertEqual([i["key"] for i in payload["deployments"]],
+                         ["hello-app", "static-app", "forgejo"])
+        self.assertEqual(payload["methods"], list(ghapp.METHODS))
+        items = self.items()
+        app, svc = items["hello-app"], items["forgejo"]
+        self.assertEqual((app["kind"], app["method"], app["name"]),
+                         ("app", "dockerfile", "Hello"))
+        self.assertEqual(items["static-app"]["method"], "static")
+        self.assertEqual((app["repo"], app["github"], app["ref"]),
+                         ("c-wenlong/hello", "c-wenlong/hello", "main"))
+        self.assertEqual(app["url"], "https://box.ts.net:8302/")
+        self.assertEqual((svc["kind"], svc["method"], svc["name"]),
+                         ("service", "script", "Forgejo"))
+        self.assertEqual(svc["github"], "c-wenlong/setup-server")
+        self.assertEqual(svc["url"], "https://box.ts.net:8301/")
+        # probe_all answers {} here: an app with a health path probes false,
+        # a service with no health URL has nothing to probe.
+        self.assertIs(app["healthy"], False)
+        self.assertIsNone(svc["healthy"])
+
+    def test_states(self):
+        items = self.items()
+        self.assertEqual(items["hello-app"]["state"], "never")
+        self.assertEqual(items["forgejo"]["state"], "never")
+        self.assertIsNone(items["hello-app"]["deployed"])
+        self.deployed("hello-app")
+        self.mark("forgejo", "sha", SHA_B + "\n")
+        items = self.items()
+        self.assertEqual(items["hello-app"]["state"], "live")
+        self.assertEqual(items["hello-app"]["deployed"],
+                         {"sha": SHA_A, "at": "2026-05-01T10:00:00Z"})
+        self.assertEqual(items["forgejo"]["state"], "live")
+        self.assertEqual(items["forgejo"]["deployed"]["sha"], SHA_B)
+        self.assertRegex(items["forgejo"]["deployed"]["at"],
+                         r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.mark("hello-app", "disabled")
+        self.mark("forgejo", "fail", json.dumps({"sha": SHA_A, "rc": 1, "at": 1}))
+        items = self.items()
+        self.assertEqual(items["hello-app"]["state"], "paused")
+        self.assertEqual(items["forgejo"]["state"], "failed")
+
+    def test_a_running_job_reads_deploying_and_a_failed_one_failed(self):
+        self.deployed("hello-app")
+        server._jobs["j1"] = {"id": "j1", "key": "hello-app", "action": "deploy",
+                              "status": "running", "exit_code": None,
+                              "log_path": os.path.join(self.tmp, "j1.log"),
+                              "started": time.time(), "finished": None}
+        self.assertEqual(self.items()["hello-app"]["state"], "deploying")
+        server._jobs["j1"].update(status="failed", exit_code=1,
+                                  finished=time.time())
+        self.assertEqual(self.items()["hello-app"]["state"], "failed")
+
+    def test_a_definition_services_json_shadows_is_not_an_app(self):
+        self.write_def("forgejo", port=8399)
+        items = self.items()
+        self.assertEqual(items["forgejo"]["kind"], "service")
+        self.assertEqual(list(items).count("forgejo"), 1)
+
+    def test_any_method_reads_into_the_registry(self):
+        # ghapp_entries used to read d["dockerfile"] unconditionally.
+        self.write_def("img-app", method="image", image="nginx:1.27", port=8304)
+        self.write_def("sh-app", method="script", cmd="make deploy",
+                       port=None, health_path=None)
+        entries = {e["key"]: e for e in server.ghapp_entries()}
+        self.assertIn("the image nginx:1.27", entries["img-app"]["description"])
+        self.assertIsNone(entries["sh-app"]["url"])
+        self.assertIsNone(entries["sh-app"]["health"])
+        items = self.items()
+        self.assertEqual(items["sh-app"]["method"], "script")
+        self.assertIsNone(items["sh-app"]["url"])
+        server.services_payload()          # the grid still renders
+
+
+class DeploymentDetailTest(DeploymentsBase):
+
+    def test_app_detail_definition_record_and_logs(self):
+        self.deployed("hello-app")
+        self.mark("hello-app", "log", "\x1b[32mbuilt\x1b[0m\ndeployed\n")
+        log_path = os.path.join(self.tmp, "j1.log")
+        with open(log_path, "w") as fh:
+            fh.write("$ ghapp.py deploy hello-app\nok\n")
+        server._jobs["j1"] = {"id": "j1", "key": "hello-app", "action": "deploy",
+                              "status": "done", "exit_code": 0,
+                              "log_path": log_path, "started": time.time() - 5,
+                              "finished": time.time()}
+        d = server.deployment_detail("hello-app")
+        self.assertEqual(d["definition"]["method"], "dockerfile")
+        self.assertEqual(d["definition"]["dockerfile"], "Dockerfile")
+        self.assertEqual(d["definition"]["env_names"], ["API_TOKEN"])
+        self.assertEqual(d["record"]["sha"], SHA_A)
+        self.assertEqual(d["editable"]["via"], "api/deployments/hello-app")
+        self.assertEqual(d["editable"]["immutable"], ["key", "name", "port"])
+        self.assertEqual(d["logs"]["deployd"], "built\ndeployed")
+        self.assertEqual([j["id"] for j in d["logs"]["jobs"]], ["j1"])
+        self.assertIn("ok", d["logs"]["jobs"][0]["log"])
+        self.assertIsNone(d["fail"])
+
+    def test_no_env_value_ever_leaks(self):
+        for key in ("hello-app", "forgejo"):
+            text = json.dumps(server.deployment_detail(key))
+            self.assertNotIn("hunter2", text)
+        self.assertNotIn("hunter2", json.dumps(server.deployments_payload()))
+
+    def test_service_detail_is_a_script_edited_through_its_poller(self):
+        self.mark("forgejo", "fail", json.dumps({"sha": SHA_A, "rc": 3, "at": 9}))
+        d = server.deployment_detail("forgejo")
+        self.assertEqual(d["definition"], {
+            "key": "forgejo", "method": "script",
+            "repo": "https://github.com/c-wenlong/setup-server.git",
+            "ref": "main", "cmd": "services/forgejo/setup.sh",
+            "source": "manifest"})
+        self.assertEqual(d["editable"]["via"], "api/deployd/pollers/forgejo")
+        self.assertEqual(d["fail"], {"sha": SHA_A, "rc": 3, "at": 9})
+        self.assertEqual(d["logs"]["jobs"], [])
+
+    def test_unknown_is_404(self):
+        for key in ("nope-app", "../etc", "UPPER"):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.deployment_detail(key)
+            self.assertEqual(ctx.exception.status, 404, key)
+
+
+class DeploymentUpdateTest(DeploymentsBase):
+
+    def test_put_changes_method_writes_the_definition_and_deploys(self):
+        out = server.update_deployment("hello-app", {
+            "method": "image", "image": "ghcr.io/c-wenlong/hello:1.2",
+            "container_port": 8080, "key": "hello-app", "port": 8302})
+        self.assertEqual(out, {"key": "hello-app", "job_id": "job-1"})
+        self.assertEqual(self.deploys, ["hello-app"])
+        d = self.read_def("hello-app")
+        self.assertEqual((d["method"], d["image"], d["container_port"]),
+                         ("image", "ghcr.io/c-wenlong/hello:1.2", 8080))
+        # Untouched fields stay, so switching back restores them.
+        self.assertEqual((d["dockerfile"], d["port"], d["name"]),
+                         ("Dockerfile", 8302, "Hello"))
+        self.assertEqual(self.items()["hello-app"]["method"], "image")
+
+    def test_put_edits_paths_and_null_drops_a_field(self):
+        server.update_deployment("hello-app", {
+            "dockerfile": "site/Dockerfile", "context": "site", "volume": None})
+        d = self.read_def("hello-app")
+        self.assertEqual((d["dockerfile"], d["context"]), ("site/Dockerfile", "site"))
+        self.assertNotIn("volume", d)
+
+    def test_bad_field_is_400_with_the_validators_message_and_no_write(self):
+        before = open(ghapp.def_path("hello-app")).read()
+        for body, word in (({"dockerfile": "../etc/passwd"}, "dockerfile"),
+                           ({"method": "image"}, "image"),
+                           ({"method": "static", "build": "a\nb",
+                             "output": "dist"}, "build"),
+                           ({"health_path": "nope"}, "health_path"),
+                           ({"repo": "not a repo"}, "repo")):
+            with self.assertRaises(server.DeployError, msg=body) as ctx:
+                server.update_deployment("hello-app", body)
+            self.assertEqual(ctx.exception.status, 400, body)
+            self.assertIn(word, ctx.exception.message, body)
+        self.assertEqual(open(ghapp.def_path("hello-app")).read(), before)
+        self.assertEqual(self.deploys, [])
+
+    def test_key_name_and_port_are_immutable(self):
+        before = open(ghapp.def_path("hello-app")).read()
+        for body in ({"key": "other-app"}, {"port": 8399}, {"name": "Renamed"}):
+            with self.assertRaises(server.DeployError, msg=body) as ctx:
+                server.update_deployment("hello-app", body)
+            self.assertEqual(ctx.exception.status, 400, body)
+        self.assertEqual(open(ghapp.def_path("hello-app")).read(), before)
+        self.assertEqual(self.deploys, [])
+
+    def test_put_on_a_service_points_at_the_poller_endpoint(self):
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_deployment("forgejo", {"cmd": "x"})
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertIn("api/deployd/pollers/forgejo", ctx.exception.message)
+
+    def test_put_refuses_non_objects_and_unknown_keys(self):
+        for body in (None, [], "x"):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.update_deployment("hello-app", body)
+            self.assertEqual(ctx.exception.status, 400)
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_deployment("ghost-app", {})
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_a_deploy_that_cannot_start_puts_the_old_definition_back(self):
+        before = self.read_def("hello-app")
+
+        def refuse(key):
+            raise server.DeployError(429, "too many jobs running (max 2)")
+        server.start_deploy = refuse
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(ctx.exception.status, 429)
+        self.assertEqual(self.read_def("hello-app"), before)
+
+    def test_refused_while_a_job_or_a_deploy_holds_the_app(self):
+        before = open(ghapp.def_path("hello-app")).read()
+        server._jobs["j1"] = {"id": "j1", "key": "hello-app", "action": "deploy",
+                              "status": "running", "exit_code": None,
+                              "log_path": os.path.join(self.tmp, "j1.log"),
+                              "started": time.time(), "finished": None}
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(ctx.exception.status, 409)
+        server._jobs.clear()
+        with ghapp.Lock("hello-app"):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(open(ghapp.def_path("hello-app")).read(), before)
+
+    def test_a_new_repo_or_ref_moves_the_apps_own_poller(self):
+        server.update_deployment("hello-app", {"ref": "next"})
+        self.assertEqual(self.pollers["hello-app"], {
+            "repo": "https://github.com/c-wenlong/hello.git", "ref": "next",
+            "cmd": "app/web/ghapp.py deploy hello-app"})
+        self.pollers.clear()
+        server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(self.pollers, {})     # same repo and ref: untouched
+
+    def test_redeploy_app_and_service(self):
+        forced = []
+        saved = server.start_deployd_force
+        server.start_deployd_force = lambda k: (forced.append(k), "job-2")[1]
+        try:
+            self.assertEqual(server.redeploy_deployment("hello-app"), "job-1")
+            self.assertEqual(server.redeploy_deployment("forgejo"), "job-2")
+        finally:
+            server.start_deployd_force = saved
+        self.assertEqual((self.deploys, forced), (["hello-app"], ["forgejo"]))
+        with self.assertRaises(server.DeployError) as ctx:
+            server.redeploy_deployment("ghost-app")
+        self.assertEqual(ctx.exception.status, 404)
+
+
+class DeploymentsHttpTest(DeploymentsBase):
+
+    def setUp(self):
+        super().setUp()
+        self.srv = server.Server(("127.0.0.1", 0), server.Handler)
+        self.port = self.srv.server_address[1]
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread.start()
+        self._force_saved = server.start_deployd_force
+        server.start_deployd_force = lambda k: "job-2"
+
+    def tearDown(self):
+        server.start_deployd_force = self._force_saved
+        self.srv.shutdown()
+        self.srv.server_close()
+        super().tearDown()
+
+    def call(self, method, path, body=None):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(method, path, body=None if body is None else json.dumps(body),
+                     headers={"Content-Type": "application/json"} if body is not None else {})
+        resp = conn.getresponse()
+        data = resp.read().decode()
+        conn.close()
+        return resp.status, json.loads(data) if data.strip() else None
+
+    def test_routes(self):
+        status, doc = self.call("GET", "/api/deployments")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(doc["deployments"]), 3)
+        status, doc = self.call("GET", "/home/api/deployments/hello-app")
+        self.assertEqual((status, doc["kind"]), (200, "app"))
+        self.assertEqual(self.call("GET", "/api/deployments/ghost-app")[0], 404)
+        status, doc = self.call("PUT", "/api/deployments/hello-app",
+                                {"method": "image", "image": "nginx:1.27"})
+        self.assertEqual((status, doc["job_id"]), (202, "job-1"))
+        status, doc = self.call("PUT", "/api/deployments/hello-app",
+                                {"image": "-bad"})
+        self.assertEqual(status, 400)
+        self.assertIn("image", doc["error"])
+        self.assertEqual(self.read_def("hello-app")["image"], "nginx:1.27")
+        self.assertEqual(self.call("PUT", "/api/deployments/forgejo", {"cmd": "x"})[0], 400)
+        status, doc = self.call("POST", "/api/deployments/forgejo/redeploy")
+        self.assertEqual((status, doc["job_id"]), (202, "job-2"))
+        status, doc = self.call("POST", "/api/deployments/hello-app/redeploy")
+        self.assertEqual((status, doc["job_id"]), (202, "job-1"))
+        self.assertEqual(self.call("PUT", "/api/nothing", {})[0], 404)
+
+
+class DeploymentUpdateRaceTest(DeploymentsBase):
+    """The review's three cases: overlapping saves, a deployd tick holding
+    the old source, and method switches the runner cannot swap alone."""
+
+    def test_a_second_save_of_the_same_app_is_refused(self):
+        before = open(ghapp.def_path("hello-app")).read()
+        server._deployment_edits.add("hello-app")
+        try:
+            with self.assertRaises(server.DeployError) as ctx:
+                server.update_deployment("hello-app", {"context": "site"})
+        finally:
+            server._deployment_edits.discard("hello-app")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(open(ghapp.def_path("hello-app")).read(), before)
+        # ...and the slot is released after a save, failed or not.
+        with self.assertRaises(server.DeployError):
+            server.update_deployment("hello-app", {"dockerfile": "../x"})
+        server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(server._deployment_edits, set())
+
+    def test_a_source_change_waits_out_a_deployd_tick(self):
+        lock = os.path.join(server.DEPLOYD_HOME, ".poll.lock")
+        os.mkdir(lock)
+        before = open(ghapp.def_path("hello-app")).read()
+        with self.assertRaises(server.DeployError) as ctx:
+            server.update_deployment("hello-app", {"ref": "next"})
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(open(ghapp.def_path("hello-app")).read(), before)
+        self.assertEqual((self.deploys, self.pollers), ([], {}))
+        # A change that keeps repo and ref does not need the tick's lock.
+        server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(self.deploys, ["hello-app"])
+        os.rmdir(lock)
+        server.update_deployment("hello-app", {"ref": "next"})
+        self.assertFalse(os.path.exists(lock))     # taken and given back
+        self.assertEqual(self.pollers["hello-app"]["ref"], "next")
+
+    def test_a_failed_start_moves_the_poller_back(self):
+        def refuse(key):
+            raise server.DeployError(429, "too many jobs running (max 2)")
+        server.start_deploy = refuse
+        with self.assertRaises(server.DeployError):
+            server.update_deployment("hello-app", {"ref": "next"})
+        self.assertEqual(self.read_def("hello-app")["ref"], "main")
+        self.assertEqual(self.pollers["hello-app"]["ref"], "main")
+
+    def capture_steps(self):
+        seen = []
+        saved = server._run_steps
+        server._run_steps = lambda job, steps: seen.append(steps)
+        self.addCleanup(setattr, server, "_run_steps", saved)
+        return seen
+
+    def test_leaving_compose_stops_the_stack_and_restores_it_on_failure(self):
+        self.write_def("api-box", port=8304, method="compose",
+                       compose_file="deploy/compose.yml", container_port=8000)
+        self.deployed("api-box")
+        src = os.path.join(ghapp.app_dir("api-box"), "src", "deploy")
+        os.makedirs(src)
+        open(os.path.join(src, "compose.yml"), "w").close()
+        server._have_docker_group = lambda: True
+        seen = self.capture_steps()
+        out = server.update_deployment("api-box", {"method": "image",
+                                                   "image": "nginx:1.27"})
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.02)
+        steps = seen[0]
+        self.assertEqual([s["argv"][-1] if "on_failure" not in s else "restore"
+                          for s in steps], ["down", "api-box", "restore", "restore"])
+        self.assertIn("--project-name", steps[0]["argv"])
+        self.assertIn("app-api-box", steps[0]["argv"])
+        self.assertEqual(steps[1]["argv"][-2:], ["deploy", "api-box"])
+        # On failure: clear whatever the new method started, then the stack.
+        self.assertEqual(steps[2]["argv"], ["docker", "rm", "--force", "app-api-box"])
+        self.assertEqual(steps[3]["argv"][-2:], ["up", "--detach"])
+        self.assertTrue(steps[3]["on_failure"])
+        self.assertEqual(server._jobs[out["job_id"]]["key"], "api-box")
+        self.assertEqual(self.deploys, [])          # not the plain path
+
+    def test_container_to_script_stops_the_container_first(self):
+        self.deployed("hello-app")
+        server._have_docker_group = lambda: True
+        seen = self.capture_steps()
+        server.update_deployment("hello-app", {"method": "script",
+                                               "cmd": "make deploy"})
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.02)
+        argvs = [s["argv"] for s in seen[0]]
+        self.assertEqual(argvs[0], ["docker", "stop", "app-hello-app"])
+        self.assertEqual(argvs[2], ["docker", "start", "app-hello-app"])
+
+    def test_container_to_compose_parks_the_container_until_the_stack_is_up(self):
+        self.deployed("hello-app")
+        server._have_docker_group = lambda: True
+        seen = self.capture_steps()
+        server.update_deployment("hello-app", {"method": "compose",
+                                               "compose_file": "compose.yml"})
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.02)
+        steps = seen[0]
+        argvs = [s["argv"] for s in steps]
+        # Never a name another app could own: app-<key> with a dotted key
+        # is impossible (the review's app-hello-prev was app hello-prev's).
+        self.assertIsNone(ghapp.KEY_RE.match("hello-app.parked"))
+        self.assertEqual(argvs[:3], [
+            ["docker", "rm", "--force", "app-hello-app.parked"],
+            ["docker", "rename", "app-hello-app", "app-hello-app.parked"],
+            ["docker", "stop", "app-hello-app.parked"]])
+        self.assertEqual(argvs[3][-2:], ["deploy", "hello-app"])
+        # Success only: drop the parked container.
+        self.assertEqual(argvs[4], ["docker", "rm", "--force", "app-hello-app.parked"])
+        self.assertFalse(steps[4].get("on_failure"))
+        # Failure only: clear the new stack by its project label, then put
+        # the old container back under its name and start it.
+        self.assertEqual(argvs[5][:2], ["sh", "-c"])
+        self.assertIn("label=com.docker.compose.project=app-hello-app", argvs[5][2])
+        self.assertEqual(argvs[6], ["docker", "rename", "app-hello-app.parked", "app-hello-app"])
+        self.assertEqual(argvs[7], ["docker", "start", "app-hello-app"])
+        self.assertTrue(all(s.get("on_failure") for s in steps[5:]))
+
+    def test_a_failed_switch_runs_the_restore_steps_and_skips_the_cleanup(self):
+        self.deployed("hello-app")
+        server._have_docker_group = lambda: True
+        before, after, restore = server._switch_steps(
+            "hello-app", self.read_def("hello-app"),
+            dict(self.read_def("hello-app"), method="compose",
+                 compose_file="compose.yml"))
+        steps = before + [{"argv": ["ghapp.py", "deploy", "hello-app"]}] + after + restore
+        ran = []
+
+        class Done:
+            def __init__(self, code):
+                self.code = code
+
+            def wait(self, timeout=None):
+                return self.code
+
+        def fake(argv, **kwargs):
+            ran.append(list(argv))
+            return Done(1 if argv[0] == "ghapp.py" else 0)
+        subprocess.Popen = fake
+        job = server.register_job("hello-app", "deploy")
+        server._run_steps(job, steps)
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual([a[:2] for a in ran], [
+            ["docker", "rm"], ["docker", "rename"], ["docker", "stop"],
+            ["ghapp.py", "deploy"],
+            ["sh", "-c"], ["docker", "rename"], ["docker", "start"]])
+
+    def test_same_method_or_never_deployed_is_the_plain_deploy(self):
+        self.write_def("api-box", port=8304, method="compose",
+                       compose_file="deploy/compose.yml", container_port=8000)
+        seen = self.capture_steps()
+        # Not deployed yet: nothing runs to stop.
+        server.update_deployment("api-box", {"method": "image", "image": "nginx:1.27"})
+        self.deployed("hello-app")
+        server.update_deployment("hello-app", {"context": "site"})
+        self.assertEqual(seen, [])
+        self.assertEqual(self.deploys, ["api-box", "hello-app"])
