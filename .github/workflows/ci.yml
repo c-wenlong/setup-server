@@ -154,7 +154,9 @@ jobs:
 
   python-syntax:
     name: Python syntax (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, which has no Python 3.9 build in
+    # actions/python-versions, so setup-python fails before any check runs.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
