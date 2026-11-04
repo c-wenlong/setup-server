@@ -960,3 +960,45 @@ origin/<ref> is at Y" before anything is stopped or checked out, so
 deployd's fail and backoff retry it, the same as
 `services/kaichenpedia/deploy.sh`. The clone stays `--filter=blob:none` and
 the checkout stays a forced detach plus `clean -ffdxq`.
+
+## v18: host-run commands get the app's env and a usable PATH (2026-11-04)
+
+Part of [#137](https://github.com/c-wenlong/setup-server/issues/137), ahead
+of moving services onto methods. A static `build` or a script `cmd` runs on
+the host, not in a container, and until now it got only the runner's own
+process env. Under deployd that is a systemd user unit's minimal PATH (no
+`uv`, no `npm`), and no app secret reaches a build that bakes one into its
+output (a site passphrase, say).
+
+**The env.** Every host-run command (`run_sh`: static `build`, script
+`cmd`) gets the runner's env overlaid with `~/services/apps/<key>/.env`
+when it exists. node/python `build`/`start` run inside the generated
+Dockerfile and are unchanged. The file is read with `docker run
+--env-file` rules, since the same file feeds that flag:
+
+| Line | Result |
+|---|---|
+| `KEY=VALUE` | set, value taken literally: quotes kept, no `$` expansion, trailing spaces kept; split at the first `=` |
+| blank, or `#` after leading whitespace | skipped |
+| bare `KEY` | KEY from the runner's env when set there, else nothing |
+| name failing `ENV_NAME_RE`, not UTF-8, or holding a NUL | skipped, with a `==>` warning naming only the line number |
+
+Leading whitespace and a first-line UTF-8 BOM are dropped and a trailing
+`\r` is ignored, as Docker does; a later line for the same key wins.
+
+**PATH.** Always the runner's PATH with `~/.local/bin`,
+`~/.nix-profile/bin`, `/opt/homebrew/bin` and `/usr/local/bin` put in
+front, each only if the directory exists, every entry once (first place
+wins, empty entries dropped). A `PATH` in `.env` is ignored for host
+commands, with one log line that does not show it: the same file goes
+into containers, where it still applies.
+
+**Static's nginx gets no `--env-file`.** It only serves files, and the
+`.env` now holds the build's secrets, which must not sit in the serving
+container's environment. That covers the rollback run too. Every other
+container method (dockerfile, image, node, python) and compose keep
+passing it.
+
+**No value is printed.** Values go into the child's environment only,
+never an argv, so the job log's echoed `$ sh -c ...` line carries none,
+and no warning includes a value.

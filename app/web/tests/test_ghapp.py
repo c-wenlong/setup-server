@@ -7,12 +7,16 @@ at a temp dir. Run from app/web/:
     python3 -m unittest discover -s tests -p 'test_*.py'
 """
 
+import contextlib
+import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -70,12 +74,14 @@ class Sandbox(unittest.TestCase):
         os.makedirs(ghapp.DEFS_DIR)
         self.calls = []
         self.cwds = []            # cwd of each call, index-aligned with calls
+        self.envs = []            # env= of each call (None for quiet/default)
         self.quiet_out = {}
         self.run_codes = {}
 
-        def fake_run(argv, check=True, capture=False, cwd=None):
+        def fake_run(argv, check=True, capture=False, cwd=None, env=None):
             self.calls.append(list(argv))
             self.cwds.append(cwd)
+            self.envs.append(env)
             code = 0
             for prefix, c in self.run_codes.items():
                 if " ".join(argv).startswith(prefix):
@@ -91,6 +97,7 @@ class Sandbox(unittest.TestCase):
         def fake_quiet(argv, cwd=None):
             self.calls.append(list(argv))
             self.cwds.append(cwd)
+            self.envs.append(None)
             for prefix, out in self.quiet_out.items():
                 if " ".join(argv).startswith(prefix):
                     return out
@@ -660,6 +667,226 @@ class MethodDeployTest(Sandbox):
             ghapp.deploy("hello-app")
         self.assertFalse(os.path.exists(
             os.path.join(ghapp.app_dir("hello-app"), "deployed.json")))
+
+
+class HostEnvTest(Sandbox):
+    """Host-run commands (static build, script cmd) get the runner's env
+    overlaid with the app's .env, read with `docker --env-file` rules, and
+    a PATH with the user tool dirs in front. No value is ever printed."""
+
+    SECRET = "sentinel-value-aaaa"   # low entropy: not a secret scan hit
+
+    def setUp(self):
+        super().setUp()
+        os.environ["DEPLOY_SHA"] = SHA
+        ghapp.healthy = lambda d, t: True
+        self._dirs = ghapp.HOST_PATH_DIRS
+        self._env = dict(os.environ)
+
+    def tearDown(self):
+        ghapp.HOST_PATH_DIRS = self._dirs
+        os.environ.clear()
+        os.environ.update(self._env)
+        super().tearDown()
+
+    def write_env(self, text, key="hello-app"):
+        os.makedirs(ghapp.app_dir(key), exist_ok=True)
+        path = os.path.join(ghapp.app_dir(key), ".env")
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def env_of(self, *words):
+        return self.envs[self.calls.index(self.argv_with(*words)[0])]
+
+    def deploy_quietly(self, key="hello-app"):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ghapp.deploy(key)
+        return out.getvalue()
+
+    def test_env_overlay_reaches_a_static_build(self):
+        self.write_def(method_def("static"))
+        self.make_file("hello-app", "public/index.html")
+        self.write_env("SITE_PASSPHRASE=%s\n" % self.SECRET)
+        os.environ["RUNNER_ONLY"] = "kept"
+        self.deploy_quietly()
+        env = self.env_of("sh", "-c", "make site")
+        self.assertEqual(env["SITE_PASSPHRASE"], self.SECRET)
+        self.assertEqual(env["RUNNER_ONLY"], "kept")     # runner env underneath
+
+    def test_env_overlay_reaches_a_script_cmd(self):
+        self.write_def(method_def("script", port=None, health_path=None))
+        self.make_src("hello-app")
+        self.write_env("TOKEN=abc\n")
+        self.deploy_quietly()
+        self.assertEqual(self.env_of("sh", "-c", "./run.sh")["TOKEN"], "abc")
+
+    def test_no_env_file_still_gets_the_runner_env(self):
+        os.environ["RUNNER_ONLY"] = "kept"
+        env = ghapp.host_env("hello-app")
+        self.assertEqual(env["RUNNER_ONLY"], "kept")
+
+    def test_docker_env_file_parsing_edge_cases(self):
+        os.environ["FROM_RUNNER"] = "runner-value"
+        os.environ.pop("NOT_SET_ANYWHERE", None)
+        path = self.write_env(
+            "\ufeffFIRST=bom-stripped\n"
+            "# a comment\n"
+            "   # an indented comment\n"
+            "\n"
+            "QUOTED=\"kept with quotes\"\n"
+            "SINGLE='single'\n"
+            "DOLLAR=$HOME/x\n"
+            "EQUALS=a=b=c\n"
+            "EMPTY=\n"
+            "   INDENTED=yes\n"
+            "TRAILING=space \n"
+            "CRLF=dos\r\n"
+            "FROM_RUNNER\n"
+            "NOT_SET_ANYWHERE\n"
+            "1BAD=%s\n"
+            "BAD NAME=%s\n"
+            "=%s\n"
+            "export E=%s\n" % ((self.SECRET,) * 4))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            got = ghapp.env_file_entries(path, dict(os.environ))
+        self.assertEqual(got, [
+            ("FIRST", "bom-stripped"),
+            ("QUOTED", '"kept with quotes"'),
+            ("SINGLE", "'single'"),
+            ("DOLLAR", "$HOME/x"),
+            ("EQUALS", "a=b=c"),
+            ("EMPTY", ""),
+            ("INDENTED", "yes"),
+            ("TRAILING", "space "),
+            ("CRLF", "dos"),
+            ("FROM_RUNNER", "runner-value"),
+        ])
+        log = out.getvalue()
+        for line in (15, 16, 17, 18):
+            self.assertIn("skipping line %d of" % line, log)
+        self.assertNotIn(self.SECRET, log)
+        self.assertNotIn("1BAD", log)                    # not even the name
+
+    def test_later_lines_win_and_a_bare_key_overrides_with_the_runner_value(self):
+        os.environ["DUP"] = "runner"
+        self.write_env("DUP=first\nDUP=second\nOTHER=1\nOTHER=2\nDUP\n")
+        env = ghapp.host_env("hello-app")
+        self.assertEqual(env["OTHER"], "2")
+        self.assertEqual(env["DUP"], "runner")
+
+    def test_non_utf8_and_nul_lines_are_skipped(self):
+        os.makedirs(ghapp.app_dir("hello-app"))
+        path = os.path.join(ghapp.app_dir("hello-app"), ".env")
+        with open(path, "wb") as fh:
+            fh.write(b"OK=1\nBAD=\xff\xfe\nNUL=a\x00b\nLAST=2\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = ghapp.env_file_entries(path, {})
+        self.assertEqual(got, [("OK", "1"), ("LAST", "2")])
+
+    def test_path_prepends_only_existing_dirs_without_duplicates(self):
+        a = os.path.join(self.tmp, "a-bin")
+        b = os.path.join(self.tmp, "b-bin")
+        missing = os.path.join(self.tmp, "missing-bin")
+        os.makedirs(a)
+        os.makedirs(b)
+        ghapp.HOST_PATH_DIRS = (a, missing, b, a)
+        os.environ["PATH"] = os.pathsep.join(["/usr/bin", b, "", "/bin", "/usr/bin"])
+        path = ghapp.host_env("hello-app")["PATH"].split(os.pathsep)
+        self.assertEqual(path, [a, b, "/usr/bin", "/bin"])
+        self.assertNotIn(missing, path)
+
+    def test_path_expands_home_dirs(self):
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(os.path.join(home, ".local", "bin"))
+        os.environ["HOME"] = home
+        ghapp.HOST_PATH_DIRS = ("~/.local/bin", "~/.nix-profile/bin")
+        os.environ["PATH"] = "/usr/bin"
+        self.assertEqual(ghapp.host_env("hello-app")["PATH"],
+                         os.pathsep.join([os.path.join(home, ".local", "bin"),
+                                          "/usr/bin"]))
+
+    def test_a_path_in_env_is_ignored_with_one_log_line(self):
+        ghapp.HOST_PATH_DIRS = ()
+        os.environ["PATH"] = "/usr/bin:/bin"
+        self.write_env("PATH=/evil/%s\nPATH=/again\nKEEP=1\n" % self.SECRET)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            env = ghapp.host_env("hello-app")
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        self.assertEqual(env["KEEP"], "1")
+        log = out.getvalue()
+        self.assertEqual(log.count("PATH in .env is ignored"), 1)
+        self.assertNotIn(self.SECRET, log)
+        self.assertNotIn("/again", log)
+
+    def test_static_nginx_gets_no_env_file_but_a_dockerfile_app_does(self):
+        self.write_def(method_def("static"))
+        self.make_file("hello-app", "public/index.html")
+        self.write_env("SITE_PASSPHRASE=%s\n" % self.SECRET)
+        self.deploy_quietly()
+        run = self.argv_with("docker", "run")[-1]
+        self.assertEqual(run[-1], ghapp.STATIC_IMAGE)
+        self.assertNotIn("--env-file", run)
+        # A dockerfile app with the same .env still gets it.
+        argv = ghapp.run_argv(good(), "img:1")
+        self.assertEqual(argv[argv.index("--env-file") + 1],
+                         os.path.join(ghapp.app_dir("hello-app"), ".env"))
+
+    def test_static_rollback_run_gets_no_env_file_either(self):
+        self.write_def(method_def("static"))
+        self.make_file("hello-app", "public/index.html")
+        self.write_env("SITE_PASSPHRASE=%s\n" % self.SECRET)
+        name = "site-%s-1000" % ("a" * 12)
+        os.makedirs(os.path.join(ghapp.app_dir("hello-app"), name))
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"), "w") as fh:
+            json.dump({"sha": "a" * 40, "method": "static", "release": name}, fh)
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "d" * 64)
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            self.deploy_quietly()
+        runs = self.argv_with("docker", "run")
+        self.assertEqual(len(runs), 2)
+        for argv in runs:
+            self.assertNotIn("--env-file", argv)
+
+    def test_the_real_run_logs_the_argv_and_never_a_value(self):
+        """Through the real run(), which echoes the argv to the job log:
+        subprocess.run is stubbed (no process reaches the host), and the
+        stub sees the values in env= while stdout holds none of them."""
+        real_run = self._saved[2]
+        fake_run = ghapp.run
+        spawned = []
+
+        def run(argv, check=True, capture=False, cwd=None, env=None):
+            if argv[0] == "sh":
+                return real_run(argv, check, capture, cwd, env)
+            return fake_run(argv, check, capture, cwd, env)
+
+        def sub_run(argv, **kw):
+            spawned.append((list(argv), kw.get("env")))
+            return subprocess.CompletedProcess(argv, 0)
+        ghapp.run = run
+        self.write_def(method_def("static", build="./build.sh"))
+        self.make_file("hello-app", "public/index.html")
+        self.write_env("SITE_PASSPHRASE=%s\nPATH=/nope\n1X=%s\n"
+                       % (self.SECRET, self.SECRET))
+        with mock.patch.object(ghapp.subprocess, "run", sub_run):
+            log = self.deploy_quietly()
+        self.assertEqual(len(spawned), 1)
+        argv, env = spawned[0]
+        self.assertEqual(argv, ["sh", "-c", "./build.sh"])
+        self.assertEqual(env["SITE_PASSPHRASE"], self.SECRET)
+        self.assertNotIn("/nope", env["PATH"])
+        self.assertIn("$ sh -c ./build.sh", log)
+        self.assertIn("PATH in .env is ignored", log)
+        self.assertIn("skipping line 3 of", log)
+        self.assertNotIn(self.SECRET, log)
+        self.assertNotIn("/nope", log)
+        for call in self.calls:                  # no value in any argv either
+            self.assertNotIn(self.SECRET, " ".join(call))
 
 
 class RemoveTest(Sandbox):
