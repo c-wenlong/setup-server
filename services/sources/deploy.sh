@@ -1,28 +1,34 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — rebuild the encrypted sources site if the fetch clone moved.
+# deploy.sh — pull the sources repo from GitHub and rebuild the encrypted
+# site if origin/BRANCH moved.
 #
 # The server is tailnet-only, so GitHub webhooks can't reach it; instead
 # deployd (services/deployd) polls the remote and re-runs setup.sh when
 # main moves — this script is the rebuild half of that run, and exits fast
-# when the repo's HEAD hasn't moved. Also runnable by hand:
+# when origin/BRANCH hasn't moved. Also runnable by hand:
 #
-#   deploy.sh            # build only if HEAD is new
+#   deploy.sh            # build only if origin/BRANCH is new
 #   deploy.sh --force    # rebuild even without new commits
 #
 # Installed by setup.sh into $SERVICE_HOME/bin/ (ENV_FILE is baked in at
 # install time — edit the copy in the setup-server repo, then re-run setup.sh).
 #
-# Unlike kaichenpedia there is no deploy clone: SOURCE_REPO is the fetch
-# clone the fetch timers already pull and commit on, so the poller shares it.
-# It is pulled forward (ff-only) but never reset or committed here.
+# The build runs in a machine-managed deploy clone at $SERVICE_HOME/repo,
+# like kaichenpedia — never in SOURCE_REPO (~/dev/sources, the fetch
+# clone). A killed fetch leaves that tree dirty, and a dirty tree used to
+# refuse `git pull --ff-only` and block every deploy (issue #138); here it
+# cannot, because no fetch job ever writes this clone. That is also why
+# this script takes no sources-fetch.lock: there is no half-fetched tree
+# to protect the build against. The clone is hard-reset to origin/BRANCH
+# each deploy — it is a build input, not a working copy.
 #
 # Build pipeline:
-#   flock .git/sources-fetch.lock        # shared with fetch_all.sh: a build
-#                                        # never reads a half-fetched tree
-#   git -C $SOURCE_REPO pull --ff-only     # best effort; a dirty or offline
-#                                          # repo just builds its local HEAD
-#   uv sync --quiet                        # in the repo, like run_web.sh
+#   git clone (first run only) / git fetch origin BRANCH
+#   verify DEPLOY_SHA is an ancestor of origin/BRANCH (deployd retries
+#     rather than deploy the wrong sha)
+#   git reset --hard origin/BRANCH
+#   uv sync --quiet                        # in the deploy clone
 #   uv run apps/web/build/build_site.py --out www/next   # scripts/ before 2026-10
 #   repoint www/current -> releases/<sha>  # atomic: one rename over the old symlink
 
@@ -36,7 +42,7 @@ set -a; . "$ENV_FILE"; set +a
 export PATH="$UV_BIN:$PATH"
 export GIT_TERMINAL_PROMPT=0   # fail loudly instead of hanging on a prompt
 
-REPO_DIR="$SOURCE_REPO"
+REPO_DIR="$SERVICE_HOME/repo"
 WWW_DIR="$SERVICE_HOME/www"
 BUILD_STATE="$SERVICE_HOME/state"
 LOCK="$SERVICE_HOME/.deploy.lock"
@@ -57,59 +63,48 @@ trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
-# ------------------------------------------------------------- pull/compare
+# An .env written before the managed clone has no REPO_URL — take the
+# fetch clone's origin (its auth already works on this box), else the
+# canonical remote. BRANCH is in every .env setup.sh ever wrote.
+if [ -z "${REPO_URL:-}" ] && [ -n "${SOURCE_REPO:-}" ]; then
+  REPO_URL="$(git -C "$SOURCE_REPO" remote get-url origin 2>/dev/null || true)"
+fi
+REPO_URL="${REPO_URL:-https://github.com/c-wenlong/sources}"
+BRANCH="${BRANCH:-main}"
+
+# ------------------------------------------------------------- fetch/compare
 if [ ! -d "$REPO_DIR/.git" ]; then
-  echo "sources repo missing at $REPO_DIR — leaving the last build up" >&2
-  exit 1
+  echo "cloning $REPO_URL (branch $BRANCH) -> $REPO_DIR"
+  git clone --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
 fi
 
-# A running fetch writes into this same checkout. fetch_all.sh holds an
-# exclusive flock on .git/sources-fetch.lock for its whole run
-# (docs/FETCHING.md), so take the same lock and hold it through the build:
-# the site is only ever built from a tree no fetch is mid-write on. A routine
-# fetch is ~2 min; wait up to SOURCES_DEPLOY_LOCK_WAIT (default 900s), then
-# skip — the next timer tick retries. No fetch timer exists off this Linux
-# box, so on macOS (no flock) the race cannot happen and no lock is taken.
-if [ "$(uname -s)" = "Linux" ] && command -v flock >/dev/null 2>&1; then
-  FETCH_LOCK="$REPO_DIR/$(git -C "$REPO_DIR" rev-parse --git-dir)/sources-fetch.lock"
-  exec 8>"$FETCH_LOCK"
-  if ! flock -w "${SOURCES_DEPLOY_LOCK_WAIT:-900}" 8; then
-    echo "fetch_all.sh still holds $FETCH_LOCK — skipping this deploy" >&2
-    exit 1
-  fi
-fi
-
-# Best effort: a weekly-fetch clone can be ahead of origin (push pending),
-# behind it (pushed from elsewhere), or dirty — HEAD after this is what we
-# build either way. Only a committed state is ever read.
-if ! git -C "$REPO_DIR" pull --ff-only --quiet 2>/dev/null; then
-  echo "note: git pull --ff-only did not apply (dirty tree, offline, or diverged) — building local HEAD"
-fi
-
-local_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
-# deployd asked for a specific remote sha (DEPLOY_SHA). If the pull could
-# not bring it down, building HEAD would deploy something else and deployd
-# would still record the requested sha as done — fail instead so it retries.
+git -C "$REPO_DIR" fetch --quiet origin "$BRANCH"
+remote_sha="$(git -C "$REPO_DIR" rev-parse "origin/$BRANCH")"
+# deployd asked for a specific remote sha (DEPLOY_SHA). If the fetch could
+# not bring it down, building origin/$BRANCH would deploy something else
+# and deployd would still record the requested sha as done — fail instead
+# so it retries.
 if [ -n "${DEPLOY_SHA:-}" ] \
-    && ! git -C "$REPO_DIR" merge-base --is-ancestor "$DEPLOY_SHA" "$local_sha" 2>/dev/null; then
-  echo "deployd asked for $DEPLOY_SHA but the clone is at $local_sha (pull failed or diverged) — failing so it retries" >&2
+    && ! git -C "$REPO_DIR" merge-base --is-ancestor "$DEPLOY_SHA" "$remote_sha" 2>/dev/null; then
+  echo "deployd asked for $DEPLOY_SHA but origin/$BRANCH is at $remote_sha (fetch failed or diverged) — failing so it retries" >&2
   exit 1
 fi
 built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
 
-if [ "$local_sha" = "$built_sha" ] && [ -d "$WWW_DIR/current" ] && [ "$FORCE" -eq 0 ]; then
+if [ "$remote_sha" = "$built_sha" ] && [ -d "$WWW_DIR/current" ] && [ "$FORCE" -eq 0 ]; then
   echo "up to date at $built_sha"
   exit 0
 fi
 
 # -------------------------------------------------------------------- build
-echo "deploying $local_sha (was: $built_sha)"
+echo "deploying $remote_sha (was: $built_sha)"
+git -C "$REPO_DIR" reset --hard --quiet "origin/$BRANCH"
 
 echo "syncing deps (uv sync)"
 ( cd "$REPO_DIR" && uv sync --quiet )
 
 # The sources repo moved the build from scripts/ to apps/web/build/ (2026-10).
-# Pick whichever the pulled tree has, so a deploy on either side of that
+# Pick whichever the cloned tree has, so a deploy on either side of that
 # change builds.
 BUILD_SCRIPT=apps/web/build/build_site.py
 [ -f "$REPO_DIR/$BUILD_SCRIPT" ] || BUILD_SCRIPT=scripts/build_site.py
@@ -135,14 +130,14 @@ if [ -d "$WWW_DIR/current" ] && [ ! -L "$WWW_DIR/current" ]; then
 else
   prev_target="$(readlink "$WWW_DIR/current" 2>/dev/null || true)"
 fi
-target="$local_sha"
-if [ "$prev_target" = "releases/$local_sha" ]; then
+target="$remote_sha"
+if [ "$prev_target" = "releases/$remote_sha" ]; then
   # A --force rebuild of the live sha can't reuse its directory name:
   # deleting or moving the release `current` points at would leave the site
   # serving a missing root (a window where requests 404, and a kill mid-way
   # leaves `current` dangling). Build beside it under a suffixed name; the
   # old build stays on as the previous release.
-  target="$local_sha.rebuild-$(date +%s)"
+  target="$remote_sha.rebuild-$(date +%s)"
 fi
 rm -rf "$WWW_DIR/releases/$target"
 mv "$WWW_DIR/next" "$WWW_DIR/releases/$target"
@@ -160,5 +155,5 @@ for d in "$WWW_DIR/releases"/*/; do
 done
 
 mkdir -p "$BUILD_STATE"
-echo "$local_sha" > "$BUILD_STATE/built-sha"
-echo "deployed $local_sha"
+echo "$remote_sha" > "$BUILD_STATE/built-sha"
+echo "deployed $remote_sha"

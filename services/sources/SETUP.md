@@ -1,57 +1,61 @@
-# sources — encrypted archive browser, auto-deployed from the fetch clone
+# sources — encrypted archive browser, auto-deployed from a managed clone
 
 The passphrase-encrypted static build of the private
 [c-wenlong/sources](https://github.com/c-wenlong/sources) archive (YouTube
 transcripts, blogs, newsletters, papers, personas), served by nginx and
 published tailnet-only. It is the same build `apps/web/build/run_web.sh` serves
 locally and the `site` workflow pushes to GitHub Pages — same passphrase
-unlocks all three. A commit on the fetch clone's `main` (the weekly fetch,
-or a push from any device) goes live on the daily poll — or immediately
-with `~/services/sources/bin/deploy.sh --force`.
+unlocks all three. A commit on `main` (the weekly fetch's push, or a push
+from any device) goes live on the next poll — or immediately with
+`~/services/sources/bin/deploy.sh --force`.
 
 ## Architecture
 
 ```
-weekly fetch timer ──┐                     push from any device
- (commits + pushes   │                            │
-  on this clone)     ▼                            ▼
-              ~/dev/sources  ◄────────────  GitHub (private repo)
-              (the fetch clone,         ▲
-               already machine-         │ deployd polls ls-remote every
-               managed on main)         │ minute (services/deployd)
-                     ▲                       │
-                     │      deployd ──► setup.sh ──► bin/deploy.sh
-                     │     (one poller for        │ 1. flock .git/sources-fetch.lock
-                     │      all deploy blocks)   │    (shared with fetch_all.sh —
-                     │                            │     no build over a half-fetched tree)
-                     │                            │ 2. git pull --ff-only (best effort)
-                     │                            │ 3. uv sync --quiet
-                     │                            │ 4. uv run apps/web/build/build_site.py --out www/next
-                     │                            │    (gzip + AES-256-GCM per file;
-                     │                            │     SITE_PASSPHRASE from .env)
-                     │                            │ 5. atomic repoint  current -> releases/<sha>
-                     │                                ▼
-                     │                     ~/services/sources/www/current
-                     │                                │  bind mount (ro)
-                     │                                ▼
-                     └──────── reads ──  nginx (Docker) 127.0.0.1:8098
-                                                │
-                                                ▼
-                              Tailscale Serve  HTTPS :8098 (tailnet only)
-                     https://homeserver.tail-name.ts.net:8098
+weekly fetch timer ──┐                    push from any device
+ (commits + pushes   │                           │
+  on its own clone)  ▼                           ▼
+              ~/dev/sources ── push ──►   GitHub (private repo)
+              (the fetch clone,               ▲
+               owned by the fetch             │ deployd polls ls-remote
+               timers — deploys               │ every minute
+               never touch it)                │ (services/deployd)
+                                              │
+                          deployd ──► setup.sh ──► bin/deploy.sh
+                          (one poller for        │ 1. clone (first run) into the
+                           all deploy blocks)    │    deploy clone ~/services/sources/repo
+                                                 │ 2. git fetch + verify DEPLOY_SHA
+                                                 │ 3. git reset --hard origin/main
+                                                 │ 4. uv sync --quiet
+                                                 │ 5. uv run apps/web/build/build_site.py --out www/next
+                                                 │    (gzip + AES-256-GCM per file;
+                                                 │     SITE_PASSPHRASE from .env)
+                                                 │ 6. atomic repoint  current -> releases/<sha>
+                                                 │        ▼
+                                                 │  ~/services/sources/www/current
+                                                 │        │  bind mount (ro)
+                                                 │        ▼
+                                                 └─ nginx (Docker) 127.0.0.1:8098
+                                                          │
+                                                          ▼
+                                        Tailscale Serve  HTTPS :8098 (tailnet only)
+                               https://homeserver.tail-name.ts.net:8098
 ```
 
-## Why the fetch clone, not a deploy clone
+## Why a deploy clone, not the fetch clone
 
-kaichenpedia keeps a machine-managed clone in `~/services/kaichenpedia/repo`
-because nothing else on the box needs it. For sources that clone already
-exists: `~/dev/sources` is where `sources-fetch.timer` pulls, fetches and
-commits every week, and its docs already require it to stay clean on `main`
-(`docs/FETCHING.md`: develop in a worktree). A second clone would double a
-multi-GB corpus for nothing, so `deploy.sh` shares the fetch clone: it pulls
-`main` forward (`--ff-only`, best effort) and builds whatever HEAD lands on.
-It never commits, resets or writes into the repo. Only committed state is
-ever built — a fetch run mid-flight still shows the last commit's tree.
+`deploy.sh` used to build straight out of `~/dev/sources`, the clone
+`sources-fetch.timer` pulls, fetches and commits on every week — a second
+clone would have doubled a multi-GB corpus for nothing. That sharing is
+what let a killed fetch block every deploy (issue #138): the aborted run
+left the tree dirty, `git pull --ff-only` refused, and the deploy could
+never reach the sha deployd asked for. So the deploy now keeps a
+machine-managed clone at `~/services/sources/repo`, the kaichenpedia
+shape: fetched and hard-reset to `origin/BRANCH` each run, never written
+by anything else, and safe to delete — it re-clones on the next deploy.
+`~/dev/sources` only seeds `REPO_URL` at setup time (its origin remote
+carries the auth that already works on this box); after that it can be
+dirty, locked or gone and deploys still run.
 
 ## Why polling, not a webhook
 
@@ -60,7 +64,7 @@ reach it. deployd (`services/deployd`) resolves `main` with
 `git ls-remote` every minute and re-runs this service's `setup.sh` when it
 moves — `deploy.sh --force` skips the wait entirely. Anything pushed to
 origin (the weekly fetch included) lands on the next tick; a commit that
-only ever exists in the local clone never reaches the remote, so it does
+only ever exists in a local clone never reaches the remote, so it does
 not trigger a deploy.
 
 ## Security model
@@ -82,25 +86,30 @@ not trigger a deploy.
 
 | Dependency | Why | Checked in preflight |
 |---|---|---|
-| git | pull the fetch clone forward | presence |
+| git | clone + fetch the deploy clone | presence |
+| non-interactive read of `REPO_URL` | the deploy clone fetches unattended | `git ls-remote $REPO_URL` answers |
 | uv | `uv run apps/web/build/build_site.py` | presence |
-| the sources clone at `SOURCE_REPO` | the build's entire input | `.git/` + `apps/web/build/build_site.py` (or the older `scripts/build_site.py`) exist |
 | `SITE_PASSPHRASE` (first run) | encryption key; lands in `.env` | non-empty |
 | Docker + Compose v2 | nginx container | daemon reachable |
 | Tailscale (running) | HTTPS publish | backend state |
 
 ## What setup.sh does
 
-1. Preflight (above), including that the fetch clone exists and that a
-   first run has `SITE_PASSPHRASE` in the environment.
-2. Writes `.env` if absent (repo path, branch, ports, poll interval, uv
-   path, service home, passphrase; mode `0600`). Re-runs read `.env` as
-   the source of truth and never need the passphrase again.
+1. Preflight (above). `REPO_URL` is resolved here too: explicit
+   `REPO_URL=...`, else the saved `.env` value, else the fetch clone's
+   origin when `SOURCE_REPO` looks like the sources repo (its remote
+   carries the auth that already works on this box), else the canonical
+   GitHub remote. A first run also needs `SITE_PASSPHRASE` in the
+   environment.
+2. Writes `.env` if absent (fetch-clone path, remote URL, branch, ports,
+   uv path, service home, passphrase; mode `0600`). Re-runs read `.env`
+   as the source of truth and never need the passphrase again.
 3. Writes `~/services/sources/nginx.conf` if absent (plain static serving;
    all routing is client-side hash routes).
 4. Installs `deploy.sh` -> `~/services/sources/bin/` (refreshed every run;
    edit the repo copy, then re-run setup.sh).
-5. Runs the initial deploy: pull, `uv sync`, `build_site.py`, swap.
+5. Runs the initial deploy: clone `~/services/sources/repo`, fetch,
+   `reset --hard origin/BRANCH`, `uv sync`, `build_site.py`, swap.
 6. `docker compose up -d` (nginx, `restart: unless-stopped`) + local health
    check.
 7. Removes the old per-service `sources-deploy` timer / LaunchAgent if a
@@ -118,11 +127,13 @@ cd services/sources && SITE_PASSPHRASE='the site passphrase' ./setup.sh
 ```
 
 Overrides: `LOCAL_PORT` / `HTTPS_PORT` (default 8098), `SOURCE_REPO`
-(default `~/dev/sources`), `BRANCH` (main). Overriding `BRANCH` or pointing
-`SOURCE_REPO` at a different remote desyncs auto-deploy: deployd polls the
-repo/ref declared in `services/sources/app.json`'s `deploy` block
-(`main` on `https://github.com/c-wenlong/sources`), so edit the manifest to
-match or pushes to the override never trigger a deploy.
+(default `~/dev/sources`; fetch-clone path, only seeds `REPO_URL`),
+`REPO_URL` (default: `SOURCE_REPO`'s origin, else
+`https://github.com/c-wenlong/sources`), `BRANCH` (main). Overriding
+`BRANCH` or `REPO_URL` desyncs auto-deploy: deployd polls the repo/ref
+declared in `services/sources/app.json`'s `deploy` block (`main` on
+`https://github.com/c-wenlong/sources`), so edit the manifest to match or
+pushes to the override never trigger a deploy.
 
 ## Ops
 
@@ -139,10 +150,10 @@ tailscale serve status
 A failed build leaves `www/current` pointing at the last release — a
 broken commit never takes the site down, and the repoint itself is one
 rename (no gap where nginx has no root). The previous release stays in
-`www/releases/` for rollback. If `git pull` fails (dirty tree, offline,
-diverged) the deploy builds the local HEAD instead and notes it in the
-log; if a fetch is mid-run the deploy waits for its lock up to 15 min,
-then skips to the next tick.
+`www/releases/` for rollback. The deploy clone is hard-reset to
+`origin/BRANCH` before every build, so nothing local can wedge it; a
+clone/fetch failure (offline, lost auth) fails that run with the site
+still up, and deployd retries on the next tick.
 
 ## Client side
 

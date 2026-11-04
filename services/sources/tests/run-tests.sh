@@ -32,7 +32,8 @@ setup() {
   : > "$CALLS_LOG"
   cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/deploy.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 
-  # A fake fetch clone: .git/ + scripts/build_site.py is all setup.sh checks.
+  # A fake fetch clone: .git/ + scripts/build_site.py is what setup.sh's
+  # "looks like sources" check wants before it trusts its origin remote.
   export SOURCE_REPO="$SANDBOX/repo"
   mkdir -p "$SOURCE_REPO/.git" "$SOURCE_REPO/scripts"
   echo "# build stub" > "$SOURCE_REPO/scripts/build_site.py"
@@ -95,12 +96,25 @@ test_preflight_tailscale_down() {
 }
 
 test_preflight_repo_missing() {
-  echo "• preflight fails when the sources clone is not where SOURCE_REPO points"
+  echo "• fetch clone missing: setup warns and deploys from the canonical remote"
   setup
   export SOURCE_REPO="$SANDBOX/not-here"
   run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "warns about the clone"         out_has "no usable sources clone"
+  check ".env falls back to canonical"  env_has "REPO_URL=https://github.com/c-wenlong/sources"
+  check "deploy clone created"          [ -d "$HOME/services/sources/repo/.git" ]
+  check "site built"                    [ -f "$HOME/services/sources/www/current/index.html" ]
+  teardown
+}
+
+test_preflight_repo_unreachable() {
+  echo "• preflight fails when the remote can't be read non-interactively"
+  setup
+  touch "$STATE_DIR/git_auth_fail"
+  run_deploy
   check "exits non-zero"    [ "$CODE" -ne 0 ]
-  check "names the problem" out_has "Sources repo not found"
+  check "names the problem" out_has "Cannot read .* non-interactively"
   check "wrote no .env"     [ ! -f "$SVC/.env" ]
   teardown
 }
@@ -123,6 +137,7 @@ test_fresh_deploy() {
   run_deploy
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env has repo path"          env_has "SOURCE_REPO=$SOURCE_REPO"
+  check ".env has clone remote"       env_has "REPO_URL=https://git.test/sources.git"
   check ".env drops poll interval"                   env_lacks "POLL_SECONDS=86400"
   check ".env has passphrase"         env_has "^SITE_PASSPHRASE="
   check "passphrase round-trips"      sh -c '. "$1" >/dev/null 2>&1 && [ "$SITE_PASSPHRASE" = "test pass phrase" ]' _ "$SVC/.env"
@@ -130,6 +145,11 @@ test_fresh_deploy() {
   check ".env is owner-only"          sh -c '[ "$(stat -c %a "$0" 2>/dev/null || stat -f %Lp "$0")" = 600 ]' "$SVC/.env"
   check "deploy script installed"     [ -x "$HOME/services/sources/bin/deploy.sh" ]
   check "env path baked into script"  grep -q "$SVC/.env" "$HOME/services/sources/bin/deploy.sh"
+  check "deploy clone created"        calls_have "git clone --branch main https://git.test/sources.git $HOME/services/sources/repo"
+  check "clone has .git"              [ -d "$HOME/services/sources/repo/.git" ]
+  check "never pulled the fetch clone" no_call "pull"
+  check "no fetch lock taken"         no_call "sources-fetch.lock"
+  check "reset to origin/main"        calls_have "reset --hard --quiet origin/main"
   check "synced deps (uv sync)"       calls_have "uv sync"
   check "built the site"              calls_have "uv run scripts/build_site.py --out"
   check "site swapped into current"   [ -f "$HOME/services/sources/www/current/index.html" ]
@@ -217,7 +237,7 @@ test_deployd_disabled_flag() {
 }
 
 test_deploy_sha_mismatch() {
-  echo "• deployd-requested sha: verified against the pulled clone"
+  echo "• deployd-requested sha: verified against origin/BRANCH"
   setup
   touch "$STATE_DIR/operator"
   run_deploy
@@ -260,21 +280,24 @@ test_idempotent_rerun() {
   check "edited .env preserved"   env_has "CUSTOM-MARK"
   check "reports up to date"      out_has "up to date at aaa1111"
   check "no rebuild"              no_call "uv run scripts/build_site.py"
+  check "still fetches"           calls_have "git -C .* fetch"
+  check "does not re-clone"       no_call "git clone"
   check "never invoked sudo"      no_call "^sudo "
   check "compose up re-invoked"   [ -f "$STATE_DIR/compose_up" ]
   teardown
 }
 
 test_push_triggers_redeploy() {
-  echo "• poller: new commit on the repo -> rebuild and swap"
+  echo "• poller: new commit on origin -> fetch, reset, rebuild and swap"
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  echo "bbb2222" > "$STATE_DIR/local_sha"
+  echo "bbb2222" > "$STATE_DIR/remote_sha"
   : > "$CALLS_LOG"
   run_poll
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the new sha"     out_has "deploying bbb2222"
+  check "reset to origin/main"    calls_have "reset --hard --quiet origin/main"
   check "rebuilt the site"        calls_have "uv run scripts/build_site.py"
   check "built sha updated"       grep -qx bbb2222 "$HOME/services/sources/state/built-sha"
   check "previous release kept"   [ -d "$HOME/services/sources/www/releases/aaa1111" ]
@@ -306,11 +329,9 @@ test_force_rebuild_same_sha() {
 }
 
 test_new_layout_build_path() {
-  echo "• repo with the apps/web layout: setup accepts it, deploy builds from apps/web/build/"
+  echo "• remote with the apps/web layout: the cloned tree builds from apps/web/build/"
   setup
-  rm -rf "$SOURCE_REPO/scripts"
-  mkdir -p "$SOURCE_REPO/apps/web/build"
-  echo "# build stub" > "$SOURCE_REPO/apps/web/build/build_site.py"
+  echo apps > "$STATE_DIR/clone_layout"   # the cloned repo has the new layout
   touch "$STATE_DIR/operator"
   run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
@@ -335,24 +356,47 @@ test_poll_lock() {
   teardown
 }
 
-test_fetch_lock() {
-  echo "• poller: skips while a fetch holds the shared repo lock"
-  [ "$OS" = "Linux" ] || { green "    ✓ (skipped on macOS — no flock, no fetch timer)"; PASS=$((PASS + 1)); return; }
-  command -v flock >/dev/null || { green "    ✓ (skipped — no flock binary)"; PASS=$((PASS + 1)); return; }
+test_fetch_clone_ignored() {
+  echo "• deploy ignores the fetch clone's state entirely (locked, dirty or absent)"
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  export SOURCES_DEPLOY_LOCK_WAIT=1
-  ( exec 9>"$SOURCE_REPO/.git/sources-fetch.lock"; flock -x 9; sleep 30 ) &
-  holder=$!
-  sleep 0.2   # let the holder take the lock before the poller tries
+  check "baseline deploy ok"    [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ] && command -v flock >/dev/null 2>&1; then
+    # The old build took this lock and waited out the fetch; the deploy
+    # clone is never written by fetch jobs, so the lock is never read.
+    ( exec 9>"$SOURCE_REPO/.git/sources-fetch.lock"; flock -x 9; sleep 30 ) &
+    holder=$!
+    sleep 0.2   # let the holder take the lock before the deploy runs
+    echo "bbb2222" > "$STATE_DIR/remote_sha"
+    : > "$CALLS_LOG"
+    run_poll
+    kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+    check "deploys under a held fetch lock" [ "$CODE" -eq 0 ]
+    check "  deployed the new sha"          out_has "deploying bbb2222"
+    check "  never pulled"                  no_call "pull"
+    check "  never touched the lock"        no_call "sources-fetch.lock"
+  fi
+  # Fetch clone gone entirely, mid-service-life (the sandbox's SVC lives
+  # inside the fake clone, so point .env at a nonexistent path instead of
+  # rm -rf'ing it — same thing deploy.sh sees on a box without the clone).
+  set_env SOURCE_REPO "$SANDBOX/not-here"
+  echo "ccc3333" > "$STATE_DIR/remote_sha"
   : > "$CALLS_LOG"
   run_poll
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
-  check "exits non-zero"      [ "$CODE" -ne 0 ]
-  check "reports the skip"    out_has "still holds .*sources-fetch.lock"
-  check "did not rebuild"     no_call "uv run scripts/build_site.py"
-  unset SOURCES_DEPLOY_LOCK_WAIT
+  check "deploys with no fetch clone" [ "$CODE" -eq 0 ]
+  check "  deployed the new sha"      out_has "deploying ccc3333"
+  check "  never pulled"              no_call "pull"
+  # An .env from before REPO_URL existed falls back the same way: with the
+  # fetch clone gone it cannot seed a remote, so the canonical URL is used.
+  sed -i.bak '/^REPO_URL=/d' "$SVC/.env"
+  rm -rf "$HOME/services/sources/repo"   # force a re-clone
+  echo "ddd4444" > "$STATE_DIR/remote_sha"
+  : > "$CALLS_LOG"
+  run_poll
+  check "legacy .env deploys too"     [ "$CODE" -eq 0 ]
+  check "  re-cloned from canonical"  calls_have "git clone --branch main https://github.com/c-wenlong/sources"
+  check "  deployed the new sha"      out_has "deploying ddd4444"
   teardown
 }
 
@@ -462,6 +506,7 @@ test_teardown_safe() {
   check "down via project dir"        calls_have "docker compose --project-directory $SVC down"
   check "down keeps volumes (no -v)"  no_call "down -v"
   check "site files kept"             [ -f "$(site_home)/www/current/index.html" ]
+  check "deploy clone kept"           [ -d "$(site_home)/repo/.git" ]
   check "nginx.conf kept"             [ -f "$(site_home)/nginx.conf" ]
   check ".env kept"                   [ -f "$SVC/.env" ]
   check "unit files kept"             [ -f "$(unit_dir)/sources-deploy.timer" ]
@@ -574,6 +619,7 @@ test_teardown_purge() {
   echo "• teardown --purge: typed confirmation, then setup.sh's files, .env and units go"
   deployed
   local home; home="$(site_home)"
+  check "deploy clone exists pre-purge" [ -d "$home/repo/.git" ]
   run_teardown --purge "source"
   check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
   check "wrong name: site kept"       [ -f "$home/www/current/index.html" ]
@@ -586,6 +632,7 @@ test_teardown_purge() {
   run_teardown --purge "sources"
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "bin gone"                    [ ! -e "$home/bin" ]
+  check "deploy clone gone"           [ ! -e "$home/repo" ]
   check "state gone"                  [ ! -e "$home/state" ]
   check "www gone"                    [ ! -e "$home/www" ]
   check "nginx.conf gone"             [ ! -e "$home/nginx.conf" ]
@@ -1102,19 +1149,18 @@ no_external_listener() {
 
 test_live() {
   echo "• live: verify the real deployment on this machine"
-  local ts port url svc_home repo
+  local ts port url svc_home
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
   url="$(sed -n 's|^PUBLIC_URL=\(.*\)/$|\1|p' "$SERVICE_DIR/.env")"
   svc_home="$(sed -n 's/^SERVICE_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
-  repo="$(sed -n 's/^SOURCE_REPO=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   live_check "container running"        sh -c "docker inspect -f '{{.State.Status}}' sources | grep -qx running"
   live_check "local index responds"     curl -fsS "http://127.0.0.1:$port/"
   live_check "app.js responds"          curl -fsS "http://127.0.0.1:$port/app.js"
   live_check "catalog blob responds"    sh -c "curl -fsS -o /dev/null 'http://127.0.0.1:$port/d/catalog.bin'"
   live_check "no wildcard listener"     no_external_listener "$port"
-  live_check "built sha matches repo"   sh -c "[ \"\$(git -C '$repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
+  live_check "built sha matches deploy clone" sh -c "[ \"\$(git -C '$svc_home/repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
   if [ "$OS" = "Linux" ]; then
     live_check "no legacy timer"        sh -c "! systemctl --user is-active sources-deploy.timer 2>/dev/null | grep -qx active"
     live_check "deployd timer active"   sh -c "systemctl --user is-active deployd.timer 2>/dev/null | grep -qx active"
@@ -1134,6 +1180,7 @@ echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_docker_perms
 test_preflight_tailscale_down
 test_preflight_repo_missing
+test_preflight_repo_unreachable
 test_preflight_passphrase_missing
 test_fresh_deploy
 test_legacy_poller_removed
@@ -1146,7 +1193,7 @@ test_push_triggers_redeploy
 test_force_rebuild_same_sha
 test_new_layout_build_path
 test_poll_lock
-test_fetch_lock
+test_fetch_clone_ignored
 test_port_override
 test_operator_escalation
 # teardown tests assert the systemd poller path; the launchd path is not
