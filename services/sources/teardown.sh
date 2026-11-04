@@ -15,15 +15,17 @@
 # Usage:
 #   ./teardown.sh            # safe remove: everything on disk kept
 #   ./teardown.sh --purge    # ALSO delete what setup.sh wrote under
-#                            # ~/services/sources (bin, state, www,
+#                            # ~/services/sources (bin, repo, state, www,
 #                            # nginx.conf), .env and the poller unit files;
 #                            # asks you to type "sources" first. Terminal
 #                            # only: the launcher's Remove never passes it.
 #
-# Never touched, purge included: the sources repo the site is built from
-# (SOURCE_REPO, default ~/dev/sources: the fetch clone, your content), any
-# other unit that mentions sources (e.g. sources-trigger.service, which this
-# setup.sh does not create), lingering and the Tailscale operator.
+# Never touched, purge included: the fetch clone at SOURCE_REPO (default
+# ~/dev/sources — your content, no longer build input), any other unit
+# that mentions sources (e.g. sources-trigger.service, which this setup.sh
+# does not create), lingering and the Tailscale operator. The deploy clone
+# at ~/services/sources/repo is machine-managed, so --purge does delete it
+# — setup.sh just clones it again.
 #
 # Reads ports and paths from .env and refuses to guess when it is missing.
 # Idempotent: re-running on a removed service changes nothing.
@@ -39,7 +41,7 @@ UNIT_DIR="$HOME/.config/systemd/user"
 UNITS="sources-deploy.timer sources-deploy.service"   # timer first
 LAUNCHD_LABEL="com.sources.deploy"
 PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
-SETUP_STATE="bin state www nginx.conf"   # under SERVICE_HOME (the deploy lock: see lock_take)
+SETUP_STATE="bin repo state www nginx.conf"   # under SERVICE_HOME (the deploy lock: see lock_take)
 
 # shellcheck source=../../lib/common.sh
 . "$SERVICE_DIR/../../lib/common.sh"
@@ -152,7 +154,7 @@ for v in SERVICE_HOME SOURCE_REPO; do
   esac
 done
 TARGET="http://127.0.0.1:$LOCAL_PORT"
-ok "$NAME: local :$LOCAL_PORT, site files ${SERVICE_HOME:-(not set)}, built from ${SOURCE_REPO:-(not set)}"
+ok "$NAME: local :$LOCAL_PORT, site files ${SERVICE_HOME:-(not set)}, fetch clone ${SOURCE_REPO:-(not set)} (never touched)"
 
 # Compose reads COMPOSE_FILE / COMPOSE_PROJECT_NAME / COMPOSE_ENV_FILES from
 # .env and the shell, and any of them would change which stack `down` (and,
@@ -251,7 +253,7 @@ purge_targets() {
   # from, so the overlap check below could pass on the wrong directory.
   case "$SOURCE_REPO" in
     ''|/*) ;;
-    *) die "SOURCE_REPO=$SOURCE_REPO in $ENV_FILE is not an absolute path — teardown cannot prove the purge stays clear of the sources repo, so it refuses. Nothing was changed." ;;
+    *) die "SOURCE_REPO=$SOURCE_REPO in $ENV_FILE is not an absolute path — teardown cannot prove the purge stays clear of the fetch clone, so it refuses. Nothing was changed." ;;
   esac
   while :; do case "$SERVICE_HOME" in */) SERVICE_HOME="${SERVICE_HOME%/}" ;; *) break ;; esac; done
   case "$SERVICE_HOME" in *..*) die "SERVICE_HOME=$SERVICE_HOME contains '..' — refusing." ;; esac
@@ -263,8 +265,10 @@ purge_targets() {
     [ -d "$SERVICE_HOME" ] || die "SERVICE_HOME=$SERVICE_HOME is not a directory — refusing."
     home_real="$(real_dir "$SERVICE_HOME")" || die "SERVICE_HOME=$SERVICE_HOME is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
     [ "$LOCK_HELD" -eq 1 ] || LOCK="$home_real/.deploy.lock"
-    # The repo the site is built from is the user's (default ~/dev/sources)
-    # and must survive: refuse if any purge path is it, holds it or is in it.
+    # The fetch clone is the user's content (default ~/dev/sources) and
+    # must survive: refuse if any purge path is it, holds it or is in it.
+    # (The deploy clone at SERVICE_HOME/repo is machine-managed — it is on
+    # the purge list like everything else setup.sh made.)
     repo_real=""
     if [ -n "$SOURCE_REPO" ] && [ -d "$SOURCE_REPO" ]; then
       repo_real="$(cd "$SOURCE_REPO" && pwd -P)" || die "Cannot resolve SOURCE_REPO=$SOURCE_REPO."
@@ -274,8 +278,8 @@ purge_targets() {
       [ -e "$p" ] || [ -L "$p" ] || continue
       r="$(real_dir "$p")" || die "$p is a symlink or resolves outside $HOME/services/$NAME — refusing."
       if [ -n "$repo_real" ]; then
-        case "$repo_real/" in "$r"/*) die "$r holds the sources repo $SOURCE_REPO — refusing to delete it." ;; esac
-        case "$r/" in "$repo_real"/*) die "$r is inside the sources repo $SOURCE_REPO — refusing to delete it." ;; esac
+        case "$repo_real/" in "$r"/*) die "$r holds the fetch clone $SOURCE_REPO — refusing to delete it." ;; esac
+        case "$r/" in "$repo_real"/*) die "$r is inside the fetch clone $SOURCE_REPO — refusing to delete it." ;; esac
       fi
       PURGE_PATHS="$PURGE_PATHS$r
 "
@@ -298,7 +302,7 @@ if [ "$PURGE" -eq 1 ]; then
     echo "      $PLIST"
   fi
   warn "$ENV_FILE holds SITE_PASSPHRASE (the key that unlocks the site, same as the sources repo's GitHub secret). If you have no other copy, save it first."
-  [ -z "$SOURCE_REPO" ] || ok "Kept: the sources repo at $SOURCE_REPO is never touched."
+  [ -z "$SOURCE_REPO" ] || ok "Kept: the fetch clone at $SOURCE_REPO is never touched."
   printf 'Type %s to confirm: ' "$NAME"
   answer=""
   read -r answer || true

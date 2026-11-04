@@ -3,10 +3,12 @@
 Layered triage: deploy pipeline → local serving → publish → client. Work
 top-down; each layer assumes the one above it is healthy.
 
-This service shares the fetch clone at `~/dev/sources` with
-`sources-fetch.timer` — the two are independent: the fetch timer writes the
-repo, deployd only reads it. A broken deploy never affects fetching, and
-vice versa.
+The build runs in a machine-managed deploy clone at
+`~/services/sources/repo`; the fetch clone at `~/dev/sources` only seeded
+the remote URL at setup time. Nothing the fetch timers do to their own
+tree — a dirty checkout, a held `sources-fetch.lock`, a missing clone —
+can block a deploy. A broken deploy never affects fetching, and vice
+versa.
 
 ## Quick status
 
@@ -15,7 +17,7 @@ vice versa.
 systemctl --user list-timers deployd.timer             # deployd scheduled?
 journalctl --user -u deployd -n 30                     # last poll + deploy runs
 cat ~/services/sources/state/built-sha                 # what was last built
-git -C ~/dev/sources rev-parse HEAD                    # what the repo is at
+git -C ~/services/sources/repo rev-parse origin/main   # what the next deploy builds
 docker inspect -f '{{.State.Status}}' sources          # nginx up?
 curl -sI http://127.0.0.1:8098/ | head -1              # serving locally?
 tailscale serve status                                 # :8098 published?
@@ -39,18 +41,22 @@ appearing in `tailscale serve status` proves nothing about the site.
   `~/services/deployd/state/` means the last deploy attempt failed and
   deployd is backing off before retrying.
 - `up to date at <sha>` with an old sha → `built-sha` equals
-  `git -C ~/dev/sources rev-parse HEAD`, meaning the repo itself is behind:
-  the fetch commit didn't land (check `journalctl -u sources-fetch`), the
-  push went to another branch, or the fetch committed without pushing
-  (deployd watches the *remote* — a commit that never reaches origin
-  triggers nothing). `.env` `BRANCH` is only documentation here —
-  deploy.sh builds HEAD, whatever it is.
-- `note: git pull --ff-only did not apply` in the log → the clone is dirty
-  or offline. The build still runs on the local HEAD, so this is a warning,
-  not a failure — but a permanently dirty clone also breaks
-  `sources-fetch.timer`, so clean it:
-  `git -C ~/dev/sources status` (restore or commit the changes; the repo
-  docs say develop in a worktree, never this clone).
+  `git -C ~/services/sources/repo rev-parse origin/main`, meaning the
+  remote itself is behind: the fetch commit didn't land (check
+  `journalctl -u sources-fetch`), the push went to another branch, or the
+  fetch committed without pushing (deployd watches the *remote* — a commit
+  that never reaches origin triggers nothing). `.env` `BRANCH` is what the
+  deploy clone fetches; it must match the ref in
+  `services/sources/app.json`'s deploy block.
+- `fatal: could not read Username` / `git clone` or `git fetch` failures →
+  the deploy clone can't reach `REPO_URL`: auth broke (`gh auth login &&
+  gh auth setup-git`, or the SSH key is gone), the box is offline, or
+  `.env` `REPO_URL` points somewhere unreadable — fix the line or delete
+  it and re-run `setup.sh` (it re-seeds from the fetch clone's origin).
+- `deployd asked for <sha> but origin/BRANCH is at <other>` → the fetch
+  brought down a different tip than deployd resolved; transient when
+  `main` is moving — it retries — but a remote stuck mid-push deserves a
+  look (`git ls-remote $REPO_URL`).
 - No log entries at all → deployd not running:
   `systemctl --user enable --now deployd.timer`; if the box just
   rebooted and nothing user-level runs, re-check lingering:
@@ -59,10 +65,6 @@ appearing in `tailscale serve status` proves nothing about the site.
 - `another deploy is running — skipping` on every run → stale lock from a
   killed build; it self-clears after 60 min, or immediately:
   `rmdir ~/services/sources/.deploy.lock`.
-- `fetch_all.sh still holds ... sources-fetch.lock` → a fetch was running;
-  the deploy waited up to `SOURCES_DEPLOY_LOCK_WAIT` (default 900s) and
-  skipped. Routine fetches take ~2 min, so repeats of this line mean a
-  fetch is stuck — check `journalctl -u sources-fetch`.
 
 **Build fails (site keeps serving the old version — that's by design).**
 Run it by hand to see the full error:
@@ -78,8 +80,9 @@ Run it by hand to see the full error:
   update `UV_BIN` or re-run setup.sh.
 - `<out> is not empty and is not an earlier build` → `www/next` left over
   from a killed run; `rm -rf ~/services/sources/www/next` and retry.
-- Anything about `catalog.db`, `raw/` or a yaml file → the repo itself is
-  in a bad state; `git -C ~/dev/sources status` and fix there.
+- Anything about `catalog.db`, `raw/` or a yaml file → the repo's content
+  itself is in a bad state; fix it upstream and push (or inspect the
+  deploy clone: `git -C ~/services/sources/repo status`).
 
 ## Layer 2 — local serving broken
 
@@ -161,11 +164,12 @@ Serve port that proxies only to `127.0.0.1:8098`, removes the legacy
 `docker compose down` (a local `docker-compose.override.yml` is picked up
 the same way `setup.sh`'s `up` picks it up). Files, `.env` and unit files
 stay, so `./setup.sh` brings it back. `--purge` also deletes what
-`setup.sh` wrote under `~/services/sources` (`bin`, `state`, `www`,
-`nginx.conf`), `.env` and the two unit files, then removes the marker dir
-only if nothing else is left in it.
+`setup.sh` wrote under `~/services/sources` (`bin`, `repo`, `state`,
+`www`, `nginx.conf`), `.env` and the two unit files, then removes the
+marker dir only if nothing else is left in it.
 
-It never touches the sources repo it builds from (`SOURCE_REPO`, default
-`~/dev/sources`: the corpus's source of truth, with GitHub), lingering,
-or units it did not create: `sources-trigger.service` and its backups are
-named in a warning and left alone.
+It never touches the fetch clone (`SOURCE_REPO`, default `~/dev/sources`:
+the corpus's source of truth, with GitHub), lingering, or units it did
+not create: `sources-trigger.service` and its backups are named in a
+warning and left alone. The deploy clone at `~/services/sources/repo` is
+machine-managed, so `--purge` does delete it — `setup.sh` re-clones it.
