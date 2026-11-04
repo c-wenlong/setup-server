@@ -19,7 +19,9 @@ and one runtime directory beside the other services:
         src/            the repo, checked out at the deployed commit
         .env            passed to the container with --env-file (0600)
         data/           mounted at `volume`, when the app declares one
-        deployed.json   {sha, image, method, at}: what is running, written last
+        deployed.json   {sha, image, method, at, release?}: what is running,
+                        written last
+        site-*/         static method only: the live and rollback releases
         .lock           one deploy or remove per app at a time
 
 Methods, and the fields each adds to the definition:
@@ -42,10 +44,11 @@ Methods, and the fields each adds to the definition:
                 volumes must live outside the checkout (absolute host paths
                 or named volumes); bind mounts under src/ do not survive.
     static      "build" (shell command run in src/), "output" (repo-relative
-                dir) — run the build, copy the output to a per-sha release
-                dir outside src/ (site-<sha12>/, so the next deploy's
-                `git clean` cannot delete what is being served), then serve
-                it read-only from a small nginx container on the app's port.
+                dir) — run the build, copy the output to a fresh per-build
+                release dir outside src/ (site-<sha12>-<ms>/, recorded in
+                deployed.json, so neither `git clean` nor a same-commit
+                rebuild can delete what is being served), then serve it
+                read-only from a small nginx container on the app's port.
                 Rollback mounts the previous release.
     node        "version" (image tag suffix, e.g. "22-alpine"), "start"
     python      (e.g. "3.13-slim"), optional "build" — a generated
@@ -671,16 +674,45 @@ def deploy_compose(d, src, prev_sha):
         raise
 
 
-def release_dir(key, sha):
-    """~/services/apps/<key>/site-<sha12>: one static build's output, staged
+RELEASE_RE = re.compile(r"^site-[0-9a-f]{12}-[0-9]{1,20}$")
+
+
+def new_release_name(key, sha):
+    """site-<sha12>-<ms>: one name per BUILD, not per commit, so redeploying
+    the same commit never reuses (and so never deletes) the live release."""
+    stamp = int(time.time() * 1000)
+    while True:
+        name = "site-%s-%d" % (sha[:12], stamp)
+        if not os.path.exists(os.path.join(app_dir(key), name)):
+            return name
+        stamp += 1
+
+
+def release_dir(key, name):
+    """~/services/apps/<key>/<name>: one static build's output, staged
     OUTSIDE the checkout so the next deploy's `git clean -ffdxq` cannot
     delete the site the running container still serves."""
-    return os.path.join(app_dir(key), "site-" + sha[:12])
+    return os.path.join(app_dir(key), name)
 
 
-def prune_releases(key, keep_shas):
+def deployed_release(key):
+    """The release dir name the last successful static deploy recorded, or
+    None: the rollback mount, and the one prune must never drop."""
+    try:
+        with open(os.path.join(app_dir(key), "deployed.json"),
+                  encoding="utf-8") as fh:
+            name = json.load(fh).get("release")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if isinstance(name, str) and RELEASE_RE.match(name) \
+            and os.path.isdir(release_dir(key, name)):
+        return name
+    return None
+
+
+def prune_releases(key, keep_names):
     """Drop static releases that are neither current nor the rollback one."""
-    keep = {"site-" + s[:12] for s in keep_shas if s}
+    keep = {n for n in keep_names if n}
     try:
         names = os.listdir(app_dir(key))
     except OSError:
@@ -690,37 +722,49 @@ def prune_releases(key, keep_shas):
             shutil.rmtree(os.path.join(app_dir(key), name), ignore_errors=True)
 
 
-def deploy_static(d, src, sha, previous, prev_sha):
-    """Run the def's build in the checkout, copy its output to a per-sha
+def deploy_static(d, src, sha, previous, prev_release):
+    """Run the def's build in the checkout, copy its output to a fresh
     release dir outside it, then serve that read-only from the small nginx
-    image. A failed build leaves the running release untouched; a failed
-    swap rolls back to the previous release dir, not just its image."""
+    image. Returns the release name. The live release is never touched: a
+    failed build, pull or swap drops only the new release, and a failed swap
+    rolls back to the previous release dir, not just its image."""
+    key = d["key"]
     run_sh(d["build"], src)
     out_dir = inside_checkout(d, src, "output")
     if not os.path.isdir(out_dir):
         raise AppError("the build produced no %s directory" % d["output"])
-    release = release_dir(d["key"], sha)
+    name = new_release_name(key, sha)
+    release = release_dir(key, name)
     tmp = release + ".tmp"
-    shutil.rmtree(tmp, ignore_errors=True)
-    # symlinks=True: a link inside the output is copied as a link and then
-    # resolves inside the container's filesystem; dereferencing it here
-    # would copy whatever HOST path it pointed at into the release.
-    shutil.copytree(out_dir, tmp, symlinks=True)
-    shutil.rmtree(release, ignore_errors=True)
-    os.replace(tmp, release)
-    run(["docker", "pull", STATIC_IMAGE])
-    say("serving %s from %s on 127.0.0.1:%d"
-        % (d["output"], STATIC_IMAGE, d["port"]))
-    mounts = [release + ":" + STATIC_DOCROOT + ":ro"]
-    # The rollback run must mount the PREVIOUS release: rolling back to the
-    # old image over this deploy's release would serve the failed content.
-    prev_kw = None
-    prev_release = release_dir(d["key"], prev_sha) if prev_sha else None
-    if prev_release and os.path.isdir(prev_release):
-        prev_kw = {"container_port": STATIC_CONTAINER_PORT,
-                   "mounts": [prev_release + ":" + STATIC_DOCROOT + ":ro"]}
-    swap(d, STATIC_IMAGE, previous, previous_run_kw=prev_kw,
-         container_port=STATIC_CONTAINER_PORT, mounts=mounts)
+    try:
+        # symlinks=True: a link inside the output is copied as a link and
+        # then resolves inside the container's filesystem; dereferencing it
+        # here would copy whatever HOST path it pointed at into the release.
+        shutil.copytree(out_dir, tmp, symlinks=True)
+        os.replace(tmp, release)
+        run(["docker", "pull", STATIC_IMAGE])
+        say("serving %s from %s on 127.0.0.1:%d"
+            % (d["output"], STATIC_IMAGE, d["port"]))
+        # The rollback run mounts the PREVIOUS release: rolling back to the
+        # old image over this deploy's release would serve the failed content.
+        # With no recorded release there is nothing to mount: rolling the
+        # old image back over THIS release would serve content that is
+        # about to be deleted, so no container rollback then.
+        prev_kw = None
+        if prev_release:
+            prev_kw = {"container_port": STATIC_CONTAINER_PORT,
+                       "mounts": [release_dir(key, prev_release) + ":"
+                                  + STATIC_DOCROOT + ":ro"]}
+        else:
+            previous = None
+        swap(d, STATIC_IMAGE, previous, previous_run_kw=prev_kw,
+             container_port=STATIC_CONTAINER_PORT,
+             mounts=[release + ":" + STATIC_DOCROOT + ":ro"])
+    except (AppError, OSError):
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(release, ignore_errors=True)
+        raise
+    return name
 
 
 def deploy(key):
@@ -740,7 +784,8 @@ def deploy(key):
         # tag, and the ID is then the only name left for the working image.
         previous = current_image(key)
         prev_sha = deployed_sha(key)
-        image = None
+        prev_release = deployed_release(key)
+        image = release = None
         if m == "script":
             run_sh(d["cmd"], src)
             if d.get("port") and d.get("health_path") \
@@ -755,7 +800,7 @@ def deploy(key):
             run(["docker", "pull", image])
             swap(d, image, previous)
         elif m == "static":
-            deploy_static(d, src, sha, previous, prev_sha)
+            release = deploy_static(d, src, sha, previous, prev_release)
             image = STATIC_IMAGE
         elif m in ("node", "python"):
             generated_dockerfile(d, src)
@@ -776,14 +821,16 @@ def deploy(key):
 
         if m != "script":         # a script manages its own Serve routes
             publish(d)
+        record = {"sha": sha, "image": image, "method": m, "ref": d["ref"],
+                  "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        if release:
+            record["release"] = release
         with open(os.path.join(app_dir(key), "deployed.json.tmp"), "w") as fh:
-            json.dump({"sha": sha, "image": image, "method": m,
-                       "ref": d["ref"],
-                       "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, fh)
+            json.dump(record, fh)
         os.replace(os.path.join(app_dir(key), "deployed.json.tmp"),
                    os.path.join(app_dir(key), "deployed.json"))
         if m == "static":
-            prune_releases(key, (sha, prev_sha))
+            prune_releases(key, (release, prev_release))
         prune_images(key, image)
         record_deployd_sha(key, sha)
         set_paused(key, False)    # a removed (or new) app resumes auto-deploy
