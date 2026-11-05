@@ -158,7 +158,7 @@
       "login": [
         "On the device, open the hub URL and tap Pair with Tailscale — it shows a 6-digit code.",
         "Approve it on the box: `~/.local/share/quiver-hub/bin/swe remote devices --approve=<code>` (requests expire in 5 minutes).",
-        "Or mint a token on the box: `./pair.sh <name>` prints a `#pair=<token>` link to open on the device."
+        "Or mint a token on the box: `cd services/quiver-hub && ./pair.sh <name>` prints a `#pair=<token>` link to open on the device."
       ],
       "description": "Quiver's remote-control hub (swe remote serve): the phone PWA for watching and steering coding-agent sessions, with an inbox and a Usage tab, and the hub MacBook satellites dial. Pinned uv install under ~/.local/share/quiver-hub, systemd user unit, loopback-only behind Serve on :8477. Runs with --public-url, so 'Pair with Tailscale' works behind Serve; approve the code on the box with swe remote devices --approve. services/quiver-hub/pair.sh mints a token for satellites."
     },
@@ -369,7 +369,7 @@
       },
       "login": [
         "No sign-in — the GUI has no password; the tailnet is the boundary.",
-        "To sync a device: add this node's Device ID on that device, then accept the prompt here."
+        "To pair a device: add this node's Device ID there with address `tcp://<host>:<SYNC_PORT>` (default 22000) — `dynamic` never reaches this box. Then accept the prompt here."
       ],
       "description": "Peer-to-peer folder sync between this box, the laptop and the phone, with this box as the always-on hub that keeps a full copy. Not a Drive: Seafile is the Drive, with a web file browser and share links; Syncthing keeps chosen folders identical device-to-device — dotfiles, a notes vault, project directories. A single native binary (pinned, checksum-verified, no Docker), so synced files are ordinary files owned by this user at any path. The GUI binds loopback behind Serve; the sync port :22000 binds the tailnet IP directly, tcp and quic, because peers dial it and QUIC is UDP. Relays, global discovery, LAN multicast, NAT traversal and all reporting are off, so it talks to no third party at all — which means peers must be added with the explicit address tcp://HOST:22000, never 'dynamic'. Photos stay in Immich; do not sync the camera roll here too."
     },
@@ -396,7 +396,7 @@
       },
       "login": [
         "Register in the browser on first visit — the master password never lives in `.env`.",
-        "Then re-run `./setup.sh` once: it sees the account and closes signups."
+        "Then `cd services/vaultwarden && ./setup.sh` once more: it sees the account and closes signups."
       ],
       "description": "Self-hosted password vault, Bitwarden-compatible — the official Bitwarden browser extension, desktop and mobile apps all work, pointed at this server instead of Bitwarden's. One container, SQLite, tiny. The admin panel ships OFF (no ADMIN_TOKEN): it is an unnecessary surface on a vault, and enabling it needs an interactive terminal because `vaultwarden hash` will not run without a TTY. The setup script cannot create your account — the master password derives the vault key in the browser and must never reach the server — so signups stay open until you register, and re-running setup.sh closes them. ⚠️ Nothing backs this box up: losing ~/services/vaultwarden loses every password. Keep a client-side encrypted export somewhere else."
     },
@@ -413,7 +413,7 @@
       "setup": "services/paperless-ngx/setup.sh",
       "env": "services/paperless-ngx/.env",
       "login": [
-        "Sign in as `admin` with `PAPERLESS_ADMIN_PASSWORD` from `.env` (generated at deploy)."
+        "Sign in with `PAPERLESS_ADMIN_USER` / `PAPERLESS_ADMIN_PASSWORD` from `.env` (generated at deploy)."
       ],
       "description": "OCR'd, searchable archive of receipts, contracts and tax documents — drop a PDF or a photo in the consume directory and it comes back indexed, tagged and full-text searchable. Two containers on SQLite: the webserver and a redis queue that is published nowhere, because anything able to reach it could drive the workers. Tika and Gotenberg (Office formats) are left out as a commented opt-in — the webserver alone idles at about 650 MB, which makes this the heaviest service here after Immich. OCR is CPU-only on this Ryzen, so imports being slow is expected rather than broken. Health-check /accounts/login/, never / or /healthz: both are 302s, and /healthz is the trap because it looks like a health endpoint and is not. Your password is created on first boot and never touched again, so if you change it in the UI the copy in .env is simply stale — that is normal. ⚠️ This becomes the archive of record for tax and legal documents on a box with no backups; use document_exporter and keep a copy elsewhere.",
       "control": {
@@ -684,7 +684,7 @@
         "kuma": "paperclip"
       },
       "login": [
-        "Open the URL and accept the CEO invite to create the company.",
+        "Open the CEO invite link saved in `~/services/paperclip/ceo-invite.txt` and create the company.",
         "Sign-in email and password live under Settings → Profile (`/company/settings/instance/profile`)."
       ],
       "description": "Agent control plane: task queue, heartbeats, run history. Official managed CLI under a systemd user unit, authenticated/private, loopback-only behind Serve on :3100. Hires claude_local / codex_local against ~/agent-workspaces/paperclip-test."

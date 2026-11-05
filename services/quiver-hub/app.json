@@ -25,7 +25,7 @@
   "login": [
     "On the device, open the hub URL and tap Pair with Tailscale — it shows a 6-digit code.",
     "Approve it on the box: `~/.local/share/quiver-hub/bin/swe remote devices --approve=<code>` (requests expire in 5 minutes).",
-    "Or mint a token on the box: `./pair.sh <name>` prints a `#pair=<token>` link to open on the device."
+    "Or mint a token on the box: `cd services/quiver-hub && ./pair.sh <name>` prints a `#pair=<token>` link to open on the device."
   ],
   "description": "Quiver's remote-control hub (swe remote serve): the phone PWA for watching and steering coding-agent sessions, with an inbox and a Usage tab, and the hub MacBook satellites dial. Pinned uv install under ~/.local/share/quiver-hub, systemd user unit, loopback-only behind Serve on :8477. Runs with --public-url, so 'Pair with Tailscale' works behind Serve; approve the code on the box with swe remote devices --approve. services/quiver-hub/pair.sh mints a token for satellites."
 }
