@@ -155,6 +155,23 @@ for bad in '"teardown.sh"' '[]' '["teardown.sh", 3]' '["teardown.sh", ""]' '["mi
   teardown
 done
 
+echo "• login steps"
+setup
+printf '{"key": "alpha", "name": "A", "group": "daily", "login": ["Sign in with `X`.", "Done."]}\n' > "$R/services/alpha/app.json"
+gen
+check "valid login: exits zero"             [ "$CODE" -eq 0 ]
+check "steps pass through verbatim"         py 'd["services"][1]["login"] == ["Sign in with `X`.", "Done."]'
+teardown
+for bad in '"x"' '[]' '[1]' '[""]' '[{}]' '[["a"]]'; do
+  setup
+  printf '{"key": "alpha", "name": "A", "group": "daily", "login": %s}\n' "$bad" > "$R/services/alpha/app.json"
+  gen
+  check "login $bad fails"                  [ "$CODE" -ne 0 ]
+  check "  names the field"                 out_has '"login"'
+  check "  nothing written"                 test ! -e "$R/app/web/services.json"
+  teardown
+done
+
 echo "• the real repo"
 OUT="$(mktemp)"
 python3 "$SCRIPT" --check > "$OUT" 2>&1; CODE=$?

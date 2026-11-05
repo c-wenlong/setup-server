@@ -217,6 +217,10 @@ Not a modal-only affair.
 Contents:
 - Icon, name, status, and the URL as a real link.
 - **Editable name and description**, saved back to the server.
+- **Sign in steps** from the manifest's `login` list — how a user gets in
+  (which .env vars hold credentials, a pair command to run on the box, or a
+  note that there is nothing to sign in to). Hidden when a service ships
+  none; not editable from the UI.
 - **Environment variables**, secrets masked, each with an eye toggle.
 - Whatever `meta` is useful (setup script path, health URL, ports).
 

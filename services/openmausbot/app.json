@@ -17,5 +17,9 @@
     ],
     "kuma": "openmausbot"
   },
+  "login": [
+    "On the box, run `openmausbot pair --label \"<device>\"` — it prints a one-time `/pair#code=...` link.",
+    "Open that link in the browser being paired. Repeat per browser; codes expire in minutes and are never written to logs."
+  ],
   "description": "Self-hosted Grokbot-style workspace: persistent AI bots, each with its own files and memory, driven from a browser. OpenMausBot's Node server serves its own web UI on loopback :8799 and is published tailnet-only over HTTPS on the same port. Browsers pair with a code (`openmausbot pair`); the owner API is never exposed beyond the tailnet. Engine CLIs (Claude Code, Codex, ...) are signed in separately as this box's user."
 }

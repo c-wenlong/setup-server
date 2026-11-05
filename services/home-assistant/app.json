@@ -9,6 +9,10 @@
   "health": "http://127.0.0.1:8123/manifest.json",
   "marker": "~/services/home-assistant",
   "env": ".env",
+  "login": [
+    "Sign in with `HA_ADMIN_USER` / `HA_ADMIN_PASSWORD` from `.env`.",
+    "Finish the onboarding prompts on first login — the location pin especially, or every sun-based automation fires at the wrong time."
+  ],
   "description": "Local-first home automation: one place for smart lights, plugs, sensors and media players, with automations that keep running when the internet does not. Runs on host networking so it can discover devices on the LAN (zeroconf, SSDP, DHCP, USB), while the web UI itself still binds 127.0.0.1 and is published through Tailscale Serve like everything else. Bluetooth is deliberately switched off: this box's own bluetoothd owns the adapter, and letting Home Assistant fight it for hci0 produced an error every two seconds, forever. setup.sh creates the admin account and opts out of analytics, but deliberately leaves the location step to you — completing it automatically would pin the box to latitude 0 and UTC, and sunrise/sunset automations would silently be wrong.",
   "control": {
     "parts": [

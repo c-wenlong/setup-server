@@ -9,6 +9,9 @@
   "health": "http://127.0.0.1:{API_PORT:8642}/health",
   "marker": "~/services/hermes-agent",
   "env": ".env",
+  "login": [
+    "The browser asks for HTTP Basic credentials: `HERMES_DASHBOARD_USERNAME` / `HERMES_DASHBOARD_PASSWORD` from `.env`."
+  ],
   "description": "Nous Research's self-improving agent: sessions, skills, memories and scheduled jobs, with a web dashboard on :9119 and a key-gated OpenAI-compatible API on loopback :8642. Official image, single container. Its data dir is ~/services/hermes-agent/data — deliberately NOT ~/.hermes, which belongs to the separate native hermes-gateway install this box already runs; the two coexist and teardown only ever touches the Docker one. Dashboard basic-auth credentials are generated into .env; the tailnet is still the real boundary.",
   "control": {
     "parts": [

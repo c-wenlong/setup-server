@@ -36,6 +36,11 @@
     "          than the vendored mark.",
     "description - shown on the detail page. The shipped default: edits made",
     "          in the UI go to ~/services/launcher/overrides.json, never here.",
+    "login   - optional list of step strings: how a user gets in (which .env",
+    "          vars hold the credentials, a pair command to run on the box, or",
+    "          that there is no sign-in at all). Rendered as the detail page's",
+    "          Sign in section; absent or malformed hides it. Backticks mark",
+    "          code. Not editable from the UI.",
     "control - start/stop/restart. THE SINGLE SOURCE OF TRUTH for lifecycle",
     "          control on this box: app/web/server.py reads it from here and",
     "          services/ntfy-control/control_listener.py reads this same file off the",
@@ -181,6 +186,9 @@
         ],
         "kuma": "manimkc"
       },
+      "login": [
+        "No sign-in — the tile opens its `/docs` API page."
+      ],
       "description": "Video-gen job server: POST a JSON brief and it renders a narrated ManimGL video, then uploads it to the Seafile `manimkc` library. A systemd user unit on 127.0.0.1:8090; the tile opens its /docs API page, since that is the whole UI. Code lives in its own repo at ~/dev/manimkc, not in this one, and narration runs through ElevenLabs, Sarvam or local Kokoro TTS."
     },
     {

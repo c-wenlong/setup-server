@@ -17,5 +17,9 @@
     ],
     "kuma": "paperclip"
   },
+  "login": [
+    "Open the URL and accept the CEO invite to create the company.",
+    "Sign-in email and password live under Settings → Profile (`/company/settings/instance/profile`)."
+  ],
   "description": "Agent control plane: task queue, heartbeats, run history. Official managed CLI under a systemd user unit, authenticated/private, loopback-only behind Serve on :3100. Hires claude_local / codex_local against ~/agent-workspaces/paperclip-test."
 }

@@ -1795,7 +1795,8 @@ class DetailTest(SandboxTest):
              "icon": "camera", "url": "https://HOST:2283/",
              "health": "http://127.0.0.1:2283/api/server/ping",
              "marker": None, "setup": "alpha/setup.sh", "env": "alpha/.env",
-             "description": "Shipped description."},
+             "description": "Shipped description.",
+             "login": ["Run `svc pair`.", "Open the printed link."]},
             {"key": "bare", "name": "Bare", "tagline": "t", "icon": "cpu",
              "url": None, "health": None, "marker": None, "setup": None,
              "env": None, "description": "No env at all."},
@@ -1811,8 +1812,9 @@ class DetailTest(SandboxTest):
         self.assertEqual(sorted(detail), [
             "active", "control", "degraded", "deployed_at", "description",
             "env", "favicon", "group",
-            "icon", "installed", "job", "key", "meta", "name", "receipt",
-            "removable", "resources", "state", "tagline", "updates", "url", "usage"])
+            "icon", "installed", "job", "key", "login", "meta", "name",
+            "receipt", "removable", "resources", "state", "tagline",
+            "updates", "url", "usage"])
         self.assertEqual(detail["key"], "alpha")
         self.assertEqual(detail["name"], "Alpha")
         self.assertEqual(detail["description"], "Shipped description.")
@@ -1841,6 +1843,22 @@ class DetailTest(SandboxTest):
 
     def test_meta_local_port_is_null_without_a_health_probe(self):
         self.assertIsNone(server.service_detail("bare")["meta"]["local_port"])
+
+    def test_login_steps_pass_through(self):
+        self.assertEqual(server.service_detail("alpha")["login"],
+                         ["Run `svc pair`.", "Open the printed link."])
+
+    def test_login_is_null_when_the_manifest_has_none(self):
+        self.assertIsNone(server.service_detail("bare")["login"])
+
+    def test_login_malformed_or_empty_degrades_to_null(self):
+        for bad in ("not a list", [{"x": 1}], [], ["", None]):
+            self.write_registry({"services": [
+                {"key": "alpha", "name": "A", "tagline": "t", "icon": "cpu",
+                 "url": None, "health": None, "marker": None, "setup": None,
+                 "env": None, "description": "", "login": bad},
+            ]})
+            self.assertIsNone(server.service_detail("alpha")["login"], bad)
 
     def test_env_lists_names_and_flags_in_file_order(self):
         env = server.service_detail("alpha")["env"]

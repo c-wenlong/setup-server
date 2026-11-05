@@ -214,7 +214,9 @@ service is deployed on this machine, run `--live` too.
    `app.json` `icon` glyph only when no brand file exists — do not ship a
    generic glyph when upstream ships a real mark.
 6. Write `services/<service>/app.json` (its launcher tile: copy a similar
-   service's, leave out `setup`), add its key to `order` in
+   service's, leave out `setup`, and fill `login` with the steps a user
+   takes to get in — the .env vars holding credentials, a pair command, or
+   that there is no sign-in), add its key to `order` in
    `app/web/registry.json`, then run `python3 scripts/build-registry.py` and
    commit the regenerated `app/web/services.json`. Never edit that file by
    hand; `make lint` fails when it drifts from the manifests.

@@ -23,5 +23,8 @@
     ],
     "kuma": "seafile"
   },
+  "login": [
+    "Sign in with `INIT_SEAFILE_ADMIN_EMAIL` / `INIT_SEAFILE_ADMIN_PASSWORD` from `.env`."
+  ],
   "description": "The Drive: file sync between laptop, phone and this box, plus a web UI, with desktop and mobile clients. Seafile plus MariaDB and Redis on a Docker network; only the web tier is published, on 127.0.0.1:8081. Camera upload stays off here on purpose — Immich owns photos, so nothing is stored twice. Also the destination manimkc uploads its finished videos to."
 }

@@ -123,6 +123,11 @@ def build():
         key = entry.get("key")
         if not key:
             raise RegistryError("%s: an entry has no \"key\"" % where)
+        login = entry.get("login")
+        if (login is not None and (not isinstance(login, list) or not login
+                or not all(isinstance(s, str) and s for s in login))):
+            raise RegistryError("%s (%s): \"login\" must be a non-empty list of "
+                                "non-empty step strings" % (where, key))
         if key in entries:
             raise RegistryError("duplicate key %r (%s and %s)" % (key, entries[key][1], where))
         entries[key] = (entry, where)

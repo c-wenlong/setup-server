@@ -759,6 +759,54 @@ h1, h2, p { margin: 0; }
   color: var(--muted);
 }
 
+/* --- sign-in steps --- */
+
+/* A numbered list rather than paragraphs: the steps are an order, and a
+   circled counter keeps "run this on the box first, then open the link"
+   readable at a glance. A single step drops its number — a one-line
+   "no sign-in" answer is not step 1 of anything. */
+.login {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  counter-reset: login-step;
+}
+.login li {
+  counter-increment: login-step;
+  position: relative;
+  padding: 8px 0 8px 30px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.login li:last-child { border-bottom: 0; }
+.login li::before {
+  content: counter(login-step);
+  position: absolute;
+  left: 0;
+  top: 9px;
+  width: 19px;
+  height: 19px;
+  font-size: 11px;
+  line-height: 19px;
+  text-align: center;
+  color: var(--faint);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+}
+.login li:only-child { padding-left: 0; }
+.login li:only-child::before { content: none; }
+.login code {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--surface-2);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--muted);
+}
+
 /* --- editable fields --- */
 
 .field { display: flex; flex-direction: column; gap: 5px; margin-top: 14px; }
