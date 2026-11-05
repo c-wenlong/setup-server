@@ -205,12 +205,20 @@ service is deployed on this machine, run `--live` too.
 4. Add the service row to the root `README.md` table and to `DIRECTORY.md`
    (services table plus any loose end it introduces), and add a monitor line in
    `services/monitoring/seed_kuma.py`.
-5. Write `services/<service>/app.json` (its launcher tile: copy a similar
+5. **Vendor the brand icon.** Download the service's own app icon into
+   `app/web/static/icons/<service>.svg` (or `.png`; add a
+   `<service>-dark.svg` pair only when the mark needs one for the dark
+   tile), register it in `BRANDS` plus any plausible spellings in
+   `BRAND_ALIAS` in `app/web/static/icons.js`, and use the file in the
+   README row like the other rows do. The tile falls back to the
+   `app.json` `icon` glyph only when no brand file exists — do not ship a
+   generic glyph when upstream ships a real mark.
+6. Write `services/<service>/app.json` (its launcher tile: copy a similar
    service's, leave out `setup`), add its key to `order` in
    `app/web/registry.json`, then run `python3 scripts/build-registry.py` and
    commit the regenerated `app/web/services.json`. Never edit that file by
    hand; `make lint` fails when it drifts from the manifests.
-6. Real-machine test: deploy, then `./tests/run-tests.sh --live`.
+7. Real-machine test: deploy, then `./tests/run-tests.sh --live`.
 
 Only add a service-level `AGENTS.md` if the service has quirks that genuinely
 deviate from these conventions.

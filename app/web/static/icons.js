@@ -101,7 +101,10 @@
     /* Red-gradient lobster, reads on both tile themes. */
     'openclaw':      { file: 'openclaw' },
     /* App-icon plate: white bg for the light tile, #0d1117 for dark. */
-    'hermes-agent':  { file: 'hermes-agent', dark: true }
+    'hermes-agent':  { file: 'hermes-agent', dark: true },
+    /* Upstream build/icon.svg: silver cursor mascot on a black rounded
+       tile; the mascot reads on both tile themes, so no -dark pair. */
+    'openmausbot':   { file: 'openmausbot' }
   };
 
   /* Spellings the registry might plausibly use for the same service. */
@@ -122,6 +125,9 @@
     'agent-canvas': 'openhands',
     'triggerdev': 'trigger-dev',
     'trigger.dev': 'trigger-dev',
+    'open-maus-bot': 'openmausbot',
+    'mausbot': 'openmausbot',
+    'openmausbot-ai': 'openmausbot',
     'coollabs': 'coolify',
     'appflowy-cloud': 'appflowy',
     'appflowyio': 'appflowy',
