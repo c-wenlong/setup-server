@@ -166,10 +166,10 @@ Supporting services (no Tailscale Serve entry):
   stop will alert), and ntfy-control cannot start/stop it (its allowlist
   is `services.json`). Pause the monitor in Kuma by hand when stopping it.
 - **sources as a launcher app (2026-11-05)** lost the same Kuma pause on
-  Stop/Start (the monitor stays in `seed_kuma.py`). Its old deploy left
-  `~/services/sources/` (old deploy clone, `www/` releases, `nginx.conf`,
-  `bin/deploy.sh`) and the gitignored `services/sources/.env` (old
-  `SITE_PASSPHRASE`) on the box: safe to delete by hand, nothing reads them.
+  Stop/Start (the monitor stays in `seed_kuma.py`). The old deploys'
+  leftovers (`~/services/{kaichenpedia,sources}/`, their gitignored
+  `services/*/.env`, launcher instance records and the old kaichenpedia
+  image) were deleted on 2026-11-05.
 - **AdGuard Home**: shipped 2026-09-11 (see the :3080 row); the remaining
   step is adding `100.77.77.77` as a nameserver in the Tailscale admin
   console, which is what makes it filter anything.
