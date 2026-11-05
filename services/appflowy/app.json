@@ -9,6 +9,10 @@
   "health": "http://127.0.0.1:8102/api/health",
   "marker": "~/services/appflowy",
   "env": ".env",
+  "login": [
+    "Sign in with `GOTRUE_ADMIN_EMAIL` / `GOTRUE_ADMIN_PASSWORD` from `.env`.",
+    "Desktop and mobile apps: set the self-hosted cloud URL to this tile's HTTPS origin first."
+  ],
   "description": "Self-hosted Notion: documents, databases and a wiki on this box. AppFlowy Cloud behind nginx on :8102, loopback-only behind Serve. First admin is seeded from .env and public sign-up is off. AI chat and the full-text search indexer are left out — AI wants an OpenAI key this box does not have, and search mmaps about 2 GB. Desktop and mobile apps point at the same HTTPS URL.",
   "control": {
     "parts": [

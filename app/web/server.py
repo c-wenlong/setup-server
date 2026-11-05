@@ -468,6 +468,17 @@ def effective_group(svc, entry):
     return gid if isinstance(gid, str) and gid else None
 
 
+def login_steps(svc):
+    """The manifest's `login` steps verbatim, or None when it has none, has
+    a malformed value, or only empty strings — all of which hide the detail
+    page's Sign in section the same way."""
+    raw = svc.get("login")
+    if not isinstance(raw, list):
+        return None
+    steps = [s for s in raw if isinstance(s, str) and s]
+    return steps or None
+
+
 # ------------------------------------------------------------------ usage
 
 # When each service was last launched (its tile opened the service in a tab)
@@ -2302,6 +2313,9 @@ def service_detail(key):
         "deployed_at": deployed_at(svc.get("marker")),
         "resources": resources,
         "description": description,
+        # How a user gets in, straight from the manifest: a list of step
+        # strings, or null — the detail page hides its Sign in section then.
+        "login": login_steps(svc),
         "meta": {
             # Registry facts, verbatim: paths as written, so what is shown is
             # what you would go and edit. Nothing derived is invented here —

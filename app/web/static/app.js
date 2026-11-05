@@ -120,6 +120,8 @@
   var elDGroup  = $('d-group');
   var elDDesc   = $('d-desc');
   var elDSave   = $('d-save');
+  var elLoginSec = $('d-login-sec');
+  var elLogin   = $('d-login');
   var elEnvSec  = $('d-env-sec');
   var elEnvPath = $('d-env-path');
   var elEnv     = $('d-env');
@@ -1796,6 +1798,10 @@
     text(elDNote, '');
     clearControls();
     if (elDStrip) { elDStrip.textContent = ''; elDStrip.hidden = true; }
+    if (elLoginSec) {
+      elLoginSec.hidden = true;
+      elLogin.textContent = '';
+    }
     elEnv.textContent = '';
     elEnvSec.hidden = true;
     elEnvEmpty.hidden = true;
@@ -1894,10 +1900,41 @@
     paintGroupSelect();
     autoGrow(elDDesc);
 
+    paintLogin(d.login);
     paintEnv(d.env, view.key);
     paintUpdates(d.updates, view.key);
     paintMeta(withReceipt(d.meta, d.receipt));
     VIEW.detail(view.key, d);
+  }
+
+  /* The manifest's `login` steps, an ordered list of "how a user gets in" —
+     which .env var holds the password, a pair command to run on the box, or
+     one line saying there is nothing to sign in to. Null/absent/malformed
+     leaves the section hidden. Backticks mark code spans, like the detail
+     page's field hints; a step is never HTML, so everything goes through
+     text nodes. */
+  function paintLogin(steps) {
+    if (!elLoginSec) return;
+    elLogin.textContent = '';
+    if (!Array.isArray(steps)) {
+      elLoginSec.hidden = true;
+      return;
+    }
+    var shown = 0;
+    for (var i = 0; i < steps.length; i++) {
+      if (typeof steps[i] !== 'string' || !steps[i]) continue;
+      var li = make('li');
+      var parts = steps[i].split('`');
+      for (var j = 0; j < parts.length; j++) {
+        if (!parts[j]) continue;
+        li.appendChild(j % 2 === 1
+          ? text(make('code'), parts[j])
+          : document.createTextNode(parts[j]));
+      }
+      elLogin.appendChild(li);
+      shown++;
+    }
+    elLoginSec.hidden = shown === 0;
   }
 
   /* --- image updates --- */

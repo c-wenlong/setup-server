@@ -9,6 +9,9 @@
   "health": "http://127.0.0.1:8105/api/instances/",
   "marker": "~/services/plane",
   "env": ".env",
+  "login": [
+    "Sign in with `PLANE_ADMIN_EMAIL` / `PLANE_ADMIN_PASSWORD` from `.env`."
+  ],
   "description": "Self-hosted Linear/Jira: issues, cycles and pages. Plane Community v1.4.2 behind an HTTP-only proxy on :8105 (Serve terminates TLS; we do not publish :443). First instance admin is seeded from .env. Eleven long-running containers plus a one-shot migrator — RAM-heavy on this 7.7 GB box. MinIO comes from quay.io because Docker Hub froze minio/minio. This is our compose, not a wrap of Plane's interactive setup.sh.",
   "control": {
     "parts": [

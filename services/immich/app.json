@@ -28,5 +28,9 @@
     "kuma": "immich",
     "_comment": "Stop order matters: the API server first, then the ML container (which only exists when the `ml` compose profile is active, hence optional), then the datastores it was talking to. Start is the reverse."
   },
+  "login": [
+    "Sign in with `IMMICH_ADMIN_EMAIL` / `IMMICH_ADMIN_PASSWORD` from `.env`.",
+    "Phone app: set Server Endpoint to this tile's URL with `/api` at the end, same credentials; the phone must be on the tailnet."
+  ],
   "description": "Self-hosted Google Photos: timeline, albums, sharing, and background camera backup from the phone to this box. Four containers on a bridge network, of which only the server is published, on 127.0.0.1:2283."
 }

@@ -9,6 +9,9 @@
   "health": "http://127.0.0.1:8103/api/v1/info/status",
   "marker": "~/services/stirling-pdf",
   "env": ".env",
+  "login": [
+    "No account — open it and use it."
+  ],
   "description": "Locally hosted PDF toolbox: merge, split, compress, OCR, convert, rotate, watermark. One container on :8103 because code-server already owns Stirling's upstream :8080. Loopback-only behind Serve. Login is off — upstream defaults to a well-known admin/stirling pair, and the tailnet is the access boundary. Standard 2.14.3 image, not the fat extra-fonts build.",
   "control": {
     "parts": [

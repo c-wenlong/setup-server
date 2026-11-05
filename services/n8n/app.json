@@ -17,5 +17,8 @@
     ],
     "kuma": "n8n"
   },
+  "login": [
+    "Sign in with `OWNER_EMAIL` / `OWNER_PASSWORD` from `.env` (the seeded owner account)."
+  ],
   "description": "Self-hosted Zapier: visual workflows wiring schedules, webhooks and APIs to everything else here — ollama, ntfy, Seafile, any loopback service. Host-network container on 127.0.0.1:5678 with SQLite storage. Often stopped on purpose; scheduled workflows do not run while it is down. Its .env holds the encryption key that every saved credential is encrypted with, so back that up with the data."
 }

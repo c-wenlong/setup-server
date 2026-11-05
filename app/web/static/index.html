@@ -185,6 +185,13 @@ if (!location.pathname.endsWith('/') && !/\.html?$/i.test(location.pathname)) {
        <p class="field-status" id="d-save" role="status" aria-live="polite"></p>
      </section>
 
+     <!-- How a user gets in: the manifest's `login` steps as an ordered list,
+          painted by app.js; hidden for services that ship none. -->
+     <section class="d-sec" id="d-login-sec" hidden>
+       <h3 class="d-sec-h">Sign in</h3>
+       <ol class="login" id="d-login"></ol>
+     </section>
+
      <!-- Mount point for view.js's Resources block. Deliberately in the main
           column, not the notes column beside it. -->
      <div id="view-res"></div>
