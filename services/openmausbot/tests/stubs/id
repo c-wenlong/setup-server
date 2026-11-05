@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# id stub: FAKE_UID overrides the reported uid (for the run-as-root test).
+if [ "${1:-}" = "-u" ]; then
+  echo "${FAKE_UID:-1000}"
+else
+  /usr/bin/id "$@"
+fi

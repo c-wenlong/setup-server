@@ -42,6 +42,9 @@ PUBLISHED = [
     # /api/healthz, not / — it reports on the cache and database rather than
     # just proving a page renders, so a half-broken forge shows as down.
     ("forgejo", 3000, "/api/healthz"),
+    # /api/health is the upstream Node server's own readiness route (200 JSON);
+    # "/" is the SPA shell and would stay green against a dead API.
+    ("openmausbot", 8799, "/api/health"),
     ("jellyfin", 8096, "/health"),
     ("vaultwarden", 8222, "/alive"),
     # /manifest.json, not /api/onboarding: the onboarding views are only
