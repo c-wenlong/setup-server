@@ -957,8 +957,8 @@ fetches the definition's ref into `refs/remotes/origin/<ref>` and requires
 the sha to be an ancestor of it (or its tip, `git merge-base
 --is-ancestor`). Otherwise the deploy fails with "deployd asked for X but
 origin/<ref> is at Y" before anything is stopped or checked out, so
-deployd's fail and backoff retry it, the same as
-`services/kaichenpedia/deploy.sh`. The clone stays `--filter=blob:none` and
+deployd's fail and backoff retry it, the same as kaichenpedia's old
+`deploy.sh` did. The clone stays `--filter=blob:none` and
 the checkout stays a forced detach plus `clean -ffdxq`.
 
 ## v18: host-run commands get the app's env and a usable PATH (2026-11-04)
