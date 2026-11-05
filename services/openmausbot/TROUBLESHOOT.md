@@ -18,8 +18,9 @@ tail ~/Library/Logs/openmausbot*.log       # macOS logs
 - **Node < 24**: upstream requires Node 24+. Install a newer Node, delete
   `.env` (so `NODE_BIN`/`OMB_BIN` get rewritten), re-run.
 - **Port already in use**: something else owns `127.0.0.1:$OMB_PORT`
-  (`ss -tlnp 'sport = :8799'`). Change `OMB_PORT`/`HTTPS_PORT` in `.env`,
-  re-run `./setup.sh` — the unit and Serve follow.
+  (`ss -tlnp 'sport = :8799'`). Change `OMB_PORT`/`HTTPS_PORT` in `.env`
+  and update `OMB_PUBLIC_URL` to the new HTTPS port too (setup preserves
+  the existing `.env`, so it does not recompute it). Re-run `./setup.sh`.
 
 ## Local health fails but the unit is running
 

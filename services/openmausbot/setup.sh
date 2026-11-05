@@ -139,11 +139,11 @@ OMB_DATA_DIR=$HOME/services/openmausbot/data
 # published, so OMB_WEBHOOK_PUBLIC_URL stays unset.
 OMB_PUBLIC_URL=https://$host:$HTTPS_PORT
 
-# Loopback trust governs *local non-browser* callers only — a browser never
+# Loopback trust governs local non-browser callers only — a browser never
 # gets it on any trust level (upstream: "a browser never gets loopback
-# trust"), so tailnet users still pair. `owner` is the documented default
-# for a self-hosted single-user box; `service` is for shared hosted
-# workspaces and would refuse `openmausbot pair` from this machine.
+# trust"), so tailnet users still pair. owner is the documented default
+# for a self-hosted single-user box; service is for shared hosted
+# workspaces and would refuse the pair command from this machine.
 OMB_LOOPBACK_TRUST=owner
 
 # Deploy bookkeeping (not read by upstream).
@@ -276,6 +276,16 @@ if [ "$OS" = "Linux" ]; then
 fi
 
 # ------------------------------------------------------- tailscale serve
+# Serve is one mapping per port: publishing over another service's HTTPS
+# port would silently take it down. Our own mapping (a re-run) is fine.
+SERVE_TARGET="http://127.0.0.1:$OMB_PORT"
+existing="$("$TAILSCALE" serve status 2>/dev/null | awk -v hdr="https://$host:$HTTPS_PORT " '
+  index($0, hdr) == 1 { inblk = 1; next }
+  /^https?:\/\// { inblk = 0 }
+  inblk && $2 == "/" && $3 == "proxy" { print $4; exit }' || true)"
+if [ -n "$existing" ] && [ "$existing" != "$SERVE_TARGET" ]; then
+  die "HTTPS :$HTTPS_PORT is already published for $existing. Set another HTTPS_PORT in $ENV_FILE (see tailscale serve status)."
+fi
 info "Publishing via Tailscale Serve (HTTPS :$HTTPS_PORT, tailnet only)"
 ts_serve_publish "$HTTPS_PORT" "http://127.0.0.1:$OMB_PORT"
 

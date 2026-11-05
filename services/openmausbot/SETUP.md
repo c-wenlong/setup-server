@@ -39,6 +39,15 @@ engine CLIs on this box (claude, codex, opencode, ...)  -- as THIS user
 - A regular (non-root) user. On Linux the script needs `sudo` once, for
   `loginctl enable-linger` and `tailscale set --operator`.
 
+| Dependency | What it is for | How it is supplied |
+|---|---|---|
+| Node.js >= 24 + npm | Runs the server; `npm install -g` installs it | You install it (nvm, brew, distro) before running |
+| curl | Local health probe and the end-to-end tailnet check | OS package manager |
+| Tailscale | The only external access path (HTTPS Serve on the tailnet) | Installed and logged in (`tailscale up`); HTTPS/Serve enabled in the tailnet admin console — a one-time toggle the script's retry loop points at |
+| systemd --user + `loginctl` | Keeps the server alive and starting at boot (Linux) | Standard on the target distro |
+| launchd | Keeps the server alive and starting at login (macOS) | Built into macOS |
+| sudo (Linux only, first run) | `loginctl enable-linger` + `tailscale set --operator` | Interactive, once per box |
+
 ## What the script does
 
 1. Preflight: Linux or macOS, not root, `node --version` >= 24, npm present,

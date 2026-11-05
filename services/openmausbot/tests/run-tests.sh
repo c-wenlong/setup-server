@@ -184,7 +184,7 @@ test_idempotent_rerun() {
   check ".env left untouched"           grep -q "my-custom-marker" "$SVC/.env"
   check "says config untouched"         out_has "leaving untouched"
   check "still upgrades the package"    calls_have "npm install -g openmausbot"
-  check "never invoked sudo"            no_call "^sudo "
+  check "never invoked sudo"            no_call "sudo "
   if [ "$OS" = "Linux" ]; then
     check "service still restarted"     calls_have "systemctl --user restart openmausbot"
   else
@@ -231,6 +231,20 @@ test_serve_approval_retry() {
   check "showed the approval prompt" out_has "approval URL"
   check "eventually published"       out_has "Tailscale Serve: HTTPS :8799"
   [ "$OS" = "Linux" ] && check "granted operator on 1st failure" calls_have "sudo tailscale set --operator="
+  teardown
+}
+
+test_serve_port_owned_by_another() {
+  echo "• :8799 already published for another app: refuses to take it over"
+  setup
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:8799 (tailnet only)
+|-- / proxy http://127.0.0.1:8093
+EOF
+  run_deploy
+  check "exits non-zero"            [ "$CODE" -ne 0 ]
+  check "names the other target"    out_has "already published for http://127.0.0.1:8093"
+  check "did not publish"           no_call "serve --bg"
   teardown
 }
 
@@ -316,7 +330,11 @@ test_teardown_not_published() {
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "no serve off"                no_call " off"
   check "says already off"            out_has "already off"
-  check "still stops"                 calls_have "stop openmausbot"
+  if [ "$OS" = "Linux" ]; then
+    check "still stops"               calls_have "stop openmausbot"
+  else
+    check "still boots out"           calls_have "launchctl bootout"
+  fi
   teardown
 }
 
@@ -379,13 +397,18 @@ test_teardown_purge() {
   deployed
   run_teardown --purge "openmaus"
   check "wrong name: exits non-zero"  [ "$CODE" -ne 0 ]
-  check "wrong name: unit kept"       [ -f "$UNIT" ]
-  check "wrong name: nothing stopped" no_call "systemctl"
+  if [ "$OS" = "Linux" ]; then
+    check "wrong name: unit kept"     [ -f "$UNIT" ]
+  else
+    check "wrong name: plist kept"    [ -f "$PLIST" ]
+  fi
+  check "wrong name: nothing stopped" no_call "stop openmausbot"
+  check "wrong name: nothing booted"  no_call "bootout"
   check "wrong name: serve untouched" no_call " off"
   check "wrong name: data kept"       [ -d "$MARKER/data" ]
   run_teardown --purge "openmausbot"
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check "unit file gone"              [ ! -f "$UNIT" ]
+  check "unit/plist file gone"        [ ! -f "$UNIT" ] && [ ! -f "$PLIST" ]
   check ".env gone"                   [ ! -f "$SVC/.env" ]
   check "data dir gone"               [ ! -d "$MARKER/data" ]
   check "marker removed"              [ ! -d "$MARKER" ]
@@ -428,28 +451,48 @@ live() {
   check_live() { local d="$1"; shift; if "$@"; then green "    ✓ $d"; else red "    ✗ $d"; rc=1; fi; }
 
   [ -f "$SERVICE_DIR/.env" ] || { echo "    (no .env — not deployed here, skipping)"; return 0; }
-  local port
+  local port https ts tsip
   port="$(sed -n 's/^OMB_PORT=\(.*\)$/\1/p' "$SERVICE_DIR/.env" | tail -1 | tr -d "\"'")"
   : "${port:=8799}"
+  https="$(sed -n 's/^HTTPS_PORT=\(.*\)$/\1/p' "$SERVICE_DIR/.env" | tail -1 | tr -d "\"'")"
+  : "${https:=$port}"
+  # Same resolution as lib's resolve_tailscale: PATH first, then the macOS
+  # app bundle — a Mac may have the app without the CLI on PATH.
+  ts="$(command -v tailscale || true)"
+  [ -n "$ts" ] || { [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ] && ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"; }
+  [ -n "$ts" ] || { red "    ✗ tailscale CLI not found"; return 1; }
+  tsip="$("$ts" ip -4 2>/dev/null | head -1)"
 
   if [ "$OS" = "Linux" ]; then
     check_live "unit is active"      systemctl --user is-active --quiet openmausbot
     check_live "unit is enabled"     systemctl --user is-enabled --quiet openmausbot
     check_live "lingering on"        bash -c '[ "$(loginctl show-user "$USER" -p Linger --value)" = yes ]'
-    check_live "nothing on non-loopback ($port)" bash -c '
-      if command -v ss >/dev/null; then
-        ! ss -tlnH "sport = :'"$port"'" | grep -vE "127\.0\.0\.1|\[::1\]" | grep -q .
-      else
-        ! lsof -nP -iTCP:'"$port"' -sTCP:LISTEN 2>/dev/null | grep -vE "127\.0\.0\.1|localhost|\[::1\]" | grep -q .
-      fi'
   else
     check_live "LaunchAgent loaded"  launchctl print "gui/$(id -u)/com.openmausbot.server"
-    check_live "nothing on non-loopback ($port)" bash -c '
-      ! lsof -nP -iTCP:'"$port"' -sTCP:LISTEN 2>/dev/null | grep -vE "127\.0\.0\.1|localhost|\[::1\]" | grep -q .'
   fi
+  # A listener on loopback or this node's tailnet IPv4 is fine — the latter
+  # is Serve's own proxy when the HTTPS port equals the app port. Anything
+  # else (LAN, wildcard) is a leak. lsof's header line is skipped so it can
+  # never read as a stray listener.
+  live_listener_audit() {
+    local keep="127\.0\.0\.1|localhost|\[::1\]|::1"
+    [ -n "$tsip" ] && keep="$keep|${tsip//./\\.}"
+    if command -v ss >/dev/null 2>&1; then
+      ! ss -tlnH "sport = :$port" | grep -vE "$keep" | grep -q .
+    else
+      ! lsof -nP -iTCP:$port -sTCP:LISTEN 2>/dev/null | tail -n +2 | grep -vE "$keep" | grep -q .
+    fi
+  }
+  live_serve_published() { "$ts" serve status | grep -q "proxy http://127.0.0.1:$port"; }
+  live_https_ok() {
+    local dns
+    dns="$("$ts" status --json | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')"
+    [ -n "$dns" ] && curl -fsS -o /dev/null --max-time 30 "https://$dns:$https/api/health"
+  }
+  check_live "nothing off-loopback/off-tailnet ($port)" live_listener_audit
   check_live "local /api/health"     curl -fsS -o /dev/null "http://127.0.0.1:$port/api/health"
-  check_live "published via Serve"   bash -c 'tailscale serve status | grep -q "proxy http://127.0.0.1:'"$port"'"'
-  check_live "end-to-end HTTPS"      bash -c 'curl -fsS -o /dev/null --max-time 30 "https://$(tailscale status --json | grep -o "\"DNSName\": *\"[^\"]*\"" | head -1 | cut -d\" -f4 | sed "s/\.$//"):'"$port"'/api/health"'
+  check_live "published via Serve"   live_serve_published
+  check_live "end-to-end HTTPS"      live_https_ok
   return "$rc"
 }
 
@@ -465,6 +508,7 @@ for t in \
   test_port_override \
   test_env_port_wins_over_cli \
   test_serve_approval_retry \
+  test_serve_port_owned_by_another \
   test_teardown_safe \
   test_teardown_port_shapes \
   test_teardown_not_published \
