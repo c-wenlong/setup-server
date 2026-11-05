@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# npm stub. $STATE_DIR/npm_prefix holds the global prefix (default $HOME/.local;
+# seed it with /usr to simulate a system-owned prefix).
+echo "npm $*" >> "$CALLS_LOG"
+prefix() { cat "$STATE_DIR/npm_prefix" 2>/dev/null || echo "$HOME/.local"; }
+case "$1" in
+  config)
+    case "$2 $3" in
+      "get prefix") prefix ;;
+      "set prefix") echo "$4" > "$STATE_DIR/npm_prefix" ;;
+    esac
+    ;;
+  install)
+    mkdir -p "$(prefix)/bin"
+    printf '#!/bin/sh\necho "0.1.141-fake"\n' > "$(prefix)/bin/openmausbot"
+    chmod +x "$(prefix)/bin/openmausbot"
+    ;;
+  --version) echo "10.0.0" ;;
+esac
+exit 0

@@ -694,6 +694,28 @@
       }
     },
     {
+      "key": "openmausbot",
+      "name": "OpenMausBot",
+      "tagline": "AI bot computer",
+      "group": "ai",
+      "icon": "chat",
+      "author": "milind-soni",
+      "url": "https://HOST:{HTTPS_PORT|OMB_PORT:8799}/",
+      "health": "http://127.0.0.1:{OMB_PORT:8799}/api/health",
+      "marker": "~/services/openmausbot",
+      "setup": "services/openmausbot/setup.sh",
+      "env": "services/openmausbot/.env",
+      "control": {
+        "parts": [
+          {
+            "unit": "openmausbot.service"
+          }
+        ],
+        "kuma": "openmausbot"
+      },
+      "description": "Self-hosted Grokbot-style workspace: persistent AI bots, each with its own files and memory, driven from a browser. OpenMausBot's Node server serves its own web UI on loopback :8799 and is published tailnet-only over HTTPS on the same port. Browsers pair with a code (`openmausbot pair`); the owner API is never exposed beyond the tailnet. Engine CLIs (Claude Code, Codex, ...) are signed in separately as this box's user."
+    },
+    {
       "key": "ollama",
       "name": "ollama",
       "tagline": "Models",
