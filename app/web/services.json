@@ -226,7 +226,7 @@
       "login": [
         "No sign-in — the tailnet is the only boundary."
       ],
-      "description": "The private designs repo as a browsable library: the gallery of every captured design system (tokens, screenshots, components) plus the docs site and scorecard. nginx serves the Zensical build on 127.0.0.1:8108 behind Serve, and answers /systems/, /tools/, /example/, /catalog.json and /README.md straight from a read-only mount of the working clone at ~/dev/design-systems (same allowlist as the repo's make serve — the ~300 MB of LFS screenshots are never copied into a release). No passphrase: the repo's own Pages deploy strips and encrypts the gallery, but the tailnet is the boundary here. deployd rebuilds when the clone's HEAD moves; ~/services/design-systems/bin/deploy.sh --force rebuilds now."
+      "description": "The private designs repo as a browsable library: the gallery of every captured design system (tokens, screenshots, components) plus the docs site and scorecard. nginx listens on 127.0.0.1:8108 behind Serve and proxies the Next.js gallery app (designs-web.service, 127.0.0.1:8191) for /gallery/ and the API, and proxies /systems/, /tools/, /catalog.json and /README.md through the app's /media/ route, which reads the working clone at ~/dev/design-systems live (it refuses gitignored files, dot paths and symlink escapes; the ~300 MB of LFS screenshots are never copied into a release). /example/ is not served. No passphrase: the repo's own Pages deploy strips and encrypts the gallery, but the tailnet is the boundary here. deployd rebuilds when the clone's HEAD moves; ~/services/design-systems/bin/deploy.sh --force rebuilds now."
     },
     {
       "key": "manimkc",

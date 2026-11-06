@@ -11,8 +11,11 @@
 #   - built site served by an nginx container binding 127.0.0.1:LOCAL_PORT,
 #     which also answers the repo paths (/systems/, /tools/, /example/,
 #     /catalog.json, /README.md) straight from a read-only mount of the
-#     checkout — the same allowlist the repo's `make serve` answers, so the
-#     ~300 MB of LFS screenshots are never copied into a release
+#     checkout, so the ~300 MB of LFS screenshots are never copied into a
+#     release. (The box's live nginx.conf has since moved to proxying the
+#     repo paths through designs-web's /media/ route and drops /example/;
+#     see SETUP.md. This template, written only when nginx.conf is missing,
+#     is the older static version.)
 #   - auto-deploy: deployd (services/deployd) polls the repo's remote and
 #     re-runs this script when main moves; new commits go live on its next
 #     tick, or immediately via bin/deploy.sh --force.
