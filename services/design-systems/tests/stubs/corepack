@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# corepack stub. deploy.sh runs `corepack pnpm@<v> --dir web install
+# --frozen-lockfile` and `... --dir web build` to rebuild the gallery app.
+# State in $STATE_DIR:
+#   web_build_fail — exists => the `build` step fails
+echo "corepack $*" >> "$CALLS_LOG"
+for a in "$@"; do
+  if [ "$a" = build ] && [ -f "$STATE_DIR/web_build_fail" ]; then
+    echo "Failed to compile. (stub)" >&2
+    exit 1
+  fi
+done
+exit 0

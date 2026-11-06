@@ -6,6 +6,8 @@
 #                 change it between runs to simulate a new commit
 #   pull_fail   — exists => `pull --ff-only` fails (dirty/diverged clone)
 #   lfs_broken  — exists => `lfs pull` succeeds but fixes no pointer files
+#   web_changed — exists => `diff --quiet <a> <b> -- web ...` reports a
+#                 change (the gallery app needs a rebuild)
 echo "git $*" >> "$CALLS_LOG"
 
 REPO_ARG="."
@@ -43,6 +45,9 @@ case "${1:-}" in
         done
         ;;
     esac
+    ;;
+  diff)
+    [ -f "$STATE_DIR/web_changed" ] && exit 1
     ;;
   fetch|status) ;;
 esac

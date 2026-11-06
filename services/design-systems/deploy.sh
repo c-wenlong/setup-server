@@ -25,6 +25,18 @@
 #   .venv/bin/python tools/site.py     # the docs site into site/
 #   cp -a site -> www/next ; repoint current -> releases/<sha>
 #
+# Then the Next.js gallery app (web/, served by the designs-web user unit)
+# is rebuilt when web/, tools/catalog.py or catalog.json changed since its
+# last build, when no build is recorded, or on --force:
+#
+#   corepack pnpm@10.10.0 --dir web install --frozen-lockfile
+#   corepack pnpm@10.10.0 --dir web build
+#   systemctl --user restart designs-web   # only after a good build
+#
+# A box without that unit (or a macOS box, which has no systemd) skips the
+# step with a log line. A failed web build leaves the docs release live and
+# designs-web on its old build, and exits non-zero so deployd retries.
+#
 set -euo pipefail
 
 ENV_FILE="__ENV_FILE__"
@@ -82,8 +94,68 @@ if [ -n "${DEPLOY_SHA:-}" ] \
 fi
 built_sha="$(cat "$BUILD_STATE/built-sha" 2>/dev/null || echo none)"
 
+# ----------------------------------------------------------- gallery app
+# The Next.js app in web/ runs from the clone as the designs-web user unit
+# (`next start`), so a new commit only reaches it through a fresh
+# `next build` and a restart. Its last good build is recorded apart from the
+# docs site's (web-built-sha), so a failed web build is retried on the next
+# run even though the docs release for that sha is already live.
+WEB_UNIT="designs-web"
+WEB_STATE="$BUILD_STATE/web-built-sha"
+PNPM="pnpm@10.10.0"
+web_needed=0
+web_why=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  web_why="macOS has no systemd user units"
+elif ! systemctl --user cat "$WEB_UNIT" >/dev/null 2>&1; then
+  web_why="$WEB_UNIT.service is not installed"
+else
+  web_built_sha="$(cat "$WEB_STATE" 2>/dev/null || echo none)"
+  if [ "$FORCE" -eq 1 ]; then
+    web_needed=1; web_why="--force"
+  elif [ "$web_built_sha" = "none" ]; then
+    web_needed=1; web_why="no previous web build recorded"
+  elif ! git -C "$REPO_DIR" diff --quiet "$web_built_sha" "$local_sha" -- web tools/catalog.py catalog.json 2>/dev/null; then
+    # Also true when git cannot compare (say the old sha is gone): rebuild.
+    web_needed=1; web_why="web/, tools/catalog.py or catalog.json changed since $web_built_sha"
+  else
+    web_why="web/, tools/catalog.py and catalog.json unchanged since $web_built_sha"
+  fi
+fi
+
+# Returns non-zero on a failed build; never restarts the unit then, so it
+# keeps serving its previous build.
+web_deploy() {
+  if [ "$web_needed" -eq 0 ]; then
+    echo "gallery app: skipped ($web_why)"
+    return 0
+  fi
+  echo "gallery app: rebuilding ($web_why)"
+  # node and corepack come from the Nix profile, which the systemd PATH
+  # lacks. Prepended only here, so the docs build keeps its own python3.
+  if ! ( cd "$REPO_DIR" \
+      && export PATH="${NODE_BIN:-$HOME/.nix-profile/bin}:$PATH" COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+      && corepack "$PNPM" --dir web install --frozen-lockfile \
+      && corepack "$PNPM" --dir web build ); then
+    echo "gallery app: BUILD FAILED at $local_sha; $WEB_UNIT not restarted (still on its previous build). The docs site deployed; failing so deployd retries." >&2
+    return 1
+  fi
+  if ! systemctl --user restart "$WEB_UNIT"; then
+    echo "gallery app: built $local_sha but 'systemctl --user restart $WEB_UNIT' failed; failing so deployd retries." >&2
+    return 1
+  fi
+  mkdir -p "$BUILD_STATE"
+  echo "$local_sha" > "$WEB_STATE"
+  echo "gallery app: built and restarted $WEB_UNIT at $local_sha"
+}
+
 if [ "$local_sha" = "$built_sha" ] && [ -d "$WWW_DIR/current" ] && [ "$FORCE" -eq 0 ]; then
-  echo "up to date at $built_sha"
+  if [ "$web_needed" -eq 0 ]; then
+    echo "up to date at $built_sha"
+    exit 0
+  fi
+  echo "docs site up to date at $built_sha"
+  web_deploy || exit 1
   exit 0
 fi
 
@@ -158,3 +230,7 @@ done
 mkdir -p "$BUILD_STATE"
 echo "$local_sha" > "$BUILD_STATE/built-sha"
 echo "deployed $local_sha"
+
+# After the swap: a failed web build must not hold back the docs site, but
+# it must fail the run so deployd retries it.
+web_deploy || exit 1

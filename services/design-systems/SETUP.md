@@ -137,6 +137,16 @@ skips the wait entirely.
 5. Runs the initial deploy: pull, `lfs pull`, `catalog.py build`,
    `scorecard.py`, `tools/site.py`, copy `site/` to `www/next`, swap.
    Bootstraps the repo's `.venv` (the `markdown` package the site build needs) if missing.
+   Then, on Linux boxes where the `designs-web` user unit (the Next.js
+   gallery app, `next start` from the clone's `web/`) is installed, it
+   rebuilds that app with `corepack pnpm@10.10.0 --dir web install
+   --frozen-lockfile` and `... build` and restarts the unit, but only when
+   `web/`, `tools/catalog.py` or `catalog.json` changed since the last good
+   web build (`state/web-built-sha`), none is recorded, or on `--force`.
+   node/corepack come from `NODE_BIN` (default `~/.nix-profile/bin`). A
+   failed web build keeps the new docs release, leaves the unit on its old
+   build, and exits non-zero so deployd retries; without the unit, or on
+   macOS, the step logs a skip line.
 6. `docker compose up -d` (nginx, `restart: unless-stopped`) + local health
    check on `/gallery/`.
 7. Removes the old per-service `design-systems-deploy` timer / LaunchAgent
