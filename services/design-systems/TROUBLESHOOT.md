@@ -87,12 +87,15 @@ Run it by hand to see the full error:
   ~/services/design-systems/www/next` and retry (both are regenerated).
 
 **The gallery renders but a package's files/screenshots 404.**
-Those come from the repo-path aliases, live from the checkout — not from
-the release. If `curl http://127.0.0.1:8108/catalog.json` fails while
-`/gallery/` works, the `SOURCE_REPO` mount is wrong: check
-`docker inspect design-systems | grep srv/repo` against `.env`'s
-`SOURCE_REPO`, and that `tools/catalog.py`'s `REPO_PATHS` still matches
-the allowlist in `~/services/design-systems/nginx.conf`.
+Those are proxied to the app's `/media/` route (designs-web, `127.0.0.1:8191`),
+which reads the checkout live — not from the release. If
+`curl http://127.0.0.1:8108/catalog.json` fails while `/gallery/` works,
+check `systemctl --user status designs-web`, that the `/systems/`,
+`/tools/`, `/catalog.json` and `/README.md` blocks in
+`~/services/design-systems/nginx.conf` rewrite to `/media/...`, and that the
+app's `SOURCE_REPO`/checkout path matches `.env`. A 404 on `/example/...`
+is expected: it is no longer served. A 404 on a gitignored or dot path is
+the route refusing it on purpose.
 
 ## Layer 2 — local serving broken
 
@@ -104,7 +107,7 @@ the allowlist in `~/services/design-systems/nginx.conf`.
   (delete it and re-run setup.sh to regenerate the default).
 - 403/404 on `/` or `/gallery/` → `www/current` missing or an empty
   release: the initial build never completed; run `bin/deploy.sh --force`.
-- 403 on pages that exist (`/`, `data.json`, `/scorecard/`) while
+- 403 on pages that exist (`/`, `/scorecard/`) while
   `www/current` is populated → file modes: a generator that writes 0600
   (e.g. via `tempfile.mkstemp` + `os.replace`) ships files the container's
   nginx uid cannot read. `find -L ~/services/design-systems/www/current
@@ -112,8 +115,10 @@ the allowlist in `~/services/design-systems/nginx.conf`.
   `chmod -R u+rwX,go+rX ~/services/design-systems/www/releases` fixes the
   live release, and a `bin/deploy.sh --force` rebuild normalises modes
   itself.
-- Gallery loads but `data.json` 404s or shows `{}` → `catalog.py build`
-  didn't run in that deploy; redeploy with `bin/deploy.sh --force`.
+- Gallery shows no styles or `/media/` thumbnails are missing →
+  `catalog.py build` didn't run in that deploy (the app reads `web/data/`);
+  redeploy with `bin/deploy.sh --force`. There is no static
+  `/gallery/data.json` any more, so a 404 there is expected.
 
 **The site serves an old commit even after a successful deploy.**
 `www/current` is a symlink — check it points at the new sha and that
@@ -124,8 +129,10 @@ repoint is one rename) but can leave `www/next` behind; see Layer 1.
 Every page-class asset answers `Cache-Control: no-cache` and revalidates
 by ETag, so staleness means the response never reached nginx — or the conf
 predates the caching block. Check
-`curl -sI http://127.0.0.1:8108/gallery/data.json | grep -i cache-control`:
-empty means `~/services/design-systems/nginx.conf` is a pre-gzip copy.
+`curl -sI http://127.0.0.1:8108/README.md | grep -i cache-control`
+(the docs pages answer `no-cache`; the app's `/media/` route sets its own
+policy, so the bare `/README.md` and `/catalog.json` show the app's header):
+empty on a docs page means `~/services/design-systems/nginx.conf` is a pre-gzip copy.
 setup.sh preserves an existing conf, so a re-run only warns — apply the
 gzip/Cache-Control block from the template in `setup.sh` by hand (or, if
 the conf is otherwise stock, delete it and re-run setup.sh to regenerate),

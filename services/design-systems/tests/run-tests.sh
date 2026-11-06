@@ -694,6 +694,12 @@ media_serves_cache_header() {
   grep -qi 'cache-control: public, max-age=2592000' <<<"$headers"
 }
 
+# Status of the last response after following redirects (the app answers
+# /gallery/ with a 308 first). -f is deliberately absent: 404 is an expected answer.
+http_final_status() {
+  [ "$(curl -sL -o /dev/null --max-time 30 -w '%{http_code}' "$1")" = "$2" ]
+}
+
 test_live() {
   echo "• live: verify the real deployment on this machine"
   local ts port url svc_home repo
@@ -705,11 +711,11 @@ test_live() {
   repo="$(sed -n 's/^SOURCE_REPO=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   live_check "container running"        sh -c "docker inspect -f '{{.State.Status}}' design-systems | grep -qx running"
   live_check "gallery responds"         curl -fsS "http://127.0.0.1:$port/gallery/"
-  live_check "gallery data responds"    sh -c "curl -fsS 'http://127.0.0.1:$port/gallery/data.json' | grep -q systems"
+  live_check "gallery 200 via public URL" http_final_status "$url/gallery/" 200
   live_check "repo path responds"       sh -c "curl -fsS 'http://127.0.0.1:$port/catalog.json' | grep -q systems"
   live_check "media alias wired"        media_alias_serves_file "$port" "$svc_home"
-  live_check "data.json gzips"          sh -c "curl -fsS -o /dev/null -D - -H 'Accept-Encoding: gzip' 'http://127.0.0.1:$port/gallery/data.json' | grep -qi 'content-encoding: gzip'"
-  live_check "data.json revalidates"    sh -c "curl -fsSI 'http://127.0.0.1:$port/gallery/data.json' | grep -qi 'cache-control: no-cache'"
+  live_check "catalog.json gzips"       sh -c "curl -fsS -o /dev/null -D - -H 'Accept-Encoding: gzip' 'http://127.0.0.1:$port/catalog.json' | grep -qi 'content-encoding: gzip'"
+  live_check "/example/ not served"     http_final_status "http://127.0.0.1:$port/example/README.md" 404
   live_check "media caches long"        media_serves_cache_header "$port" "$svc_home"
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches repo"   sh -c "[ \"\$(git -C '$repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"

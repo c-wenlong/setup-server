@@ -40,9 +40,9 @@ immediately with `~/services/design-systems/bin/deploy.sh --force`.
           │                                              ~/services/design-systems/www/current
           │                                                            │  bind mount (ro)
           │                                                            ▼
-          └──── /systems|/tools|/example|catalog.json|README.md ── nginx (Docker)
-                 (read-only mount of the checkout,                  127.0.0.1:8108
-                  same allowlist make serve answers)                     ▲
+          └──── /systems|/tools|catalog.json|README.md ── nginx (Docker)
+                 (proxied to designs-web's /media/ route,           127.0.0.1:8108
+                  which reads the checkout; no /example/)                ▲
                                                                         │  bind mount (ro)
                                               ~/services/design-systems/media
                                               (refero shots/posters/videos/favicons,
@@ -62,16 +62,25 @@ resets or writes git state. (It does write build outputs into the
 checkout's gitignored `docs/gallery/`, `docs/scorecard/` and `site/` — the
 same files `make build` / `make serve` write.)
 
-## Why nginx answers repo paths
+## Why the repo paths go through the app
 
-The gallery's `data.json` records paths like
-`systems/linear/screenshots/home.png` — full-size screenshots and package
-files that are not part of the built site (they are LFS objects, ~300 MB).
-The repo's dev server answers a fixed allowlist (`tools/catalog.py`'s
-`REPO_PATHS`: `/systems/`, `/tools/`, `/example/`, `/catalog.json`,
-`/README.md`) from the checkout. nginx does the same with `alias` onto a
-read-only bind mount of `SOURCE_REPO`, so a release stays small and the
-checkout is the single copy.
+The gallery links to paths like `systems/linear/screenshots/home.png` —
+full-size screenshots and package files that are not part of the built site
+(they are LFS objects, ~300 MB). The gallery is now the Next.js app
+(`designs-web.service`, `127.0.0.1:8191`), and the live
+`~/services/design-systems/nginx.conf` rewrites `/systems/`, `/tools/`,
+`/catalog.json` and `/README.md` to the app's `/media/` route and proxies
+them there. The route reads the checkout live and refuses gitignored files,
+dot paths and symlink escapes, which the old read-only `alias` + `autoindex`
+did not. `/example/` (third-party clones) is no longer served, and there is
+no static `/gallery/data.json`: the app reads the generated data itself.
+
+Caveat: that live conf is maintained on the box (it also carries the
+`/api/redeploy` token header and needs `host.docker.internal` in the
+container). The template `setup.sh` writes when `nginx.conf` is missing is
+still the older static version (aliases onto the read-only `SOURCE_REPO`
+mount, `autoindex on`, `/example/`). Treat it as a bootstrap, not the
+current deployment, and read the live file before copying from it.
 
 Refero media follows the same idea but lives outside the repo: the
 gallery's `#/refero` pages point at `/refero-media/shots|posters|videos|
@@ -92,7 +101,8 @@ skips the wait entirely.
 
 - nginx binds `127.0.0.1:8108` only; HTTPS + device auth come from
   Tailscale.
-- The site is static files — no app code, no database, no accounts.
+- The docs site is static files; the gallery is the Next.js app (designs-web,
+  127.0.0.1:8191, reached only through nginx) — no database, no accounts.
 - **This site is deliberately not encrypted**, unlike the repo's Pages
   deploy. It serves readable package files, screenshots and the scorecard.
   That is within the repo's rules — AGENTS.md forbids publishing them
@@ -123,7 +133,9 @@ skips the wait entirely.
    path, service home; mode `0600`). Re-runs read `.env` as the source of
    truth.
 3. Writes `~/services/design-systems/nginx.conf` if absent (docs site +
-   the repo-path aliases + the `/refero-media/` media alias). It also
+   the static repo-path aliases + the `/refero-media/` media alias; the
+   live conf has since been changed by hand to proxy the repo paths and the
+   gallery through designs-web, see above). It also
    carries the response policy: gzip for the text assets (`data.json`
    alone is ~1.5 MB, ~120 KB on the wire) and a Cache-Control per file
    class — `no-cache` revalidation for HTML, JSON, the unhashed
@@ -193,9 +205,9 @@ rename (no gap where nginx has no root). The previous release stays in
 diverged) the deploy builds the local HEAD instead and notes it in the
 log.
 
-The repo-path aliases (`/systems/` etc.) are served live from the
-checkout, not from the release — they reflect the working tree
-immediately, independent of any deploy.
+The repo paths (`/systems/` etc.) are served live from the checkout by
+the app's `/media/` route, not from the release — they reflect the working
+tree immediately, independent of any deploy.
 
 ## Client side
 
