@@ -35,7 +35,8 @@
 #
 # A box without that unit (or a macOS box, which has no systemd) skips the
 # step with a log line. A failed web build leaves the docs release live and
-# designs-web on its old build, and exits non-zero so deployd retries.
+# designs-web on its old build (web/.next is snapshotted before the build
+# and put back on failure), and exits non-zero so deployd retries.
 #
 set -euo pipefail
 
@@ -123,23 +124,39 @@ else
   fi
 fi
 
-# Returns non-zero on a failed build; never restarts the unit then, so it
-# keeps serving its previous build.
+# Returns non-zero on a failed build or restart. A failed build never
+# restarts the unit, and puts back the .next it was serving (snapshotted
+# first), so the running process keeps the files it loaded.
 web_deploy() {
   if [ "$web_needed" -eq 0 ]; then
     echo "gallery app: skipped ($web_why)"
     return 0
   fi
   echo "gallery app: rebuilding ($web_why)"
+  local web_dir="$REPO_DIR/web" snap="$REPO_DIR/web/.next.deploy-prev"
+  # Clear the record before touching anything: a build or restart that fails
+  # (a --force rebuild of an already-built sha included) must leave no web
+  # sha behind, so the next plain run rebuilds instead of reporting
+  # "unchanged".
+  rm -f "$WEB_STATE"
+  # Snapshot the live build. A snapshot left by a run that died part-way is
+  # the last good build, so keep it rather than copying a half-built .next.
+  if [ ! -d "$snap" ] && [ -d "$web_dir/.next" ]; then
+    cp -a "$web_dir/.next" "$snap"
+  fi
   # node and corepack come from the Nix profile, which the systemd PATH
   # lacks. Prepended only here, so the docs build keeps its own python3.
   if ! ( cd "$REPO_DIR" \
       && export PATH="${NODE_BIN:-$HOME/.nix-profile/bin}:$PATH" COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
       && corepack "$PNPM" --dir web install --frozen-lockfile \
       && corepack "$PNPM" --dir web build ); then
-    echo "gallery app: BUILD FAILED at $local_sha; $WEB_UNIT not restarted (still on its previous build). The docs site deployed; failing so deployd retries." >&2
+    if [ -d "$snap" ]; then
+      rm -rf "$web_dir/.next" && mv "$snap" "$web_dir/.next"
+    fi
+    echo "gallery app: BUILD FAILED at $local_sha; $WEB_UNIT not restarted, previous .next put back. The docs site deployed; failing so deployd retries." >&2
     return 1
   fi
+  rm -rf "$snap"
   if ! systemctl --user restart "$WEB_UNIT"; then
     echo "gallery app: built $local_sha but 'systemctl --user restart $WEB_UNIT' failed; failing so deployd retries." >&2
     return 1

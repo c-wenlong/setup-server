@@ -534,12 +534,13 @@ test_web_skipped_without_unit() {
 }
 
 test_web_build_failure() {
-  echo "• gallery app: a failed build keeps the docs deploy, skips the restart, exits non-zero, retries"
+  echo "• gallery app: a failed build keeps the docs deploy, restores .next, skips the restart, exits non-zero, retries"
   web_linux_only || return 0
   setup
-  touch "$STATE_DIR/operator"
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
   run_deploy
-  touch "$STATE_DIR/web_unit" "$STATE_DIR/web_build_fail"
+  check "first build ok"              grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+  touch "$STATE_DIR/web_build_fail" "$STATE_DIR/web_changed"
   echo "bbb2222" > "$STATE_DIR/local_sha"
   : > "$CALLS_LOG"
   run_poll
@@ -547,27 +548,53 @@ test_web_build_failure() {
   check "says so"                     out_has "gallery app: BUILD FAILED at bbb2222; designs-web not restarted"
   check "build was attempted"         calls_have "corepack pnpm@10.10.0 --dir web build"
   check "designs-web not restarted"   no_call "restart designs-web"
+  check "live .next put back"         grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+  check "no snapshot left"            [ ! -e "$SOURCE_REPO/web/.next.deploy-prev" ]
   check "no web sha recorded"         [ ! -f "$HOME/$WEB_SHA_FILE" ]
   check "docs still swapped"          sh -c '[ "$(readlink "$1")" = releases/bbb2222 ]' _ "$HOME/services/design-systems/www/current"
   check "docs sha recorded"           grep -qx bbb2222 "$HOME/services/design-systems/state/built-sha"
   check "failure after the swap"      [ "$(grep -n 'deployed bbb2222' <<<"$OUT" | cut -d: -f1)" -lt "$(grep -n 'BUILD FAILED' <<<"$OUT" | cut -d: -f1)" ]
   # deployd's retry: same sha, docs current, web still owed -> build it only
-  rm "$STATE_DIR/web_build_fail"
+  rm "$STATE_DIR/web_build_fail" "$STATE_DIR/web_changed"
   : > "$CALLS_LOG"
   run_poll
   check "retry exits zero"            [ "$CODE" -eq 0 ]
   check "  docs left alone"           out_has "docs site up to date at bbb2222"
   check "  no docs rebuild"           no_call "python tools/site.py"
-  check "  app rebuilt"               calls_have "corepack pnpm@10.10.0 --dir web build"
+  check "  app rebuilt"               grep -qx bbb2222 "$SOURCE_REPO/web/.next/BUILD_ID"
   check "  restarted"                 calls_have "systemctl --user restart designs-web"
   check "  web sha recorded"          grep -qx bbb2222 "$HOME/$WEB_SHA_FILE"
-  # a restart that fails is a failure too, and records nothing
+  check "  snapshot cleaned up"       [ ! -e "$SOURCE_REPO/web/.next.deploy-prev" ]
+  teardown
+}
+
+test_web_failed_force_is_retried() {
+  echo "• gallery app: a failed --force rebuild/restart of a built sha is retried by the next plain run"
+  web_linux_only || return 0
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
+  run_deploy
+  check "built and recorded"          grep -qx aaa1111 "$HOME/$WEB_SHA_FILE"
   touch "$STATE_DIR/web_restart_fail"
-  rm "$HOME/$WEB_SHA_FILE"
-  run_poll
+  run_poll --force
   check "failed restart: non-zero"    [ "$CODE" -ne 0 ]
   check "  says so"                   out_has "restart designs-web' failed"
-  check "  no web sha recorded"       [ ! -f "$HOME/$WEB_SHA_FILE" ]
+  check "  web sha cleared"           [ ! -f "$HOME/$WEB_SHA_FILE" ]
+  rm "$STATE_DIR/web_restart_fail"
+  : > "$CALLS_LOG"
+  run_poll
+  check "plain run exits zero"        [ "$CODE" -eq 0 ]
+  check "  rebuilds, not 'unchanged'" out_has "gallery app: rebuilding (no previous web build recorded)"
+  check "  restarted"                 calls_have "systemctl --user restart designs-web"
+  check "  web sha recorded"          grep -qx aaa1111 "$HOME/$WEB_SHA_FILE"
+  touch "$STATE_DIR/web_build_fail"
+  run_poll --force
+  check "failed forced build: non-zero" [ "$CODE" -ne 0 ]
+  check "  web sha cleared"           [ ! -f "$HOME/$WEB_SHA_FILE" ]
+  check "  live .next put back"       grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+  rm "$STATE_DIR/web_build_fail"
+  run_poll
+  check "  next plain run rebuilds"   out_has "gallery app: rebuilding (no previous web build recorded)"
   teardown
 }
 
@@ -1392,6 +1419,7 @@ test_web_rebuilt_when_changed
 test_web_skipped_when_unchanged
 test_web_skipped_without_unit
 test_web_build_failure
+test_web_failed_force_is_retried
 test_web_skipped_on_macos
 test_spaced_repo_path
 test_poll_lock

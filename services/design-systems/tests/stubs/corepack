@@ -2,12 +2,20 @@
 # corepack stub. deploy.sh runs `corepack pnpm@<v> --dir web install
 # --frozen-lockfile` and `... --dir web build` to rebuild the gallery app.
 # State in $STATE_DIR:
-#   web_build_fail — exists => the `build` step fails
+#   web_build_fail — exists => the `build` step fails, after clobbering
+#                    web/.next the way a real `next build` cleans it first
+# A good build writes web/.next/BUILD_ID = the sha the git stub reports.
 echo "corepack $*" >> "$CALLS_LOG"
 for a in "$@"; do
-  if [ "$a" = build ] && [ -f "$STATE_DIR/web_build_fail" ]; then
-    echo "Failed to compile. (stub)" >&2
-    exit 1
+  if [ "$a" = build ]; then
+    rm -rf web/.next; mkdir -p web/.next
+    if [ -f "$STATE_DIR/web_build_fail" ]; then
+      echo partial > web/.next/BUILD_ID
+      echo "Failed to compile. (stub)" >&2
+      exit 1
+    fi
+    cat "$STATE_DIR/local_sha" 2>/dev/null > web/.next/BUILD_ID || echo aaa1111 > web/.next/BUILD_ID
+    [ -s web/.next/BUILD_ID ] || echo aaa1111 > web/.next/BUILD_ID
   fi
 done
 exit 0
