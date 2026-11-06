@@ -598,6 +598,38 @@ test_web_failed_force_is_retried() {
   teardown
 }
 
+test_web_snapshot_is_atomic() {
+  echo "• gallery app: a half-copied snapshot is never restored; a failed snapshot stops before the build"
+  web_linux_only || return 0
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
+  run_deploy
+  # an interrupted copy from an earlier run: partial, under the temp name
+  mkdir -p "$SOURCE_REPO/web/.next.deploy-prev.tmp"
+  echo partial > "$SOURCE_REPO/web/.next.deploy-prev.tmp/BUILD_ID"
+  touch "$STATE_DIR/web_build_fail"
+  run_poll --force
+  check "failed build: non-zero"      [ "$CODE" -ne 0 ]
+  check "  restored the good build"   grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+  check "  temp copy gone"            [ ! -e "$SOURCE_REPO/web/.next.deploy-prev.tmp" ]
+  check "  no snapshot left"          [ ! -e "$SOURCE_REPO/web/.next.deploy-prev" ]
+  rm "$STATE_DIR/web_build_fail"
+  if [ "$(id -u)" -ne 0 ]; then
+    # an unreadable file makes cp -a fail: nothing may be built or restarted
+    echo secret > "$SOURCE_REPO/web/.next/locked"; chmod 000 "$SOURCE_REPO/web/.next/locked"
+    : > "$CALLS_LOG"
+    run_poll --force
+    check "failed snapshot: non-zero"   [ "$CODE" -ne 0 ]
+    check "  says so"                   out_has "gallery app: could not snapshot"
+    check "  no build attempted"        no_call "corepack"
+    check "  no restart"                no_call "restart designs-web"
+    check "  live .next untouched"      grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+    check "  no partial snapshot"       sh -c '[ ! -e "$1.deploy-prev" ] && [ ! -e "$1.deploy-prev.tmp" ]' _ "$SOURCE_REPO/web/.next"
+    chmod 600 "$SOURCE_REPO/web/.next/locked"
+  fi
+  teardown
+}
+
 test_web_skipped_on_macos() {
   echo "• gallery app (macOS): skipped with a log line, no systemctl"
   if [ "$OS" != "Darwin" ]; then
@@ -1420,6 +1452,7 @@ test_web_skipped_when_unchanged
 test_web_skipped_without_unit
 test_web_build_failure
 test_web_failed_force_is_retried
+test_web_snapshot_is_atomic
 test_web_skipped_on_macos
 test_spaced_repo_path
 test_poll_lock

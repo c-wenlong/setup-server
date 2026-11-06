@@ -139,10 +139,19 @@ web_deploy() {
   # sha behind, so the next plain run rebuilds instead of reporting
   # "unchanged".
   rm -f "$WEB_STATE"
-  # Snapshot the live build. A snapshot left by a run that died part-way is
-  # the last good build, so keep it rather than copying a half-built .next.
+  # Snapshot the live build. It is copied to a temp name and renamed into
+  # place only once the copy succeeded, so "$snap" is always complete; a
+  # temp dir left by an interrupted copy is never trusted. A snapshot left
+  # by a run that died later is the last good build, so keep it rather than
+  # copying a half-built .next. No snapshot, no build: nothing has changed
+  # yet, so the app keeps running as it is.
   if [ ! -d "$snap" ] && [ -d "$web_dir/.next" ]; then
-    cp -a "$web_dir/.next" "$snap"
+    rm -rf "$snap.tmp"
+    if ! cp -a "$web_dir/.next" "$snap.tmp" || ! mv "$snap.tmp" "$snap"; then
+      rm -rf "$snap.tmp"
+      echo "gallery app: could not snapshot $web_dir/.next; not building, $WEB_UNIT left as it is. Failing so deployd retries." >&2
+      return 1
+    fi
   fi
   # node and corepack come from the Nix profile, which the systemd PATH
   # lacks. Prepended only here, so the docs build keeps its own python3.
