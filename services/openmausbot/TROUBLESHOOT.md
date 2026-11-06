@@ -78,7 +78,11 @@ one shot and writes the startup cache:
 
 ```sh
 install -m 755 contrib/devin-seed-models ~/.local/bin/
-devin-seed-models && systemctl --user restart openmausbot
+devin-seed-models   # export OMB_DATA_DIR first if .env overrides it
+# reload the running instance (works on Linux and macOS):
+curl -X PATCH http://127.0.0.1:8799/api/instances/devin \
+  -H 'content-type: application/json' \
+  -d '{"cli":"/home/'"$USER"'/.local/bin/devin-acp"}'
 ```
 
 If the engine itself reports `unavailable`, `devin acp --version` exit code

@@ -138,9 +138,13 @@ from `session/new`, which already contains the full list:
 
 ```sh
 install -m 755 contrib/devin-seed-models ~/.local/bin/
-devin-seed-models                    # writes providers/engine-models/devin.json
-systemctl --user restart openmausbot # or PATCH the instance with its cli again
+devin-seed-models     # export OMB_DATA_DIR first if .env overrides it
+curl -X PATCH http://127.0.0.1:8799/api/instances/devin \
+  -H 'content-type: application/json' \
+  -d '{"cli":"/home/'"$USER"'/.local/bin/devin-acp"}'   # reloads, any OS
 ```
+
+(`systemctl --user restart openmausbot` reloads it too, on Linux.)
 
 Then the picker shows every Devin model (swe-2, Claude, GPT, Gemini …) with
 the thinking-level variants. If a turn fails with an auth error, the stored
