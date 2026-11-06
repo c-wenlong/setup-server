@@ -71,7 +71,12 @@ Methods, and the fields each adds to the definition:
                     bridge (listen on 0.0.0.0, not 127.0.0.1).
                   "cache_control": "no-cache": sent as Cache-Control on
                     the files `location /`.
-                With either set, the generated server block (files exactly
+                  "frame_ancestors": "none" (the only value): the files
+                    `location /` also sends Content-Security-Policy
+                    "frame-ancestors 'none'" and X-Frame-Options DENY, so
+                    no other site can frame the app (clickjacking). A meta
+                    CSP cannot set frame-ancestors, so it has to be here.
+                With any of these set, the generated server block (files exactly
                 as the image's default config serves them, plus these) is
                 written beside the release as <release>.nginx.conf and
                 mounted read-only over the default; a rollback mounts the
@@ -218,6 +223,10 @@ PROXY_ADD_HOST = PROXY_HOST + ":host-gateway"
 PROXY_PATH_RE = re.compile(r"^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?$")
 MAX_PROXIES = 10
 CACHE_CONTROL_RE = re.compile(r"^[A-Za-z0-9 ,=-]{1,100}$")
+# static's frame_ancestors value -> the CSP source it sends. Only "none":
+# no launcher page frames an app, and a fixed table keeps every word that
+# reaches the nginx config out of the definition.
+FRAME_ANCESTORS = {"none": "'none'"}
 
 # deployd's .env (read for SERVICE_HOME, never sourced) and its default home.
 DEPLOYD_ENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -365,6 +374,10 @@ def validate(d):
         if cc is not None and (not isinstance(cc, str) or not cc.strip()
                                or not CACHE_CONTROL_RE.fullmatch(cc)):
             raise AppError("bad cache_control %r" % (cc,))
+        fa = d.get("frame_ancestors")
+        if fa is not None and (not isinstance(fa, str)
+                               or fa not in FRAME_ANCESTORS):
+            raise AppError("bad frame_ancestors %r" % (fa,))
     elif m in ("node", "python"):
         v = d.get("version")
         if not isinstance(v, str) or not VERSION_RE.match(v):
@@ -993,7 +1006,7 @@ CONF_SUFFIX = ".nginx.conf"
 def release_conf(key, name):
     """The nginx config generated for release `name`, kept BESIDE the
     release (inside it, nginx would serve it as a file). Only a definition
-    with proxies or cache_control has one."""
+    with proxies, cache_control or frame_ancestors has one."""
     return release_dir(key, name) + CONF_SUFFIX
 
 
@@ -1023,15 +1036,18 @@ def prune_releases(key, keep_names):
 
 def static_conf(d):
     """The nginx server block for a static definition, or None when it has
-    neither proxies nor cache_control (the image's own default config then
-    serves it, exactly as before these fields existed). The files side
-    mirrors that default config (root, index, the 50x page); the only
-    addition there is the Cache-Control header. Every word written here
-    passed validate(): paths and the header value hold no quote, brace,
-    `;` or whitespace that could reshape the config."""
+    none of proxies, cache_control and frame_ancestors (the image's own
+    default config then serves it, exactly as before these fields
+    existed). The files side mirrors that default config (root, index,
+    the 50x page); the only additions there are the Cache-Control and
+    anti-framing headers. Every word written here passed validate():
+    paths and the header value hold no quote, brace, `;` or whitespace
+    that could reshape the config, and the frame-ancestors source comes
+    from FRAME_ANCESTORS, never from the definition."""
     proxies = d.get("proxies") or []
     cache = d.get("cache_control")
-    if not proxies and not cache:
+    frame = FRAME_ANCESTORS.get(d.get("frame_ancestors"))
+    if not proxies and not cache and not frame:
         return None
     # IPv4 listen only: the image adds [::]:80 to its default when the
     # container has IPv6, but the port is published on 127.0.0.1 anyway,
@@ -1060,6 +1076,11 @@ def static_conf(d):
               "        index  index.html index.htm;"]
     if cache:
         lines.append('        add_header Cache-Control "%s";' % cache)
+    if frame:
+        # `always`: a 404 page can be framed and clicked through too.
+        lines += ['        add_header Content-Security-Policy '
+                  '"frame-ancestors %s" always;' % frame,
+                  "        add_header X-Frame-Options DENY always;"]
     lines += ["    }",
               "",
               "    error_page   500 502 503 504  /50x.html;",

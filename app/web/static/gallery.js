@@ -181,6 +181,9 @@
         { name: 'cache_control', label: 'Cache-Control header', def: '', mono: true,
           optional: true, placeholder: 'no-cache',
           hint: 'Optional. Sent with every file, e.g. no-cache so a new deploy shows on the next load.' },
+        { name: 'frame_ancestors', label: 'Frame ancestors', def: '', mono: true,
+          optional: true, placeholder: 'none',
+          hint: 'Optional. none stops other sites from framing the app (sends CSP frame-ancestors and X-Frame-Options).' },
         { name: 'proxies', label: 'Proxy rules', kind: 'proxies', optional: true, max: 10,
           hint: 'Optional. Requests under a path go to that port on this box, path unchanged. ' +
                 'The service there must accept connections from Docker (listen on 0.0.0.0).' }] },

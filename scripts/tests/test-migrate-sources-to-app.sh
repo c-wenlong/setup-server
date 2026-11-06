@@ -278,6 +278,7 @@ check "def: output apps/web/dist"           [ "$(json_get "$(DEF)" 'd["output"]'
 check "def: build runs build_site.py"       sh -c "grep -q 'uv sync --quiet && uv run apps/web/build/build_site.py --out apps/web/dist' '$(DEF)'"
 check "def: /api/ proxied to host 8089"     [ "$(json_get "$(DEF)" 'd["proxies"]')" = "[{'path': '/api/', 'port': 8089}]" ]
 check "def: Cache-Control no-cache"         [ "$(json_get "$(DEF)" 'd["cache_control"]')" = no-cache ]
+check "def: frame_ancestors none"          [ "$(json_get "$(DEF)" 'd["frame_ancestors"]')" = none ]
 check "def: health_path /"                  [ "$(json_get "$(DEF)" 'd["health_path"]')" = / ]
 check "def: env_names is SOURCE_REPO"       [ "$(json_get "$(DEF)" 'd["env_names"]')" = "['SOURCE_REPO']" ]
 check "def: passes ghapp.validate"          python3 -c "import json,sys; sys.path.insert(0,'$R/app/web'); import ghapp; ghapp.validate(json.load(open('$(DEF)')))"
