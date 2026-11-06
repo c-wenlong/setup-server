@@ -68,6 +68,27 @@ inherits only `PATH`, not your SSH session's agent. `claude auth` /
 Cursor and Devin-ACP adapters were not verified upstream at deploy time —
 check upstream docs before counting on them.
 
+## Devin engine shows only "Agent default"
+
+`POST /api/instances/devin/refresh-models` silently fails for Devin: the
+discovery calls `session/set_config_option` once per advertised model under
+a 60s global budget, and Devin advertises ~130. Run the seeder shipped in
+`contrib/devin-seed-models` — it pulls the full list from `session/new` in
+one shot and writes the startup cache:
+
+```sh
+install -m 755 contrib/devin-seed-models ~/.local/bin/
+devin-seed-models   # export OMB_DATA_DIR first if .env overrides it
+# reload the running instance (works on Linux and macOS):
+curl -X PATCH http://127.0.0.1:8799/api/instances/devin \
+  -H 'content-type: application/json' \
+  -d '{"cli":"/home/'"$USER"'/.local/bin/devin-acp"}'
+```
+
+If the engine itself reports `unavailable`, `devin acp --version` exit code
+2 is usually the cause — the instance `cli` must point at the `devin-acp`
+shim, not `devin acp` directly (see SETUP.md → Devin over ACP).
+
 ## Nuke and pave
 
 ```sh

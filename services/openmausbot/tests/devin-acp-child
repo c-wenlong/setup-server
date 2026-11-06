@@ -15,8 +15,25 @@ if (process.argv[2] === "--version") {
 
 const log = fs.createWriteStream(process.env.DEVIN_STUB_LOG, { flags: "a" });
 const failAuth = process.env.DEVIN_STUB_AUTH_FAIL === "1";
+const catalog = process.env.DEVIN_STUB_CATALOG === "1";
 let authed = false;
 const reply = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
+
+// Enough of Devin's real session/new payload to exercise devin-seed-models:
+// a "model" select plus the thought_level entry it reads as variants.
+const CONFIG_OPTIONS = [
+  { id: "mode", name: "Session Mode", category: "mode", type: "select", currentValue: "accept-edits",
+    options: [{ value: "accept-edits", name: "Code" }] },
+  { id: "model", name: "Model", category: "model", type: "select", currentValue: "swe-2-high",
+    options: [
+      { value: "adaptive", name: "Adaptive" },
+      { value: "swe-2-high", name: "SWE-2 High" },
+      { value: "swe-2-high", name: "SWE-2 High (dup)" },
+      { value: "claude-opus-5-5-medium", name: "Claude Opus 5.5 Medium" },
+    ] },
+  { id: "thought_level", name: "Thinking", category: "thought_level", type: "select", currentValue: "high",
+    options: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }] },
+];
 
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   log.write(line + "\n");
@@ -34,6 +51,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (m.method === "session/new" && !authed)
     return reply({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "not authenticated" } });
   if (m.method === "session/new")
-    return reply({ jsonrpc: "2.0", id: m.id, result: { sessionId: "stub-session" } });
+    return reply({ jsonrpc: "2.0", id: m.id, result: {
+      sessionId: "stub-session",
+      ...(catalog ? { configOptions: CONFIG_OPTIONS } : {}),
+    } });
   reply({ jsonrpc: "2.0", id: m.id, result: {} });
 });

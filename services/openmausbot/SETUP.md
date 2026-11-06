@@ -130,9 +130,25 @@ curl -X PATCH http://127.0.0.1:8799/api/instances/devin \
   -d '{"cli":"/home/'"$USER"'/.local/bin/devin-acp"}'
 ```
 
-The engine then reports `available` and exposes Devin's model catalog in the
-model picker. If a turn fails with an auth error, the stored key is stale:
-`devin auth logout && devin auth login` on the box.
+The engine then reports `available`. The model picker starts at
+"Agent default" only: upstream's `refresh-models` confirms every model
+individually over a 60s budget, and Devin advertises ~130, so the survey
+always dies mid-flight and the error is swallowed. Seed the catalog instead
+from `session/new`, which already contains the full list:
+
+```sh
+install -m 755 contrib/devin-seed-models ~/.local/bin/
+devin-seed-models     # export OMB_DATA_DIR first if .env overrides it
+curl -X PATCH http://127.0.0.1:8799/api/instances/devin \
+  -H 'content-type: application/json' \
+  -d '{"cli":"/home/'"$USER"'/.local/bin/devin-acp"}'   # reloads, any OS
+```
+
+(`systemctl --user restart openmausbot` reloads it too, on Linux.)
+
+Then the picker shows every Devin model (swe-2, Claude, GPT, Gemini …) with
+the thinking-level variants. If a turn fails with an auth error, the stored
+key is stale: `devin auth logout && devin auth login` on the box.
 
 ## Trust model
 

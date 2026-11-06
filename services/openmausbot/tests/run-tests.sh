@@ -511,6 +511,69 @@ test_devin_acp_shim() {
   rm -rf "$SHIM_HOME"
 }
 
+# ------------------------------------------------- contrib/devin-seed-models
+# The seeder drives the shim end-to-end: session/new through auth injection,
+# then writes providers/engine-models/<instance>.json in the shape
+# OpenMausBot's own discovery would have produced.
+test_devin_seed_models() {
+  echo "• contrib/devin-seed-models (model catalog seeder)"
+  command -v node >/dev/null 2>&1 || { echo "    (node not found — skipping)"; return 0; }
+
+  local SHIM CHILD SEED SEED_HOME DATA
+  SHIM="$REPO_ROOT/services/openmausbot/contrib/devin-acp"
+  CHILD="$REPO_ROOT/services/openmausbot/tests/devin-acp-child"
+  SEED="$REPO_ROOT/services/openmausbot/contrib/devin-seed-models"
+  SEED_HOME="$(mktemp -d)"
+  DATA="$SEED_HOME/data"
+  mkdir -p "$SEED_HOME/.local/share/devin" "$DATA/providers/engine-models"
+  printf 'windsurf_api_key = "stub-key"\n' > "$SEED_HOME/.local/share/devin/credentials.toml"
+  printf '{"default":"agent-default","options":[{"id":"agent-default","label":"Agent default","custom":true}],"checkedAt":0,"build":"9.9.9"}\n' \
+    > "$DATA/providers/engine-models/devin.json"
+
+  seed_run() { # env: DEVIN_STUB_CATALOG
+    env -i PATH="$PATH" HOME="$SEED_HOME" \
+      DEVIN_CLI="$CHILD" DEVIN_ACP="$SHIM" OMB_DATA_DIR="$DATA" \
+      DEVIN_STUB_LOG="$SEED_HOME/child.log" \
+      DEVIN_STUB_CATALOG="${DEVIN_STUB_CATALOG:-}" \
+      timeout 20 node "$SEED" "${1:-devin}" 2>&1
+  }
+
+  # Happy path: catalog comes back from session/new through the shim's auth.
+  DEVIN_STUB_CATALOG=1
+  OUT="$(seed_run)"
+  check "seed reports count"        out_has 'seeded 4 models'
+  check "seed writes cache"         bash -c \
+    "node -e 'const j=JSON.parse(require(\"fs\").readFileSync(\"$DATA/providers/engine-models/devin.json\",\"utf8\"));if(j.options.length!==4)process.exit(1)'"
+  check "passthrough stays first"   bash -c \
+    "grep -q '\"id\":\"agent-default\"' '$DATA/providers/engine-models/devin.json'"
+  check "models marked custom"      bash -c \
+    "node -e 'const j=JSON.parse(require(\"fs\").readFileSync(\"$DATA/providers/engine-models/devin.json\",\"utf8\"));if(!j.options.every(o=>o.custom===true))process.exit(1)'"
+  check "duplicates deduped"        bash -c \
+    "node -e 'const j=JSON.parse(require(\"fs\").readFileSync(\"$DATA/providers/engine-models/devin.json\",\"utf8\"));if(j.options.filter(o=>o.id===\"swe-2-high\").length!==1)process.exit(1)'"
+  check "variants attached"         bash -c \
+    "grep -q '\"id\":\"medium\"' '$DATA/providers/engine-models/devin.json' && grep -q '\"id\":\"high\"' '$DATA/providers/engine-models/devin.json'"
+  check "build stamp preserved"     bash -c \
+    "grep -q '\"build\":\"9.9.9\"' '$DATA/providers/engine-models/devin.json'"
+  check "checkedAt stamped"         bash -c \
+    "node -e 'const j=JSON.parse(require(\"fs\").readFileSync(\"$DATA/providers/engine-models/devin.json\",\"utf8\"));if(!(j.checkedAt>0))process.exit(1)'"
+  check "session was authenticated" bash -c \
+    "grep -q '\"method\":\"authenticate\"' '$SEED_HOME/child.log'"
+  unset DEVIN_STUB_CATALOG
+
+  # No model configOptions: exits non-zero, catalog file left untouched.
+  OUT="$(seed_run; echo "rc=$?")"
+  check "no catalog: exits non-zero" out_has 'rc=1'
+  check "no catalog: explains"       out_has 'no model configOptions'
+  check "no catalog: file kept"      bash -c \
+    "node -e 'const j=JSON.parse(require(\"fs\").readFileSync(\"$DATA/providers/engine-models/devin.json\",\"utf8\"));if(j.options.length!==4)process.exit(1)'"
+
+  # Unsafe instance id is refused before touching anything.
+  OUT="$(seed_run 'a;b')"
+  check "bad instance id refused"    out_has 'refusing unsafe instance id'
+
+  rm -rf "$SEED_HOME"
+}
+
 # ------------------------------------------------------------- live suite
 live() {
   echo
@@ -592,7 +655,8 @@ for t in \
   test_teardown_purge \
   test_teardown_purge_odd_data_dir \
   test_teardown_refuses_compose_overrides \
-  test_devin_acp_shim; do
+  test_devin_acp_shim \
+  test_devin_seed_models; do
   "$t"
 done
 

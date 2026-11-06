@@ -1,0 +1,108 @@
+#!/usr/bin/env node
+// devin-seed-models — seeds OpenMausBot's on-disk model catalog for a
+// customAcp Devin instance.
+//
+// Why this exists: `POST /api/instances/:id/refresh-models` discovers models
+// by calling `session/set_config_option` once per advertised model to read
+// each one's variants. Devin advertises ~130 models behind a 60s global
+// discovery budget, so the survey always dies mid-flight — and
+// acpModelCatalog.read() swallows the error, leaving the placeholder
+// "Agent default" catalog in place. `session/new` already returns the full
+// list in `configOptions`, so this script asks for it once and writes the
+// startup cache (providers/engine-models/<instance>.json) in the exact
+// shape the discovery would have produced: the agent-default passthrough
+// first, every model marked custom, thought-level variants attached.
+// Afterwards, PATCH the instance (same cli value) or restart the unit to
+// make the live instance reload from the seeded catalog.
+//
+// Usage: contrib/devin-seed-models [instanceId]     (default: devin)
+//   DEVIN_ACP      shim to spawn      (default: devin-acp on PATH)
+//   OMB_DATA_DIR   OpenMausBot data   (default: ~/services/openmausbot/data)
+"use strict";
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const readline = require("node:readline");
+
+const instanceId = process.argv[2] || "devin";
+if (!/^[\w.-]+$/.test(instanceId)) {
+  console.error(`refusing unsafe instance id "${instanceId}"`);
+  process.exit(2);
+}
+const shim = process.env.DEVIN_ACP || "devin-acp";
+const dataDir = process.env.OMB_DATA_DIR ||
+  path.join(os.homedir(), "services/openmausbot/data");
+const cachePath = path.join(dataDir, "providers/engine-models", `${instanceId}.json`);
+
+const child = spawn(shim, [], { stdio: ["pipe", "pipe", "inherit"] });
+child.on("error", (err) => {
+  console.error(`cannot run shim "${shim}": ${err.message}`);
+  process.exit(1);
+});
+const send = (id, method, params) =>
+  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+
+send(1, "initialize", {
+  protocolVersion: 1,
+  clientInfo: { name: "devin-seed-models", version: "1" },
+  clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+});
+send(2, "session/new", { cwd: os.tmpdir(), mcpServers: [] });
+
+const deadline = setTimeout(() => {
+  console.error("timed out waiting for session/new; is devin-acp working?");
+  child.kill();
+  process.exit(1);
+}, 30000);
+
+const selectValues = (options) => (Array.isArray(options) ? options : []).flatMap((o) => {
+  if (!o || typeof o !== "object") return [];
+  if (typeof o.value === "string" && typeof o.name === "string")
+    return [{ id: o.value, label: o.name }];
+  return selectValues(o.options);
+});
+
+readline.createInterface({ input: child.stdout }).on("line", (line) => {
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.id !== 2) return;
+  clearTimeout(deadline);
+  child.kill();
+  if (msg.error || !msg.result) {
+    console.error(`session/new failed: ${JSON.stringify(msg.error ?? msg)}`);
+    process.exit(1);
+  }
+  const opts = Array.isArray(msg.result.configOptions) ? msg.result.configOptions : [];
+  const model =
+    opts.find((o) => o && o.type === "select" && o.id === "model") ??
+    opts.find((o) => o && o.type === "select" && o.category === "model" && typeof o.id === "string");
+  if (!model) {
+    console.error("session/new returned no model configOptions; catalog left untouched");
+    process.exit(1);
+  }
+  const think = opts.find((o) => o && (
+    o.id === "thought_level" || o.id === "effort" ||
+    o.id === "reasoning_effort" || o.category === "thought_level"));
+  const variants = think ? selectValues(think.options) : [];
+  const seen = new Set();
+  const options = [{ id: "agent-default", label: "Agent default", custom: true }];
+  for (const m of selectValues(model.options)) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    options.push({ ...m, custom: true, ...(variants.length ? { variants } : {}) });
+  }
+  let build;
+  try { build = JSON.parse(fs.readFileSync(cachePath, "utf8")).build; } catch { }
+  const catalog = {
+    default: "agent-default",
+    options,
+    checkedAt: Date.now(),
+    ...(typeof build === "string" ? { build } : {}),
+  };
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  fs.writeFileSync(cachePath, JSON.stringify(catalog));
+  console.log(`${instanceId}: seeded ${options.length} models into ${cachePath}`);
+  console.log("reload with: systemctl --user restart openmausbot" +
+    `  (or PATCH /api/instances/${instanceId} with its current cli value)`);
+});
