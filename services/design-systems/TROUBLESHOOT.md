@@ -129,10 +129,10 @@ repoint is one rename) but can leave `www/next` behind; see Layer 1.
 Every page-class asset answers `Cache-Control: no-cache` and revalidates
 by ETag, so staleness means the response never reached nginx — or the conf
 predates the caching block. Check
-`curl -sI http://127.0.0.1:8108/README.md | grep -i cache-control`
-(the docs pages answer `no-cache`; the app's `/media/` route sets its own
-policy, so the bare `/README.md` and `/catalog.json` show the app's header):
-empty on a docs page means `~/services/design-systems/nginx.conf` is a pre-gzip copy.
+`curl -sIL http://127.0.0.1:8108/scorecard/ | grep -i cache-control`
+(a docs page; the app answers `no-cache`, while its `/media/` route used by
+`/catalog.json` and `/README.md` sets its own policy): empty means
+`~/services/design-systems/nginx.conf` is a pre-gzip copy.
 setup.sh preserves an existing conf, so a re-run only warns — apply the
 gzip/Cache-Control block from the template in `setup.sh` by hand (or, if
 the conf is otherwise stock, delete it and re-run setup.sh to regenerate),

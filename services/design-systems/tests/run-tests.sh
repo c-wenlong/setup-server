@@ -715,7 +715,8 @@ test_live() {
   live_check "repo path responds"       sh -c "curl -fsS 'http://127.0.0.1:$port/catalog.json' | grep -q systems"
   live_check "media alias wired"        media_alias_serves_file "$port" "$svc_home"
   live_check "catalog.json gzips"       sh -c "curl -fsS -o /dev/null -D - -H 'Accept-Encoding: gzip' 'http://127.0.0.1:$port/catalog.json' | grep -qi 'content-encoding: gzip'"
-  live_check "/example/ not served"     http_final_status "http://127.0.0.1:$port/example/README.md" 404
+  # Only meaningful while the file exists in the checkout; otherwise any 404 would pass.
+  live_check "/example/ not served"     sh -c "[ -f '$repo/example/README.md' ] && [ \"\$(curl -sL -o /dev/null -w '%{http_code}' 'http://127.0.0.1:$port/example/README.md')\" = 404 ]"
   live_check "media caches long"        media_serves_cache_header "$port" "$svc_home"
   live_check "no wildcard listener"     no_external_listener "$port"
   live_check "built sha matches repo"   sh -c "[ \"\$(git -C '$repo' rev-parse HEAD)\" = \"\$(cat '$svc_home/state/built-sha')\" ]"
