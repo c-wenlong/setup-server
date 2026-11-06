@@ -10,6 +10,13 @@ first, dated by merge.
 
 ### Added
 
+- **Static apps: anti-framing headers.** A static definition may carry
+  `frame_ancestors: "none"`, which sends `Content-Security-Policy:
+  frame-ancestors 'none'` and `X-Frame-Options: DENY` (both `always`) on
+  the files, so another site cannot frame the app and trick a click. Off
+  by default; the sources app turns it on (its migration writes it, and the
+  Deploys gallery's static form edits it).
+
 - **Static apps: proxy rules and a Cache-Control header.** A static
   definition may carry `proxies` (up to 10 `{"path": "/api/", "port":
   8089}` rules, each proxied unbuffered with a 600 s timeout to that port on

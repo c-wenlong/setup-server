@@ -1026,6 +1026,7 @@ method (server.py adds no rules):
 |---|---|---|
 | `proxies` | list of at most 10 `{"path", "port"}` objects, nothing else in them | one `location <path>` each, `proxy_pass http://host.docker.internal:<port>` |
 | `cache_control` | `^[A-Za-z0-9 ,=-]{1,100}$`, not blank | `add_header Cache-Control "<value>"` on the files `location /` |
+| `frame_ancestors` | the string `none`, nothing else | `add_header Content-Security-Policy "frame-ancestors 'none'" always;` and `add_header X-Frame-Options DENY always;` on the files `location /` and the 50x page's location |
 
 A proxy path matches `^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?$`, so it is
 never `/` itself (that would shadow the site) and holds no quote, brace,
@@ -1044,12 +1045,20 @@ and Docker Desktop. The host service must accept connections from the
 Docker bridge: listen on `0.0.0.0` (the sources trigger listens on
 `0.0.0.0:8089`), not `127.0.0.1`.
 
-**The config.** With either field set, `ghapp.py` writes the server block
+**Anti-framing.** `frame_ancestors: "none"` stops other sites from
+framing the app, so a page elsewhere cannot trick a click onto one of its
+buttons (sources' Redeploy, Restart, Summarize). A `<meta>` CSP cannot set
+`frame-ancestors`, so it must be a response header. It is opt-in: no
+launcher page frames an app today, but a default would rewrite the config
+of every static app on its next deploy. `always` covers error replies too.
+The proxied `location`s do not get it; their replies are not pages.
+
+**The config.** With any of these fields set, `ghapp.py` writes the server block
 beside the release as `site-<sha12>-<ms>.nginx.conf` (outside the
 docroot, or nginx would serve it) and mounts it read-only over
 `/etc/nginx/conf.d/default.conf`. The files side mirrors the image's
 default config (root, `index index.html index.htm`, the 50x page) plus the
-header; it listens on IPv4 only, since the port is published on
+headers; it listens on IPv4 only, since the port is published on
 `127.0.0.1` and a `[::]` listen fails in a container without IPv6. With
 neither field, nginx runs on its default config as before and nothing is
 written.

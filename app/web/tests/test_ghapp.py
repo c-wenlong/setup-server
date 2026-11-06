@@ -1745,6 +1745,15 @@ class StaticProxyTest(Sandbox):
                 ghapp.validate(method_def("static", cache_control=v))
             self.assertTrue(str(ctx.exception).startswith("bad cache_control"))
 
+    def test_frame_ancestors_none_passes_and_anything_else_is_refused(self):
+        ghapp.validate(method_def("static", frame_ancestors="none"))
+        ghapp.validate(method_def("static", frame_ancestors=None))
+        for v in ("", "self", "'none'", "NONE", "none;", "none\n", True, 0,
+                  ["none"], {"none": 1}, "https://evil.example"):
+            with self.assertRaises(ghapp.AppError, msg=v) as ctx:
+                ghapp.validate(method_def("static", frame_ancestors=v))
+            self.assertTrue(str(ctx.exception).startswith("bad frame_ancestors"), v)
+
     # --- the generated config
 
     def test_no_extras_means_no_config_and_no_add_host(self):
@@ -1798,6 +1807,49 @@ class StaticProxyTest(Sandbox):
         name = self.deployed()["release"]
         conf = os.path.join(ghapp.app_dir("hello-app"), name + ".nginx.conf")
         self.assertIn(conf + ":/etc/nginx/conf.d/default.conf:ro", run)
+
+    def test_frame_ancestors_adds_both_anti_framing_headers_on_the_files(self):
+        text = ghapp.static_conf(method_def("static", proxies=self.API,
+                                            cache_control="no-cache",
+                                            frame_ancestors="none"))
+        files = text[text.index("    location / {"):]
+        files = files[:files.index("    }") + 5]
+        self.assertEqual(files, "    location / {\n"
+                                "        root   /usr/share/nginx/html;\n"
+                                "        index  index.html index.htm;\n"
+                                '        add_header Cache-Control "no-cache";\n'
+                                "        add_header Content-Security-Policy "
+                                "\"frame-ancestors 'none'\" always;\n"
+                                "        add_header X-Frame-Options DENY always;\n"
+                                "    }")
+        err = text[text.index("    location = /50x.html {"):]
+        self.assertEqual(err, "    location = /50x.html {\n"
+                              "        root   /usr/share/nginx/html;\n"
+                              "        add_header Content-Security-Policy "
+                              "\"frame-ancestors 'none'\" always;\n"
+                              "        add_header X-Frame-Options DENY always;\n"
+                              "    }\n}\n")
+        self.assertEqual(text.count("Content-Security-Policy"), 2)
+        self.assertEqual(text.count("{"), text.count("}"))
+
+    def test_frame_ancestors_alone_writes_a_config_without_other_extras(self):
+        text = ghapp.static_conf(method_def("static", frame_ancestors="none"))
+        self.assertNotIn("proxy_pass", text)
+        self.assertNotIn("Cache-Control", text)
+        self.assertIn("add_header X-Frame-Options DENY always;", text)
+        self.write_def(method_def("static", frame_ancestors="none"))
+        self.make_file("hello-app", "public/index.html")
+        self.deploy_quietly()
+        run = self.argv_with("docker", "run")[-1]
+        self.assertNotIn("--add-host", run)
+        conf = os.path.join(ghapp.app_dir("hello-app"),
+                            self.deployed()["release"] + ".nginx.conf")
+        self.assertIn(conf + ":/etc/nginx/conf.d/default.conf:ro", run)
+
+    def test_without_frame_ancestors_no_anti_framing_header(self):
+        text = ghapp.static_conf(method_def("static", cache_control="no-cache"))
+        self.assertNotIn("frame-ancestors", text)
+        self.assertNotIn("X-Frame-Options", text)
 
     def test_proxies_mount_the_config_beside_the_release_and_add_the_host(self):
         self.write_def(method_def("static", proxies=self.API,

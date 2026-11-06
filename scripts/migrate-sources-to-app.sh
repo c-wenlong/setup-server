@@ -132,6 +132,7 @@ def expected(env_names):
             "proxies": [{"path": "/api/",
                          "port": int(os.environ["TRIGGER_PORT"])}],
             "cache_control": "no-cache",
+            "frame_ancestors": "none",
             "env_names": env_names, "created_at": server._now_iso()}
 
 
