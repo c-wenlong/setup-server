@@ -65,6 +65,13 @@ Run it by hand to see the full error:
   thumbnail step: the checkout's screenshots were never materialised.
   `git -C ~/dev/design-systems lfs pull` (install `git-lfs` first if
   needed), then re-run deploy.
+- `gallery app: BUILD FAILED at <sha>` → the docs site deployed, but the
+  Next.js app in `web/` did not build, so `designs-web` was not restarted
+  and still serves its previous build. deployd retries; reproduce with
+  `cd ~/dev/design-systems && PATH=~/.nix-profile/bin:$PATH corepack
+  pnpm@10.10.0 --dir web build`. `gallery app: skipped (...)` lines are
+  normal: the unit is not installed, it is macOS, or nothing under `web/`,
+  `tools/catalog.py` or `catalog.json` changed.
 - `tools/site.py` import errors (`import markdown`) → the repo's `.venv`
   was deleted or requirements.txt changed; deploy.sh recreates/re-syncs it
   (`uv venv` + `uv pip install -r requirements.txt`) — if that fails, `uv`

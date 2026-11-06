@@ -450,6 +450,202 @@ test_operator_escalation() {
   teardown
 }
 
+# ----------------------------------------------------- gallery app (web/)
+# deploy.sh rebuilds the Next.js app and restarts designs-web. The build path
+# is Linux-only (systemd user unit); on macOS it is skipped with a log line.
+# FAKE_UNAME cannot cross over here: deploy.sh's swap picks GNU or BSD mv
+# from uname, so each branch is tested on its own OS.
+WEB_SHA_FILE='services/design-systems/state/web-built-sha'
+web_linux_only() {
+  [ "$OS" = "Linux" ] && return 0
+  echo "    (skipped: the designs-web build path runs on Linux only)"
+  return 1
+}
+
+test_web_rebuilt_when_changed() {
+  echo "• gallery app: built on first deploy, rebuilt + restarted when web/ changed"
+  web_linux_only || return 0
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "says why (no build recorded)" out_has "gallery app: rebuilding (no previous web build recorded)"
+  check "pnpm install, frozen lockfile" calls_have "corepack pnpm@10.10.0 --dir web install --frozen-lockfile"
+  check "pnpm build"                  calls_have "corepack pnpm@10.10.0 --dir web build"
+  check "designs-web restarted"       calls_have "systemctl --user restart designs-web"
+  check "web sha recorded"            grep -qx aaa1111 "$HOME/$WEB_SHA_FILE"
+  echo "bbb2222" > "$STATE_DIR/local_sha"
+  touch "$STATE_DIR/web_changed"
+  : > "$CALLS_LOG"
+  run_poll
+  check "poll exits zero"             [ "$CODE" -eq 0 ]
+  check "compared the web paths"      calls_have "diff --quiet aaa1111 bbb2222 -- web tools/catalog.py catalog.json"
+  check "says what changed"           out_has "gallery app: rebuilding (web/, tools/catalog.py or catalog.json changed since aaa1111)"
+  check "rebuilt"                     calls_have "corepack pnpm@10.10.0 --dir web build"
+  check "restarted after the build"   [ "$(call_line "corepack pnpm@10.10.0 --dir web build")" -lt "$(call_line "restart designs-web")" ]
+  check "web sha moved"               grep -qx bbb2222 "$HOME/$WEB_SHA_FILE"
+  teardown
+}
+
+test_web_skipped_when_unchanged() {
+  echo "• gallery app: a commit outside web/ deploys the docs only; --force rebuilds it"
+  web_linux_only || return 0
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
+  run_deploy
+  echo "bbb2222" > "$STATE_DIR/local_sha"
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "docs deployed"               out_has "deployed bbb2222"
+  check "logs the skip"               out_has "gallery app: skipped (web/, tools/catalog.py and catalog.json unchanged since aaa1111)"
+  check "no pnpm"                     no_call "corepack"
+  check "no restart"                  no_call "restart designs-web"
+  check "web sha left at its build"   grep -qx aaa1111 "$HOME/$WEB_SHA_FILE"
+  : > "$CALLS_LOG"
+  run_poll
+  check "nothing new: up to date"     out_has "up to date at bbb2222"
+  check "  still no pnpm"             no_call "corepack"
+  : > "$CALLS_LOG"
+  run_poll --force
+  check "--force exits zero"          [ "$CODE" -eq 0 ]
+  check "--force rebuilds the app"    out_has "gallery app: rebuilding (--force)"
+  check "--force restarts"            calls_have "systemctl --user restart designs-web"
+  teardown
+}
+
+test_web_skipped_without_unit() {
+  echo "• gallery app: skipped cleanly when designs-web.service is not installed"
+  web_linux_only || return 0
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "probed the unit"             calls_have "systemctl --user cat designs-web"
+  check "logs the skip"               out_has "gallery app: skipped (designs-web.service is not installed)"
+  check "no pnpm"                     no_call "corepack"
+  check "no restart"                  no_call "restart designs-web"
+  check "no web sha"                  [ ! -f "$HOME/$WEB_SHA_FILE" ]
+  : > "$CALLS_LOG"
+  run_poll --force
+  check "--force still skips"         out_has "gallery app: skipped (designs-web.service is not installed)"
+  check "  no pnpm"                   no_call "corepack"
+  teardown
+}
+
+test_web_build_failure() {
+  echo "• gallery app: a failed build keeps the docs deploy, restores .next, skips the restart, exits non-zero, retries"
+  web_linux_only || return 0
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
+  run_deploy
+  check "first build ok"              grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+  touch "$STATE_DIR/web_build_fail" "$STATE_DIR/web_changed"
+  echo "bbb2222" > "$STATE_DIR/local_sha"
+  : > "$CALLS_LOG"
+  run_poll
+  check "exits non-zero"              [ "$CODE" -ne 0 ]
+  check "says so"                     out_has "gallery app: BUILD FAILED at bbb2222; designs-web not restarted"
+  check "build was attempted"         calls_have "corepack pnpm@10.10.0 --dir web build"
+  check "designs-web not restarted"   no_call "restart designs-web"
+  check "live .next put back"         grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+  check "no snapshot left"            [ ! -e "$SOURCE_REPO/web/.next.deploy-prev" ]
+  check "no web sha recorded"         [ ! -f "$HOME/$WEB_SHA_FILE" ]
+  check "docs still swapped"          sh -c '[ "$(readlink "$1")" = releases/bbb2222 ]' _ "$HOME/services/design-systems/www/current"
+  check "docs sha recorded"           grep -qx bbb2222 "$HOME/services/design-systems/state/built-sha"
+  check "failure after the swap"      [ "$(grep -n 'deployed bbb2222' <<<"$OUT" | cut -d: -f1)" -lt "$(grep -n 'BUILD FAILED' <<<"$OUT" | cut -d: -f1)" ]
+  # deployd's retry: same sha, docs current, web still owed -> build it only
+  rm "$STATE_DIR/web_build_fail" "$STATE_DIR/web_changed"
+  : > "$CALLS_LOG"
+  run_poll
+  check "retry exits zero"            [ "$CODE" -eq 0 ]
+  check "  docs left alone"           out_has "docs site up to date at bbb2222"
+  check "  no docs rebuild"           no_call "python tools/site.py"
+  check "  app rebuilt"               grep -qx bbb2222 "$SOURCE_REPO/web/.next/BUILD_ID"
+  check "  restarted"                 calls_have "systemctl --user restart designs-web"
+  check "  web sha recorded"          grep -qx bbb2222 "$HOME/$WEB_SHA_FILE"
+  check "  snapshot cleaned up"       [ ! -e "$SOURCE_REPO/web/.next.deploy-prev" ]
+  teardown
+}
+
+test_web_failed_force_is_retried() {
+  echo "• gallery app: a failed --force rebuild/restart of a built sha is retried by the next plain run"
+  web_linux_only || return 0
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
+  run_deploy
+  check "built and recorded"          grep -qx aaa1111 "$HOME/$WEB_SHA_FILE"
+  touch "$STATE_DIR/web_restart_fail"
+  run_poll --force
+  check "failed restart: non-zero"    [ "$CODE" -ne 0 ]
+  check "  says so"                   out_has "restart designs-web' failed"
+  check "  web sha cleared"           [ ! -f "$HOME/$WEB_SHA_FILE" ]
+  rm "$STATE_DIR/web_restart_fail"
+  : > "$CALLS_LOG"
+  run_poll
+  check "plain run exits zero"        [ "$CODE" -eq 0 ]
+  check "  rebuilds, not 'unchanged'" out_has "gallery app: rebuilding (no previous web build recorded)"
+  check "  restarted"                 calls_have "systemctl --user restart designs-web"
+  check "  web sha recorded"          grep -qx aaa1111 "$HOME/$WEB_SHA_FILE"
+  touch "$STATE_DIR/web_build_fail"
+  run_poll --force
+  check "failed forced build: non-zero" [ "$CODE" -ne 0 ]
+  check "  web sha cleared"           [ ! -f "$HOME/$WEB_SHA_FILE" ]
+  check "  live .next put back"       grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+  rm "$STATE_DIR/web_build_fail"
+  run_poll
+  check "  next plain run rebuilds"   out_has "gallery app: rebuilding (no previous web build recorded)"
+  teardown
+}
+
+test_web_snapshot_is_atomic() {
+  echo "• gallery app: a half-copied snapshot is never restored; a failed snapshot stops before the build"
+  web_linux_only || return 0
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
+  run_deploy
+  # an interrupted copy from an earlier run: partial, under the temp name
+  mkdir -p "$SOURCE_REPO/web/.next.deploy-prev.tmp"
+  echo partial > "$SOURCE_REPO/web/.next.deploy-prev.tmp/BUILD_ID"
+  touch "$STATE_DIR/web_build_fail"
+  run_poll --force
+  check "failed build: non-zero"      [ "$CODE" -ne 0 ]
+  check "  restored the good build"   grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+  check "  temp copy gone"            [ ! -e "$SOURCE_REPO/web/.next.deploy-prev.tmp" ]
+  check "  no snapshot left"          [ ! -e "$SOURCE_REPO/web/.next.deploy-prev" ]
+  rm "$STATE_DIR/web_build_fail"
+  if [ "$(id -u)" -ne 0 ]; then
+    # an unreadable file makes cp -a fail: nothing may be built or restarted
+    echo secret > "$SOURCE_REPO/web/.next/locked"; chmod 000 "$SOURCE_REPO/web/.next/locked"
+    : > "$CALLS_LOG"
+    run_poll --force
+    check "failed snapshot: non-zero"   [ "$CODE" -ne 0 ]
+    check "  says so"                   out_has "gallery app: could not snapshot"
+    check "  no build attempted"        no_call "corepack"
+    check "  no restart"                no_call "restart designs-web"
+    check "  live .next untouched"      grep -qx aaa1111 "$SOURCE_REPO/web/.next/BUILD_ID"
+    check "  no partial snapshot"       sh -c '[ ! -e "$1.deploy-prev" ] && [ ! -e "$1.deploy-prev.tmp" ]' _ "$SOURCE_REPO/web/.next"
+    chmod 600 "$SOURCE_REPO/web/.next/locked"
+  fi
+  teardown
+}
+
+test_web_skipped_on_macos() {
+  echo "• gallery app (macOS): skipped with a log line, no systemctl"
+  if [ "$OS" != "Darwin" ]; then
+    echo "    (skipped: the macOS branch runs on macOS only)"
+    return 0
+  fi
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/web_unit"
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "logs the skip"               out_has "gallery app: skipped (macOS has no systemd user units)"
+  check "no unit probe"               no_call "systemctl --user cat designs-web"
+  check "no pnpm"                     no_call "corepack"
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -1251,6 +1447,13 @@ test_nginx_conf_stale_warns
 test_push_triggers_redeploy
 test_force_rebuild_same_sha
 test_deps_resync_on_requirements_change
+test_web_rebuilt_when_changed
+test_web_skipped_when_unchanged
+test_web_skipped_without_unit
+test_web_build_failure
+test_web_failed_force_is_retried
+test_web_snapshot_is_atomic
+test_web_skipped_on_macos
 test_spaced_repo_path
 test_poll_lock
 test_port_override
