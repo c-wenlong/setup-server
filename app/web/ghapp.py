@@ -1076,17 +1076,20 @@ def static_conf(d):
               "        index  index.html index.htm;"]
     if cache:
         lines.append('        add_header Cache-Control "%s";' % cache)
-    if frame:
-        # `always`: a 404 page can be framed and clicked through too.
-        lines += ['        add_header Content-Security-Policy '
-                  '"frame-ancestors %s" always;' % frame,
-                  "        add_header X-Frame-Options DENY always;"]
+    # `always`: an error reply can be framed and clicked through too. The
+    # 50x location gets them as well: nginx locations do not inherit
+    # add_header from each other.
+    framing = ['        add_header Content-Security-Policy '
+               '"frame-ancestors %s" always;' % frame,
+               "        add_header X-Frame-Options DENY always;"] if frame else []
+    lines += framing
     lines += ["    }",
               "",
               "    error_page   500 502 503 504  /50x.html;",
               "    location = /50x.html {",
-              "        root   %s;" % STATIC_DOCROOT,
-              "    }",
+              "        root   %s;" % STATIC_DOCROOT]
+    lines += framing
+    lines += ["    }",
               "}"]
     return "\n".join(lines) + "\n"
 

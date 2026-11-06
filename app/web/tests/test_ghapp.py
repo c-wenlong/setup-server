@@ -1822,7 +1822,14 @@ class StaticProxyTest(Sandbox):
                                 "\"frame-ancestors 'none'\" always;\n"
                                 "        add_header X-Frame-Options DENY always;\n"
                                 "    }")
-        self.assertEqual(text.count("Content-Security-Policy"), 1)
+        err = text[text.index("    location = /50x.html {"):]
+        self.assertEqual(err, "    location = /50x.html {\n"
+                              "        root   /usr/share/nginx/html;\n"
+                              "        add_header Content-Security-Policy "
+                              "\"frame-ancestors 'none'\" always;\n"
+                              "        add_header X-Frame-Options DENY always;\n"
+                              "    }\n}\n")
+        self.assertEqual(text.count("Content-Security-Policy"), 2)
         self.assertEqual(text.count("{"), text.count("}"))
 
     def test_frame_ancestors_alone_writes_a_config_without_other_extras(self):

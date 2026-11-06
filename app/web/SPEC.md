@@ -1026,7 +1026,7 @@ method (server.py adds no rules):
 |---|---|---|
 | `proxies` | list of at most 10 `{"path", "port"}` objects, nothing else in them | one `location <path>` each, `proxy_pass http://host.docker.internal:<port>` |
 | `cache_control` | `^[A-Za-z0-9 ,=-]{1,100}$`, not blank | `add_header Cache-Control "<value>"` on the files `location /` |
-| `frame_ancestors` | the string `none`, nothing else | `add_header Content-Security-Policy "frame-ancestors 'none'" always;` and `add_header X-Frame-Options DENY always;` on the files `location /` |
+| `frame_ancestors` | the string `none`, nothing else | `add_header Content-Security-Policy "frame-ancestors 'none'" always;` and `add_header X-Frame-Options DENY always;` on the files `location /` and the 50x page's location |
 
 A proxy path matches `^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?$`, so it is
 never `/` itself (that would shadow the site) and holds no quote, brace,
