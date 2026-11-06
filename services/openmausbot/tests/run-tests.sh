@@ -462,6 +462,8 @@ live() {
   [ -n "$ts" ] || { [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ] && ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"; }
   [ -n "$ts" ] || { red "    ✗ tailscale CLI not found"; return 1; }
   tsip="$("$ts" ip -4 2>/dev/null | head -1)"
+  local tsip6
+  tsip6="$("$ts" ip -6 2>/dev/null | head -1)"
 
   if [ "$OS" = "Linux" ]; then
     check_live "unit is active"      systemctl --user is-active --quiet openmausbot
@@ -470,13 +472,15 @@ live() {
   else
     check_live "LaunchAgent loaded"  launchctl print "gui/$(id -u)/com.openmausbot.server"
   fi
-  # A listener on loopback or this node's tailnet IPv4 is fine — the latter
-  # is Serve's own proxy when the HTTPS port equals the app port. Anything
-  # else (LAN, wildcard) is a leak. lsof's header line is skipped so it can
-  # never read as a stray listener.
+  # A listener on loopback or this node's tailnet IPs is fine — the latter
+  # are Serve's own proxies when the HTTPS port equals the app port (Serve
+  # binds both the v4 and the v6 tailnet address). Anything else (LAN,
+  # wildcard) is a leak. lsof's header line is skipped so it can never
+  # read as a stray listener. Colons need no escaping in an ERE.
   live_listener_audit() {
     local keep="127\.0\.0\.1|localhost|\[::1\]|::1"
     [ -n "$tsip" ] && keep="$keep|${tsip//./\\.}"
+    [ -n "$tsip6" ] && keep="$keep|$tsip6"
     if command -v ss >/dev/null 2>&1; then
       ! ss -tlnH "sport = :$port" | grep -vE "$keep" | grep -q .
     else
