@@ -92,7 +92,47 @@ codex auth         # Codex
 ```
 
 OpenMausBot launches whichever engine a bot is configured to use; unverified
-engines (Cursor, a Devin ACP adapter) are not configured by this deploy.
+engines (Cursor) are not configured by this deploy.
+
+### Devin over ACP (optional)
+
+Upstream ships a generic `customAcp` engine for any agent CLI speaking the
+Agent Client Protocol over stdio, and the Devin CLI is itself an ACP server
+(`devin acp`). Two gaps need a shim, shipped as `contrib/devin-acp`:
+
+- OMB's version probe appends `--version` to the whole cli; `devin acp`
+  rejects unknown flags, so the shim routes the probe at `devin --version`.
+- `devin acp` ignores local credentials by design — the ACP *host* must call
+  `authenticate` with `params._meta.api_key`. customAcp never authenticates,
+  so the shim injects the call itself after `initialize`, reading the key
+  from `~/.local/share/devin/credentials.toml` (created by `devin auth login`).
+
+```sh
+devin auth login                                    # as the service user
+install -m 755 contrib/devin-acp ~/.local/bin/      # set DEVIN inside to the
+                                                    # absolute `which devin`
+```
+
+Then add an engine instance (UI: Settings → Engines, or `instances` in
+`data/config.json`; if `instances` is written by hand it **replaces** the
+default fleet, so include every entry you want to keep):
+
+```json
+"devin": { "driver": "customAcp", "displayName": "Devin",
+           "config": { "cli": "/home/USER/.local/bin/devin-acp" } }
+```
+
+Or patch a running server (loopback owner trust, no restart):
+
+```sh
+curl -X PATCH http://127.0.0.1:8799/api/instances/devin \
+  -H 'content-type: application/json' \
+  -d '{"cli":"/home/'"$USER"'/.local/bin/devin-acp"}'
+```
+
+The engine then reports `available` and exposes Devin's model catalog in the
+model picker. If a turn fails with an auth error, the stored key is stale:
+`devin auth logout && devin auth login` on the box.
 
 ## Trust model
 

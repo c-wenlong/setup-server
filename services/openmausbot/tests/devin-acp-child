@@ -1,0 +1,39 @@
+#!/usr/bin/env node
+// Test fixture: stands in for `devin` when the suite exercises contrib/devin-acp.
+// `--version` prints a banner; otherwise speaks enough newline-delimited
+// JSON-RPC to verify the shim's auth injection and traffic ordering. Every
+// inbound line is appended to $DEVIN_STUB_LOG so tests can assert call order.
+// DEVIN_STUB_AUTH_FAIL=1 makes `authenticate` return an error.
+"use strict";
+const fs = require("node:fs");
+const readline = require("node:readline");
+
+if (process.argv[2] === "--version") {
+  console.log("devin 3000.0.0 (stub)");
+  process.exit(0);
+}
+
+const log = fs.createWriteStream(process.env.DEVIN_STUB_LOG, { flags: "a" });
+const failAuth = process.env.DEVIN_STUB_AUTH_FAIL === "1";
+let authed = false;
+const reply = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
+
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  log.write(line + "\n");
+  let m;
+  try { m = JSON.parse(line); } catch { return; }
+  if (m.method === "initialize")
+    return reply({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  if (m.method === "authenticate") {
+    if (failAuth)
+      return reply({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "bad key" } });
+    authed = true;
+    return reply({ jsonrpc: "2.0", id: m.id, result: {} });
+  }
+  // Real `devin acp` refuses sessions until the host authenticates.
+  if (m.method === "session/new" && !authed)
+    return reply({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "not authenticated" } });
+  if (m.method === "session/new")
+    return reply({ jsonrpc: "2.0", id: m.id, result: { sessionId: "stub-session" } });
+  reply({ jsonrpc: "2.0", id: m.id, result: {} });
+});

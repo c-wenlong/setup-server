@@ -1,0 +1,101 @@
+#!/usr/bin/env node
+// devin-acp — stdio shim between OpenMausBot's customAcp driver and `devin acp`.
+//
+// Two gaps are bridged here:
+// 1. OMB probes engines by appending `--version` to the configured cli;
+//    `devin acp` (a clap subcommand) rejects it — so it's routed at
+//    `devin --version`.
+// 2. `devin acp` deliberately ignores local credentials (env vars and the
+//    REPL credential store) — the ACP host must call `authenticate` with
+//    `params._meta.api_key`. OMB's customAcp driver never authenticates
+//    (pickAuthMethod returns null), so this shim injects the call itself:
+//    right after the `initialize` response it sends `authenticate` using the
+//    API key in ~/.local/share/devin/credentials.toml. Client traffic is held
+//    only while that call is in flight so a fast `session/new` can't race it;
+//    the `initialize` request itself always passes straight through.
+//    The shim's own traffic is swallowed; the host sees a clean ACP server.
+//
+// Install: copy to ~/.local/bin/devin-acp, chmod +x, set DEVIN below to the
+// absolute path of `devin` if it is not on the service's PATH (a systemd user
+// unit's PATH usually is not the login PATH), then point the customAcp
+// instance's cli at this file. DEVIN_CLI env overrides the path.
+"use strict";
+const { spawn, execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const readline = require("node:readline");
+
+const DEVIN = process.env.DEVIN_CLI || "devin";
+const AUTH_ID = "__devin_acp_shim__";
+
+if (process.argv[2] === "--version") {
+  process.stdout.write(execFileSync(DEVIN, ["--version"]));
+  process.exit(0);
+}
+
+function apiKey() {
+  try {
+    const toml = fs.readFileSync(
+      path.join(os.homedir(), ".local/share/devin/credentials.toml"), "utf8");
+    const m = toml.match(/windsurf_api_key\s*=\s*["']([^"']+)["']/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+const key = apiKey();
+const child = spawn(DEVIN, ["acp"], { stdio: ["pipe", "pipe", "inherit"] });
+
+// open   — everything passes through (no key, or auth settled)
+// init   — key found; waiting for the initialize response
+// authing — authenticate sent; holding client lines until it settles
+let phase = key ? "init" : "open";
+const held = [];
+let first = true;
+let stdinEnded = false;
+const flush = () => {
+  while (held.length) child.stdin.write(held.shift() + "\n");
+  if (stdinEnded) child.stdin.end();
+};
+
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  // Per ACP the first client message is always `initialize`, and it must
+  // reach the agent before our `authenticate` makes sense — it passes even
+  // while a key is pending. Everything after it waits for auth to settle.
+  if (first) { first = false; return child.stdin.write(line + "\n"); }
+  if (phase === "open") child.stdin.write(line + "\n");
+  else held.push(line);
+});
+
+readline.createInterface({ input: child.stdout }).on("line", (line) => {
+  let msg = null;
+  try { msg = JSON.parse(line); } catch { /* log lines pass through */ }
+  if (msg && msg.id === AUTH_ID) {
+    phase = "open";
+    flush();
+    return; // swallow the shim's own response
+  }
+  process.stdout.write(line + "\n");
+  if (msg && phase === "init" && msg.result && msg.result.protocolVersion !== undefined) {
+    phase = "authing";
+    child.stdin.write(JSON.stringify({
+      jsonrpc: "2.0", id: AUTH_ID, method: "authenticate",
+      params: { methodId: "devin-browser", _meta: { api_key: key } },
+    }) + "\n");
+  }
+});
+
+// Closing our stdin early must not cut the child off mid-handshake: the
+// injected authenticate may still be in flight, and writes to an ended
+// stdin fail. The child gets its EOF once the queue is flushed (or at once
+// when nothing is held).
+process.stdin.on("end", () => {
+  stdinEnded = true;
+  if (phase === "open") child.stdin.end();
+});
+child.on("exit", (code, signal) => {
+  if (signal) process.kill(process.pid, signal);
+  else process.exit(code ?? 0);
+});
