@@ -442,6 +442,75 @@ test_teardown_refuses_compose_overrides() {
   teardown
 }
 
+# ------------------------------------------------------- contrib/devin-acp
+# The shim's behavior is exercised end-to-end against tests/devin-acp-child,
+# a fake `devin` speaking ndjson JSON-RPC and logging every inbound line.
+# Real node is required; the PATH stubs are for the deploy scripts, not this.
+test_devin_acp_shim() {
+  echo "• contrib/devin-acp shim (Devin ACP engine helper)"
+  command -v node >/dev/null 2>&1 || { echo "    (node not found — skipping)"; return 0; }
+
+  local SHIM CHILD SHIM_HOME
+  SHIM="$REPO_ROOT/services/openmausbot/contrib/devin-acp"
+  CHILD="$REPO_ROOT/services/openmausbot/tests/devin-acp-child"
+  SHIM_HOME="$(mktemp -d)"
+  mkdir -p "$SHIM_HOME/.local/share/devin"
+
+  shim_run() { # stdin: ndjson requests; env: DEVIN_STUB_LOG, DEVIN_STUB_AUTH_FAIL
+    env -i PATH="$PATH" HOME="$SHIM_HOME" \
+      DEVIN_CLI="$CHILD" DEVIN_STUB_LOG="$DEVIN_STUB_LOG" \
+      DEVIN_STUB_AUTH_FAIL="${DEVIN_STUB_AUTH_FAIL:-}" \
+      timeout 20 node "$SHIM" 2>/dev/null
+  }
+
+  # --version routes to `devin --version`, not `devin acp --version`.
+  OUT="$(env -i PATH="$PATH" DEVIN_CLI="$CHILD" node "$SHIM" --version 2>/dev/null)"
+  check "--version forwards to devin" out_has "devin 3000.0.0"
+
+  # Full flow: the shim injects authenticate after initialize and holds the
+  # next client message until auth settles; its own traffic never reaches us.
+  printf 'windsurf_api_key = "stub-key"\n' > "$SHIM_HOME/.local/share/devin/credentials.toml"
+  DEVIN_STUB_LOG="$SHIM_HOME/child.log"; : > "$DEVIN_STUB_LOG"
+  OUT="$(printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
+    | shim_run)"
+  check "initialize response forwarded"    out_has '"id":1'
+  check "session/new answered"             out_has 'stub-session'
+  check "shim auth response swallowed"     out_lacks '__devin_acp_shim__'
+  check "child saw authenticate"           bash -c "grep -q '\"method\":\"authenticate\"' '$DEVIN_STUB_LOG'"
+  check "authenticate carries the key"     bash -c "grep -q 'stub-key' '$DEVIN_STUB_LOG'"
+  check "auth precedes session/new"        bash -c \
+    "[ \$(grep -n authenticate '$DEVIN_STUB_LOG' | head -1 | cut -d: -f1) -lt \$(grep -n 'session/new' '$DEVIN_STUB_LOG' | head -1 | cut -d: -f1) ]"
+
+  # No credentials file: nothing is injected or held; traffic passes through.
+  rm -f "$SHIM_HOME/.local/share/devin/credentials.toml"
+  DEVIN_STUB_LOG="$SHIM_HOME/child2.log"; : > "$DEVIN_STUB_LOG"
+  OUT="$(printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
+    | shim_run)"
+  # Like real `devin acp`, the stub refuses unauthenticated sessions — seeing
+  # that refusal proves the message passed straight through with no injection.
+  check "no key: refusal forwarded"        out_has 'not authenticated'
+  check "no key: no authenticate injected" bash -c "! grep -q authenticate '$DEVIN_STUB_LOG'"
+
+  # Auth failure: the shim still flushes held traffic and reports the child.
+  printf 'windsurf_api_key = "stub-key"\n' > "$SHIM_HOME/.local/share/devin/credentials.toml"
+  DEVIN_STUB_LOG="$SHIM_HOME/child3.log"; : > "$DEVIN_STUB_LOG"
+  DEVIN_STUB_AUTH_FAIL=1
+  OUT="$(printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
+    | shim_run)"
+  unset DEVIN_STUB_AUTH_FAIL
+  check "auth fails: held traffic flushed" out_has '"id":2'
+  check "auth fails: refusal forwarded"    out_has 'not authenticated'
+  check "auth fails: response swallowed"   out_lacks '__devin_acp_shim__'
+
+  rm -rf "$SHIM_HOME"
+}
+
 # ------------------------------------------------------------- live suite
 live() {
   echo
@@ -522,7 +591,8 @@ for t in \
   test_teardown_preflight \
   test_teardown_purge \
   test_teardown_purge_odd_data_dir \
-  test_teardown_refuses_compose_overrides; do
+  test_teardown_refuses_compose_overrides \
+  test_devin_acp_shim; do
   "$t"
 done
 
