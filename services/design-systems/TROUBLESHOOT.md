@@ -130,10 +130,12 @@ what the app saw:
 → 403; with `kai-home-server.taild6a23f.ts.net` → 200. Check
 `~/services/design-systems/nginx.conf` has `proxy_set_header Host $http_host;`
 in the `/_next/static/` block (and in any newer proxy block pointed at
-:8191 — same requirement), add it, then `docker exec design-systems
-nginx -s reload`. Seen 2026-11-07 when the `/_next/static/` block was
-added without the header; the page itself kept working because
-`location /` forwards it.
+:8191 — same requirement), add it, then `docker restart design-systems`.
+The conf is a single-file bind mount, so `nginx -s reload` only works when
+the editor kept the same inode — a save-by-replace leaves the container on
+the old file. Seen 2026-11-07 when the `/_next/static/` block was added
+without the header; the page itself kept working because `location /`
+forwards it.
 
 **The site serves an old commit even after a successful deploy.**
 `www/current` is a symlink — check it points at the new sha and that
