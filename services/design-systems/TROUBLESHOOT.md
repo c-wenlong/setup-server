@@ -120,6 +120,21 @@ the route refusing it on purpose.
   redeploy with `bin/deploy.sh --force`. There is no static
   `/gallery/data.json` any more, so a 404 there is expected.
 
+**Pages load but render as bare unstyled HTML — every `/_next/static/*`
+request answers 403.** The app's `web/proxy.ts` refuses any `Host` outside
+loopback/`DESIGN_SYSTEMS_ALLOWED_HOSTS`, so every nginx block that proxies
+to designs-web must forward the real `Host` — nginx's default there is
+`$proxy_host` (`host.docker.internal`), which the app rejects. Reproduce
+what the app saw:
+`curl -H 'Host: host.docker.internal' http://172.17.0.1:8191/_next/static/chunks/<file>`
+→ 403; with `kai-home-server.taild6a23f.ts.net` → 200. Check
+`~/services/design-systems/nginx.conf` has `proxy_set_header Host $http_host;`
+in the `/_next/static/` block (and in any newer proxy block pointed at
+:8191 — same requirement), add it, then `docker exec design-systems
+nginx -s reload`. Seen 2026-11-07 when the `/_next/static/` block was
+added without the header; the page itself kept working because
+`location /` forwards it.
+
 **The site serves an old commit even after a successful deploy.**
 `www/current` is a symlink — check it points at the new sha and that
 `state/built-sha` updated. A deploy killed mid-swap can't leave a gap (the
