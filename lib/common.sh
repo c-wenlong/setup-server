@@ -98,45 +98,59 @@ wait_http() {
   return 1
 }
 
-# ts_serve_publish HTTPS_PORT TARGET: publish TARGET (usually
-# http://127.0.0.1:<port>) tailnet-only on HTTPS_PORT. Never steals the
-# port: when `serve status` shows HTTPS_PORT's / handlers already proxy to
-# a different target — a deliberate repoint like the design-systems →
-# Studio cutover — it warns and leaves the mapping alone. A port that is
-# free or already ours is republished as before (Serve replaces the
-# mapping), and an unreadable status counts as no evidence.
-# On Linux a first publish failure is usually tailscaled refusing a
-# non-operator, so it grants operator rights once via sudo. If Serve still
-# fails it is the one-time enablement link: Tailscale prints it, we wait
-# for Enter and retry. Needs OS and TAILSCALE.
-ts_serve_publish() {
-  local https_port="$1" target="$2" status verdict
-  status="$("$TAILSCALE" serve status 2>/dev/null)" || status=""
-  if [ -n "$status" ]; then
-    verdict="$(printf '%s\n' "$status" | awk -v want=":$https_port" -v t="$target" '
-      index($0, "https://") == 1 {
+# ts_serve_foreign HTTPS_PORT TARGET: 0 when `serve status` shows a /
+# handler on HTTPS_PORT proxying anywhere but TARGET — a deliberate repoint
+# (like the design-systems → Studio cutover on :8108) that a publish must
+# not steal — and 1 otherwise, including an unreadable status, which is no
+# evidence and lets the publish go ahead. Needs TAILSCALE.
+ts_serve_foreign() {
+  local https_port="$1" target="$2" status
+  status="$("$TAILSCALE" serve status 2>/dev/null)" || return 1
+  [ -n "$status" ] || return 1
+  [ "$(printf '%s\n' "$status" | awk -v want=":$https_port" -v t="$target" '
+    /^[A-Za-z][A-Za-z0-9+.-]*:\/\// {
+      inport = 0
+      if (index($0, "https://") == 1) {
         u = $1; sub(/\/$/, "", u)
         p = match(u, /:[0-9]+$/) ? substr(u, RSTART) : ":443"
         inport = (p == want)
-        next
       }
-      inport && $2 == "/" { n++; if (/ proxy / && $NF == t) mine++ }
-      END {
-        if (n == 0)          print "free"
-        else if (mine == n)  print "ours"
-        else                 print "foreign"
-      }')"
-    if [ "$verdict" = "foreign" ]; then
-      warn "HTTPS :$https_port already proxies to a different target — leaving it alone. To hand the port to this service: $TAILSCALE serve --https=$https_port off, then re-run."
-      return 0
-    fi
+      next
+    }
+    inport && $2 == "/" { if (!(/ proxy / && $NF == t)) bad = 1 }
+    END { print bad ? "foreign" : "clean" }')" = "foreign" ]
+}
+
+# ts_serve_publish HTTPS_PORT TARGET: publish TARGET (usually
+# http://127.0.0.1:<port>) tailnet-only on HTTPS_PORT. Never steals the
+# port: when ts_serve_foreign sees / handlers proxying elsewhere it warns
+# and leaves the mapping alone; a port that is free or already ours is
+# republished as before (Serve replaces the mapping).
+# On Linux a first publish failure is usually tailscaled refusing a
+# non-operator, so it grants operator rights once via sudo. If Serve still
+# fails it is the one-time enablement link: Tailscale prints it, we wait
+# for Enter and retry — and re-check ownership before every attempt, since
+# the wait is long enough for someone else to repoint the port meanwhile.
+# Needs OS and TAILSCALE.
+ts_serve_publish() {
+  local https_port="$1" target="$2"
+  if ts_serve_foreign "$https_port" "$target"; then
+    warn "HTTPS :$https_port already proxies to a different target — leaving it alone. To hand the port to this service: $TAILSCALE serve --https=$https_port off, then re-run."
+    return 0
   fi
   if ! "$TAILSCALE" serve --bg --https="$https_port" "$target" >/dev/null 2>&1; then
     if [ "$OS" = "Linux" ]; then
       info "Direct serve failed — trying operator grant (needs sudo, one time)"
       sudo tailscale set --operator="$USER"
     fi
-    until "$TAILSCALE" serve --bg --https="$https_port" "$target"; do
+    while :; do
+      if ts_serve_foreign "$https_port" "$target"; then
+        warn "HTTPS :$https_port was repointed while we waited — leaving it alone."
+        return 0
+      fi
+      if "$TAILSCALE" serve --bg --https="$https_port" "$target"; then
+        break
+      fi
       echo
       info "If Tailscale printed an approval URL above, open it, approve, then press Enter to retry."
       read -r || die "cannot read approval confirmation (stdin closed or no TTY) — re-run setup.sh in a terminal to approve Tailscale Serve"

@@ -59,7 +59,16 @@ ENV_FILE="$SERVICE_DIR/.env"
 # target and resume auto-deploys, undoing either, so refuse while the
 # flag stands. bin/deploy.sh (rebuild only, publishes nothing) still
 # runs meanwhile.
-DEPLOYD_FLAG="$HOME/services/deployd/state/design-systems.disabled"
+# The flag lives at $SERVICE_HOME/state — deployd's home can be moved via
+# services/deployd/.env (written %q-escaped), so read it rather than
+# guessing the default.
+DEPLOYD_STATE="$HOME/services/deployd/state"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  raw="$(sed -n 's/^ *SERVICE_HOME=//p' "$SERVICE_DIR/../deployd/.env" | tail -1)"
+  raw="$(printf '%s' "$raw" | sed 's/\\\(.\)/\1/g')"
+  [ -n "$raw" ] && DEPLOYD_STATE="$raw/state"
+fi
+DEPLOYD_FLAG="$DEPLOYD_STATE/design-systems.disabled"
 [ ! -f "$DEPLOYD_FLAG" ] || die "design-systems is paused: $DEPLOYD_FLAG exists (written by teardown.sh or the Studio cutover). Refusing to resume auto-deploys and republish :$HTTPS_PORT. To bring the service back: rm $DEPLOYD_FLAG, then re-run ./setup.sh"
 
 # A re-run (e.g. under deployd, whose PATH is minimal) finds tools where

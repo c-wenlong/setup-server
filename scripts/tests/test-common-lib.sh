@@ -60,7 +60,12 @@ setup() {
           fi ;;
   serve)  if [ "${2:-}" = "status" ]; then
             [ -z "${FAKE_SERVE_STATUS_FAILS:-}" ] || exit 1
-            printf "%s" "${FAKE_SERVE_STATUS:-}"
+            sn=$(cat "'"$SB"'/status_n" 2>/dev/null || echo 0); sn=$((sn + 1)); echo "$sn" > "'"$SB"'/status_n"
+            if [ -n "${FAKE_SERVE_STATUS_LATE:-}" ] && [ "$sn" -gt 1 ]; then
+              printf "%s" "$FAKE_SERVE_STATUS_LATE"
+            else
+              printf "%s" "${FAKE_SERVE_STATUS:-}"
+            fi
             exit 0
           fi
           n=$(cat "'"$SB"'/serve_n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SB"'/serve_n"
@@ -73,7 +78,7 @@ esac'
   stub curl 'n=$(cat "'"$SB"'/curl_n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SB"'/curl_n"
 [ "$n" -gt "${FAKE_CURL_FAILS:-0}" ]'
 }
-teardown() { rm -rf "$SB"; unset FAKE_OS FAKE_UID FAKE_TS_STATE FAKE_TS_NO_DNS FAKE_TS_STATUS_FAILS FAKE_SERVE_FAILS FAKE_SERVE_STATUS FAKE_SERVE_STATUS_FAILS FAKE_DOCKER_DOWN FAKE_NO_COMPOSE FAKE_CURL_FAILS; }
+teardown() { rm -rf "$SB"; unset FAKE_OS FAKE_UID FAKE_TS_STATE FAKE_TS_NO_DNS FAKE_TS_STATUS_FAILS FAKE_SERVE_FAILS FAKE_SERVE_STATUS FAKE_SERVE_STATUS_FAILS FAKE_SERVE_STATUS_LATE FAKE_DOCKER_DOWN FAKE_NO_COMPOSE FAKE_CURL_FAILS; }
 
 # lib 'commands': source the lib in a fresh bash under the stubs, run the
 # commands, capture stdout+stderr in OUT and the status in CODE.
@@ -237,6 +242,24 @@ FAKE_SERVE_STATUS='https://box.tail1.ts.net:9443 (tailnet only)
 |-- / proxy http://127.0.0.1:9999
 ' lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'
 check "unrelated port mapped: publishes"   calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8081"
+teardown
+setup
+FAKE_SERVE_STATUS='https://box.tail1.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8081
+
+http://box.tail1.ts.net:8080 (tailnet only)
+|-- / proxy http://127.0.0.1:9999
+' lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'
+check "http block after ours: republishes" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8081"
+teardown
+setup
+FAKE_SERVE_FAILS=1 \
+FAKE_SERVE_STATUS_LATE='https://box.tail1.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:9999
+' lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'
+check "repointed mid-wait: stops"          out_has "repointed while we waited"
+check "  exits zero"                       [ "$CODE" -eq 0 ]
+check "  no second publish"                [ "$(grep -c 'serve --bg' "$SB/calls.log")" -eq 1 ]
 teardown
 setup
 FAKE_SERVE_STATUS_FAILS=1 lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'

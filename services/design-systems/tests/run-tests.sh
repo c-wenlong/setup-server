@@ -271,6 +271,21 @@ test_deployd_disabled_flag() {
   teardown
 }
 
+test_deployd_custom_home_flag() {
+  echo "• the pause flag is found under a custom deployd SERVICE_HOME too"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/deployd" "$HOME/deployd home/state"
+  printf 'SERVICE_HOME=%s\n' "$HOME/deployd\\ home" > "$SANDBOX/repo/services/deployd/.env"
+  touch "$HOME/deployd home/state/design-systems.disabled"
+  run_deploy
+  check "re-setup refused"        [ "$CODE" -ne 0 ]
+  check "  says why"              out_has "design-systems is paused"
+  check "  names the flag"        out_has "$HOME/deployd home/state/design-systems.disabled"
+  check "  flag kept"             [ -f "$HOME/deployd home/state/design-systems.disabled" ]
+  teardown
+}
+
 test_serve_port_owned_elsewhere() {
   echo "• a :HTTPS_PORT already proxying to a different target is not taken over"
   setup
@@ -1465,6 +1480,7 @@ test_fresh_deploy
 test_legacy_poller_removed
 test_legacy_poller_kept_without_deployd
 test_deployd_disabled_flag
+test_deployd_custom_home_flag
 test_serve_port_owned_elsewhere
 test_deploy_sha_mismatch
 test_path_restored_from_env
