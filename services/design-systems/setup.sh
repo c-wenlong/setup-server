@@ -52,10 +52,34 @@ ENV_FILE="$SERVICE_DIR/.env"
 # shellcheck source=../../lib/common.sh
 . "$SERVICE_DIR/../../lib/common.sh"
 
-# A manual ./setup.sh re-installs the service: clear deployd's disabled
-# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
-# never invokes this while the flag is set, so clearing is always manual.
-rm -f "$HOME/services/deployd/state/design-systems.disabled"
+# A parked service stays parked. deployd's disabled flag means the
+# service was taken out of rotation on purpose: teardown.sh writes it so
+# a removed service stays down, and the Studio cutover wrote it so this
+# stack stops owning :HTTPS_PORT. A re-run would republish the old serve
+# target and resume auto-deploys, undoing either, so refuse while the
+# flag stands. bin/deploy.sh (rebuild only, publishes nothing) still
+# runs meanwhile.
+# The flag lives at $SERVICE_HOME/state — deployd's home can be moved via
+# services/deployd/.env (written %q-escaped), so read it rather than
+# guessing the default.
+DEPLOYD_STATE="$HOME/services/deployd/state"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  raw="$(sed -n 's/^ *SERVICE_HOME=//p' "$SERVICE_DIR/../deployd/.env" | tail -1)"
+  # Decode like ghapp.py's shlex.split: a surrounding quote pair comes off
+  # whole, then %q backslash escapes resolve to their literals.
+  case "$raw" in
+    \"*\"|\'*\') raw="${raw#?}"; raw="${raw%?}" ;;
+  esac
+  raw="$(printf '%s' "$raw" | sed 's/\\\(.\)/\1/g')"
+  [ -n "$raw" ] && DEPLOYD_STATE="$raw/state"
+fi
+# A flag parked under the default home before deployd's home moved — or by
+# an older teardown that did not resolve the custom home — still holds.
+DEPLOYD_FLAG=""
+for f in "$DEPLOYD_STATE/design-systems.disabled" "$HOME/services/deployd/state/design-systems.disabled"; do
+  if [ -f "$f" ]; then DEPLOYD_FLAG="$f"; break; fi
+done
+[ -z "$DEPLOYD_FLAG" ] || die "design-systems is paused: $DEPLOYD_FLAG exists (written by teardown.sh or the Studio cutover). Refusing to resume auto-deploys and republish :$HTTPS_PORT. To bring the service back: rm $DEPLOYD_FLAG, then re-run ./setup.sh"
 
 # A re-run (e.g. under deployd, whose PATH is minimal) finds tools where
 # the first install recorded them in .env — put those dirs on PATH first.

@@ -251,7 +251,7 @@ test_legacy_poller_kept_without_deployd() {
 }
 
 test_deployd_disabled_flag() {
-  echo "• teardown marks deployd disabled; a manual setup clears the flag"
+  echo "• teardown marks deployd disabled; setup refuses while the flag stands"
   setup
   touch "$STATE_DIR/operator"
   fake_deployd
@@ -259,9 +259,72 @@ test_deployd_disabled_flag() {
   run_teardown
   check "teardown exits zero"     [ "$CODE" -eq 0 ]
   check "disabled flag written"   [ -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  : > "$CALLS_LOG"
   run_deploy
-  check "re-setup exits zero"     [ "$CODE" -eq 0 ]
-  check "disabled flag cleared"   [ ! -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  check "re-setup refused"        [ "$CODE" -ne 0 ]
+  check "  says why"              out_has "design-systems is paused"
+  check "  flag kept"             [ -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  check "  nothing republished"   no_call "serve --bg"
+  rm -f "$HOME/services/deployd/state/design-systems.disabled"
+  run_deploy
+  check "setup after rm runs"     [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_deployd_custom_home_flag() {
+  echo "• the pause flag is honored under a custom deployd SERVICE_HOME, and under the default one it may predate"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  mkdir -p "$SANDBOX/repo/services/deployd" "$HOME/deployd home/state"
+  printf 'SERVICE_HOME=%s\n' "$HOME/deployd\\ home" > "$SANDBOX/repo/services/deployd/.env"
+  touch "$HOME/deployd home/state/design-systems.disabled"
+  run_deploy
+  check "custom-home flag: refused" [ "$CODE" -ne 0 ]
+  check "  says why"                out_has "design-systems is paused"
+  check "  names the flag"          out_has "$HOME/deployd home/state/design-systems.disabled"
+  check "  flag kept"               [ -f "$HOME/deployd home/state/design-systems.disabled" ]
+  rm -f "$HOME/deployd home/state/design-systems.disabled"
+  touch "$HOME/services/deployd/state/design-systems.disabled"
+  run_deploy
+  check "flag left at the default home: still refused" [ "$CODE" -ne 0 ]
+  check "  names that flag"         out_has "$HOME/services/deployd/state/design-systems.disabled"
+  rm -f "$HOME/services/deployd/state/design-systems.disabled"
+  printf 'SERVICE_HOME="%s"\n' "$HOME/deployd home" > "$SANDBOX/repo/services/deployd/.env"
+  touch "$HOME/deployd home/state/design-systems.disabled"
+  run_deploy
+  check "quoted SERVICE_HOME: refused" [ "$CODE" -ne 0 ]
+  teardown
+}
+
+test_teardown_flag_custom_home() {
+  echo "• teardown parks the service in deployd's real state dir, custom home included"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  mkdir -p "$SANDBOX/repo/services/deployd" "$HOME/deployd home/state"
+  printf 'SERVICE_HOME=%s\n' "$HOME/deployd\\ home" > "$SANDBOX/repo/services/deployd/.env"
+  run_deploy
+  run_teardown
+  check "teardown exits zero"        [ "$CODE" -eq 0 ]
+  check "flag at the custom home"    [ -f "$HOME/deployd home/state/design-systems.disabled" ]
+  check "  not the default dir"      [ ! -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  run_deploy
+  check "re-setup still refused"     [ "$CODE" -ne 0 ]
+  check "  says why"                 out_has "design-systems is paused"
+  teardown
+}
+
+test_serve_port_owned_elsewhere() {
+  echo "• a :HTTPS_PORT already proxying to a different target is not taken over"
+  setup
+  touch "$STATE_DIR/operator"
+  printf 'https://test-host.tailfake.ts.net:8108 (tailnet only)\n|-- / proxy http://127.0.0.1:8845\n' \
+    > "$STATE_DIR/serve_status"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "no publish attempted"    no_call "serve --bg"
+  check "warns it left it alone"  out_has "different target"
   teardown
 }
 
@@ -1446,6 +1509,9 @@ test_fresh_deploy
 test_legacy_poller_removed
 test_legacy_poller_kept_without_deployd
 test_deployd_disabled_flag
+test_deployd_custom_home_flag
+test_teardown_flag_custom_home
+test_serve_port_owned_elsewhere
 test_deploy_sha_mismatch
 test_path_restored_from_env
 test_release_perms_normalised

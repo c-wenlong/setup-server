@@ -5,6 +5,10 @@
 #   serve_fails_left    — countdown of forced serve failures (approval-link flow)
 echo "tailscale $*" >> "$CALLS_LOG"
 
+# `serve status`: nothing is published in the sandbox — answer before the
+# gate, like the real daemon answers status reads for any user.
+[ "$1" = "serve" ] && [ "${2:-}" = "status" ] && exit 0
+
 case "$1" in
   status)
     state="Running"

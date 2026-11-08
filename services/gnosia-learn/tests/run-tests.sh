@@ -912,7 +912,7 @@ test_serve_approval_pause() {
   run_deploy
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "explained the pause"   out_has "approval URL"
-  check "serve retried to 3"    sh -c '[ "$(grep -c "tailscale serve" "$CALLS_LOG")" -eq 3 ]'
+  check "serve retried to 3"    sh -c '[ "$(grep -c "tailscale serve --bg" "$CALLS_LOG")" -eq 3 ]'
   teardown
 }
 

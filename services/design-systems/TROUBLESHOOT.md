@@ -55,6 +55,15 @@ appearing in `tailscale serve status` proves nothing about the site.
 - `another deploy is running — skipping` on every run → stale lock from a
   killed build; it self-clears after 60 min, or immediately:
   `rmdir ~/services/design-systems/.deploy.lock`.
+- `setup.sh` dies with `design-systems is paused` →
+  `~/services/deployd/state/design-systems.disabled` exists: teardown.sh
+  wrote it so a removed service stays removed, and the Studio cutover
+  wrote it so this legacy stack stops owning `:8108`. The refusal is the
+  point — a re-run would republish the old target and resume auto-deploys.
+  To bring the service back anyway: `rm` the flag, then re-run setup.sh
+  (if `:8108` now serves something else, free it first with
+  `tailscale serve --https=8108 off`). `bin/deploy.sh` still runs while
+  paused — it rebuilds and restarts without touching Serve.
 
 **Build fails (site keeps serving the old version — that's by design).**
 Run it by hand to see the full error:
@@ -225,10 +234,12 @@ cp -a ~/services/design-systems/media ~/design-systems-media.bak       # optiona
 cp ~/services/design-systems/nginx.conf ~/design-systems-nginx.conf.bak # optional
 cd ~/dev/setup-server/services/design-systems
 ./teardown.sh --purge
+rm ~/services/deployd/state/design-systems.disabled   # teardown parks auto-deploy; release it
 ./setup.sh
 ```
 Without `--purge`, `./teardown.sh` only unpublishes, stops any legacy poller and
-the container, and keeps everything else, so `./setup.sh` brings it back as
+the container, and keeps everything else — it still writes the disabled
+flag, so remove it first and `./setup.sh` brings the service back as
 it was. The source of truth is the git repo at `~/dev/design-systems` (and
 GitHub), which this never writes to beyond the repo's own gitignored build
 outputs.

@@ -442,18 +442,31 @@ EOF
 fi
 
 # Tell deployd not to resurrect this on the next push: the flag lives in
-# deployd's own state dir so it survives --purge too. Re-run ./setup.sh to
-# clear it and re-enable auto-deploy.
-if [ -d "$HOME/services/deployd/state" ]; then
-  touch "$HOME/services/deployd/state/$NAME.disabled"
-  ok "deployd will skip $NAME until its setup.sh runs again"
+# deployd's own state dir so it survives --purge too. Its home can move via
+# services/deployd/.env, so resolve it exactly like setup.sh does (keep the
+# two in step) or the flag and the check would diverge. While it stands,
+# setup.sh refuses to run — remove it by hand to bring the service back.
+DEPLOYD_STATE="$HOME/services/deployd/state"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  raw="$(sed -n 's/^ *SERVICE_HOME=//p' "$SERVICE_DIR/../deployd/.env" | tail -1)"
+  # Decode like ghapp.py's shlex.split: a surrounding quote pair comes off
+  # whole, then %q backslash escapes resolve to their literals.
+  case "$raw" in
+    \"*\"|\'*\') raw="${raw#?}"; raw="${raw%?}" ;;
+  esac
+  raw="$(printf '%s' "$raw" | sed 's/\\\(.\)/\1/g')"
+  [ -n "$raw" ] && DEPLOYD_STATE="$raw/state"
+fi
+if [ -d "$DEPLOYD_STATE" ]; then
+  touch "$DEPLOYD_STATE/$NAME.disabled"
+  ok "deployd will skip $NAME until $NAME.disabled is removed and setup.sh re-runs"
 fi
 
 echo
 if [ "$PURGE" -eq 1 ]; then
-  printf '\033[1;32mDone.\033[0m %s is removed and its state is gone. Your clone at %s is untouched; ./setup.sh starts fresh.\n' "$NAME" "$SOURCE_REPO"
+  printf '\033[1;32mDone.\033[0m %s is removed and its state is gone. Your clone at %s is untouched; remove the deployd disabled flag, then ./setup.sh starts fresh.\n' "$NAME" "$SOURCE_REPO"
 else
-  printf '\033[1;32mDone.\033[0m %s is removed. Built site, media, unit files and .env are kept; ./setup.sh brings it back.\n' "$NAME"
+  printf '\033[1;32mDone.\033[0m %s is removed. Built site, media, unit files and .env are kept; remove the deployd disabled flag, then ./setup.sh brings it back.\n' "$NAME"
   echo "  Delete that state too: ./teardown.sh --purge"
 fi
 echo "  Uptime Kuma will now report it down. The launcher's Remove pauses that"
