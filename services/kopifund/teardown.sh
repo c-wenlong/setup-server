@@ -5,7 +5,7 @@
 # The inverse of setup.sh's run + publish + timer, and nothing more:
 #   1. unpublish the Tailscale Serve ports that point at THIS service, found
 #      from `tailscale serve status` (never `serve reset`)
-#   2. stop the sync timer and remove its unit/LaunchAgent
+#   2. stop the sync + analyse timers and remove their units/LaunchAgents
 #   3. `docker compose down` — the container and its network go
 #   4. write deployd's state/kopifund.disabled so the next upstream commit
 #      does not resurrect the service (a manual ./setup.sh clears it)
@@ -15,8 +15,8 @@
 # The data folder ~/.kopifund is NEVER deleted, not even by --purge: it is
 # an unlocked git-crypt clone of kopifund-hub shared with the Mac — the
 # upstream remote IS the backup. --purge deletes only ~/services/kopifund
-# (the source clone, sync script, state) and .env. If the data folder must
-# go too, that is a separate, deliberate `rm -rf ~/.kopifund`.
+# (the source clone, sync + analyse scripts, state) and .env. If the data
+# folder must go too, that is a separate, deliberate `rm -rf ~/.kopifund`.
 #
 # Usage:
 #   ./teardown.sh            # safe remove: everything restorable kept
@@ -256,18 +256,23 @@ elif [ "$unpublished" -eq 0 ]; then
   ok "Nothing on Tailscale Serve points at $TARGET (already off)"
 fi
 
-# ------------------------------------------------------------- sync timer
-info "Stopping the sync timer"
+# --------------------------------------------------------------- timers
+info "Stopping the sync + analyse timers"
 if [ "$OS" = "Linux" ]; then
   systemctl --user disable --now kopifund-sync.timer >/dev/null 2>&1 || true
+  systemctl --user disable --now kopifund-analyse.timer >/dev/null 2>&1 || true
   rm -f "$HOME/.config/systemd/user/kopifund-sync.timer" \
-        "$HOME/.config/systemd/user/kopifund-sync.service"
+        "$HOME/.config/systemd/user/kopifund-sync.service" \
+        "$HOME/.config/systemd/user/kopifund-analyse.timer" \
+        "$HOME/.config/systemd/user/kopifund-analyse.service"
   systemctl --user daemon-reload >/dev/null 2>&1 || true
-  ok "Timer removed (systemd user)"
+  ok "Timers removed (systemd user)"
 else
   launchctl bootout "gui/$(id -u)/com.kopifund.sync" >/dev/null 2>&1 || true
-  rm -f "$HOME/Library/LaunchAgents/com.kopifund.sync.plist"
-  ok "LaunchAgent removed (com.kopifund.sync)"
+  launchctl bootout "gui/$(id -u)/com.kopifund.analyse" >/dev/null 2>&1 || true
+  rm -f "$HOME/Library/LaunchAgents/com.kopifund.sync.plist" \
+        "$HOME/Library/LaunchAgents/com.kopifund.analyse.plist"
+  ok "LaunchAgents removed (com.kopifund.sync, com.kopifund.analyse)"
 fi
 
 # ---------------------------------------------------------------- stop
