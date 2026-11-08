@@ -2,6 +2,8 @@
 # docker stub. State in $STATE_DIR:
 #   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
 #   docker_containers  — one container name per line, printed by `docker ps`
+#   running_<name>     — exists => `inspect -f {{.State.Running}} <name>` says true
+#   exec_fails         — exists => `docker exec` exits 1 (analyse failed)
 #   compose_up / compose_down / compose_pull — touched by compose verbs
 echo "docker $*" >> "$CALLS_LOG"
 
@@ -22,10 +24,20 @@ case "$1" in
     ;;
 
   inspect)
+    # docker inspect -f '{{.State.Running}}' <name> — "true" only when the
+    # test marked that container running; otherwise behave like docker
+    # does on a missing/stopped one (false/absent + non-zero).
+    if [ "${2:-}" = "-f" ]; then
+      if [ -f "$STATE_DIR/running_${4:-}" ]; then echo true; exit 0; fi
+      echo false; exit 1
+    fi
     echo running
     ;;
 
   exec)
+    # docker exec <container> <cmd> — the stats rebuild; exec_fails turns
+    # it into the failure the timer must report.
+    [ -f "$STATE_DIR/exec_fails" ] && exit 1
     ;;
 
   compose)

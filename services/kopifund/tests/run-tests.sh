@@ -58,7 +58,7 @@ setup() {
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/sync.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/sync.sh" "$SERVICE_DIR/analyse.sh" "$SERVICE_DIR/docker-compose.yml" "$SVC/"
 
   # The two private repos, as local file:// remotes. UPSTREAM is the app
   # source (needs a Dockerfile for the compose build context check); HUB is
@@ -95,6 +95,11 @@ run_deploy() {
 
 run_sync() {
   OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/kopifund/bin/sync.sh" 2>&1)"
+  CODE=$?
+}
+
+run_analyse() {
+  OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/kopifund/bin/analyse.sh" 2>&1)"
   CODE=$?
 }
 
@@ -203,9 +208,26 @@ test_preflight_repo_unreachable() {
 test_preflight_no_gitcrypt() {
   echo "• preflight fails without git-crypt"
   setup
-  local stubs2="$SANDBOX/stubs2"
-  mkdir -p "$stubs2"; cp "$STUBS"/* "$stubs2/"; rm "$stubs2/git-crypt"
-  OUT="$(PATH="$stubs2:$PATH" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  # "Not installed" can't come from removing the stub — the real binary
+  # would still answer (this box needs it for the deploy). So the PATH is
+  # stubs + a farm of symlinks to every real binary EXCEPT git-crypt:
+  # command -v then fails for it on any machine, wherever it is installed.
+  local stubs2="$SANDBOX/stubs2" binfarm="$SANDBOX/binfarm"
+  mkdir -p "$stubs2" "$binfarm"; cp "$STUBS"/* "$stubs2/"; rm "$stubs2/git-crypt"
+  local d f n
+  local OLDIFS="$IFS"; IFS=:
+  for d in $PATH; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      [ -f "$f" ] && [ -x "$f" ] || continue
+      n="${f##*/}"
+      case "$n" in git-crypt) continue ;; esac
+      [ -e "$STUBS/$n" ] && continue     # stubbed names stay stubbed
+      [ -e "$binfarm/$n" ] || ln -s "$f" "$binfarm/$n" 2>/dev/null || true
+    done
+  done
+  IFS="$OLDIFS"
+  OUT="$(PATH="$stubs2:$binfarm" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
   check "exits non-zero"            [ "$CODE" -ne 0 ]
   check "names the install"         out_has "git-crypt is required"
   check "wrote no .env"             [ ! -f "$SVC/.env" ]
@@ -249,6 +271,9 @@ test_fresh_deploy() {
   check "git-crypt unlock ran"            calls_have "git-crypt unlock"
   check "sync.sh installed + executable"  [ -x "$HOME/services/kopifund/bin/sync.sh" ]
   check "sync.sh baked the .env path"     grep -qF "ENV_FILE=\"$SVC/.env\"" "$HOME/services/kopifund/bin/sync.sh"
+  check "analyse.sh installed + exec"     [ -x "$HOME/services/kopifund/bin/analyse.sh" ]
+  check "analyse.sh baked the .env path"  grep -qF "ENV_FILE=\"$SVC/.env\"" "$HOME/services/kopifund/bin/analyse.sh"
+  check ".env records analyse cadence"    grep -qx 'ANALYSE_SECONDS=86400' "$SVC/.env"
   check "compose binds loopback"          compose_hasF '127.0.0.1:${LOCAL_PORT'
   check "compose mounts the data clone"   compose_hasF '${KOPIFUND_DATA'
   check "compose publishes no wildcard"   no_host_wildcard_port
@@ -259,11 +284,38 @@ test_fresh_deploy() {
   if [ "$OS" = "Linux" ]; then
     check "timer unit written"            [ -f "$HOME/.config/systemd/user/kopifund-sync.timer" ]
     check "timer enabled"                 [ -f "$STATE_DIR/kopifund-sync_enabled" ]
+    check "analyse units written"         [ -f "$HOME/.config/systemd/user/kopifund-analyse.timer" ] && [ -f "$HOME/.config/systemd/user/kopifund-analyse.service" ]
+    check "analyse timer enabled"         [ -f "$STATE_DIR/kopifund-analyse_enabled" ]
+    check "analyse cadence in unit"       grep -q 'OnUnitActiveSec=86400s' "$HOME/.config/systemd/user/kopifund-analyse.timer"
     check "no sudo (linger already on)"   no_call "^sudo "
   else
     check "LaunchAgent written"           [ -f "$HOME/Library/LaunchAgents/com.kopifund.sync.plist" ]
     check "plist carries the interval"    grep -q '<integer>300</integer>' "$HOME/Library/LaunchAgents/com.kopifund.sync.plist"
+    check "analyse LaunchAgent written"   [ -f "$HOME/Library/LaunchAgents/com.kopifund.analyse.plist" ]
+    check "analyse plist interval"        grep -q '<integer>86400</integer>' "$HOME/Library/LaunchAgents/com.kopifund.analyse.plist"
   fi
+  teardown
+}
+
+test_analyse_script() {
+  echo "• analyse: quiet skip when the container is down, runs inside it when up"
+  setup
+  run_deploy
+  check "deploy ok"                    [ "$CODE" -eq 0 ]
+  check "deploy ran no exec (down)"    no_call "docker exec"
+  : > "$CALLS_LOG"
+  run_analyse
+  check "container down: exits zero"   [ "$CODE" -eq 0 ]
+  check "container down: no exec call" no_call "docker exec"
+  touch "$STATE_DIR/running_kopifund"
+  run_analyse
+  check "container up: exits zero"     [ "$CODE" -eq 0 ]
+  check "analyse ran in the container" calls_have "docker exec -w /app kopifund python3 server/finance.py analyse --no-publish"
+  check "says refreshed"               out_has "stats refreshed"
+  touch "$STATE_DIR/exec_fails"
+  run_analyse
+  check "analyse fails: non-zero"      [ "$CODE" -ne 0 ]
+  check "analyse fails: says so"       out_has "analyse failed"
   teardown
 }
 
@@ -316,20 +368,71 @@ test_legacy_adoption() {
 }
 
 test_legacy_not_adopted_when_hub_newer() {
-  echo "• adoption is skipped when the hub clone's db is newer"
+  echo "• the clone's ledger is kept when the launcher's is older"
   setup
   run_deploy
   check "deploy ok" [ "$CODE" -eq 0 ]
   legacy="$HOME/services/apps/kopifund-finance/data"
-  mkdir -p "$legacy"
+  mkdir -p "$legacy/notes"
   echo "old-db" > "$legacy/kopifund.db"
   touch -d '1970-01-01' "$legacy/kopifund.db" 2>/dev/null \
     || touch -t 197001010000 "$legacy/kopifund.db"
+  echo "legacy-only" > "$legacy/notes/extra.txt"
   rm -f "$HOME/services/kopifund/state/legacy-adopted"
   run_deploy
   check "re-run exits zero"         [ "$CODE" -eq 0 ]
   check "hub db not regressed"      not grep -qx "old-db" "$HOME/.kopifund/kopifund.db"
-  check "warned it skipped"         out_has "not adopting"
+  check "warned it kept the clone's" out_has "Kept the clone's ledger"
+  check "files still merge"         grep -qx "legacy-only" "$HOME/.kopifund/notes/extra.txt"
+  teardown
+}
+
+test_legacy_adoption_richer_db() {
+  echo "• adoption: a richer legacy ledger wins by txn count, files still don't clobber"
+  command -v python3 >/dev/null || { echo "    (skipped — no python3)"; return; }
+  setup
+  # Both sides real records: the clone's has 2 transactions, the launcher
+  # app's 5 — time alone would never say which to keep; the count does.
+  mk_txn_db "$SANDBOX/work-kopifund-hub/kopifund.db" 2
+  printf 'hub-config\n' > "$SANDBOX/work-kopifund-hub/config.toml"
+  env $GIT_ENV git -C "$SANDBOX/work-kopifund-hub" commit -qam "hub snapshot"
+  git -C "$SANDBOX/work-kopifund-hub" push -q "$SANDBOX/kopifund-hub.git" main
+  legacy="$HOME/services/apps/kopifund-finance/data"
+  mkdir -p "$legacy/notes"
+  mk_txn_db "$legacy/kopifund.db" 5
+  printf 'wal-bytes\n' > "$legacy/kopifund.db-wal"
+  printf 'legacy-config\n' > "$legacy/config.toml"
+  printf 'legacy-only\n' > "$legacy/notes/extra.txt"
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "richer db adopted"             [ "$(txns_in "$HOME/.kopifund/kopifund.db")" = "5" ]
+  check "its -wal came along"           grep -qx "wal-bytes" "$HOME/.kopifund/kopifund.db-wal"
+  check "says why it took the db"       out_has "5 transactions vs the clone's 2"
+  check "clone's config kept"           grep -qx "hub-config" "$HOME/.kopifund/config.toml"
+  check "legacy-only file merged"       grep -qx "legacy-only" "$HOME/.kopifund/notes/extra.txt"
+  teardown
+}
+
+test_legacy_adoption_poorer_db() {
+  echo "• adoption: the clone's richer ledger is never overwritten"
+  command -v python3 >/dev/null || { echo "    (skipped — no python3)"; return; }
+  setup
+  # The real regression: the launcher's near-empty record looked newer by
+  # mtime but held nothing — the count is what must keep it out.
+  mk_txn_db "$SANDBOX/work-kopifund-hub/kopifund.db" 5
+  env $GIT_ENV git -C "$SANDBOX/work-kopifund-hub" commit -qam "hub snapshot"
+  git -C "$SANDBOX/work-kopifund-hub" push -q "$SANDBOX/kopifund-hub.git" main
+  legacy="$HOME/services/apps/kopifund-finance/data"
+  mkdir -p "$legacy/notes"
+  mk_txn_db "$legacy/kopifund.db" 2
+  printf 'stray-wal\n' > "$legacy/kopifund.db-wal"
+  printf 'legacy-only\n' > "$legacy/notes/extra.txt"
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "clone's db kept"               [ "$(txns_in "$HOME/.kopifund/kopifund.db")" = "5" ]
+  check "warned it kept the clone's"    out_has "Kept the clone's ledger"
+  check "legacy files still merge"      grep -qx "legacy-only" "$HOME/.kopifund/notes/extra.txt"
+  check "stray -wal not left beside db" [ ! -f "$HOME/.kopifund/kopifund.db-wal" ]
   teardown
 }
 
@@ -540,6 +643,30 @@ print(con.execute("SELECT v FROM ledger").fetchone()[0])
 PY
 }
 
+# A kopifund-shaped record: the real txn table with $2 rows — what the
+# adoption check counts (plain journal mode; no sidecars). rm first: the
+# path may hold a seed's plain text, which is not a db at all.
+mk_txn_db() {
+  rm -f "$1"
+  DB_PATH="$1" DB_N="$2" python3 - <<'PY'
+import os, sqlite3
+con = sqlite3.connect(os.environ["DB_PATH"])
+con.execute("CREATE TABLE txn (v INTEGER)")
+con.executemany("INSERT INTO txn VALUES (?)", [(i,) for i in range(int(os.environ["DB_N"]))])
+con.commit(); con.close()
+PY
+}
+txns_in() {  # prints the txn row count of a real record; read-only so the
+             # probe does not checkpoint away a stray -wal the next check wants
+  python3 - "$1" <<'PY'
+import sqlite3, sys
+from urllib.parse import quote
+db = sqlite3.connect("file:%s?mode=ro" % quote(sys.argv[1]), uri=True)
+print(db.execute("SELECT count(*) FROM txn").fetchone()[0])
+db.close()
+PY
+}
+
 test_sync_diverged_sqlite() {
   echo "• sync: real sqlite dbs (WAL, live-writer state) merge intact"
   command -v python3 >/dev/null || { echo "    (skipped — no python3)"; return; }
@@ -645,6 +772,9 @@ test_teardown_safe() {
   check "service home kept"           [ -d "$HOME/services/kopifund/repo" ]
   check ".env kept"                   [ -f "$SVC/.env" ]
   check "timer disabled"              [ ! -f "$STATE_DIR/kopifund-sync_enabled" ] || [ "$OS" != "Linux" ]
+  check "analyse timer disabled"      [ ! -f "$STATE_DIR/kopifund-analyse_enabled" ] || [ "$OS" != "Linux" ]
+  check "analyse units removed"       [ ! -f "$HOME/.config/systemd/user/kopifund-analyse.timer" ] || [ "$OS" != "Linux" ]
+  check "analyse plist removed"       [ ! -f "$HOME/Library/LaunchAgents/com.kopifund.analyse.plist" ] || [ "$OS" = "Linux" ]
   check "deployd skip marker written" [ -f "$HOME/services/deployd/state/kopifund.disabled" ]
   check "says how to bring it back"   out_has "./setup.sh brings it back"
   run_deploy
@@ -805,10 +935,13 @@ test_live() {
   live_check "source clone present"          sh -c "test -f '$HOME/services/kopifund/repo/Dockerfile'"
   if [ "$OS" = "Linux" ]; then
     live_check "sync timer enabled"          sh -c "systemctl --user is-enabled kopifund-sync.timer"
+    live_check "analyse timer enabled"       sh -c "systemctl --user is-enabled kopifund-analyse.timer"
     live_check "sync script installed"       sh -c "test -x '$HOME/services/kopifund/bin/sync.sh'"
+    live_check "analyse script installed"    sh -c "test -x '$HOME/services/kopifund/bin/analyse.sh'"
     live_check "lingering keeps timer alive" sh -c "loginctl show-user '$USER' -p Linger | grep -qx 'Linger=yes'"
   else
     live_check "LaunchAgent installed"       sh -c "test -f '$HOME/Library/LaunchAgents/com.kopifund.sync.plist'"
+    live_check "analyse LaunchAgent present" sh -c "test -f '$HOME/Library/LaunchAgents/com.kopifund.analyse.plist'"
   fi
 }
 
@@ -825,9 +958,12 @@ else
   test_no_key_no_data
   test_data_dir_not_a_clone
   test_fresh_deploy
+  test_analyse_script
   test_linger_escalation
   test_legacy_adoption
   test_legacy_not_adopted_when_hub_newer
+  test_legacy_adoption_richer_db
+  test_legacy_adoption_poorer_db
   test_locked_clone_unlocks
   test_idempotent_rerun
   test_upstream_moves

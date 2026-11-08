@@ -14,6 +14,9 @@
 #   - a user-level sync timer (systemd --user timer / launchd agent) that
 #     snapshots ~/.kopifund to kopifund-hub and merges the other machines'
 #     snapshots back, every SYNC_SECONDS
+#   - a user-level analyse timer that rebuilds the per-machine stats cache
+#     (~/.kopifund/cache, gitignored) every ANALYSE_SECONDS — a pulled
+#     ledger is no in-app write, so nothing else refreshes the dashboard
 #   - reachable tailnet-only at https://<host>.<tailnet>.ts.net:HTTPS_PORT
 #
 # Usage:
@@ -130,6 +133,11 @@ KOPIFUND_TAILNET_URL=https://$TS_HOST:$HTTPS_PORT
 
 # Seconds between sync snapshots of the data folder.
 SYNC_SECONDS=300
+
+# Seconds between stats rebuilds into the data folder's cache — the app
+# reads cache/results, which is gitignored per machine, so a sync that
+# lands a newer ledger never refreshes the pages by itself.
+ANALYSE_SECONDS=86400
 EOF
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
@@ -150,8 +158,10 @@ DATA_DIR="${KOPIFUND_DATA:?KOPIFUND_DATA missing from $ENV_FILE}"
 KOPIFUND_HOSTS="${KOPIFUND_HOSTS:?KOPIFUND_HOSTS missing from $ENV_FILE}"
 TAILNET_URL="${KOPIFUND_TAILNET_URL:?KOPIFUND_TAILNET_URL missing from $ENV_FILE}"
 SYNC_SECONDS="${SYNC_SECONDS:-300}"
+ANALYSE_SECONDS="${ANALYSE_SECONDS:-86400}"
 STATE="$SERVICE_HOME"
 case "$SYNC_SECONDS" in ''|*[!0-9]*) die "SYNC_SECONDS must be numeric (got: $SYNC_SECONDS)";; esac
+case "$ANALYSE_SECONDS" in ''|*[!0-9]*) die "ANALYSE_SECONDS must be numeric (got: $ANALYSE_SECONDS)";; esac
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
@@ -272,51 +282,110 @@ fi
 
 # ------------------------------------------------- adopt launcher app data
 # The launcher's app kept its data at
-# ~/services/apps/kopifund-finance/data. One-time copy INTO the data clone,
-# only while that legacy dir exists and only when the hub side is not
-# already newer. The comparison is snapshot age, never file mtime: a fresh
-# clone stamps every file with the checkout time, so mtime-vs-mtime would
-# skip a real migration whenever the Mac's last push predates today. The
-# hub side uses the last commit that touched kopifund.db; the legacy side
-# uses its own mtime (the live app wrote it, so that is honest).
+# ~/services/apps/kopifund-finance/data. One-time merge INTO the data
+# clone, only while that legacy dir exists — and the two halves of it get
+# different treatment:
+#
+#   FILES merge without clobbering (cp -n): the launcher's folder can
+#   hold things the clone lacks (statements that never reached the Mac),
+#   but wherever both have a file the clone's copy stays. Its config and
+#   device registry come from the newer lineage — the old app's
+#   config.toml/devices.json were real downgrades in practice.
+#
+#   kopifund.db copies over the clone's only when it is measurably
+#   richer. The honest test is the ledger itself (the txn row count),
+#   not time: a fresh clone stamps every file at checkout, and a live
+#   app's db looks newest whenever the app was last open — the launcher
+#   app's empty record once won that race against the clone's thousands
+#   of transactions. When a side cannot be counted (not a kopifund db,
+#   still sealed, no python3), fall back to snapshot age — the clone's
+#   last kopifund.db commit vs the legacy file's mtime, never the
+#   clone's checkout time.
+#
 # Marked done so a re-run never re-copies.
 mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+
+# The ledger's transaction count, or nothing when the file cannot be read
+# as a kopifund record.
+txn_count() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" <<'PY' 2>/dev/null
+import sqlite3, sys
+from urllib.parse import quote
+try:
+    db = sqlite3.connect("file:%s?mode=ro" % quote(sys.argv[1]), uri=True)
+    print(db.execute("SELECT count(*) FROM txn").fetchone()[0])
+    db.close()
+except Exception:
+    sys.exit(1)
+PY
+}
+
 ADOPT_MARKER="$STATE/state/legacy-adopted"
 if [ -d "$LEGACY_DATA" ] && [ ! -f "$ADOPT_MARKER" ]; then
-  hub_ts=0
-  if [ -f "$DATA_DIR/kopifund.db" ]; then
-    hub_ts="$(git -C "$DATA_DIR" log -1 --format=%ct -- kopifund.db 2>/dev/null || true)"
-    hub_ts="${hub_ts:-0}"
+  hub_db="$DATA_DIR/kopifund.db"; leg_db="$LEGACY_DATA/kopifund.db"
+  overwrite_db=0; db_why=""
+  if [ -f "$hub_db" ] && [ -f "$leg_db" ]; then
+    hub_n="$(txn_count "$hub_db" || true)"; leg_n="$(txn_count "$leg_db" || true)"
+    if [ -n "$hub_n" ] && [ -n "$leg_n" ]; then
+      if [ "$leg_n" -gt "$hub_n" ]; then
+        overwrite_db=1; db_why="$leg_n transactions vs the clone's $hub_n"
+      fi
+    else
+      hub_ts="$(git -C "$DATA_DIR" log -1 --format=%ct -- kopifund.db 2>/dev/null || true)"
+      hub_ts="${hub_ts:-0}"
+      leg_ts="$(mtime_of "$leg_db")"
+      if [ "$leg_ts" -gt "$hub_ts" ]; then
+        overwrite_db=1; db_why="newer than the clone's last ledger snapshot"
+      fi
+    fi
   fi
-  legacy_ts=0
-  [ -f "$LEGACY_DATA/kopifund.db" ] && legacy_ts="$(mtime_of "$LEGACY_DATA/kopifund.db")"
-  if [ -f "$DATA_DIR/kopifund.db" ] && [ -f "$LEGACY_DATA/kopifund.db" ] \
-     && [ "$hub_ts" -ge "$legacy_ts" ]; then
-    warn "The hub clone's ledger is not older than the launcher app's — not adopting. Remove $LEGACY_DATA when satisfied, or resolve by hand."
-    touch "$ADOPT_MARKER"
-  else
-    info "Adopting launcher app data from $LEGACY_DATA"
-    cp -a "$LEGACY_DATA/." "$DATA_DIR/"
-    touch "$ADOPT_MARKER"
-    ok "Legacy data copied into $DATA_DIR (lands in the next sync snapshot)"
+  info "Adopting launcher app data: merging $LEGACY_DATA into $DATA_DIR (files the clone lacks only)"
+  had_wal=0; had_shm=0; had_journal=0
+  [ -f "$hub_db"-wal ] && had_wal=1
+  [ -f "$hub_db"-shm ] && had_shm=1
+  [ -f "$hub_db"-journal ] && had_journal=1
+  cp -an "$LEGACY_DATA/." "$DATA_DIR/"
+  if [ "$overwrite_db" -eq 1 ]; then
+    cp -a "$leg_db" "$hub_db"
+    # sqlite sidecars travel with their db or not at all — a -wal that
+    # belongs to the OTHER file must never replay against this one.
+    for ext in -wal -shm -journal; do
+      if [ -f "$leg_db$ext" ]; then cp -a "$leg_db$ext" "$hub_db$ext"; else rm -f "$hub_db$ext"; fi
+    done
+    ok "Adopted the launcher's ledger over the clone's ($db_why)"
+  elif [ -f "$hub_db" ]; then
+    # Gap-fill may have dragged the launcher's sidecars in beside the
+    # clone's ledger — a -wal belonging to the OTHER db must never
+    # replay against this one. Only sidecars that were not already
+    # there go; the worktree's own hold the app's real unflushed rows.
+    [ "$had_wal" -eq 0 ] && rm -f "$hub_db"-wal
+    [ "$had_shm" -eq 0 ] && rm -f "$hub_db"-shm
+    [ "$had_journal" -eq 0 ] && rm -f "$hub_db"-journal
+    [ -f "$leg_db" ] \
+      && warn "Kept the clone's ledger — the launcher's is not richer. If that was wrong its copy is still at $leg_db — reconcile by hand, then remove $LEGACY_DATA."
   fi
+  touch "$ADOPT_MARKER"
+  ok "Legacy data merged into $DATA_DIR (lands in the next sync snapshot)"
 fi
 
-# ------------------------------------------------------ sync script+timer
-info "Installing sync script -> $STATE/bin/sync.sh"
+# ------------------------------------------------- sync+analyse scripts
+info "Installing sync + analyse scripts -> $STATE/bin"
 sed -e "s|__ENV_FILE__|$ENV_FILE|" \
   "$SERVICE_DIR/sync.sh" > "$STATE/bin/sync.sh"
-chmod +x "$STATE/bin/sync.sh"
+sed -e "s|__ENV_FILE__|$ENV_FILE|" \
+  "$SERVICE_DIR/analyse.sh" > "$STATE/bin/analyse.sh"
+chmod +x "$STATE/bin/sync.sh" "$STATE/bin/analyse.sh"
 # The clone may carry no identity (deployd boxes, fresh VMs); the timer's
 # snapshot commits need one and must not fall back to a guess.
 git -C "$DATA_DIR" config user.name >/dev/null 2>&1 \
   || git -C "$DATA_DIR" config user.name "kopifund-sync"
 git -C "$DATA_DIR" config user.email >/dev/null 2>&1 \
   || git -C "$DATA_DIR" config user.email "kopifund-sync@$TS_HOST"
-ok "Sync script installed"
+ok "Scripts installed"
 
 if [ "$OS" = "Linux" ]; then
-  info "Writing systemd user timer (sync every ${SYNC_SECONDS}s)"
+  info "Writing systemd user timers (sync every ${SYNC_SECONDS}s, analyse every ${ANALYSE_SECONDS}s)"
   UNIT_DIR="$HOME/.config/systemd/user"
   mkdir -p "$UNIT_DIR"
   cat > "$UNIT_DIR/kopifund-sync.service" <<EOF
@@ -342,17 +411,41 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+  cat > "$UNIT_DIR/kopifund-analyse.service" <<EOF
+# Generated by services/kopifund/setup.sh — regenerated on every re-run.
+[Unit]
+Description=kopifund stats rebuild (analyse into ~/.kopifund/cache)
+
+[Service]
+Type=oneshot
+ExecStart=$STATE/bin/analyse.sh
+EOF
+  chmod 600 "$UNIT_DIR/kopifund-analyse.service"   # names .env-derived paths
+  cat > "$UNIT_DIR/kopifund-analyse.timer" <<EOF
+# Generated by services/kopifund/setup.sh — regenerated on every re-run.
+[Unit]
+Description=kopifund stats rebuild every ${ANALYSE_SECONDS}s
+
+[Timer]
+OnBootSec=300
+OnUnitActiveSec=${ANALYSE_SECONDS}s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
   systemctl --user daemon-reload
   systemctl --user enable --now kopifund-sync.timer
+  systemctl --user enable --now kopifund-analyse.timer
   # The timer must outlive logouts (the box may sit at a login screen for
   # days): lingering on, at most one sudo on first deploy.
   if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
     info "Enabling lingering for $USER so the sync timer runs logged out (needs sudo, one time)"
     sudo loginctl enable-linger "$USER"
   fi
-  ok "Timer enabled: systemctl --user status kopifund-sync.timer"
+  ok "Timers enabled: systemctl --user status kopifund-sync.timer / kopifund-analyse.timer"
 else
-  info "Writing LaunchAgent (sync every ${SYNC_SECONDS}s)"
+  info "Writing LaunchAgents (sync every ${SYNC_SECONDS}s, analyse every ${ANALYSE_SECONDS}s)"
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
   cat > "$HOME/Library/LaunchAgents/com.kopifund.sync.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -372,11 +465,33 @@ else
 </dict>
 </plist>
 EOF
-  chmod 600 "$HOME/Library/LaunchAgents/com.kopifund.sync.plist"  # names .env-derived paths
+  cat > "$HOME/Library/LaunchAgents/com.kopifund.analyse.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated by services/kopifund/setup.sh — regenerated on every re-run. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.kopifund.analyse</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$STATE/bin/analyse.sh</string>
+  </array>
+  <key>StartInterval</key><integer>$ANALYSE_SECONDS</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/kopifund-analyse.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/kopifund-analyse.log</string>
+</dict>
+</plist>
+EOF
+  chmod 600 "$HOME/Library/LaunchAgents/com.kopifund.sync.plist" \
+            "$HOME/Library/LaunchAgents/com.kopifund.analyse.plist"  # names .env-derived paths
   launchctl bootout "gui/$(id -u)/com.kopifund.sync" 2>/dev/null || true
   launchctl enable "gui/$(id -u)/com.kopifund.sync" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.kopifund.sync.plist"
-  ok "LaunchAgent loaded: com.kopifund.sync"
+  launchctl bootout "gui/$(id -u)/com.kopifund.analyse" 2>/dev/null || true
+  launchctl enable "gui/$(id -u)/com.kopifund.analyse" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.kopifund.analyse.plist"
+  ok "LaunchAgents loaded: com.kopifund.sync + com.kopifund.analyse"
 fi
 
 # -------------------------------------------- retiring the launcher app
@@ -414,15 +529,24 @@ else
   warn "No answer on $url/api/health yet — the cert may still be minting. Retry in a minute: curl $url/api/health"
 fi
 
+# ------------------------------------------------------- first analyse
+# The stats cache is per-machine (gitignored), so a freshly provisioned
+# or newly-pulled data folder serves an empty dashboard until a rebuild
+# runs. Do the first one now; the timer repeats it every ANALYSE_SECONDS.
+info "Rebuilding the stats cache (first run)"
+"$STATE/bin/analyse.sh" \
+  || warn "stats rebuild did not run — the analyse timer retries on schedule"
+
 echo
 printf '\033[1;32mDone.\033[0m Kopifund is at \033[1m%s\033[0m (tailnet only).\n' "$url"
 echo
 echo "  Source:   $REPO_DIR ($REPO_URL @ $REF, hard-reset per deploy)"
 echo "  Data:     $DATA_DIR — unlocked git-crypt clone of kopifund-hub"
-echo "  Sync:     snapshots + merges every ${SYNC_SECONDS}s"
+echo "  Sync:     snapshots + merges every ${SYNC_SECONDS}s; stats rebuild"
+echo "            every ${ANALYSE_SECONDS}s (cache/ is per-machine)"
 [ "$OS" = "Linux" ] \
-  && echo "            (systemctl --user status kopifund-sync.timer; journalctl --user -u kopifund-sync)" \
-  || echo "            (launchctl list com.kopifund.sync; log: ~/Library/Logs/kopifund-sync.log)"
+  && echo "            (systemctl --user status kopifund-sync.timer kopifund-analyse.timer; journalctl --user -u kopifund-sync -u kopifund-analyse)" \
+  || echo "            (launchctl list com.kopifund.sync com.kopifund.analyse; logs: ~/Library/Logs/kopifund-*.log)"
 echo "  Key:      $KEY_FILE — keep a copy in the password manager; losing it"
 echo "            makes kopifund-hub unreadable, permanently."
 echo
