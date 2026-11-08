@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# launchctl stub: logs and succeeds; LaunchAgent state is asserted via the
+# plist file itself, not via launchctl.
+echo "launchctl $*" >> "$CALLS_LOG"
+exit 0

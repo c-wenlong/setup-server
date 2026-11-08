@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# systemctl --user stub: logs and tracks per-unit state in $STATE_DIR.
+#   <unit>_enabled — enable ran (disable removes it)
+#   <unit>_active  — enable --now or start ran
+# Unit is the last argument, minus .service/.timer.
+echo "systemctl $*" >> "$CALLS_LOG"
+
+unit="${*: -1}"; unit="${unit%.timer}"; unit="${unit%.service}"
+
+case "${2:-}" in
+  daemon-reload|cat|show)
+    ;;
+  enable)
+    touch "$STATE_DIR/${unit}_enabled"
+    case " $* " in *" --now "*) touch "$STATE_DIR/${unit}_active" ;; esac
+    ;;
+  disable)
+    rm -f "$STATE_DIR/${unit}_enabled"
+    case " $* " in *" --now "*) rm -f "$STATE_DIR/${unit}_active" ;; esac
+    ;;
+  start)  touch "$STATE_DIR/${unit}_active" ;;
+  stop)   rm -f "$STATE_DIR/${unit}_active" ;;
+  is-active)  [ -f "$STATE_DIR/${unit}_active" ]  && exit 0 || exit 3 ;;
+  is-enabled) [ -f "$STATE_DIR/${unit}_enabled" ] && exit 0 || exit 1 ;;
+esac
+exit 0

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# loginctl stub: Linger state lives in $STATE_DIR/linger.
+echo "loginctl $*" >> "$CALLS_LOG"
+case "${1:-}" in
+  show-user)
+    if [ -f "$STATE_DIR/linger" ]; then echo "Linger=yes"; else echo "Linger=no"; fi
+    ;;
+  enable-linger)
+    touch "$STATE_DIR/linger"
+    ;;
+esac
+exit 0

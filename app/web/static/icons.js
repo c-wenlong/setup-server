@@ -104,7 +104,11 @@
     'hermes-agent':  { file: 'hermes-agent', dark: true },
     /* Upstream build/icon.svg: silver cursor mascot on a black rounded
        tile; the mascot reads on both tile themes, so no -dark pair. */
-    'openmausbot':   { file: 'openmausbot' }
+    'openmausbot':   { file: 'openmausbot' },
+    /* Kopifund's own sticker-set mark (app-icons/sticker/logo-square.svg in
+       kopifund-finance): kopi bag + coin on a yellow plate, reads on both
+       tile themes, so no -dark pair. */
+    'kopifund':      { file: 'kopifund' }
   };
 
   /* Spellings the registry might plausibly use for the same service. */
@@ -135,7 +139,9 @@
     'stirlingpdf': 'stirling-pdf',
     'makeplane': 'plane',
     'plane-so': 'plane',
-    'umami-software': 'umami'
+    'umami-software': 'umami',
+    'kopifund-finance': 'kopifund',
+    'kopifund-hub': 'kopifund'
   };
 
   /* --------------------------------------------------------------- glyphs */
