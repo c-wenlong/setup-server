@@ -68,6 +68,16 @@ require_docker_compose
 require_tailscale_up
 require_numeric LOCAL_PORT HTTPS_PORT
 
+# An existing .env overrides the defaults above, including the repo URLs —
+# source it BEFORE the access check so a saved SSH URL is what ls-remote
+# probes, not the https default a first install would have used.
+if [ -f "$ENV_FILE" ]; then
+  ok "Config already exists, leaving untouched: $ENV_FILE"
+  REQUESTED_PORT="$LOCAL_PORT"
+  REQUESTED_HTTPS="$HTTPS_PORT"
+  set -a; . "$ENV_FILE"; set +a
+fi
+
 # deployd and this script touch the private repos unattended — verify auth now.
 for repo in "$REPO_URL" "$HUB_URL"; do
   GIT_TERMINAL_PROMPT=0 git ls-remote --heads "$repo" >/dev/null 2>&1 \
@@ -81,9 +91,9 @@ TS_HOST="$(tailnet_host)"
 ok "Tailnet name: $TS_HOST"
 
 # ---------------------------------------------------------------- .env
-if [ -f "$ENV_FILE" ]; then
-  ok "Config already exists, leaving untouched: $ENV_FILE"
-else
+# An existing .env was already sourced above (the repo access check needs
+# its saved URLs). A fresh install writes it now, then takes the same path.
+if [ ! -f "$ENV_FILE" ]; then
   info "Writing .env (ports, paths, repo URLs — mode 600)"
   tz="Etc/UTC"
   if [ -L /etc/localtime ]; then
@@ -123,13 +133,14 @@ SYNC_SECONDS=300
 EOF
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
+  REQUESTED_PORT="$LOCAL_PORT"
+  REQUESTED_HTTPS="$HTTPS_PORT"
+  set -a; . "$ENV_FILE"; set +a
 fi
 
-# Read back: an existing .env is the source of truth for ports, paths and
-# repos, so a re-run can never silently move a live deployment.
-REQUESTED_PORT="$LOCAL_PORT"
-REQUESTED_HTTPS="$HTTPS_PORT"
-set -a; . "$ENV_FILE"; set +a
+# Validation — one path whether .env was just written or loaded above. An
+# existing .env is the source of truth for ports, paths and repos, so a
+# re-run can never silently move a live deployment.
 REPO_URL="${REPO_URL:?REPO_URL missing from $ENV_FILE}"
 HUB_URL="${HUB_URL:?HUB_URL missing from $ENV_FILE}"
 REF="${KOPIFUND_REF:-main}"
@@ -157,6 +168,18 @@ if [ "$TAILNET_URL" != "$WANT_URL" ]; then
 fi
 
 mkdir -p "$STATE/bin" "$STATE/state"
+
+# A manual ./setup.sh re-installs the service: clear deployd's disabled
+# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
+# never invokes this while the flag is set, so clearing is always manual.
+DEPLOYD_HOME="$HOME/services/deployd"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  d="$(sed -n "s/^SERVICE_HOME=\(.*\)\$/\1/p" "$SERVICE_DIR/../deployd/.env" \
+       | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
+  case "$d" in \~/*) d="$HOME/${d#\~/}" ;; \$HOME/*) d="$HOME/${d#\$HOME/}" ;; esac
+  [ -n "$d" ] && DEPLOYD_HOME="$d"
+fi
+rm -f "$DEPLOYD_HOME/state/kopifund.disabled"
 
 # ------------------------------------------------------------- repo clone
 # Machine-managed checkout of the app source. Hard-reset per run: nobody
@@ -234,17 +257,42 @@ else
   die "$DATA_DIR exists but is not a kopifund-hub clone. Reconcile by hand (SETUP.md, 'Data folder'), then re-run — this script never converts a populated folder in place."
 fi
 
+# -------------------------------------- retiring the launcher app's writer
+# The launcher's From-GitHub app (app-kopifund-finance) held :LOCAL_PORT
+# before this service existed and is the old writer of the legacy data.
+# Stop it BEFORE the adoption copy: an in-flight save landing after the
+# copy would be stranded in the old folder forever, and a write mid-copy
+# could hand the clone a torn database. Stopping it here also frees the
+# port for the compose project below. Removing its tile stays a manual
+# launcher action (the note at the end explains why order matters).
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$LEGACY_CONTAINER"; then
+  info "Stopping the launcher app's container ($LEGACY_CONTAINER) — superseded by this service"
+  docker stop "$LEGACY_CONTAINER" >/dev/null
+fi
+
 # ------------------------------------------------- adopt launcher app data
-# The launcher's From-GitHub app kept its data at
-# ~/services/apps/kopifund-finance/data. One-time copy INTO the data clone:
-# it runs only while that legacy dir exists and only when the clone's
-# kopifund.db is not already newer, so a hub snapshot the Mac refreshed
-# after this box last wrote is never regressed. The copy then lands in the
-# next sync snapshot. Marked done so a re-run never re-copies.
+# The launcher's app kept its data at
+# ~/services/apps/kopifund-finance/data. One-time copy INTO the data clone,
+# only while that legacy dir exists and only when the hub side is not
+# already newer. The comparison is snapshot age, never file mtime: a fresh
+# clone stamps every file with the checkout time, so mtime-vs-mtime would
+# skip a real migration whenever the Mac's last push predates today. The
+# hub side uses the last commit that touched kopifund.db; the legacy side
+# uses its own mtime (the live app wrote it, so that is honest).
+# Marked done so a re-run never re-copies.
+mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 ADOPT_MARKER="$STATE/state/legacy-adopted"
 if [ -d "$LEGACY_DATA" ] && [ ! -f "$ADOPT_MARKER" ]; then
-  if [ -f "$DATA_DIR/kopifund.db" ] && [ "$DATA_DIR/kopifund.db" -nt "$LEGACY_DATA/kopifund.db" ]; then
-    warn "$DATA_DIR is newer than the launcher app's data — not adopting. Remove $LEGACY_DATA when satisfied, or resolve by hand."
+  hub_ts=0
+  if [ -f "$DATA_DIR/kopifund.db" ]; then
+    hub_ts="$(git -C "$DATA_DIR" log -1 --format=%ct -- kopifund.db 2>/dev/null || true)"
+    hub_ts="${hub_ts:-0}"
+  fi
+  legacy_ts=0
+  [ -f "$LEGACY_DATA/kopifund.db" ] && legacy_ts="$(mtime_of "$LEGACY_DATA/kopifund.db")"
+  if [ -f "$DATA_DIR/kopifund.db" ] && [ -f "$LEGACY_DATA/kopifund.db" ] \
+     && [ "$hub_ts" -ge "$legacy_ts" ]; then
+    warn "The hub clone's ledger is not older than the launcher app's — not adopting. Remove $LEGACY_DATA when satisfied, or resolve by hand."
     touch "$ADOPT_MARKER"
   else
     info "Adopting launcher app data from $LEGACY_DATA"
@@ -332,14 +380,14 @@ EOF
 fi
 
 # -------------------------------------------- retiring the launcher app
-# The From-GitHub launcher app (app-kopifund-finance) held :8300 before this
-# service existed. It is the same app on the same port — stop it so the
-# compose project can bind. Removing its tile/data is a launcher action and
-# stays manual (its data was already adopted above).
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$LEGACY_CONTAINER"; then
-  info "Stopping the launcher app's container ($LEGACY_CONTAINER) — superseded by this service"
-  docker stop "$LEGACY_CONTAINER" >/dev/null
-  warn "Remove the launcher app when satisfied: launcher -> kopifund-finance -> Remove (keeps its data; already adopted)."
+# The old tile lives in the launcher, not here — removing it is a dashboard
+# action. Warn while its definition is still on the box, and warn honestly:
+# the launcher's Remove unpublishes any Serve port that proxies to the same
+# target, which is exactly the :HTTPS_PORT this service now owns, so the
+# publish must be re-applied once afterwards or the service goes dark.
+if [ -f "$HOME/services/launcher/apps/kopifund-finance.json" ]; then
+  warn "The old launcher tile (kopifund-finance) is still installed. Remove it when satisfied — launcher -> kopifund-finance -> Remove keeps its data dir, already adopted above."
+  warn "  Its Remove also unpublishes :$HTTPS_PORT (the same proxy target this service owns) — re-run ./setup.sh once afterwards to put the publish back."
 fi
 
 # ---------------------------------------------------------------- deploy

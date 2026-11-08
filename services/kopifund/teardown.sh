@@ -7,7 +7,9 @@
 #      from `tailscale serve status` (never `serve reset`)
 #   2. stop the sync timer and remove its unit/LaunchAgent
 #   3. `docker compose down` — the container and its network go
-#   4. keep .env, ~/services/kopifund and the data folder, so ./setup.sh
+#   4. write deployd's state/kopifund.disabled so the next upstream commit
+#      does not resurrect the service (a manual ./setup.sh clears it)
+#   5. keep .env, ~/services/kopifund and the data folder, so ./setup.sh
 #      brings it back as it was
 #
 # The data folder ~/.kopifund is NEVER deleted, not even by --purge: it is
@@ -272,6 +274,23 @@ fi
 info "Stopping and removing the container (docker compose down)"
 docker compose --project-directory "$SERVICE_DIR" down
 ok "Container removed; data in ${DATA_DIR:-~/.kopifund} kept (it is the hub clone — the backup, not a leftover)"
+
+# ------------------------------------------------------------- deployd
+# deployd polls the app repo and re-runs setup.sh on new commits — without
+# this marker the next upstream push would resurrect the service we just
+# removed, container, timer and Serve route included. A manual ./setup.sh
+# clears the flag; deployd itself never does.
+DEPLOYD_HOME="$HOME/services/deployd"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  d="$(sed -n "s/^SERVICE_HOME=\(.*\)\$/\1/p" "$SERVICE_DIR/../deployd/.env" \
+       | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
+  case "$d" in \~/*) d="$HOME/${d#\~/}" ;; \$HOME/*) d="$HOME/${d#\$HOME/}" ;; esac
+  [ -n "$d" ] && DEPLOYD_HOME="$d"
+fi
+if [ -d "$DEPLOYD_HOME/state" ]; then
+  touch "$DEPLOYD_HOME/state/$NAME.disabled"
+  ok "deployd will skip $NAME until its setup.sh runs again"
+fi
 
 # ---------------------------------------------------------------- purge
 if [ "$PURGE" -eq 1 ]; then

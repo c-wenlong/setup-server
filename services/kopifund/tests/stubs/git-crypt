@@ -1,20 +1,37 @@
 #!/usr/bin/env bash
 # git-crypt stub. `unlock <key>` requires the key file to exist and then
 # "decrypts" the cwd: any file starting with the 9-byte \0GITCRYPT magic has
-# the magic stripped, which is how the sandbox fakes a sealed checkout.
+# the magic stripped. `smudge`/`clean` are the stream filters git runs for
+# filter.git-crypt.* (checkout, cat-file --filters, add): smudge strips the
+# magic, clean adds it — so a repo with `* filter=git-crypt` stores blobs
+# with the magic and checks out plaintext, exactly like the real thing.
 echo "git-crypt $*" >> "$CALLS_LOG"
+
+has_magic() { [ "$(od -An -c -N9 "$1" 2>/dev/null | tr -d ' ')" = '\0GITCRYPT' ]; }
 
 case "${1:-}" in
   unlock)
     key="${2:-}"
     [ -f "$key" ] || { echo "git-crypt: $key: no such file" >&2; exit 1; }
     find . -type f ! -path './.git/*' 2>/dev/null | while IFS= read -r f; do
-      if [ "$(od -An -c -N9 "$f" 2>/dev/null | tr -d ' ')" = '\0GITCRYPT' ]; then
+      if has_magic "$f"; then
         tail -c +10 "$f" > "$f.plain" && mv "$f.plain" "$f"
       fi
     done
     ;;
-  status|init|lock)
+  smudge|clean)
+    # Blob bytes go through a file, never a shell variable — the magic's
+    # leading NUL cannot survive $().
+    buf="$(mktemp)"
+    cat > "$buf"
+    if [ "$1" = "smudge" ]; then
+      if has_magic "$buf"; then tail -c +10 "$buf"; else cat "$buf"; fi
+    else
+      if has_magic "$buf"; then cat "$buf"; else printf '\0GITCRYPT'; cat "$buf"; fi
+    fi
+    rm -f "$buf"
+    ;;
+  status|init|lock|diff)
     ;;
 esac
 exit 0

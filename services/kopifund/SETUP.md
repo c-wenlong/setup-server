@@ -80,14 +80,17 @@ Two repos, two jobs:
    - present and unlocked → kept, fast-forwarded when clean;
    - present but **not a clone** → refuses (never converts a populated
      folder in place).
-5. Adopts `~/services/apps/kopifund-finance/data` once (the launcher app's
-   data), only when the clone's `kopifund.db` is not already newer; marked
-   done at `~/services/kopifund/state/legacy-adopted`.
-6. Installs `~/services/kopifund/bin/sync.sh` and the timer — systemd user
+5. Stops the old `app-kopifund-finance` container if it still runs (same
+   app, same port; it is the old writer, so it goes down before the copy,
+   and deleting its launcher tile is a manual last step).
+6. Adopts `~/services/apps/kopifund-finance/data` once (the launcher app's
+   data), only when the hub side is not already newer — compared by
+   snapshot age (the clone's last `kopifund.db` commit vs the legacy db's
+   own mtime), never by clone checkout time; marked done at
+   `~/services/kopifund/state/legacy-adopted`.
+7. Installs `~/services/kopifund/bin/sync.sh` and the timer — systemd user
    `kopifund-sync.timer` on Linux (plus `loginctl enable-linger`, sudo at
    most once), `com.kopifund.sync` LaunchAgent on macOS.
-7. Stops the old `app-kopifund-finance` container if it still runs (same
-   app, same port; deleting its launcher tile is a manual last step).
 8. `docker compose up -d --build`, waits on `/api/health`, publishes via
    Serve, verifies end-to-end HTTPS.
 
@@ -102,9 +105,12 @@ cd services/kopifund && ./setup.sh
 ```
 
 Then, in the launcher: remove the `kopifund-finance` app tile (Remove keeps
-its data — already adopted). The box's `~/.kopifund` now holds the launcher's
-data on top of the hub snapshot, lands in the next sync snapshot, and the
-Mac pulls it on its next tick.
+its data — already adopted), **then re-run `./setup.sh` once**: the
+launcher's Remove unpublishes any Serve port proxying to
+`http://127.0.0.1:8300`, which is the same target this service owns, so the
+publish has to be re-applied or the service goes dark. The box's
+`~/.kopifund` now holds the launcher's data on top of the hub snapshot,
+lands in the next sync snapshot, and the Mac pulls it on its next tick.
 
 ## Client-side setup
 
@@ -131,7 +137,9 @@ Mac pulls it on its next tick.
   themselves never conflict). Reconcile by hand, then delete the loser
   file; it rides the next snapshot out.
 - `cache/`, `exports/`, `backups/`, `*.lock`, `*-wal`, `*-shm`, `.env` are
-  gitignored upstream — they never sync.
+  gitignored upstream — they never sync. Rows committed into
+  `kopifund.db-wal` would be stranded by that rule, so each tick first runs
+  a passive SQLite checkpoint to fold them into the `.db` that does sync.
 - A **sealed** clone (files still `\0GITCRYPT…`) is never committed:
   `sync.sh` refuses until `git-crypt unlock <key>` runs.
 - Manual snapshot anytime: `cd ~/.kopifund && git add -A && git commit &&

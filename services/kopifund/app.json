@@ -5,8 +5,8 @@
   "group": "mine",
   "icon": "kopifund",
   "author": "c-wenlong",
-  "url": "https://HOST:8300/",
-  "health": "http://127.0.0.1:8300/api/health",
+  "url": "https://HOST:{HTTPS_PORT|LOCAL_PORT:8300}/",
+  "health": "http://127.0.0.1:{LOCAL_PORT:8300}/api/health",
   "marker": "~/services/kopifund",
   "env": ".env",
   "control": {

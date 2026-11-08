@@ -44,18 +44,47 @@ for f in config.toml profile.json kopifund.db; do
 done
 
 # mkdir is the portable atomic lock (no flock on macOS); inside .git so the
-# lock itself is never committed.
+# lock itself is never committed. The owner writes its pid+start inside so a
+# later tick can tell a live run (defer quietly) from a dead one — a SIGKILL
+# skips the EXIT trap, and without the reclaim below that dir would block
+# every later tick forever.
 lockdir=".git/kopifund-sync.lock.d"
+stale_after=900   # a tick is seconds of work; 15min old means it died mid-run
 if ! mkdir "$lockdir" 2>/dev/null; then
-  exit 0   # another run is in flight — next tick catches up
+  owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
+  opid="${owner%% *}"; ostart="${owner##* }"
+  age=0
+  case "$ostart" in ''|*[!0-9]*) ;; *) age=$(( $(date +%s) - ostart )) ;; esac
+  if [ -n "$opid" ] && kill -0 "$opid" 2>/dev/null && [ "$age" -lt "$stale_after" ]; then
+    exit 0   # a live run is in flight — next tick catches up
+  fi
+  say "reclaiming a stale sync lock (pid ${opid:-unknown}, age ${age}s)"
+  rm -rf "$lockdir"
+  mkdir "$lockdir" 2>/dev/null || exit 0   # raced with another tick — it owns it
 fi
-trap 'rmdir "$lockdir" 2>/dev/null || true' EXIT
+printf '%s %s\n' "$$" "$(date +%s)" > "$lockdir/pid"
+trap 'rm -rf "$lockdir"' EXIT
 
 HOST="$(hostname -s 2>/dev/null || hostname)"
 NOW="$(date '+%Y-%m-%d %H:%M:%S %z')"
 GIT=(git -c "user.name=kopifund-sync" -c "user.email=kopifund-sync@$HOST")
 
 # ------------------------------------------------------- 1. local snapshot
+# Committed transactions can sit in kopifund.db-wal, which .gitignore
+# excludes — checkpoint first so the snapshot's .db blob actually contains
+# them. PASSIVE never blocks the live app; what it cannot checkpoint this
+# tick it gets next tick.
+if [ -f kopifund.db ] && command -v python3 >/dev/null 2>&1; then
+  python3 - <<'PY' 2>/dev/null || true
+import sqlite3
+try:
+    db = sqlite3.connect("file:kopifund.db?mode=rw", uri=True)
+    db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    db.close()
+except Exception:
+    pass
+PY
+fi
 "${GIT[@]}" add -A
 if ! "${GIT[@]}" diff --cached --quiet; then
   "${GIT[@]}" commit -qm "snapshot: $HOST $NOW"
@@ -94,13 +123,29 @@ integrate() {
   # Preserve the losing side of every file BOTH tips touched since the base.
   # Text files may have merged cleanly — the copy is belt and braces, and a
   # stale <name>.loser-<sha> is deleted the next time its sha is the winner.
+  # cat-file --filters pipes the blob through the smudge filter: in this
+  # git-crypt repo a plain `git show` would write ciphertext, not the
+  # readable file the recovery instructions promise. Parents are created
+  # first — the winner may have deleted the directory the file lived in.
   both="$(comm -12 \
     <("${GIT[@]}" diff --name-only "$base" "$ltip" | sort) \
     <("${GIT[@]}" diff --name-only "$base" "$rtip" | sort))"
-  printf '%s\n' "$both" | while IFS= read -r f; do
+  preserve_failed=0
+  while IFS= read -r f; do
     [ -n "$f" ] || continue
-    "${GIT[@]}" show "$loser:$f" > "$f.loser-$lshort" 2>/dev/null || true
-  done
+    "${GIT[@]}" cat-file -e "$loser:$f" 2>/dev/null || continue
+    mkdir -p "$(dirname "$f.loser-$lshort")" || { preserve_failed=1; continue; }
+    tmp="$f.loser-$lshort.tmp.$$"
+    if "${GIT[@]}" cat-file --filters "$loser:$f" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$f.loser-$lshort" || { rm -f "$tmp"; preserve_failed=1; }
+    else
+      rm -f "$tmp"; preserve_failed=1
+    fi
+  done <<EOF
+$both
+EOF
+  [ "$preserve_failed" -eq 0 ] \
+    || say "WARNING: could not write every losing copy — recover the rest from git history (loser tip $lshort)"
 
   if ! "${GIT[@]}" merge -q --no-commit -X "$wside" "$REMOTE/$BRANCH"; then
     # -X settles content conflicts; modify/delete still needs a hand.

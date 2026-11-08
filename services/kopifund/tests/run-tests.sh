@@ -65,6 +65,12 @@ setup() {
   # kopifund-hub — its clone becomes the data folder.
   make_remote "$SANDBOX/kopifund-finance.git" Dockerfile README.md
   make_remote "$SANDBOX/kopifund-hub.git" config.toml profile.json kopifund.db
+  # The real hub gitignores sqlite sidecars — matching it is what makes the
+  # sync script's wal checkpoint load-bearing in tests.
+  printf -- '*-wal\n*-shm\n*.lock\n' > "$SANDBOX/work-kopifund-hub/.gitignore"
+  env $GIT_ENV git -C "$SANDBOX/work-kopifund-hub" add .gitignore
+  env $GIT_ENV git -C "$SANDBOX/work-kopifund-hub" commit -qm "ignore sqlite sidecars"
+  git -C "$SANDBOX/work-kopifund-hub" push -q "$SANDBOX/kopifund-hub.git" main
   export KOPIFUND_REPO_URL="file://$SANDBOX/kopifund-finance.git"
   export KOPIFUND_HUB_URL="file://$SANDBOX/kopifund-hub.git"
 
@@ -105,6 +111,12 @@ out_has()    { grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 not()        { ! "$@"; }
+before() {   # before <patA> <patB>: A's first $OUT line precedes B's
+  local a b
+  a="$(grep -n -- "$1" <<<"$OUT" | head -1 | cut -d: -f1)"
+  b="$(grep -n -- "$2" <<<"$OUT" | head -1 | cut -d: -f1)"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
 env_has()    { grep -q "$1" "$SVC/.env"; }
 file_mode()  { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 
@@ -270,22 +282,30 @@ test_linger_escalation() {
 test_legacy_adoption() {
   echo "• legacy launcher data is adopted once, into the data clone"
   setup
+  # The honest case: the Mac's last hub snapshot is OLD (backdate the hub's
+  # last kopifund.db commit) while the launcher's live data is new (mtimes
+  # of now). A fresh clone's checkout-time mtimes would win an mtime race —
+  # the comparison must use the commit's snapshot age instead.
+  echo "stale-db" > "$SANDBOX/work-kopifund-hub/kopifund.db"
+  env $GIT_ENV GIT_AUTHOR_DATE='2020-01-01T00:00:00Z' GIT_COMMITTER_DATE='2020-01-01T00:00:00Z' \
+    git -C "$SANDBOX/work-kopifund-hub" commit -qam "old snapshot"
+  git -C "$SANDBOX/work-kopifund-hub" push -q "$SANDBOX/kopifund-hub.git" main
   legacy="$HOME/services/apps/kopifund-finance/data"
   mkdir -p "$legacy/statements/dbs-multiplier"
   echo "live-db" > "$legacy/kopifund.db"
   echo "stmt" > "$legacy/statements/dbs-multiplier/s.pdf"
-  # The live app's db must be newer than the hub clone's, like the real
-  # migration (yesterday's snapshot, today's live data): the clone's mtime
-  # is deploy time, so stamp the legacy files ahead of it.
-  touch -t 203001010000 "$legacy/kopifund.db" "$legacy/statements/dbs-multiplier/s.pdf"
   echo "app-kopifund-finance" > "$STATE_DIR/docker_containers"
+  mkdir -p "$HOME/services/launcher/apps"
+  : > "$HOME/services/launcher/apps/kopifund-finance.json"
   run_deploy
   check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "writer stopped before copy"    before "Stopping the launcher" "Adopting launcher app data"
   check "legacy db adopted"             grep -qx "live-db" "$HOME/.kopifund/kopifund.db"
   check "statements adopted"            [ -f "$HOME/.kopifund/statements/dbs-multiplier/s.pdf" ]
   check "adopt marker written"          [ -f "$HOME/services/kopifund/state/legacy-adopted" ]
   check "old container stopped"         calls_have "docker stop app-kopifund-finance"
-  check "says remove the tile"          out_has "launcher"
+  check "says remove the tile"          out_has "launcher tile"
+  check "warns Remove unpublishes"      out_has "unpublishes"
   # re-run: marker means no second adoption even if legacy dir stays
   echo "still-live" > "$legacy/kopifund.db"
   rm -f "$HOME/.kopifund/kopifund.db"
@@ -456,6 +476,123 @@ test_sync_diverged_binary_conflict() {
   teardown
 }
 
+test_sync_diverged_gitcrypt() {
+  echo "• sync: loser copies decrypt through the git-crypt smudge filter"
+  setup
+  # Make the fixture hub git-crypt-shaped: .gitattributes marks everything
+  # filtered, and the stub's clean adds the \0GITCRYPT magic to stored blobs
+  # while smudge strips it on the way out — the real filter pipeline.
+  printf '* filter=git-crypt\n' > "$SANDBOX/work-kopifund-hub/.gitattributes"
+  env $GIT_ENV git -C "$SANDBOX/work-kopifund-hub" add .gitattributes
+  env $GIT_ENV git -C "$SANDBOX/work-kopifund-hub" commit -qm "encrypt everything"
+  git -C "$SANDBOX/work-kopifund-hub" push -q "$SANDBOX/kopifund-hub.git" main
+  run_deploy
+  check "deploy ok" [ "$CODE" -eq 0 ]
+  d="$HOME/.kopifund"
+  git -C "$d" config filter.git-crypt.smudge 'git-crypt smudge'
+  git -C "$d" config filter.git-crypt.clean 'git-crypt clean'
+  git -C "$d" config filter.git-crypt.required true
+  other="$SANDBOX/other-mac"
+  git clone -q "$SANDBOX/kopifund-hub.git" "$other"
+  git -C "$other" config filter.git-crypt.smudge 'git-crypt smudge'
+  git -C "$other" config filter.git-crypt.clean 'git-crypt clean'
+  git -C "$other" config filter.git-crypt.required true
+  # Mac writes its db, commits (clean encrypts the blob), pushes, stamped old.
+  echo "mac-db" > "$other/kopifund.db"
+  PATH="$STUBS:$PATH" env $GIT_ENV GIT_AUTHOR_DATE='2020-01-01T00:00:00Z' GIT_COMMITTER_DATE='2020-01-01T00:00:00Z' git -C "$other" add -A
+  PATH="$STUBS:$PATH" env $GIT_ENV GIT_AUTHOR_DATE='2020-01-01T00:00:00Z' GIT_COMMITTER_DATE='2020-01-01T00:00:00Z' git -C "$other" commit -qm "mac db"
+  git -C "$other" push -q origin main
+  # This box writes its own, stamped newer => ours wins.
+  echo "server-db" > "$d/kopifund.db"
+  PATH="$STUBS:$PATH" env $GIT_ENV GIT_AUTHOR_DATE='2021-01-01T00:00:00Z' GIT_COMMITTER_DATE='2021-01-01T00:00:00Z' git -C "$d" add -A
+  PATH="$STUBS:$PATH" env $GIT_ENV GIT_AUTHOR_DATE='2021-01-01T00:00:00Z' GIT_COMMITTER_DATE='2021-01-01T00:00:00Z' git -C "$d" commit -qm "server db"
+  run_sync
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  check "winner db is plaintext"     grep -qx "server-db" "$d/kopifund.db"
+  check "loser copy is PLAINTEXT"    sh -c 'cat "$0"/kopifund.db.loser-* | grep -qx "mac-db"' "$d"
+  check "loser copy has no magic"    sh -c '! od -An -c -N9 "$0"/kopifund.db.loser-* | tr -d " " | grep -qx "\\0GITCRYPT"' "$d"
+  check "remote stores ciphertext"   sh -c "git -C '$SANDBOX/kopifund-hub.git' show HEAD:kopifund.db | od -An -c -N9 | tr -d ' ' | grep -qx '\\\\0GITCRYPT'"
+  teardown
+}
+
+# A real SQLite fixture for the db conflict case: WAL mode, and the writer
+# exits without closing so committed rows stay in the -wal file — the state
+# the live app leaves behind. The sync-side checkpoint is what puts them in
+# the committed .db blob.
+mk_db() {
+  rm -f "$1" "$1-wal" "$1-shm"
+  DB_PATH="$1" DB_VAL="$2" python3 - <<'PY'
+import os, sqlite3
+con = sqlite3.connect(os.environ["DB_PATH"])
+con.execute("PRAGMA journal_mode=WAL")
+con.execute("CREATE TABLE ledger (v TEXT)")
+con.execute("INSERT INTO ledger VALUES (?)", (os.environ["DB_VAL"],))
+con.commit()
+os._exit(0)   # skip interpreter cleanup so the -wal file outlives the writer
+PY
+}
+read_db() {  # prints the single ledger row; fails on any integrity problem
+  DB_PATH="$1" python3 - <<'PY'
+import os, sqlite3
+con = sqlite3.connect(os.environ["DB_PATH"])
+assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+print(con.execute("SELECT v FROM ledger").fetchone()[0])
+PY
+}
+
+test_sync_diverged_sqlite() {
+  echo "• sync: real sqlite dbs (WAL, live-writer state) merge intact"
+  command -v python3 >/dev/null || { echo "    (skipped — no python3)"; return; }
+  setup
+  run_deploy
+  check "deploy ok" [ "$CODE" -eq 0 ]
+  other="$SANDBOX/other-mac"
+  git clone -q "$SANDBOX/kopifund-hub.git" "$other"
+  mk_db "$other/kopifund.db" mac
+  [ -f "$other/kopifund.db-wal" ] || echo "    (note: no -wal left behind; coverage is weaker)"
+  env $GIT_ENV GIT_AUTHOR_DATE='2020-01-01T00:00:00Z' GIT_COMMITTER_DATE='2020-01-01T00:00:00Z' git -C "$other" add -A
+  env $GIT_ENV GIT_AUTHOR_DATE='2020-01-01T00:00:00Z' GIT_COMMITTER_DATE='2020-01-01T00:00:00Z' git -C "$other" commit -qm "mac db"
+  git -C "$other" push -q origin main
+  # This box: live-writer state, committed rows still in -wal. sync.sh's
+  # own snapshot path is what must checkpoint them into the .db blob.
+  mk_db "$HOME/.kopifund/kopifund.db" server
+  run_sync
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "local db intact, rows kept"    test "$(read_db "$HOME/.kopifund/kopifund.db")" = "server"
+  tmp="$SANDBOX/remote.db"
+  git -C "$SANDBOX/kopifund-hub.git" show HEAD:kopifund.db > "$tmp"
+  check "pushed .db blob is a valid db" read_db "$tmp" >/dev/null
+  check "pushed .db holds server rows"  [ "$(read_db "$tmp")" = "server" ]
+  check "-wal was never committed"      sh -c "! git -C '$SANDBOX/kopifund-hub.git' ls-tree -r --name-only HEAD | grep -q 'kopifund.db-wal'"
+  teardown
+}
+
+test_sync_stale_lock() {
+  echo "• sync: a stale lock is reclaimed; a live owner's lock is honoured"
+  setup
+  run_deploy
+  check "deploy ok" [ "$CODE" -eq 0 ]
+  d="$HOME/.kopifund"
+  # A dead owner + an old start: a SIGKILLed run, which must not block
+  # syncing forever. The pid is beyond every platform's pid_max.
+  mkdir "$d/.git/kopifund-sync.lock.d"
+  printf '9876543 %s\n' "$(( $(date +%s) - 1000 ))" > "$d/.git/kopifund-sync.lock.d/pid"
+  echo "note" > "$d/notes.txt"
+  run_sync
+  check "reclaims and exits zero"   [ "$CODE" -eq 0 ]
+  check "says it reclaimed"         out_has "reclaiming"
+  check "synced anyway"             sh -c "git -C '$SANDBOX/kopifund-hub.git' show HEAD:notes.txt >/dev/null"
+  # A live owner (this shell's pid, fresh start) defers quietly instead.
+  mkdir "$d/.git/kopifund-sync.lock.d"
+  printf '%s %s\n' "$$" "$(date +%s)" > "$d/.git/kopifund-sync.lock.d/pid"
+  echo "note2" > "$d/notes2.txt"
+  run_sync
+  check "live owner: exits zero"    [ "$CODE" -eq 0 ]
+  check "live owner: did not sync"  sh -c "! git -C '$SANDBOX/kopifund-hub.git' show HEAD:notes2.txt >/dev/null 2>&1"
+  rm -rf "$d/.git/kopifund-sync.lock.d"
+  teardown
+}
+
 test_sync_locked_refuses() {
   echo "• sync: a sealed data folder is never committed over"
   setup
@@ -477,6 +614,7 @@ run_teardown() {
 
 deployed() {
   setup
+  mkdir -p "$HOME/services/deployd/state"
   run_deploy
   cat > "$STATE_DIR/serve_status" <<EOF
 https://test-host.tailfake.ts.net:2283 (tailnet only)
@@ -507,7 +645,10 @@ test_teardown_safe() {
   check "service home kept"           [ -d "$HOME/services/kopifund/repo" ]
   check ".env kept"                   [ -f "$SVC/.env" ]
   check "timer disabled"              [ ! -f "$STATE_DIR/kopifund-sync_enabled" ] || [ "$OS" != "Linux" ]
+  check "deployd skip marker written" [ -f "$HOME/services/deployd/state/kopifund.disabled" ]
   check "says how to bring it back"   out_has "./setup.sh brings it back"
+  run_deploy
+  check "manual setup clears it"      [ ! -f "$HOME/services/deployd/state/kopifund.disabled" ]
   run_teardown
   check "re-run exits zero"           [ "$CODE" -eq 0 ]
   teardown
@@ -665,6 +806,7 @@ test_live() {
   if [ "$OS" = "Linux" ]; then
     live_check "sync timer enabled"          sh -c "systemctl --user is-enabled kopifund-sync.timer"
     live_check "sync script installed"       sh -c "test -x '$HOME/services/kopifund/bin/sync.sh'"
+    live_check "lingering keeps timer alive" sh -c "loginctl show-user '$USER' -p Linger | grep -qx 'Linger=yes'"
   else
     live_check "LaunchAgent installed"       sh -c "test -f '$HOME/Library/LaunchAgents/com.kopifund.sync.plist'"
   fi
@@ -694,6 +836,9 @@ else
   test_sync_snapshots_and_pushes
   test_sync_fastforwards
   test_sync_diverged_binary_conflict
+  test_sync_diverged_gitcrypt
+  test_sync_diverged_sqlite
+  test_sync_stale_lock
   test_sync_locked_refuses
   test_teardown_safe
   test_teardown_not_published
