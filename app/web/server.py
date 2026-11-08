@@ -2457,7 +2457,9 @@ def ghapp_entries():
             "setup": "app/web/ghapp.py",
             "github": {"repo": d["repo"], "ref": d["ref"]},
             "control": (None if source == "repo" else
-                        {"parts": [{"container": ghapp.container_name(key)}]}),
+                        {"parts": [{"container": ghapp.container_name(key)}],
+                         **({"kuma": d["kuma"]}
+                            if d.get("kuma") is not None else {})}),
             # "repo": only this checkout's app/web/apps/ has it; Deploy adopts it.
             "ghapp_source": source,
             "env_names": list(d.get("env_names") or []),

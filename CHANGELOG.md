@@ -10,6 +10,15 @@ first, dated by merge.
 
 ### Added
 
+- **App tiles regain Kuma pausing and phone control.** A launcher app
+  definition may carry `kuma` — one monitor name or a list of up to five —
+  which the launcher pauses on Stop/Remove and resumes on Start, the same
+  as a service's `control.kuma`. ntfy-control's allowlist now also reads
+  `~/services/launcher/apps` (`CONTROL_APPS_DIR` overrides), so launcher
+  apps are stoppable from the phone as `app-<key>` containers again. The
+  Deploys gallery form edits the field; kaichenpedia and sources regain
+  both controls they lost on becoming apps (app/web/SPEC.md v20).
+
 - **Static apps: anti-framing headers.** A static definition may carry
   `frame_ancestors: "none"`, which sends `Content-Security-Policy:
   frame-ancestors 'none'` and `X-Frame-Options: DENY` (both `always`) on

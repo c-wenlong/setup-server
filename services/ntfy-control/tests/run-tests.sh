@@ -43,7 +43,8 @@ setup() {
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID NTFY_PORT CONTROL_TOPIC REPLY_TOPIC STATE_DIR CALLS_LOG
+  unset FAKE_UID NTFY_PORT CONTROL_TOPIC REPLY_TOPIC STATE_DIR CALLS_LOG \
+        CONTROL_APPS_DIR
 }
 
 run_deploy() {
@@ -588,6 +589,79 @@ cl.handle("stop adguard")'
   teardown
 }
 
+# A launcher app's allowlist entry comes from its definition file in the
+# apps dir (CONTROL_APPS_DIR overrides ~/services/launcher/apps), not from
+# services.json: container app-<key>, kuma from the definition. These run
+# against a fixture repo so the shipped services.json stays out of it.
+apps_repo() {
+  GREPO="$SANDBOX/repo"
+  APPS_DIR="$SANDBOX/apps"
+  export CONTROL_APPS_DIR="$APPS_DIR"
+  mkdir -p "$GREPO/app/web" "$APPS_DIR"
+  cat > "$GREPO/app/web/services.json" <<'JSON'
+{"services": [
+  {"key": "n8n", "control": {"parts": [{"container": "n8n"}], "kuma": "n8n"}}
+]}
+JSON
+}
+
+test_handle_launcher_apps() {
+  echo "• apps dir: launcher app defs join the allowlist, kuma and all"
+  setup
+  echo "KUMA_PORT=3002" > "$SANDBOX/kuma.env"
+  apps_repo
+  cat > "$APPS_DIR/kaichenpedia.json" <<'JSON'
+{"key": "kaichenpedia", "name": "kaichenpedia", "repo": "o/kaichenpedia",
+ "ref": "main", "method": "dockerfile", "dockerfile": "Dockerfile",
+ "context": ".", "container_port": 8000, "port": 8091,
+ "health_path": "/", "volume": null, "kuma": "kaichenpedia"}
+JSON
+  # Neighbours that must not break or shadow the good entries.
+  echo "{ not json" > "$APPS_DIR/broken.json"
+  cat > "$APPS_DIR/launcher.json" <<'JSON'
+{"key": "launcher", "name": "not the launcher"}
+JSON
+  cat > "$APPS_DIR/n8n.json" <<'JSON'
+{"key": "n8n", "name": "n8n as an app"}
+JSON
+  run_handle_fixture "stop kaichenpedia"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "app works past bad neighbours" calls_have "kaichenpedia: stop ok"
+  check "kuma paused before stop"     calls_in_order "kuma_toggle.py pause kaichenpedia" \
+                                        "docker stop app-kaichenpedia"
+  : > "$CALLS_LOG"
+  run_handle_fixture "start kaichenpedia"
+  check "container then resume"       calls_in_order "docker start app-kaichenpedia" \
+                                        "kuma_toggle.py resume kaichenpedia"
+  : > "$CALLS_LOG"
+  run_handle_fixture "stop launcher"
+  check "hard-locked app key ignored" calls_have "unknown service 'launcher'"
+  check "nothing executed"            no_call "docker stop"
+  : > "$CALLS_LOG"
+  run_handle_fixture "stop n8n"
+  check "services.json wins the key"  calls_have "docker stop n8n$"
+  check "  not the app container"     no_call "docker stop app-n8n"
+  teardown
+}
+
+test_apps_dir_live_reload() {
+  echo "• apps dir: a new definition is controllable without a restart"
+  setup
+  apps_repo
+  run_py_fixture '
+import os
+cl.handle("stop n8n")
+with open(os.environ["CALLS_LOG"], "a") as fh:
+    fh.write("--- app added ---\n")
+with open(os.path.join(os.environ["CONTROL_APPS_DIR"], "wiki-app.json"), "w") as fh:
+    fh.write("{\"key\": \"wiki-app\", \"name\": \"wiki\"}")
+cl.handle("stop wiki-app")'
+  check "picks up the new def"        calls_in_order "--- app added ---" \
+                                        "docker stop app-wiki-app"
+  check "  and reports ok"            calls_have "wiki-app: stop ok"
+  teardown
+}
+
 test_shipped_adguard_guard() {
   echo "• allowlist: the shipped registry guards adguard's stop with teardown.sh --check-dns"
   check "registry carries the guard" python3 -c '
@@ -624,6 +698,8 @@ test_handle_rejects_unknown
 test_handle_stop_guard
 test_handle_stop_guard_resolved_at_stop_time
 test_handle_stop_guard_timeout
+test_handle_launcher_apps
+test_apps_dir_live_reload
 test_shipped_adguard_guard
 
 if [ "${1:-}" = "--live" ]; then

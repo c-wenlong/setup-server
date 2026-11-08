@@ -243,6 +243,24 @@ class MethodValidateTest(unittest.TestCase):
             ghapp.validate(method_def("script", env_names=["1BAD"]))
 
 
+class KumaValidateTest(unittest.TestCase):
+    """`kuma` names the Uptime Kuma monitors a stop pauses: one string or a
+    short list of control-name-shaped strings, valid for every method."""
+
+    def test_one_name_or_a_list_on_any_method(self):
+        ghapp.validate(good(kuma="kaichenpedia"))
+        ghapp.validate(method_def("static", kuma=["one", "two.three"]))
+        ghapp.validate(method_def("script", kuma=["a", "b@c", "d.e", "f", "g"]))
+        ghapp.validate(good(kuma=None))
+
+    def test_bad_kuma_shapes_are_refused(self):
+        bad = ["", "a b", "a/b", "a\nb", "-lead", ".lead", "a" * 129,
+               [], ["a"] * 6, ["a", "a"], [7], ["ok", 7], {"a": 1}, 7, True]
+        for v in bad:
+            with self.assertRaises(ghapp.AppError, msg=v):
+                ghapp.validate(good(kuma=v))
+
+
 class ArgvTest(Sandbox):
 
     def test_run_binds_loopback_only_and_restarts_unless_stopped(self):
