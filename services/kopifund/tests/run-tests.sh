@@ -122,6 +122,12 @@ before() {   # before <patA> <patB>: A's first $OUT line precedes B's
   b="$(grep -n -- "$2" <<<"$OUT" | head -1 | cut -d: -f1)"
   [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
 }
+calls_before() {  # calls_before <patA> <patB>: A's first logged call precedes B's
+  local a b
+  a="$(grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1)"
+  b="$(grep -n -- "$2" "$CALLS_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
 env_has()    { grep -q "$1" "$SVC/.env"; }
 file_mode()  { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 
@@ -273,12 +279,15 @@ test_fresh_deploy() {
   check "sync.sh baked the .env path"     grep -qF "ENV_FILE=\"$SVC/.env\"" "$HOME/services/kopifund/bin/sync.sh"
   check "analyse.sh installed + exec"     [ -x "$HOME/services/kopifund/bin/analyse.sh" ]
   check "analyse.sh baked the .env path"  grep -qF "ENV_FILE=\"$SVC/.env\"" "$HOME/services/kopifund/bin/analyse.sh"
+  check "analyse.sh baked docker's path"  grep -qF "DOCKER=\"\${KOPIFUND_DOCKER:-$STUBS/docker}\"" "$HOME/services/kopifund/bin/analyse.sh"
   check ".env records analyse cadence"    grep -qx 'ANALYSE_SECONDS=86400' "$SVC/.env"
   check "compose binds loopback"          compose_hasF '127.0.0.1:${LOCAL_PORT'
   check "compose mounts the data clone"   compose_hasF '${KOPIFUND_DATA'
   check "compose publishes no wildcard"   no_host_wildcard_port
   check "compose up --build invoked"      calls_have "up -d --build"
   check "waited on /api/health"           calls_have "127.0.0.1:8300/api/health"
+  check "first-run analyse exec'd"        calls_have "docker exec -w /app kopifund python3 server/finance.py analyse --no-publish"
+  check "analyse ran after health"        calls_before "api/health" "docker exec"
   check "served :8300 tailnet-only"       calls_have "tailscale serve --bg --https=8300 http://127.0.0.1:8300"
   check "prints final URL"                out_has "https://test-host.tailfake.ts.net:8300"
   if [ "$OS" = "Linux" ]; then
@@ -302,8 +311,9 @@ test_analyse_script() {
   setup
   run_deploy
   check "deploy ok"                    [ "$CODE" -eq 0 ]
-  check "deploy ran no exec (down)"    no_call "docker exec"
+  check "deploy ran the first exec"    calls_have "docker exec -w /app kopifund python3 server/finance.py analyse --no-publish"
   : > "$CALLS_LOG"
+  rm -f "$STATE_DIR/running_kopifund"
   run_analyse
   check "container down: exits zero"   [ "$CODE" -eq 0 ]
   check "container down: no exec call" no_call "docker exec"
@@ -316,6 +326,12 @@ test_analyse_script() {
   run_analyse
   check "analyse fails: non-zero"      [ "$CODE" -ne 0 ]
   check "analyse fails: says so"       out_has "analyse failed"
+  rm -f "$STATE_DIR/exec_fails"
+  # A missing docker is real breakage — not the quiet "container down" skip.
+  OUT="$(KOPIFUND_DOCKER=/no/such/docker PATH="$STUBS:$PATH" bash "$HOME/services/kopifund/bin/analyse.sh" 2>&1)"
+  CODE=$?
+  check "docker missing: non-zero"     [ "$CODE" -ne 0 ]
+  check "docker missing: says so"      out_has "not runnable"
   teardown
 }
 
@@ -433,6 +449,28 @@ test_legacy_adoption_poorer_db() {
   check "warned it kept the clone's"    out_has "Kept the clone's ledger"
   check "legacy files still merge"      grep -qx "legacy-only" "$HOME/.kopifund/notes/extra.txt"
   check "stray -wal not left beside db" [ ! -f "$HOME/.kopifund/kopifund.db-wal" ]
+  teardown
+}
+
+test_legacy_adoption_no_hub_db() {
+  echo "• adoption: a clone with no ledger takes the launcher's db AND its -wal"
+  command -v python3 >/dev/null || { echo "    (skipped — no python3)"; return; }
+  setup
+  # The hub never carried a ledger: the launcher's kopifund.db arrives by
+  # gap-fill like any other file — and its -wal, holding rows not yet
+  # checkpointed, must not be pruned as a "foreign" sidecar.
+  env $GIT_ENV git -C "$SANDBOX/work-kopifund-hub" rm -q kopifund.db
+  env $GIT_ENV git -C "$SANDBOX/work-kopifund-hub" commit -qm "no ledger yet"
+  git -C "$SANDBOX/work-kopifund-hub" push -q "$SANDBOX/kopifund-hub.git" main
+  legacy="$HOME/services/apps/kopifund-finance/data"
+  mkdir -p "$legacy"
+  mk_txn_db "$legacy/kopifund.db" 7
+  printf 'wal-bytes\n' > "$legacy/kopifund.db-wal"
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "ledger gap-filled"             [ "$(txns_in "$HOME/.kopifund/kopifund.db")" = "7" ]
+  check "its -wal kept"                 grep -qx "wal-bytes" "$HOME/.kopifund/kopifund.db-wal"
+  check "says it had no clone ledger"   out_has "the clone had none"
   teardown
 }
 
@@ -964,6 +1002,7 @@ else
   test_legacy_not_adopted_when_hub_newer
   test_legacy_adoption_richer_db
   test_legacy_adoption_poorer_db
+  test_legacy_adoption_no_hub_db
   test_locked_clone_unlocks
   test_idempotent_rerun
   test_upstream_moves

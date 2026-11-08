@@ -17,6 +17,7 @@ case "$1" in
     ;;
 
   stop)
+    rm -f "$STATE_DIR/running_$2"
     if [ -f "$STATE_DIR/docker_containers" ]; then
       grep -vx "$2" "$STATE_DIR/docker_containers" > "$STATE_DIR/.dc" 2>/dev/null || true
       mv "$STATE_DIR/.dc" "$STATE_DIR/docker_containers"
@@ -46,9 +47,23 @@ case "$1" in
       *)
         for a in "$@"; do
           case "$a" in
-            up)   touch "$STATE_DIR/compose_up" ;;
+            up)
+              touch "$STATE_DIR/compose_up"
+              # A successful up leaves the project container running —
+              # setup's first-run analyse must see it that way.
+              touch "$STATE_DIR/running_kopifund"
+              grep -qx kopifund "$STATE_DIR/docker_containers" 2>/dev/null \
+                || echo kopifund >> "$STATE_DIR/docker_containers"
+              ;;
             pull) touch "$STATE_DIR/compose_pull" ;;
-            down) touch "$STATE_DIR/compose_down" ;;
+            down)
+              touch "$STATE_DIR/compose_down"
+              rm -f "$STATE_DIR/running_kopifund"
+              if [ -f "$STATE_DIR/docker_containers" ]; then
+                grep -vx kopifund "$STATE_DIR/docker_containers" > "$STATE_DIR/.dc" 2>/dev/null || true
+                mv "$STATE_DIR/.dc" "$STATE_DIR/docker_containers"
+              fi
+              ;;
           esac
         done
         ;;

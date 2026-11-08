@@ -27,14 +27,24 @@ ENV_FILE="__ENV_FILE__"
 [ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; }
 CONTAINER="${KOPIFUND_CONTAINER:-kopifund}"
 
+# setup.sh bakes `command -v docker` in: launchd and systemd run this with
+# a bare PATH, so a docker CLI outside it (Docker Desktop on the Mac) must
+# still resolve. KOPIFUND_DOCKER overrides for odd installs.
+DOCKER="${KOPIFUND_DOCKER:-__DOCKER__}"
+
 say() { printf 'kopifund-analyse: %s\n' "$*"; }
 
+# A missing docker is real breakage, not a stopped container — say so.
+if [ ! -x "$DOCKER" ]; then
+  say "docker is not runnable at $DOCKER — re-run setup.sh"
+  exit 1
+fi
 # The image carries the Python the pipeline needs (3.14); the host's may
 # not. `docker inspect` fails outright when there is no such container.
-if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" != "true" ]; then
+if [ "$("$DOCKER" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" != "true" ]; then
   exit 0
 fi
-if docker exec -w /app "$CONTAINER" python3 server/finance.py analyse --no-publish >/dev/null; then
+if "$DOCKER" exec -w /app "$CONTAINER" python3 server/finance.py analyse --no-publish >/dev/null; then
   say "stats refreshed"
 else
   say "analyse failed — the dashboard keeps the last results; next tick retries"

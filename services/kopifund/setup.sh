@@ -341,7 +341,8 @@ if [ -d "$LEGACY_DATA" ] && [ ! -f "$ADOPT_MARKER" ]; then
     fi
   fi
   info "Adopting launcher app data: merging $LEGACY_DATA into $DATA_DIR (files the clone lacks only)"
-  had_wal=0; had_shm=0; had_journal=0
+  had_db=0; had_wal=0; had_shm=0; had_journal=0
+  [ -f "$hub_db" ] && had_db=1
   [ -f "$hub_db"-wal ] && had_wal=1
   [ -f "$hub_db"-shm ] && had_shm=1
   [ -f "$hub_db"-journal ] && had_journal=1
@@ -354,16 +355,20 @@ if [ -d "$LEGACY_DATA" ] && [ ! -f "$ADOPT_MARKER" ]; then
       if [ -f "$leg_db$ext" ]; then cp -a "$leg_db$ext" "$hub_db$ext"; else rm -f "$hub_db$ext"; fi
     done
     ok "Adopted the launcher's ledger over the clone's ($db_why)"
-  elif [ -f "$hub_db" ]; then
-    # Gap-fill may have dragged the launcher's sidecars in beside the
-    # clone's ledger — a -wal belonging to the OTHER db must never
-    # replay against this one. Only sidecars that were not already
+  elif [ "$had_db" -eq 1 ]; then
+    # The clone's ledger won: gap-fill may have dragged the launcher's
+    # sidecars in beside it, and a -wal belonging to the OTHER db must
+    # never replay against this one. Only sidecars that were not already
     # there go; the worktree's own hold the app's real unflushed rows.
     [ "$had_wal" -eq 0 ] && rm -f "$hub_db"-wal
     [ "$had_shm" -eq 0 ] && rm -f "$hub_db"-shm
     [ "$had_journal" -eq 0 ] && rm -f "$hub_db"-journal
     [ -f "$leg_db" ] \
       && warn "Kept the clone's ledger — the launcher's is not richer. If that was wrong its copy is still at $leg_db — reconcile by hand, then remove $LEGACY_DATA."
+  elif [ -f "$hub_db" ]; then
+    # No clone db existed — the ledger itself just gap-filled, and its
+    # sidecars (adopted rows still in -wal) must come with it.
+    ok "Adopted the launcher's ledger — the clone had none"
   fi
   touch "$ADOPT_MARKER"
   ok "Legacy data merged into $DATA_DIR (lands in the next sync snapshot)"
@@ -373,7 +378,11 @@ fi
 info "Installing sync + analyse scripts -> $STATE/bin"
 sed -e "s|__ENV_FILE__|$ENV_FILE|" \
   "$SERVICE_DIR/sync.sh" > "$STATE/bin/sync.sh"
-sed -e "s|__ENV_FILE__|$ENV_FILE|" \
+# analyse.sh gets docker's resolved path too — its timer runs under
+# launchd/systemd with a bare PATH, where a docker CLI living somewhere
+# else (Docker Desktop on the Mac) would silently never be found.
+DOCKER_BIN="$(command -v docker)"
+sed -e "s|__ENV_FILE__|$ENV_FILE|" -e "s|__DOCKER__|$DOCKER_BIN|" \
   "$SERVICE_DIR/analyse.sh" > "$STATE/bin/analyse.sh"
 chmod +x "$STATE/bin/sync.sh" "$STATE/bin/analyse.sh"
 # The clone may carry no identity (deployd boxes, fresh VMs); the timer's
