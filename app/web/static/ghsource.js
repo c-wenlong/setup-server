@@ -147,6 +147,9 @@
     xhr.open('POST', 'api/apps/' + encodeURIComponent(key) + '/export', true);
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('Content-Type', 'application/json');
+    /* The API's CSRF gate: writes must carry this fixed header, which a
+       cross-site "simple" request cannot add. */
+    xhr.setRequestHeader('X-Requested-With', 'launcher');
     xhr.onloadend = function () {
       clearTimeout(timer);
       var data = null;

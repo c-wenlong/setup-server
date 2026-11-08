@@ -38,6 +38,11 @@ Serves static/ as static files and a small JSON API:
     GET    api/jobs/{id}
     GET    healthz
 
+Every mutating method (POST/PUT/PATCH/DELETE) must carry the fixed
+`X-Requested-With: launcher` header, and Sec-Fetch-Site/Origin are checked
+when a browser sent them — the CSRF gate at Handler._check_write, enforced
+centrally in _dispatch.
+
 Env values are never in a list or detail payload, not even masked: the
 detail response carries names and a `secret` flag only, and revealing one
 is a separate explicit POST that is never logged. Editing one rewrites
@@ -191,6 +196,15 @@ TOUCH_EVENTS = ("launched", "opened")
 MAX_NOTE_TITLE = 120
 MAX_NOTE_BODY = 8000
 MAX_NOTES_PER_SERVICE = 100
+
+
+# A request line can carry control bytes (ANSI escapes, a bare \r) verbatim
+# into the log; anything request-derived goes through this before stderr.
+_LOG_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _log_clean(text):
+    return _LOG_CTRL_RE.sub("", text)
 
 
 def log(msg):
@@ -865,7 +879,24 @@ _favicon_slots = threading.BoundedSemaphore(FAVICON_MAX_WORKERS)
 
 # Unlike _opener, this one FOLLOWS redirects: a moved page still gets to say
 # which icon it uses, and the href resolves against the post-redirect URL.
-_favicon_opener = urllib.request.build_opener()
+# But the page asked is whatever a loopback service answers, and a hostile
+# one can 302 the fetch anywhere — cloud metadata, another port's admin
+# API — so the chain is bounded and http(s)-only.
+class _FaviconRedirect(urllib.request.HTTPRedirectHandler):
+    """Tighter redirect policy for the favicon fetch: at most a few hops
+    (urllib's default is ten, more than a moved page needs) and every hop
+    http(s). urllib's own allowlist also admits ftp, which is refused here.
+    """
+
+    max_redirections = 4
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme not in ("http", "https"):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_favicon_opener = urllib.request.build_opener(_FaviconRedirect())
 
 
 class _IconLinks(html.parser.HTMLParser):
@@ -3403,6 +3434,11 @@ def deployd_upsert_poller(key, body):
     cmd = clean_field("cmd", body.get("cmd"), 2048, True)
     if not repo or not cmd:
         raise DeployError(400, "repo and cmd are required")
+    # Both land in git argv — `git ls-remote <repo>` in deployd, `git fetch
+    # <repo> <ref>:<ref>` in the check endpoint — where a leading dash is an
+    # option (--upload-pack runs a command), never a value.
+    if repo.startswith("-") or ref.startswith("-"):
+        raise DeployError(400, "repo and ref cannot start with '-'")
     with _deployd_pollers_lock:
         pollers = _deployd_overrides(state_dir)
         pollers[key] = {"repo": repo, "ref": ref, "cmd": cmd}
@@ -6581,6 +6617,31 @@ def normalize(path):
     return path
 
 
+# Sent on every response (added in end_headers, so send_error gets them
+# too): nothing may frame this UI, and assets come only from this origin —
+# except images, where live favicons arrive over the tailnet and the glyph
+# fallbacks are data: URIs. The inline <script> in index.html's <head>
+# (mount bounce + first-paint theme) is why script-src needs 'unsafe-inline'.
+SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy":
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: http: https:; frame-ancestors 'none'",
+}
+
+# The CSRF gate. This API has no auth — the tailnet is the boundary — but
+# that does nothing about a hostile page already open in the operator's
+# browser, which could otherwise POST here freely: a cross-origin "simple"
+# request (a text/plain form post) mutates state without any preflight.
+# Every mutating method therefore must carry this fixed custom header.
+# A simple request cannot add one, and a request that does triggers a CORS
+# preflight this server never answers — so a cross-site write can never get
+# through. Sec-Fetch-Site and Origin back it up (see _check_write).
+CSRF_HEADER = "X-Requested-With"
+CSRF_HEADER_VALUE = "launcher"
+_FETCH_SITE_OK = ("same-origin", "same-site", "none")
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "launcher"
     protocol_version = "HTTP/1.1"
@@ -6588,7 +6649,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # ---- plumbing
 
     def log_message(self, fmt, *args):
-        log("%s %s" % (self.address_string(), fmt % args))
+        # The request line is in here (log_request / log_error), control
+        # bytes and all — cleaned or a forged line writes fake log rows.
+        log("%s %s" % (self.address_string(), _log_clean(fmt % args)))
+
+    def end_headers(self):
+        # Every response, whatever produced it — including send_error's
+        # (a bad request line or an unimplemented verb like OPTIONS).
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
+        super().end_headers()
 
     def _send(self, status, body, ctype, extra=None):
         if isinstance(body, str):
@@ -6660,9 +6730,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             raise DeployError(400, "malformed JSON body")
 
+    def _check_write(self):
+        """The CSRF gate on every mutating method, run before routing so no
+        endpoint can bypass it (CSRF_HEADER's comment has the why).
+
+        Fetch metadata first when the client sent it: Sec-Fetch-Site is a
+        browser's own word for where the request came from, and an Origin
+        is only trusted while it names this Host. Then the header itself —
+        the check that actually stops a browser write, since the metadata
+        is absent from non-browser clients.
+        """
+        fetch_site = self.headers.get("Sec-Fetch-Site")
+        if fetch_site is not None \
+                and fetch_site.lower() not in _FETCH_SITE_OK:
+            self._forbid_write()
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            try:
+                onetloc = urllib.parse.urlsplit(origin).netloc.lower()
+            except ValueError:
+                onetloc = ""
+            if onetloc != (self.headers.get("Host") or "").lower():
+                self._forbid_write()
+        if self.headers.get(CSRF_HEADER) != CSRF_HEADER_VALUE:
+            self._forbid_write("missing %s header" % CSRF_HEADER)
+
+    def _forbid_write(self, message="cross-site request refused"):
+        """Refuse the write without draining its body: the connection is
+        closed instead — the same call _read_json_body makes over its
+        limit — or the unread bytes would be parsed as the next request."""
+        self.close_connection = True
+        raise DeployError(403, message)
+
     def _dispatch(self, method):
         try:
             path = normalize(self.path)
+            if method != "GET":
+                self._check_write()
             if method == "GET":
                 self._route_get(path)
             elif method == "PATCH":
@@ -6680,7 +6784,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             # Never leak a traceback to the client; stderr gets the detail.
             log("unhandled error on %s %s\n%s"
-                % (method, self.path, traceback.format_exc()))
+                % (method, _log_clean(self.path), traceback.format_exc()))
             try:
                 self._error(500, "internal error")
             except Exception:

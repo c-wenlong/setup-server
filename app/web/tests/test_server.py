@@ -32,6 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server  # noqa: E402
 
 
+# The write gate server.py enforces on every mutating method: every test
+# client sends this header so the routing under test is what actually runs.
+API_HEADERS = {server.CSRF_HEADER: server.CSRF_HEADER_VALUE}
+
+
 # Job steps run on daemon threads that outlive the test which started them: a
 # test that calls start_action without waiting returns while its thread has yet
 # to reach subprocess.Popen. Restoring the *real* Popen in tearDown therefore
@@ -790,6 +795,34 @@ class FetchPageIconTest(unittest.TestCase):
         self.assertLessEqual(len(reads), 10)
 
 
+class FaviconRedirectPolicyTest(unittest.TestCase):
+    """_FaviconRedirect: bounded hops, http(s) targets only — a hostile
+    loopback page can 302 the fetch anywhere, so the chain is short and
+    off-scheme hops (urllib admits ftp by default) are refused."""
+
+    def test_the_opener_uses_the_bounded_handler(self):
+        self.assertTrue(any(isinstance(h, server._FaviconRedirect)
+                            for h in server._favicon_opener.handlers))
+        self.assertLessEqual(server._FaviconRedirect.max_redirections, 4)
+
+    def test_off_scheme_targets_are_refused(self):
+        h = server._FaviconRedirect()
+        for target in ("ftp://127.0.0.1:21/x", "file:///etc/passwd",
+                       "gopher://x/1"):
+            self.assertIsNone(
+                h.redirect_request(None, None, 302, "", {}, target), target)
+
+    def test_http_and_https_targets_are_followed(self):
+        import urllib.request
+        h = server._FaviconRedirect()
+        req = urllib.request.Request("http://127.0.0.1:1/")
+        for target in ("http://127.0.0.1:2/ui/",
+                       "https://box.ts.net:8443/"):
+            new = h.redirect_request(req, None, 302, "", {}, target)
+            self.assertIsNotNone(new, target)
+            self.assertEqual(new.full_url, target)
+
+
 class FaviconPageTest(SandboxTest):
     """favicon_page builds the loopback page a tile's icon is read from."""
 
@@ -1428,8 +1461,10 @@ class HttpTest(SandboxTest):
     def get(self, path, method="GET", body=None):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        conn.request(method, path, body=body,
-                     headers={"Content-Type": "application/json"} if body else {})
+        headers = dict(API_HEADERS)
+        if body:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
         data = resp.read().decode()
         status = resp.status
@@ -1593,6 +1628,146 @@ class HttpTest(SandboxTest):
         self.assertEqual(status, 500)
         self.assertEqual(json.loads(body), {"error": "internal error"})
         self.assertNotIn("Traceback", body)
+
+
+class CsrfHttpTest(HttpTest):
+    """The write gate: mutating methods must carry CSRF_HEADER, and browser
+    fetch metadata (Sec-Fetch-Site, Origin) is honoured when sent."""
+
+    def call(self, method, path, body=None, headers=None):
+        """A request with fully controlled headers — most cases here need
+        the CSRF header absent or a metadata header set."""
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        hdrs = dict(headers or {})
+        if body is not None and "Content-Type" not in hdrs:
+            hdrs["Content-Type"] = "application/json"
+        conn.request(method, path, body=body, headers=hdrs)
+        resp = conn.getresponse()
+        data = resp.read().decode()
+        status = resp.status
+        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+        conn.close()
+        return status, data, resp_headers
+
+    def test_write_without_the_header_is_403(self):
+        for method in ("POST", "PATCH", "PUT", "DELETE"):
+            status, body, _ = self.call(method, "/api/services/alpha/deploy")
+            self.assertEqual(status, 403, method)
+            self.assertIn("error", json.loads(body))
+        # And nothing ran: the gate fires before routing or body reads.
+        status, body, _ = self.call(
+            "POST", "/api/deployd/pollers/evil",
+            body=json.dumps({"repo": "https://example/e.git",
+                             "cmd": "touch /tmp/csrf"}))
+        self.assertEqual(status, 403)
+
+    def test_a_simple_cross_site_post_is_403(self):
+        # The classic CSRF shape: a text/plain form body, no custom headers.
+        status, _, _ = self.call(
+            "POST", "/api/services/alpha/action",
+            body='{"action": "stop"}',
+            headers={"Content-Type": "text/plain"})
+        self.assertEqual(status, 403)
+
+    def test_wrong_header_value_is_403(self):
+        status, _, _ = self.call("POST", "/api/order", body="{}",
+                                 headers={server.CSRF_HEADER: "yes"})
+        self.assertEqual(status, 403)
+
+    def test_fetch_metadata_cross_site_is_403(self):
+        for site in ("cross-site", "Cross-Site"):
+            status, _, _ = self.call(
+                "POST", "/api/order", body="{}",
+                headers=dict(API_HEADERS, **{"Sec-Fetch-Site": site}))
+            self.assertEqual(status, 403, site)
+
+    def test_fetch_metadata_ok_values_reach_routing(self):
+        # 404, not 403: the gate passed and routing ran. (Missing header is
+        # the curl case; browsers always send one of these on a write.)
+        for site in ("same-origin", "same-site", "none", None):
+            hdrs = dict(API_HEADERS)
+            if site is not None:
+                hdrs["Sec-Fetch-Site"] = site
+            status, _, _ = self.call("POST", "/api/nope", body="{}",
+                                     headers=hdrs)
+            self.assertEqual(status, 404, site)
+
+    def test_origin_must_name_this_host(self):
+        status, _, _ = self.call(
+            "POST", "/api/order", body="{}",
+            headers=dict(API_HEADERS,
+                         **{"Origin": "https://evil.example"}))
+        self.assertEqual(status, 403)
+        for origin in ("null", "not-a-url", "https://127.0.0.1:1"):
+            status, _, _ = self.call(
+                "POST", "/api/order", body="{}",
+                headers=dict(API_HEADERS, **{"Origin": origin}))
+            self.assertEqual(status, 403, origin)
+        # The matching one passes the gate and reaches routing (404).
+        status, _, _ = self.call(
+            "POST", "/api/nope", body="{}",
+            headers=dict(API_HEADERS,
+                         **{"Origin": "http://127.0.0.1:%d" % self.port}))
+        self.assertEqual(status, 404)
+
+    def test_get_needs_no_header(self):
+        status, _, _ = self.call("GET", "/healthz")
+        self.assertEqual(status, 200)
+        status, _, _ = self.call("GET", "/api/services")
+        self.assertEqual(status, 200)
+
+    def test_security_headers_on_every_response(self):
+        for method, path in (("GET", "/healthz"),
+                             ("GET", "/api/nope"),
+                             ("POST", "/api/order")):
+            _, _, hdrs = self.call(method, path)
+            self.assertEqual(hdrs.get("x-frame-options"), "DENY", path)
+            csp = hdrs.get("content-security-policy") or ""
+            self.assertIn("frame-ancestors 'none'", csp, path)
+            self.assertIn("default-src 'self'", csp, path)
+
+    def test_leading_dash_poller_fields_are_400(self):
+        for body in ({"repo": "--upload-pack=touch /tmp/x", "cmd": "c"},
+                     {"repo": "-oProxyCommand=id", "cmd": "c"},
+                     {"repo": "https://example/a.git", "ref": "-d", "cmd": "c"},
+                     {"repo": "https://example/a.git", "ref": "--all",
+                      "cmd": "c"}):
+            status, data, _ = self.call(
+                "POST", "/api/deployd/pollers/evil",
+                body=json.dumps(body), headers=dict(API_HEADERS))
+            self.assertEqual(status, 400, body)
+            self.assertIn("'-'", data or "")
+
+
+class LogForgeHttpTest(HttpTest):
+    """A request-target is raw attacker bytes: control codes must never
+    reach stderr, or a forged line writes fake rows into the log."""
+
+    def test_requestline_control_bytes_are_stripped_in_the_log(self):
+        import io
+        import socket
+        buf = io.StringIO()
+        saved = sys.stderr
+        sys.stderr = buf
+        try:
+            with socket.create_connection(("127.0.0.1", self.port),
+                                          timeout=5) as s:
+                s.sendall(b"GET /forge\x1b[31m-now HTTP/1.0\r\n"
+                          b"Host: x\r\n\r\n")
+                while s.recv(65536):
+                    pass
+        finally:
+            sys.stderr = saved
+        out = buf.getvalue()
+        self.assertNotIn("\x1b", out)
+        self.assertIn("/forge", out)
+
+    def test__log_clean(self):
+        # The control byte goes; the printable "[31m" behind it stays —
+        # harmless text once the ESC that would interpret it is gone.
+        self.assertEqual(server._log_clean("a\x00b\x1b[31mc\x7fd\re"),
+                         "ab[31mcde")
 
 
 # ---------------------------------------------------------------- probes
@@ -2845,8 +3020,10 @@ class EnvEditHttpTest(SandboxTest):
     def call(self, method, path, body=None):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        conn.request(method, path, body=body,
-                     headers={"Content-Type": "application/json"} if body else {})
+        headers = dict(API_HEADERS)
+        if body:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
         data = resp.read().decode()
         conn.close()
@@ -3670,9 +3847,10 @@ class NotesHttpTest(NotesTestBase):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         payload = json.dumps(body).encode() if body is not None else None
-        conn.request(method, path, body=payload,
-                     headers={"Content-Type": "application/json"}
-                     if payload else {})
+        headers = dict(API_HEADERS)
+        if payload:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=payload, headers=headers)
         resp = conn.getresponse()
         data = resp.read().decode()
         status = resp.status
@@ -3750,7 +3928,8 @@ class NotesHttpTest(NotesTestBase):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         conn.request("POST", "/api/services/alpha/notes", body=b"{not json",
-                     headers={"Content-Type": "application/json"})
+                     headers=dict(API_HEADERS,
+                                  **{"Content-Type": "application/json"}))
         resp = conn.getresponse()
         self.assertEqual(resp.status, 400)
         resp.read()
@@ -3784,7 +3963,8 @@ class NotesHttpTest(NotesTestBase):
         note = json.loads(self.call("/api/services/alpha/notes", "POST",
                                     {"body": "x"})[1])
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        conn.request("DELETE", "/api/services/alpha/notes/%s" % note["id"])
+        conn.request("DELETE", "/api/services/alpha/notes/%s" % note["id"],
+                     headers=dict(API_HEADERS))
         resp = conn.getresponse()
         self.assertEqual(resp.status, 204)
         self.assertEqual(resp.read(), b"")
@@ -3893,9 +4073,10 @@ class DetailHttpTest(SandboxTest):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         payload = json.dumps(body).encode() if body is not None else None
-        conn.request(method, path, body=payload,
-                     headers={"Content-Type": "application/json"}
-                     if payload else {})
+        headers = dict(API_HEADERS)
+        if payload:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=payload, headers=headers)
         resp = conn.getresponse()
         data = resp.read().decode()
         status = resp.status
@@ -4833,9 +5014,10 @@ class ControlHttpTest(SandboxTest):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         payload = json.dumps(body).encode() if body is not None else None
-        conn.request(method, path, body=payload,
-                     headers={"Content-Type": "application/json"}
-                     if payload else {})
+        headers = dict(API_HEADERS)
+        if payload:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=payload, headers=headers)
         resp = conn.getresponse()
         data = resp.read().decode()
         status = resp.status
@@ -5610,9 +5792,10 @@ class TouchHttpTest(SandboxTest):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         payload = raw if raw is not None else (
             json.dumps(body).encode() if body is not None else None)
-        conn.request(method, path, body=payload,
-                     headers={"Content-Type": "application/json"}
-                     if payload else {})
+        headers = dict(API_HEADERS)
+        if payload:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=payload, headers=headers)
         resp = conn.getresponse()
         data = resp.read().decode()
         status = resp.status
@@ -7982,6 +8165,31 @@ class DeploydPollersTest(SandboxTest):
             server.deployd_remove_poller("ghost")
         self.assertEqual(ctx.exception.status, 404)
 
+    def test_leading_dash_repo_and_ref_are_rejected(self):
+        # repo/ref land in `git ls-remote` and `git fetch <url> <ref>:<ref>`
+        # argv — a dash value is an option (--upload-pack runs a command).
+        for body in ({"repo": "--upload-pack=id", "cmd": "c"},
+                     {"repo": "-oProxyCommand=id", "cmd": "c"},
+                     {"repo": "https://example/a.git", "ref": "-d",
+                      "cmd": "c"},
+                     {"repo": "https://example/a.git", "ref": "--all",
+                      "cmd": "c"}):
+            with self.assertRaises(server.DeployError) as ctx:
+                server.deployd_upsert_poller("custom", body)
+            self.assertEqual(ctx.exception.status, 400, body)
+        # A leading dash inside whitespace is cleaned first, then refused.
+        with self.assertRaises(server.DeployError):
+            server.deployd_upsert_poller("custom", {
+                "repo": "  -x", "cmd": "c"})
+        # Nothing was written: the refusals fire before the file update.
+        self.assertFalse(os.path.exists(
+            os.path.join(self.state, "pollers.json")))
+        # And an ordinary value still saves.
+        server.deployd_upsert_poller("custom", {
+            "repo": "https://example/c.git", "ref": "release-1",
+            "cmd": "run c"})
+        self.assertEqual(self.pollers_file()["custom"]["ref"], "release-1")
+
     def test_pause_resume(self):
         server.deployd_pause_poller("alpha", True)
         flag = os.path.join(self.state, "alpha.disabled")
@@ -8908,7 +9116,7 @@ class UpdateHttpTest(UpdateTestBase):
     def call(self, path):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        conn.request("POST", path)
+        conn.request("POST", path, headers=dict(API_HEADERS))
         resp = conn.getresponse()
         body = json.loads(resp.read().decode() or "null")
         conn.close()
@@ -9331,7 +9539,8 @@ class ExportAppTest(GithubAppsBase):
         try:
             conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
             conn.request("POST", "/api/apps/hello-app/export", body="{}",
-                         headers={"Content-Type": "application/json"})
+                         headers=dict(API_HEADERS,
+                                      **{"Content-Type": "application/json"}))
             resp = conn.getresponse()
             body = resp.read().decode()
             conn.close()
@@ -10154,8 +10363,11 @@ class DeploymentsHttpTest(DeploymentsBase):
     def call(self, method, path, body=None):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        headers = dict(API_HEADERS)
+        if body is not None:
+            headers["Content-Type"] = "application/json"
         conn.request(method, path, body=None if body is None else json.dumps(body),
-                     headers={"Content-Type": "application/json"} if body is not None else {})
+                     headers=headers)
         resp = conn.getresponse()
         data = resp.read().decode()
         conn.close()
