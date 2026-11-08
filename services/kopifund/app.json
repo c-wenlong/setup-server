@@ -1,0 +1,30 @@
+{
+  "key": "kopifund",
+  "name": "Kopifund",
+  "tagline": "Money",
+  "group": "mine",
+  "icon": "kopifund",
+  "author": "c-wenlong",
+  "url": "https://HOST:8300/",
+  "health": "http://127.0.0.1:8300/api/health",
+  "marker": "~/services/kopifund",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "container": "kopifund"
+      }
+    ],
+    "kuma": "kopifund",
+    "_comment": "Single container; the data folder it mounts is a git-crypt clone synced by a separate user timer, which is not a part the launcher should stop."
+  },
+  "login": [
+    "No sign-in: loopback and the tailnet are the boundary. Phones pair once from Settings -> Link a phone (QR), then read over the tailnet with a device bearer."
+  ],
+  "description": "Kopifund personal finance tracker (private c-wenlong/kopifund-finance repo): bank/wallet/brokerage/CPF PDF statements parsed into one categorised ledger, from a Singapore user's own accounts. Built from a machine-managed clone at ~/services/kopifund/repo, hard-reset per deploy; the container it makes mounts the data folder at ~/.kopifund — upstream's own data root — which is an unlocked git-crypt clone of the private kopifund-hub repo: the versioned, Mac-shared state. A systemd user timer / LaunchAgent snapshots it back to the hub every SYNC_SECONDS and merges the other machines' snapshots (newer tip wins a raced file; the loser is kept as <name>.loser-<sha>). Replaces the launcher's From-GitHub deployment of the same app.",
+  "deploy": {
+    "repo": "https://github.com/c-wenlong/kopifund-finance",
+    "ref": "main",
+    "cmd": "services/kopifund/setup.sh"
+  }
+}

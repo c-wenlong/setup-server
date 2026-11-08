@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# git-crypt stub. `unlock <key>` requires the key file to exist and then
+# "decrypts" the cwd: any file starting with the 9-byte \0GITCRYPT magic has
+# the magic stripped, which is how the sandbox fakes a sealed checkout.
+echo "git-crypt $*" >> "$CALLS_LOG"
+
+case "${1:-}" in
+  unlock)
+    key="${2:-}"
+    [ -f "$key" ] || { echo "git-crypt: $key: no such file" >&2; exit 1; }
+    find . -type f ! -path './.git/*' 2>/dev/null | while IFS= read -r f; do
+      if [ "$(od -An -c -N9 "$f" 2>/dev/null | tr -d ' ')" = '\0GITCRYPT' ]; then
+        tail -c +10 "$f" > "$f.plain" && mv "$f.plain" "$f"
+      fi
+    done
+    ;;
+  status|init|lock)
+    ;;
+esac
+exit 0

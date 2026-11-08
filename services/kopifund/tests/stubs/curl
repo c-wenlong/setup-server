@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# curl stub — fakes Kopifund's HTTP surface. State in $STATE_DIR:
+#   health_fails_left  — countdown of 503s from /api/health
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; want_code=0; failonerr=0; dump_hdr=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -D) dump_hdr="$2"; shift 2 ;;
+    -u) shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -H|--max-time|--connect-timeout|-d|--data-binary) shift 2 ;;
+    -L) shift ;;
+    -[a-zA-Z]*)
+      case "$1" in
+        *f*) failonerr=1 ;;
+        *I*) method="HEAD" ;;
+      esac
+      shift
+      ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {  # emit <http_code> <body>
+  if [ -n "$dump_hdr" ]; then
+    hdr="$(printf 'HTTP/1.1 %s\n' "$1")"
+    if [ "$dump_hdr" = "-" ]; then
+      printf '%s\n' "$hdr"
+    else
+      printf '%s\n' "$hdr" > "$dump_hdr"
+    fi
+  fi
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ] && [ -z "$dump_hdr" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */api/health|*/api/health/)
+    if [ -f "$STATE_DIR/health_fails_left" ]; then
+      left="$(cat "$STATE_DIR/health_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/health_fails_left"
+        emit 503 '{"ok":false}'
+      fi
+    fi
+    emit 200 '{"ok":true}'
+    ;;
+  *)
+    emit 200 '{}'
+    ;;
+esac

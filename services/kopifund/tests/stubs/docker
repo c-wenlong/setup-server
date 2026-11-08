@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# docker stub. State in $STATE_DIR:
+#   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
+#   docker_containers  — one container name per line, printed by `docker ps`
+#   compose_up / compose_down / compose_pull — touched by compose verbs
+echo "docker $*" >> "$CALLS_LOG"
+
+case "$1" in
+  ps)
+    if [ -f "$STATE_DIR/docker_no_perm" ]; then
+      echo "permission denied while trying to connect to the docker API" >&2
+      exit 1
+    fi
+    [ -f "$STATE_DIR/docker_containers" ] && cat "$STATE_DIR/docker_containers"
+    ;;
+
+  stop)
+    if [ -f "$STATE_DIR/docker_containers" ]; then
+      grep -vx "$2" "$STATE_DIR/docker_containers" > "$STATE_DIR/.dc" 2>/dev/null || true
+      mv "$STATE_DIR/.dc" "$STATE_DIR/docker_containers"
+    fi
+    ;;
+
+  inspect)
+    echo running
+    ;;
+
+  exec)
+    ;;
+
+  compose)
+    case "$2" in
+      version) echo "Docker Compose version v2.99-stub" ;;
+      *)
+        for a in "$@"; do
+          case "$a" in
+            up)   touch "$STATE_DIR/compose_up" ;;
+            pull) touch "$STATE_DIR/compose_pull" ;;
+            down) touch "$STATE_DIR/compose_down" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0

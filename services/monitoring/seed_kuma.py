@@ -94,6 +94,9 @@ PUBLISHED = [
     # that the catalog reads: content pages read catalog.db per request, and
     # the landing page reads none, so a DB fault won't be caught here.
     ("gnosia-learn", 8107, "/"),
+    # /api/health ({"ok":true}) — the documented always-open probe; it also
+    # answers on the phone-link path, so it stays up under both.
+    ("kopifund", 8300, "/api/health"),
     # "/" is the app shell (200): the whole corpus is encrypted blobs, so no
     # deeper endpoint exists — this proves nginx serves, nothing more.
     ("sources", 8098, "/"),
