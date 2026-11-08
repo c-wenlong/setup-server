@@ -442,18 +442,18 @@ EOF
 fi
 
 # Tell deployd not to resurrect this on the next push: the flag lives in
-# deployd's own state dir so it survives --purge too. Re-run ./setup.sh to
-# clear it and re-enable auto-deploy.
+# deployd's own state dir so it survives --purge too. While it stands,
+# setup.sh refuses to run — remove it by hand to bring the service back.
 if [ -d "$HOME/services/deployd/state" ]; then
   touch "$HOME/services/deployd/state/$NAME.disabled"
-  ok "deployd will skip $NAME until its setup.sh runs again"
+  ok "deployd will skip $NAME until $NAME.disabled is removed and setup.sh re-runs"
 fi
 
 echo
 if [ "$PURGE" -eq 1 ]; then
-  printf '\033[1;32mDone.\033[0m %s is removed and its state is gone. Your clone at %s is untouched; ./setup.sh starts fresh.\n' "$NAME" "$SOURCE_REPO"
+  printf '\033[1;32mDone.\033[0m %s is removed and its state is gone. Your clone at %s is untouched; remove the deployd disabled flag, then ./setup.sh starts fresh.\n' "$NAME" "$SOURCE_REPO"
 else
-  printf '\033[1;32mDone.\033[0m %s is removed. Built site, media, unit files and .env are kept; ./setup.sh brings it back.\n' "$NAME"
+  printf '\033[1;32mDone.\033[0m %s is removed. Built site, media, unit files and .env are kept; remove the deployd disabled flag, then ./setup.sh brings it back.\n' "$NAME"
   echo "  Delete that state too: ./teardown.sh --purge"
 fi
 echo "  Uptime Kuma will now report it down. The launcher's Remove pauses that"

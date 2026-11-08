@@ -13,12 +13,22 @@
 # built from what this command reports.
 echo "tailscale $*" >> "$CALLS_LOG"
 
-if [ "$1" = "serve" ] && [ "${2:-}" = "status" ] && [ -f "$STATE_DIR/serve_status_fails" ]; then
-  echo "failed to connect to local tailscaled" >&2
-  exit 1
-fi
-if [ "$1" = "serve" ] && [ "${2:-}" = "status" ] && [ -f "$STATE_DIR/serve_status" ]; then
-  cat "$STATE_DIR/serve_status"
+# `serve status` is answered ahead of the operator gate and the failure
+# countdown, like the real daemon answers status reads for any user.
+if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then
+  if [ -f "$STATE_DIR/serve_status_fails" ]; then
+    echo "failed to connect to local tailscaled" >&2
+    exit 1
+  fi
+  if [ -f "$STATE_DIR/serve_status" ]; then
+    cat "$STATE_DIR/serve_status"
+  else
+    # No file: the two-port default this service publishes.
+    echo "https://test-host.tailfake.ts.net:8097 (tailnet only)"
+    echo "|-- / proxy http://127.0.0.1:8097"
+    echo "https://test-host.tailfake.ts.net:8099 (tailnet only)"
+    echo "|-- / proxy http://127.0.0.1:8099"
+  fi
   exit 0
 fi
 case " $* " in *" off "*) [ "$1" = "serve" ] && exit 0 ;; esac
@@ -57,15 +67,7 @@ JSON
       echo "sending serve config: Access denied: serve config denied" >&2
       exit 1
     fi
-    case "$2" in
-      status)
-        echo "https://test-host.tailfake.ts.net:8097 (tailnet only)"
-        echo "|-- / proxy http://127.0.0.1:8097"
-        echo "https://test-host.tailfake.ts.net:8099 (tailnet only)"
-        echo "|-- / proxy http://127.0.0.1:8099"
-        ;;
-      *) echo "Serve started and running in the background." ;;
-    esac
+    echo "Serve started and running in the background."
     ;;
   set)
     case "$2" in

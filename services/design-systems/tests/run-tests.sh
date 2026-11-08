@@ -251,7 +251,7 @@ test_legacy_poller_kept_without_deployd() {
 }
 
 test_deployd_disabled_flag() {
-  echo "• teardown marks deployd disabled; a manual setup clears the flag"
+  echo "• teardown marks deployd disabled; setup refuses while the flag stands"
   setup
   touch "$STATE_DIR/operator"
   fake_deployd
@@ -259,9 +259,28 @@ test_deployd_disabled_flag() {
   run_teardown
   check "teardown exits zero"     [ "$CODE" -eq 0 ]
   check "disabled flag written"   [ -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  : > "$CALLS_LOG"
   run_deploy
-  check "re-setup exits zero"     [ "$CODE" -eq 0 ]
-  check "disabled flag cleared"   [ ! -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  check "re-setup refused"        [ "$CODE" -ne 0 ]
+  check "  says why"              out_has "design-systems is paused"
+  check "  flag kept"             [ -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  check "  nothing republished"   no_call "serve --bg"
+  rm -f "$HOME/services/deployd/state/design-systems.disabled"
+  run_deploy
+  check "setup after rm runs"     [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_serve_port_owned_elsewhere() {
+  echo "• a :HTTPS_PORT already proxying to a different target is not taken over"
+  setup
+  touch "$STATE_DIR/operator"
+  printf 'https://test-host.tailfake.ts.net:8108 (tailnet only)\n|-- / proxy http://127.0.0.1:8845\n' \
+    > "$STATE_DIR/serve_status"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "no publish attempted"    no_call "serve --bg"
+  check "warns it left it alone"  out_has "different target"
   teardown
 }
 
@@ -1446,6 +1465,7 @@ test_fresh_deploy
 test_legacy_poller_removed
 test_legacy_poller_kept_without_deployd
 test_deployd_disabled_flag
+test_serve_port_owned_elsewhere
 test_deploy_sha_mismatch
 test_path_restored_from_env
 test_release_perms_normalised

@@ -99,13 +99,38 @@ wait_http() {
 }
 
 # ts_serve_publish HTTPS_PORT TARGET: publish TARGET (usually
-# http://127.0.0.1:<port>) tailnet-only on HTTPS_PORT. Idempotent: Serve
-# replaces an existing mapping on that port. On Linux a first failure is
-# usually tailscaled refusing a non-operator, so it grants operator rights
-# once via sudo. If Serve still fails it is the one-time enablement link:
-# Tailscale prints it, we wait for Enter and retry. Needs OS and TAILSCALE.
+# http://127.0.0.1:<port>) tailnet-only on HTTPS_PORT. Never steals the
+# port: when `serve status` shows HTTPS_PORT's / handlers already proxy to
+# a different target — a deliberate repoint like the design-systems →
+# Studio cutover — it warns and leaves the mapping alone. A port that is
+# free or already ours is republished as before (Serve replaces the
+# mapping), and an unreadable status counts as no evidence.
+# On Linux a first publish failure is usually tailscaled refusing a
+# non-operator, so it grants operator rights once via sudo. If Serve still
+# fails it is the one-time enablement link: Tailscale prints it, we wait
+# for Enter and retry. Needs OS and TAILSCALE.
 ts_serve_publish() {
-  local https_port="$1" target="$2"
+  local https_port="$1" target="$2" status verdict
+  status="$("$TAILSCALE" serve status 2>/dev/null)" || status=""
+  if [ -n "$status" ]; then
+    verdict="$(printf '%s\n' "$status" | awk -v want=":$https_port" -v t="$target" '
+      index($0, "https://") == 1 {
+        u = $1; sub(/\/$/, "", u)
+        p = match(u, /:[0-9]+$/) ? substr(u, RSTART) : ":443"
+        inport = (p == want)
+        next
+      }
+      inport && $2 == "/" { n++; if (/ proxy / && $NF == t) mine++ }
+      END {
+        if (n == 0)          print "free"
+        else if (mine == n)  print "ours"
+        else                 print "foreign"
+      }')"
+    if [ "$verdict" = "foreign" ]; then
+      warn "HTTPS :$https_port already proxies to a different target — leaving it alone. To hand the port to this service: $TAILSCALE serve --https=$https_port off, then re-run."
+      return 0
+    fi
+  fi
   if ! "$TAILSCALE" serve --bg --https="$https_port" "$target" >/dev/null 2>&1; then
     if [ "$OS" = "Linux" ]; then
       info "Direct serve failed — trying operator grant (needs sudo, one time)"

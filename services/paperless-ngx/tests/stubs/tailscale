@@ -18,9 +18,11 @@
 # from. A hardcoded hostname is a login that fails for everyone but this box.
 echo "tailscale $*" >> "$CALLS_LOG"
 
-# teardown.sh: `serve status` (read once, before any change) and `serve
-# --https=N off`. Answered ahead of the operator gate, like the real daemon
-# answers status reads for any user.
+# `serve status` is answered ahead of the operator gate and the failure
+# countdown, like the real daemon answers status reads for any user. With
+# no serve_status file it reports what this deploy has published so far —
+# a stub that echoed the real `serve status` would let an assertion pass
+# on some other service's mapping.
 if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then
   if [ -f "$STATE_DIR/serve_status_fails" ]; then
     echo "failed to connect to local tailscaled" >&2
@@ -30,6 +32,11 @@ if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then
     cat "$STATE_DIR/serve_status"
     exit 0
   fi
+  port="$(cat "$STATE_DIR/serve_port" 2>/dev/null || echo 8095)"
+  local_port="$(cat "$STATE_DIR/serve_local_port" 2>/dev/null || echo 8095)"
+  printf 'https://test-host.tailfake.ts.net:%s (tailnet only)\n' "$port"
+  printf '|-- / proxy http://127.0.0.1:%s\n' "$local_port"
+  exit 0
 fi
 case " $* " in *" off "*) [ "$1" = "serve" ] && exit 0 ;; esac
 
@@ -71,28 +78,15 @@ EOF
       echo "sending serve config: Access denied: serve config denied" >&2
       exit 1
     fi
-    case "$2" in
-      status)
-        # Only what this deploy publishes. Nothing else on the node, because a
-        # stub that echoed the real `serve status` would let an assertion pass
-        # on some other service's mapping.
-        port="$(cat "$STATE_DIR/serve_port" 2>/dev/null || echo 8095)"
-        local_port="$(cat "$STATE_DIR/serve_local_port" 2>/dev/null || echo 8095)"
-        printf 'https://test-host.tailfake.ts.net:%s (tailnet only)\n' "$port"
-        printf '|-- / proxy http://127.0.0.1:%s\n' "$local_port"
-        ;;
-      *)
-        # Record what was actually published so the harness can assert the
-        # mapping, and so `serve status` above reports it back.
-        for a in "$@"; do
-          case "$a" in
-            --https=*) printf '%s' "${a#--https=}" > "$STATE_DIR/serve_port" ;;
-            http://127.0.0.1:*) printf '%s' "${a##*:}" > "$STATE_DIR/serve_local_port" ;;
-          esac
-        done
-        echo "Serve started and running in the background."
-        ;;
-    esac
+    # Record what was actually published so the harness can assert the
+    # mapping, and so `serve status` above reports it back.
+    for a in "$@"; do
+      case "$a" in
+        --https=*) printf '%s' "${a#--https=}" > "$STATE_DIR/serve_port" ;;
+        http://127.0.0.1:*) printf '%s' "${a##*:}" > "$STATE_DIR/serve_local_port" ;;
+      esac
+    done
+    echo "Serve started and running in the background."
     ;;
   set)
     case "$2" in

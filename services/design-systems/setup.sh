@@ -52,10 +52,15 @@ ENV_FILE="$SERVICE_DIR/.env"
 # shellcheck source=../../lib/common.sh
 . "$SERVICE_DIR/../../lib/common.sh"
 
-# A manual ./setup.sh re-installs the service: clear deployd's disabled
-# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
-# never invokes this while the flag is set, so clearing is always manual.
-rm -f "$HOME/services/deployd/state/design-systems.disabled"
+# A parked service stays parked. deployd's disabled flag means the
+# service was taken out of rotation on purpose: teardown.sh writes it so
+# a removed service stays down, and the Studio cutover wrote it so this
+# stack stops owning :HTTPS_PORT. A re-run would republish the old serve
+# target and resume auto-deploys, undoing either, so refuse while the
+# flag stands. bin/deploy.sh (rebuild only, publishes nothing) still
+# runs meanwhile.
+DEPLOYD_FLAG="$HOME/services/deployd/state/design-systems.disabled"
+[ ! -f "$DEPLOYD_FLAG" ] || die "design-systems is paused: $DEPLOYD_FLAG exists (written by teardown.sh or the Studio cutover). Refusing to resume auto-deploys and republish :$HTTPS_PORT. To bring the service back: rm $DEPLOYD_FLAG, then re-run ./setup.sh"
 
 # A re-run (e.g. under deployd, whose PATH is minimal) finds tools where
 # the first install recorded them in .env — put those dirs on PATH first.

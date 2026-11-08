@@ -126,6 +126,10 @@ skips the wait entirely.
 
 ## What setup.sh does
 
+0. Refuses outright while `~/services/deployd/state/design-systems.disabled`
+   exists — the flag means the service was parked on purpose (teardown.sh
+   writes it; the Studio cutover wrote it so this stack stops owning
+   :8108). `rm` it by hand to bring the service back.
 1. Preflight (above), including the LFS pointer scan — if any screenshot in
    `systems/` is still a pointer, it runs `git lfs pull` and dies only if
    pointers remain after it.
@@ -167,7 +171,10 @@ skips the wait entirely.
    (`~/services/deployd/bin/deployd`); without it the old poller stays and
    setup warns, so install `services/deployd` first for auto-deploy.
 8. Publishes via `tailscale serve --bg --https=8108` and verifies
-   `/gallery/` end-to-end.
+   `/gallery/` end-to-end. If `:8108` already proxies to a different target
+   (a deliberate repoint, like the Studio cutover), the publish is skipped
+   with a warning rather than taking the port back — free it with
+   `tailscale serve --https=8108 off` first if it should be ours.
 
 ## Deploy
 
