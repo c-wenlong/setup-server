@@ -43,10 +43,11 @@ services:
     ports:
       # loopback only — the tailnet is the security boundary; Serve fronts
       # HTTPS and the app also gates non-loopback reads on device tokens.
-      - '127.0.0.1:${LOCAL_PORT:-8300}:8770'
+      # 8780 is the port upstream's own Dockerfile EXPOSEs and CMDs.
+      - '127.0.0.1:${LOCAL_PORT:-8300}:8780'
     healthcheck:
       # The image is a python:3.14 base — stdlib urllib, no wget/curl needed.
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8770/api/health', timeout=4)"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8780/api/health', timeout=4)"]
       interval: 30s
       timeout: 5s
       retries: 5
