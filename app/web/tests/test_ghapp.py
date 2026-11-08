@@ -7,6 +7,7 @@ at a temp dir. Run from app/web/:
     python3 -m unittest discover -s tests -p 'test_*.py'
 """
 
+import atexit
 import contextlib
 import io
 import json
@@ -17,6 +18,12 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+
+# ghapp.py resolves ~/services/... at import time, so the suite gets its own
+# empty HOME before the module can load; the box's real launcher apps and
+# deployd state must never leak into a test run.
+os.environ["HOME"] = tempfile.mkdtemp(prefix="launcher-test-home-")
+atexit.register(shutil.rmtree, os.environ["HOME"], ignore_errors=True)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
