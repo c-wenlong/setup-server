@@ -76,6 +76,11 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 # import ghapp and carries its own copy).
 APP_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$")
 
+# Mirrors ghapp.CONTAINER_METHODS: only these run as container app-<key>,
+# so only these are phone-controllable. A compose app has no single
+# app-<key> container and a script app may have none at all.
+APP_CONTAINER_METHODS = ("dockerfile", "image", "static", "node", "python")
+
 # The second lock, mirroring app/web/server.py: the shared file already
 # marks these `locked`, and this is here so an edit to that file cannot
 # hand the phone a button that stops the thing you would start things with.
@@ -240,25 +245,34 @@ def _apps_dir():
 def _apps_sig(apps_dir):
     """Sorted (filename, mtime) of the apps dir's *.json — the cache
     invalidation for the app half of the allowlist. () when there is no
-    apps dir: no launcher apps is a normal state, not an error."""
+    apps dir: no launcher apps is a normal state, not an error. A file
+    whose mtime cannot be read (a dangling symlink) is skipped, not fatal:
+    it could not be parsed anyway and must not hide the apps beside it."""
     try:
-        return tuple(sorted(
-            (n, os.path.getmtime(os.path.join(apps_dir, n)))
-            for n in os.listdir(apps_dir) if n.endswith(".json")))
+        names = sorted(n for n in os.listdir(apps_dir) if n.endswith(".json"))
     except OSError:
         return ()
+    sig = []
+    for n in names:
+        try:
+            sig.append((n, os.path.getmtime(os.path.join(apps_dir, n))))
+        except OSError:
+            continue
+    return tuple(sig)
 
 
-def _merge_apps(services, apps_dir):
+def _merge_apps(services, apps_dir, registry_keys):
     """Add launcher app definitions to the allowlist. Returns how many.
 
-    A definition is one ~/services/launcher/apps/<key>.json: its app runs
-    as container app-<key>, and its optional `kuma` gets the same
-    pause-on-stop/resume-on-start a service's control block gets. A file
-    that is unreadable, not a definition, or keyed wrong is skipped — one
-    bad definition must not take the rest of the allowlist down — and a
-    services.json service of the same key wins (a deployed app shadowing a
-    real service would be a confusing control)."""
+    A definition is one ~/services/launcher/apps/<key>.json: a
+    container-method app runs as container app-<key>, and its optional
+    `kuma` gets the same pause-on-stop/resume-on-start a service's control
+    block gets. A file that is unreadable, not a definition, keyed wrong,
+    or not a container method (compose/script has no single app-<key> to
+    stop) is skipped — one bad definition must not take the rest of the
+    allowlist down — and a services.json service of the same key wins
+    (registry_keys holds every key in the file, controllable or not: a
+    deployed app shadowing a real service would be a confusing control)."""
     count = 0
     for name, _ in _apps_sig(apps_dir):
         path = os.path.join(apps_dir, name)
@@ -275,9 +289,12 @@ def _merge_apps(services, apps_dir):
             continue
         if key in HARD_LOCKED:
             continue
-        if key in services:
+        if key in registry_keys:
             print(f"control app {key} skipped: a services.json service has "
                   "that key", flush=True)
+            continue
+        method = d.get("method") or "dockerfile"
+        if method not in APP_CONTAINER_METHODS:
             continue
         services[key] = {
             "parts": _parts({"parts": [{"container": "app-" + key}]}),
@@ -317,6 +334,9 @@ def load_registry():
             print(f"control registry unreadable ({path}): {e}", flush=True)
             continue
         services = {}
+        registry_keys = {s.get("key") for s in doc.get("services") or []
+                         if isinstance(s, dict)
+                         and isinstance(s.get("key"), str)}
         for svc in doc.get("services") or []:
             key = svc.get("key")
             block = svc.get("control")
@@ -331,7 +351,7 @@ def load_registry():
                              "primary": block.get("primary"), "registry": path}
             if "stop_guard" in block:
                 services[key]["stop_guard"] = block["stop_guard"]
-        apps = _merge_apps(services, apps_dir)
+        apps = _merge_apps(services, apps_dir, registry_keys)
         _registry.update(path=path, mtime=mtime, apps_sig=apps_sig,
                          services=services)
         print(f"control registry: {len(services)} controllable "

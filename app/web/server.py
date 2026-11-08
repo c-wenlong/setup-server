@@ -2458,8 +2458,13 @@ def ghapp_entries():
             "github": {"repo": d["repo"], "ref": d["ref"]},
             "control": (None if source == "repo" else
                         {"parts": [{"container": ghapp.container_name(key)}],
+                         # kuma only takes effect on container methods: a
+                         # compose or script app has no app-<key> to pause
+                         # around.
                          **({"kuma": d["kuma"]}
-                            if d.get("kuma") is not None else {})}),
+                            if d.get("kuma") is not None
+                            and ghapp.method_of(d) in ghapp.CONTAINER_METHODS
+                            else {})}),
             # "repo": only this checkout's app/web/apps/ has it; Deploy adopts it.
             "ghapp_source": source,
             "env_names": list(d.get("env_names") or []),

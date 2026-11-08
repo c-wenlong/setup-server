@@ -15,7 +15,10 @@ hand-edited, never in this repo):
          ... the method's own fields, below ...}
 
 ("kuma" names the Uptime Kuma monitors the launcher pauses on Stop and
-Remove and resumes on Start, so a deliberate stop does not page.)
+Remove and resumes on Start, so a deliberate stop does not page. It is
+accepted on every method so a method switch never fails validation, but
+it only takes effect on container methods — compose and script have no
+single app-<key> container to pause around.)
 
 and one runtime directory beside the other services:
 

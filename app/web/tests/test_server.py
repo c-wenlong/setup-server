@@ -10343,3 +10343,20 @@ class GhappKumaTest(DeploymentsBase):
         plan = self.plan("hello-app", "start")
         self.assertEqual(plan[0], ["docker", "start", "app-hello-app"])
         self.assertEqual(plan[-1][-2:], ["resume", "kaichenpedia"])
+
+    def test_kuma_only_counts_on_container_methods(self):
+        # compose/script definitions still validate with kuma (a method
+        # switch must not fail validation) but get no pause/resume steps:
+        # they have no single app-<key> container to pause around.
+        self.write_def("compose-app", method="compose",
+                       compose_file="docker-compose.yml", kuma="k1")
+        self.write_def("script-app", method="script", cmd="make deploy",
+                       port=None, health_path=None, kuma="k2")
+        self.enable_kuma()
+        entries = {e["key"]: e for e in server.ghapp_entries()}
+        self.assertNotIn("kuma", entries["compose-app"]["control"])
+        self.assertNotIn("kuma", entries["script-app"]["control"])
+        self.assertEqual(self.plan("compose-app", "stop"),
+                         [["docker", "stop", "app-compose-app"]])
+        self.assertEqual(self.plan("script-app", "start"),
+                         [["docker", "start", "app-script-app"]])

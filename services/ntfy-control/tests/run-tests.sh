@@ -600,7 +600,8 @@ apps_repo() {
   mkdir -p "$GREPO/app/web" "$APPS_DIR"
   cat > "$GREPO/app/web/services.json" <<'JSON'
 {"services": [
-  {"key": "n8n", "control": {"parts": [{"container": "n8n"}], "kuma": "n8n"}}
+  {"key": "n8n", "control": {"parts": [{"container": "n8n"}], "kuma": "n8n"}},
+  {"key": "locked-svc"}
 ]}
 JSON
 }
@@ -624,6 +625,20 @@ JSON
   cat > "$APPS_DIR/n8n.json" <<'JSON'
 {"key": "n8n", "name": "n8n as an app"}
 JSON
+  cat > "$APPS_DIR/locked-svc.json" <<'JSON'
+{"key": "locked-svc", "name": "shadows a registry key"}
+JSON
+  cat > "$APPS_DIR/compose-app.json" <<'JSON'
+{"key": "compose-app", "method": "compose",
+ "compose_file": "docker-compose.yml", "kuma": "k1"}
+JSON
+  cat > "$APPS_DIR/script-app.json" <<'JSON'
+{"key": "script-app", "method": "script", "cmd": "./run.sh", "kuma": "k2"}
+JSON
+  cat > "$APPS_DIR/nomethod-app.json" <<'JSON'
+{"key": "nomethod-app", "name": "no method = dockerfile"}
+JSON
+  ln -s "$SANDBOX/gone.json" "$APPS_DIR/dangling.json"
   run_handle_fixture "stop kaichenpedia"
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "app works past bad neighbours" calls_have "kaichenpedia: stop ok"
@@ -641,6 +656,18 @@ JSON
   run_handle_fixture "stop n8n"
   check "services.json wins the key"  calls_have "docker stop n8n$"
   check "  not the app container"     no_call "docker stop app-n8n"
+  : > "$CALLS_LOG"
+  run_handle_fixture "stop locked-svc"
+  check "uncontrollable key still wins" calls_have "unknown service 'locked-svc'"
+  check "  not the app container"      no_call "docker stop app-locked-svc"
+  : > "$CALLS_LOG"
+  run_handle_fixture "stop compose-app"
+  check "compose app not controllable" calls_have "unknown service 'compose-app'"
+  run_handle_fixture "stop script-app"
+  check "script app not controllable"  calls_have "unknown service 'script-app'"
+  : > "$CALLS_LOG"
+  run_handle_fixture "stop nomethod-app"
+  check "no method means dockerfile"   calls_have "docker stop app-nomethod-app"
   teardown
 }
 

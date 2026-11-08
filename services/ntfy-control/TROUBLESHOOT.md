@@ -9,9 +9,11 @@ of each entry in `app/web/services.json` — the single registry the launcher's
 web UI reads for the same purpose, so the phone panel and the launcher's
 start/stop buttons can never disagree — plus the launcher app definitions in
 `~/services/launcher/apps` (`CONTROL_APPS_DIR` overrides), each mapping to its
-`app-<key>` container and its `kuma` monitors. Adding a service to the panel
-means adding a `control` block in services.json, not editing
-`control_listener.py`.
+`app-<key>` container and its `kuma` monitors. Only container-method apps
+join (a compose or script app has no single `app-<key>` to stop), and a
+services.json key wins every collision, controllable or not. Adding a
+service to the panel means adding a `control` block in services.json, not
+editing `control_listener.py`.
 
 Both sources are re-read whenever they change — the registry on its mtime,
 the apps dir on a sorted (name, mtime) signature — so an edit takes effect

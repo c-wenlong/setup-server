@@ -53,9 +53,11 @@ control_listener.py  (systemd user unit / launchd, Restart=always)
 Launcher apps (the tiles built from GitHub, definitions in
 `~/services/launcher/apps/<key>.json`) join the same list as
 `app-<key>` containers, with each definition's optional `kuma` monitors —
-kaichenpedia and sources are controllable this way. A services.json
-entry wins a key collision, and `CONTROL_APPS_DIR` overrides the apps
-dir.
+kaichenpedia and sources are controllable this way. Only container-method
+apps (dockerfile, image, static, node, python) join: a compose or script
+app has no single `app-<key>` container to stop. A services.json entry
+wins any key collision, controllable or not, and `CONTROL_APPS_DIR`
+overrides the apps dir.
 
 Stopping/starting also pauses/resumes the matching Kuma monitor (skipped
 with a note in the reply if Kuma is unreachable — e.g. after
