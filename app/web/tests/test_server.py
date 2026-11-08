@@ -10285,3 +10285,85 @@ class DeploymentUpdateRaceTest(DeploymentsBase):
                                                "image": "nginx:1.27"})
         self.assertEqual(self.deploys, ["hello-app"])
         self.assertTrue(os.path.isdir(lock))      # never taken, never dropped
+
+
+class GhappKumaTest(DeploymentsBase):
+    """An app definition's `kuma` field becomes its control block's monitor
+    list, so a deliberate stop pauses it exactly like a service's does."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved["_find_uv"] = server._find_uv
+        server._find_uv = lambda: None          # no Kuma unless a test asks
+        server._have_docker_group = lambda: True
+
+    def plan(self, key, action):
+        return [step["argv"] for step
+                in server.plan_action(server.find_service(key), action)]
+
+    def enable_kuma(self):
+        """Same fixture ControlKumaTest builds: a toggle script and a
+        monitoring .env inside the sandbox repo, plus a uv to run it under."""
+        toggle = os.path.join(self.repo, "services", "ntfy-control", "kuma_toggle.py")
+        os.makedirs(os.path.dirname(toggle), exist_ok=True)
+        with open(toggle, "w", encoding="utf-8") as fh:
+            fh.write("# fixture\n")
+        env_path = os.path.join(self.repo, "services", "monitoring", ".env")
+        os.makedirs(os.path.dirname(env_path), exist_ok=True)
+        with open(env_path, "w", encoding="utf-8") as fh:
+            fh.write("KUMA_PORT=3002\nKUMA_ADMIN_USER=admin\n"
+                     "KUMA_ADMIN_PASSWORD=%s\n" % SECRET_VALUE)
+        server._find_uv = lambda: "/opt/bin/uv"
+        return toggle
+
+    def test_entries_carry_the_definitions_kuma(self):
+        self.write_def("hello-app", kuma="kaichenpedia")
+        self.write_def("static-app", kuma=["one", "two"], method="static",
+                       build="npm run build", output="dist")
+        entries = {e["key"]: e for e in server.ghapp_entries()}
+        self.assertEqual(entries["hello-app"]["control"],
+                         {"parts": [{"container": "app-hello-app"}],
+                          "kuma": "kaichenpedia"})
+        self.assertEqual(entries["static-app"]["control"]["kuma"],
+                         ["one", "two"])
+
+    def test_an_app_without_kuma_has_none(self):
+        entry = server.find_service("hello-app")
+        self.assertEqual(entry["control"],
+                         {"parts": [{"container": "app-hello-app"}]})
+        self.enable_kuma()
+        self.assertEqual(self.plan("hello-app", "stop"),
+                         [["docker", "stop", "app-hello-app"]])
+        self.assertEqual(self.plan("hello-app", "restart"),
+                         [["docker", "stop", "app-hello-app"],
+                          ["docker", "start", "app-hello-app"]])
+
+    def test_stop_pauses_before_the_container_and_start_resumes_after(self):
+        self.write_def("hello-app", kuma="kaichenpedia")
+        toggle = self.enable_kuma()
+        plan = self.plan("hello-app", "stop")
+        self.assertEqual(plan[0],
+                         ["/opt/bin/uv", "run", "--with", "uptime-kuma-api",
+                          "python3", os.path.realpath(toggle), "pause",
+                          "kaichenpedia"])
+        self.assertEqual(plan[1], ["docker", "stop", "app-hello-app"])
+        plan = self.plan("hello-app", "start")
+        self.assertEqual(plan[0], ["docker", "start", "app-hello-app"])
+        self.assertEqual(plan[-1][-2:], ["resume", "kaichenpedia"])
+
+    def test_kuma_only_counts_on_container_methods(self):
+        # compose/script definitions still validate with kuma (a method
+        # switch must not fail validation) but get no pause/resume steps:
+        # they have no single app-<key> container to pause around.
+        self.write_def("compose-app", method="compose",
+                       compose_file="docker-compose.yml", kuma="k1")
+        self.write_def("script-app", method="script", cmd="make deploy",
+                       port=None, health_path=None, kuma="k2")
+        self.enable_kuma()
+        entries = {e["key"]: e for e in server.ghapp_entries()}
+        self.assertNotIn("kuma", entries["compose-app"]["control"])
+        self.assertNotIn("kuma", entries["script-app"]["control"])
+        self.assertEqual(self.plan("compose-app", "stop"),
+                         [["docker", "stop", "app-compose-app"]])
+        self.assertEqual(self.plan("script-app", "start"),
+                         [["docker", "start", "app-script-app"]])

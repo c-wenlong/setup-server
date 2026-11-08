@@ -222,7 +222,10 @@
   ];
   var AFTER = [
     { name: 'health_path', label: 'Health path', def: '/', mono: true, optional: true,
-      hint: 'Probed on 127.0.0.1 after each deploy; the old version stays if it never answers.' }
+      hint: 'Probed on 127.0.0.1 after each deploy; the old version stays if it never answers.' },
+    { name: 'kuma', label: 'Uptime Kuma monitor', def: '', mono: true, optional: true,
+      kind: 'kuma', placeholder: 'kaichenpedia',
+      hint: 'Optional. Paused on Stop and resumed on Start, so a deliberate stop doesn’t page. Comma-separate several.' }
   ];
 
   /* ---------- the gallery ---------- */
@@ -689,6 +692,25 @@
         if (f.kind === 'proxies') {
           /* Absent in `base` is no rows, the same as null. */
           row = proxiesFor(f, Object.prototype.hasOwnProperty.call(def, f.name) ? def[f.name] : null);
+        } else if (f.kind === 'kuma') {
+          /* One text input, comma-separated: a stored list shows joined.
+             read() sends a string for one name, a list for several, null
+             for empty — the shapes ghapp.validate takes. */
+          var kv = Object.prototype.hasOwnProperty.call(def, f.name) ? def[f.name] : null;
+          row = inputFor(f, Array.isArray(kv) ? kv.join(', ')
+                                              : (kv == null ? '' : String(kv)));
+          (function (r) {
+            r.read = function () {
+              var names = [];
+              r.input.value.split(',').forEach(function (p) {
+                p = p.trim();
+                if (p) names.push(p);
+              });
+              return names.length === 0 ? null
+                                        : (names.length === 1 ? names[0] : names);
+            };
+          }(row));
+          row.input.addEventListener('input', markDirty);
         } else {
           row = inputFor(f, seedValue(def, f), { multiline: f.name === 'cmd' });
           row.input.addEventListener('input', markDirty);

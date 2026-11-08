@@ -7,23 +7,30 @@ Layered triage: phone → ntfy server → listener → registry → the action i
 The listener has **no hard-coded service list**. It reads the `control` block
 of each entry in `app/web/services.json` — the single registry the launcher's
 web UI reads for the same purpose, so the phone panel and the launcher's
-start/stop buttons can never disagree. Adding a service to the panel means
-adding a `control` block there, not editing `control_listener.py`.
+start/stop buttons can never disagree — plus the launcher app definitions in
+`~/services/launcher/apps` (`CONTROL_APPS_DIR` overrides), each mapping to its
+`app-<key>` container and its `kuma` monitors. Only container-method apps
+join (a compose or script app has no single `app-<key>` to stop), and a
+services.json key wins every collision, controllable or not. Adding a
+service to the panel means adding a `control` block in services.json, not
+editing `control_listener.py`.
 
-The file is re-read whenever its mtime changes, so an edit takes effect
-without restarting the listener. On startup (and on each reload) it logs which
-file won:
+Both sources are re-read whenever they change — the registry on its mtime,
+the apps dir on a sorted (name, mtime) signature — so an edit takes effect
+without restarting the listener. On startup (and on each reload) it logs
+which file won:
 
 ```
-control registry: 19 services from /home/user/dev/setup-server/app/web/services.json
+control registry: 21 controllable (19 services + 2 apps) from /home/user/dev/setup-server/app/web/services.json
 ```
 
 Trust that line over this one — controllable as of 2026-09-12 (19, up from
 the original 6): `adguard`, `beszel`, `code-server`, `firefly-iii`, `forgejo`,
 `home-assistant`, `homepage`, `immich`, `jellyfin`, `manimkc`, `n8n`,
 `open-webui`, `paperless-ngx`, `remote-desktop`, `seafile`, `syncthing`,
-`uptime-kuma`, `vaultwarden`. kaichenpedia left the list on 2026-11-04,
-when it became a launcher app: the allowlist is `services.json` only.
+`uptime-kuma`, `vaultwarden`. kaichenpedia left the list on 2026-11-04
+when it became a launcher app, and rejoined it on 2026-11-08 when the
+allowlist started reading `~/services/launcher/apps` too.
 Send `panel` for the button menu, or `pick stop` for a picker.
 
 `ntfy`, `ollama` and `launcher` are **locked out in code** (`HARD_LOCKED` in

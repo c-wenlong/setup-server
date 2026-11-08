@@ -14,12 +14,15 @@ ntfy), and on top of that message text is only ever *matched* against the
 allowlist below — it is never executed. Worst case for a bogus message is a
 "usage" reply.
 
-THE ALLOWLIST IS NOT IN THIS FILE. It is the per-service `control` block in
-`app/web/services.json`, which the launcher's web UI reads for exactly the
-same purpose. Two hand-maintained service->command maps would drift — a
-service controllable from the phone but not the web, or a Kuma monitor
-paused on only one of the two paths — so there is one map and both front
-ends read it. This listener is deployed as a copy under
+THE ALLOWLIST IS NOT IN THIS FILE. For services it is the per-service
+`control` block in `app/web/services.json`, which the launcher's web UI
+reads for exactly the same purpose; for launcher apps it is the definition
+files in ~/services/launcher/apps (CONTROL_APPS_DIR overrides), each one
+mapping to its container app-<key> and its optional `kuma` monitors. Two
+hand-maintained service->command maps would drift — a service controllable
+from the phone but not the web, or a Kuma monitor paused on only one of
+the two paths — so both front ends read the same sources. This listener is
+deployed as a copy under
 ~/services/ntfy-control/bin (see setup.sh), so it locates the repo copy of
 that file at runtime; see _registry_candidates(). If it cannot find one,
 nothing is controllable and it says so, rather than falling back to a stale
@@ -42,6 +45,7 @@ Modes:
 Config via env (systemd EnvironmentFile= / launchd EnvironmentVariables):
     NTFY_BASE_URL, CONTROL_TOPIC, REPLY_TOPIC, KUMA_ENV_FILE,
     CONTROL_REGISTRY (optional explicit path to app/web/services.json)
+    CONTROL_APPS_DIR (optional explicit path to the launcher apps dir)
 """
 
 import json
@@ -66,6 +70,16 @@ VERBS = ("start", "stop", "restart")
 # Same shape gate as the launcher's: container and unit names out of the
 # registry are matched against this before they can become an argv word.
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
+
+# An app definition's key, the same pattern ghapp.py's KEY_RE applies (this
+# file is deployed alone under ~/services/ntfy-control/bin, so it cannot
+# import ghapp and carries its own copy).
+APP_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$")
+
+# Mirrors ghapp.CONTAINER_METHODS: only these run as container app-<key>,
+# so only these are phone-controllable. A compose app has no single
+# app-<key> container and a script app may have none at all.
+APP_CONTAINER_METHODS = ("dockerfile", "image", "static", "node", "python")
 
 # The second lock, mirroring app/web/server.py: the shared file already
 # marks these `locked`, and this is here so an edit to that file cannot
@@ -101,7 +115,7 @@ def run(argv, env=None, timeout=300):
 
 # ------------------------------------------------------- shared allowlist
 
-_registry = {"path": None, "mtime": None, "services": {}}
+_registry = {"path": None, "mtime": None, "apps_sig": None, "services": {}}
 
 
 def _registry_candidates():
@@ -221,16 +235,88 @@ def run_guard(argv):
     return proc.returncode, f"the safety check exited {proc.returncode}"
 
 
+def _apps_dir():
+    """Where launcher app definitions live: ~/services/launcher/apps unless
+    CONTROL_APPS_DIR points elsewhere."""
+    explicit = os.environ.get("CONTROL_APPS_DIR", "").strip()
+    return explicit or os.path.expanduser("~/services/launcher/apps")
+
+
+def _apps_sig(apps_dir):
+    """Sorted (filename, mtime) of the apps dir's *.json — the cache
+    invalidation for the app half of the allowlist. () when there is no
+    apps dir: no launcher apps is a normal state, not an error. A file
+    whose mtime cannot be read (a dangling symlink) is skipped, not fatal:
+    it could not be parsed anyway and must not hide the apps beside it."""
+    try:
+        names = sorted(n for n in os.listdir(apps_dir) if n.endswith(".json"))
+    except OSError:
+        return ()
+    sig = []
+    for n in names:
+        try:
+            sig.append((n, os.path.getmtime(os.path.join(apps_dir, n))))
+        except OSError:
+            continue
+    return tuple(sig)
+
+
+def _merge_apps(services, apps_dir, registry_keys):
+    """Add launcher app definitions to the allowlist. Returns how many.
+
+    A definition is one ~/services/launcher/apps/<key>.json: a
+    container-method app runs as container app-<key>, and its optional
+    `kuma` gets the same pause-on-stop/resume-on-start a service's control
+    block gets. A file that is unreadable, not a definition, keyed wrong,
+    or not a container method (compose/script has no single app-<key> to
+    stop) is skipped — one bad definition must not take the rest of the
+    allowlist down — and a services.json service of the same key wins
+    (registry_keys holds every key in the file, controllable or not: a
+    deployed app shadowing a real service would be a confusing control)."""
+    count = 0
+    for name, _ in _apps_sig(apps_dir):
+        path = os.path.join(apps_dir, name)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError) as e:
+            print(f"control app definition skipped ({path}): {e}", flush=True)
+            continue
+        key = d.get("key") if isinstance(d, dict) else None
+        if not isinstance(key, str) or not APP_KEY_RE.match(key):
+            print(f"control app definition skipped ({path}): bad key {key!r}",
+                  flush=True)
+            continue
+        if key in HARD_LOCKED:
+            continue
+        if key in registry_keys:
+            print(f"control app {key} skipped: a services.json service has "
+                  "that key", flush=True)
+            continue
+        method = d.get("method") or "dockerfile"
+        if method not in APP_CONTAINER_METHODS:
+            continue
+        services[key] = {
+            "parts": _parts({"parts": [{"container": "app-" + key}]}),
+            "kuma": _monitors({"kuma": d.get("kuma")}),
+            "primary": None, "registry": path}
+        count += 1
+    return count
+
+
 def load_registry():
-    """key -> {parts, primary, kuma, stop_guard?, registry} per controllable service.
+    """key -> {parts, primary, kuma, stop_guard?, registry} per controllable
+    service or launcher app.
 
     A stop_guard is carried raw and resolved by resolve_guard at stop time,
     so a guard file restored after a failed lookup counts straight away.
 
-    Re-read only when the file changes, so editing services.json takes
-    effect without restarting the listener — the same live-reload the
-    launcher gets from the same file.
+    Re-read only when services.json or the apps dir changes, so editing
+    either takes effect without restarting the listener — the same
+    live-reload the launcher gets from the same file.
     """
+    apps_dir = _apps_dir()
+    apps_sig = _apps_sig(apps_dir)
     for path in _registry_candidates():
         if not os.path.isfile(path):
             continue
@@ -238,7 +324,8 @@ def load_registry():
             mtime = os.path.getmtime(path)
         except OSError:
             continue
-        if _registry["path"] == path and _registry["mtime"] == mtime:
+        if (_registry["path"] == path and _registry["mtime"] == mtime
+                and _registry["apps_sig"] == apps_sig):
             return _registry["services"]
         try:
             with open(path, encoding="utf-8") as fh:
@@ -247,6 +334,9 @@ def load_registry():
             print(f"control registry unreadable ({path}): {e}", flush=True)
             continue
         services = {}
+        registry_keys = {s.get("key") for s in doc.get("services") or []
+                         if isinstance(s, dict)
+                         and isinstance(s.get("key"), str)}
         for svc in doc.get("services") or []:
             key = svc.get("key")
             block = svc.get("control")
@@ -261,8 +351,11 @@ def load_registry():
                              "primary": block.get("primary"), "registry": path}
             if "stop_guard" in block:
                 services[key]["stop_guard"] = block["stop_guard"]
-        _registry.update(path=path, mtime=mtime, services=services)
-        print(f"control registry: {len(services)} services from {path}",
+        apps = _merge_apps(services, apps_dir, registry_keys)
+        _registry.update(path=path, mtime=mtime, apps_sig=apps_sig,
+                         services=services)
+        print(f"control registry: {len(services)} controllable "
+              f"({len(services) - apps} services + {apps} apps) from {path}",
               flush=True)
         return services
     # Nothing parsed this time. If a registry loaded successfully earlier in
@@ -273,7 +366,7 @@ def load_registry():
     # working beats correct but empty. A restart still starts from scratch,
     # so this can never mask a permanently broken file.
     if _registry["services"]:
-        print("control registry unreadable — keeping the %d services last "
+        print("control registry unreadable — keeping the %d entries last "
               "loaded from %s" % (len(_registry["services"]), _registry["path"]),
               flush=True)
         return _registry["services"]

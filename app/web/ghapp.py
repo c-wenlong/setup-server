@@ -11,7 +11,14 @@ hand-edited, never in this repo):
                  | "node" | "python" | "script",   # absent == "dockerfile"
          "container_port": 3000, "port": 8301, "health_path": "/",
          "volume": "/data" | null,
+         "kuma": "monitor" | ["monitor", ...] | null,   # optional, any method
          ... the method's own fields, below ...}
+
+("kuma" names the Uptime Kuma monitors the launcher pauses on Stop and
+Remove and resumes on Start, so a deliberate stop does not page. It is
+accepted on every method so a method switch never fails validation, but
+it only takes effect on container methods — compose and script have no
+single app-<key> container to pause around.)
 
 and one runtime directory beside the other services:
 
@@ -228,6 +235,11 @@ CACHE_CONTROL_RE = re.compile(r"^[A-Za-z0-9 ,=-]{1,100}$")
 # reaches the nginx config out of the definition.
 FRAME_ANCESTORS = {"none": "'none'"}
 
+# A Kuma monitor name in a definition's `kuma`, the same shape server.py's
+# _CONTROL_NAME_RE accepts in a registry control block.
+KUMA_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
+MAX_KUMA = 5
+
 # deployd's .env (read for SERVICE_HOME, never sourced) and its default home.
 DEPLOYD_ENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "services", "deployd", ".env")
@@ -403,6 +415,15 @@ def validate(d):
                               or not all(isinstance(n, str) and ENV_NAME_RE.match(n)
                                          for n in names)):
         raise AppError("bad env_names %r" % (names,))
+    kuma = d.get("kuma")
+    if kuma is not None:
+        if isinstance(kuma, str):
+            kuma = [kuma]
+        if not isinstance(kuma, list) or not 1 <= len(kuma) <= MAX_KUMA \
+                or not all(isinstance(n, str) and KUMA_NAME_RE.fullmatch(n)
+                           for n in kuma) \
+                or len(set(kuma)) != len(kuma):
+            raise AppError("bad kuma %r" % (d.get("kuma"),))
     return d
 
 

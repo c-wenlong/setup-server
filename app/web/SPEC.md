@@ -1079,3 +1079,43 @@ them stays without them; a 400 shows inline and marks the field.
 deploy always rebuilds), so a caller written for a skip-if-unchanged
 `deploy.sh --force` can point at the runner unchanged. `remove` takes no
 flag.
+
+## v20: app definitions carry `kuma`; ntfy-control sees launcher apps (2026-11-08)
+
+An app that migrated off `services/` (kaichenpedia, then sources) lost two
+things its service tile had: the Kuma pause around a deliberate stop, and
+phone control via ntfy-control. Both come back through the app
+definition, not the registry, so the apps' config stays in one place.
+
+**The `kuma` field.** Optional for every method: one monitor name or a
+list of up to five, each fullmatching
+`[A-Za-z0-9][A-Za-z0-9._@-]{0,127}` (the same shape server.py's
+_CONTROL_NAME_RE gives a registry control block), no duplicates;
+`ghapp.validate` refuses anything else and absent/null is none — and it
+accepts `kuma` on every method, so a method switch can never fail
+validation over a monitor name.
+`ghapp_entries` copies it into the entry's control block when the app is
+deployed on this box and its method is a container method (dockerfile,
+image, static, node, python): compose and script have no single
+app-<key> container to pause around, so their `kuma` is kept in the
+definition but produces no steps. With it in place, plan_action's
+pause-on-stop/resume-on-start, the remove path's pause and the
+reinstall's resume all apply unchanged. The
+Deploys form edits it as one comma-separated text field under "Uptime
+Kuma monitor": a single name saves a string, several save a list, empty
+saves null.
+
+**ntfy-control.** The listener's allowlist gains a second source: beside
+`app/web/services.json` it reads the launcher apps dir
+(`~/services/launcher/apps`, or `CONTROL_APPS_DIR` when set) and adds each
+valid container-method definition as the container `app-<key>` plus the
+definition's `kuma` monitors — the same method gate as the launcher,
+carried as a local copy since the deployed listener cannot import ghapp.
+A file that will not parse, a definition whose key fails the ghapp key
+shape, a HARD_LOCKED key, a non-container method, and a key any
+services.json service owns — controllable or not — are all skipped (the
+registry wins every collision). The registry
+cache is keyed on services.json's mtime plus a sorted (name, mtime)
+signature of the apps dir, so adding, editing or removing a definition
+takes effect without a listener restart — the same live-reload editing
+services.json always had.
