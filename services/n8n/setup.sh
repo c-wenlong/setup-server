@@ -12,7 +12,7 @@
 # Usage:
 #   ./setup.sh
 #   OWNER_EMAIL=me@x.com OWNER_PASSWORD='MyPass123' ./setup.sh
-#   LOCAL_PORT=5679 HTTPS_PORT=5679 ./setup.sh
+#   LOCAL_PORT=5679 HTTPS_PORT=5679 ./setup.sh   # first run only; .env wins after
 #
 # n8n password policy: >= 8 chars with at least 1 number and 1 capital letter.
 #
@@ -23,6 +23,11 @@
 set -euo pipefail
 
 LOCAL_PORT="${LOCAL_PORT:-5678}"
+# The HTTPS port follows the local port unless set explicitly (the
+# convention home-assistant and jellyfin copied), so overriding only
+# LOCAL_PORT cannot split the two. Whether it was explicit is remembered
+# for the .env read-back below.
+HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
@@ -35,10 +40,15 @@ detect_os
 info "Preflight checks ($OS)"
 refuse_root
 command -v curl >/dev/null || die "curl is required."
+# openssl generates N8N_ENCRYPTION_KEY and the default owner password on
+# first run; python3 builds the owner-seed request below. Checking here
+# beats discovering an empty encryption key via Compose's :? guard.
+command -v openssl >/dev/null || die "openssl is required (it generates the encryption key and owner password). On Ubuntu: sudo apt-get install -y openssl"
+command -v python3 >/dev/null || die "python3 is required (it builds the owner-seed request)."
 resolve_tailscale
 require_docker_compose
 require_tailscale_up
-require_numeric HTTPS_PORT
+require_numeric LOCAL_PORT HTTPS_PORT
 ok "$OS + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
 
 host="$(tailnet_host)"
@@ -66,7 +76,29 @@ EOF
   ok "Wrote $ENV_FILE"
 fi
 
-mkdir -p "$HOME/services/n8n/data"
+# Read back: an existing .env is the source of truth for ports, paths and
+# credentials, so a re-run can never silently move a live deployment.
+REQUESTED_PORT="$LOCAL_PORT"
+set -a; . "$ENV_FILE"; set +a
+DATA_DIR="${N8N_VOLUME:?N8N_VOLUME missing from $ENV_FILE}"
+require_numeric LOCAL_PORT
+if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
+  warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
+fi
+# .env holds no HTTPS_PORT, so a default HTTPS port keeps following the
+# local port .env settled on; an explicit HTTPS_PORT is honoured as given.
+[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
+
+# Drift check, not a rewrite: .env is the user's file. A PUBLIC_URL that no
+# longer matches this box leaves webhook and editor URLs pointing at a dead
+# address — which fails silently, so say so loudly.
+WANT_PUBLIC_URL="https://$host:$HTTPS_PORT/"
+if [ "${PUBLIC_URL:-}" != "$WANT_PUBLIC_URL" ]; then
+  warn "PUBLIC_URL in .env is ${PUBLIC_URL:-(unset)} but this box now answers to $WANT_PUBLIC_URL."
+  warn "  Webhook and editor URLs will be dead. Fix: set PUBLIC_URL=$WANT_PUBLIC_URL in $ENV_FILE, then re-run."
+fi
+
+mkdir -p "$DATA_DIR"
 
 # ---------------------------------------------------------------- deploy
 info "Starting container (docker compose up -d) — first run pulls the image"
@@ -86,12 +118,42 @@ for i in $(seq 1 40); do
 done
 
 info "Seeding owner account (idempotent)"
-owner_email="$(sed -n 's/^OWNER_EMAIL=\(.*\)$/\1/p' "$ENV_FILE")"
-owner_pw="$(sed -n 's/^OWNER_PASSWORD=\(.*\)$/\1/p' "$ENV_FILE")"
+# .env is the authority for the credentials. Values are read the way Docker
+# Compose reads them (an optional `export `, matching single or double
+# quotes, an inline ` #` comment after an unquoted value) without executing
+# the file — the same helper teardown.sh uses. A plain `sed 's/^K=//'`
+# takes quotes and comments literally instead.
+env_get() {
+  local line value tail quote=""
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  # Compose interpolates $HOME / ${HOME} in unquoted and double-quoted values
+  # (single quotes are literal). That one variable is all a value here may
+  # use; anything else is left as written.
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
+  printf '%s' "$value"
+}
+owner_email="$(env_get OWNER_EMAIL)"
+owner_pw="$(env_get OWNER_PASSWORD)"
+# json.dumps, not string interpolation: a `"` or `\` in a hand-edited
+# password would otherwise corrupt the body and surface only as the
+# "inconclusive" warning below.
+owner_json="$(python3 -c 'import json,sys; print(json.dumps({"email":sys.argv[1],"firstName":"Admin","lastName":"User","password":sys.argv[2]}))' "$owner_email" "$owner_pw")"
 # browser-id header: n8n 2.x rejects browserless POSTs without it.
 resp="$(curl -s -X POST "http://127.0.0.1:$LOCAL_PORT/rest/owner/setup" \
   -H 'Content-Type: application/json' -H 'browser-id: setup-script' \
-  -d "{\"email\":\"$owner_email\",\"firstName\":\"Admin\",\"lastName\":\"User\",\"password\":\"$owner_pw\"}" || true)"
+  -d "$owner_json" || true)"
 if grep -q '"email"' <<<"$resp"; then
   ok "Owner account created: $owner_email"
 elif grep -qi 'already' <<<"$resp"; then
