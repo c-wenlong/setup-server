@@ -449,6 +449,11 @@ fi
 DEPLOYD_STATE="$HOME/services/deployd/state"
 if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
   raw="$(sed -n 's/^ *SERVICE_HOME=//p' "$SERVICE_DIR/../deployd/.env" | tail -1)"
+  # Decode like ghapp.py's shlex.split: a surrounding quote pair comes off
+  # whole, then %q backslash escapes resolve to their literals.
+  case "$raw" in
+    \"*\"|\'*\') raw="${raw#?}"; raw="${raw%?}" ;;
+  esac
   raw="$(printf '%s' "$raw" | sed 's/\\\(.\)/\1/g')"
   [ -n "$raw" ] && DEPLOYD_STATE="$raw/state"
 fi

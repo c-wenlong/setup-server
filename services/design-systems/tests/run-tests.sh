@@ -289,6 +289,11 @@ test_deployd_custom_home_flag() {
   run_deploy
   check "flag left at the default home: still refused" [ "$CODE" -ne 0 ]
   check "  names that flag"         out_has "$HOME/services/deployd/state/design-systems.disabled"
+  rm -f "$HOME/services/deployd/state/design-systems.disabled"
+  printf 'SERVICE_HOME="%s"\n' "$HOME/deployd home" > "$SANDBOX/repo/services/deployd/.env"
+  touch "$HOME/deployd home/state/design-systems.disabled"
+  run_deploy
+  check "quoted SERVICE_HOME: refused" [ "$CODE" -ne 0 ]
   teardown
 }
 
