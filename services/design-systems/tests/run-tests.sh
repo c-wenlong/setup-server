@@ -272,17 +272,41 @@ test_deployd_disabled_flag() {
 }
 
 test_deployd_custom_home_flag() {
-  echo "• the pause flag is found under a custom deployd SERVICE_HOME too"
+  echo "• the pause flag is honored under a custom deployd SERVICE_HOME, and under the default one it may predate"
   setup
   touch "$STATE_DIR/operator"
+  fake_deployd
   mkdir -p "$SANDBOX/repo/services/deployd" "$HOME/deployd home/state"
   printf 'SERVICE_HOME=%s\n' "$HOME/deployd\\ home" > "$SANDBOX/repo/services/deployd/.env"
   touch "$HOME/deployd home/state/design-systems.disabled"
   run_deploy
-  check "re-setup refused"        [ "$CODE" -ne 0 ]
-  check "  says why"              out_has "design-systems is paused"
-  check "  names the flag"        out_has "$HOME/deployd home/state/design-systems.disabled"
-  check "  flag kept"             [ -f "$HOME/deployd home/state/design-systems.disabled" ]
+  check "custom-home flag: refused" [ "$CODE" -ne 0 ]
+  check "  says why"                out_has "design-systems is paused"
+  check "  names the flag"          out_has "$HOME/deployd home/state/design-systems.disabled"
+  check "  flag kept"               [ -f "$HOME/deployd home/state/design-systems.disabled" ]
+  rm -f "$HOME/deployd home/state/design-systems.disabled"
+  touch "$HOME/services/deployd/state/design-systems.disabled"
+  run_deploy
+  check "flag left at the default home: still refused" [ "$CODE" -ne 0 ]
+  check "  names that flag"         out_has "$HOME/services/deployd/state/design-systems.disabled"
+  teardown
+}
+
+test_teardown_flag_custom_home() {
+  echo "• teardown parks the service in deployd's real state dir, custom home included"
+  setup
+  touch "$STATE_DIR/operator"
+  fake_deployd
+  mkdir -p "$SANDBOX/repo/services/deployd" "$HOME/deployd home/state"
+  printf 'SERVICE_HOME=%s\n' "$HOME/deployd\\ home" > "$SANDBOX/repo/services/deployd/.env"
+  run_deploy
+  run_teardown
+  check "teardown exits zero"        [ "$CODE" -eq 0 ]
+  check "flag at the custom home"    [ -f "$HOME/deployd home/state/design-systems.disabled" ]
+  check "  not the default dir"      [ ! -f "$HOME/services/deployd/state/design-systems.disabled" ]
+  run_deploy
+  check "re-setup still refused"     [ "$CODE" -ne 0 ]
+  check "  says why"                 out_has "design-systems is paused"
   teardown
 }
 
@@ -1481,6 +1505,7 @@ test_legacy_poller_removed
 test_legacy_poller_kept_without_deployd
 test_deployd_disabled_flag
 test_deployd_custom_home_flag
+test_teardown_flag_custom_home
 test_serve_port_owned_elsewhere
 test_deploy_sha_mismatch
 test_path_restored_from_env

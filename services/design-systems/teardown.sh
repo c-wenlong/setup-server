@@ -442,10 +442,18 @@ EOF
 fi
 
 # Tell deployd not to resurrect this on the next push: the flag lives in
-# deployd's own state dir so it survives --purge too. While it stands,
+# deployd's own state dir so it survives --purge too. Its home can move via
+# services/deployd/.env, so resolve it exactly like setup.sh does (keep the
+# two in step) or the flag and the check would diverge. While it stands,
 # setup.sh refuses to run — remove it by hand to bring the service back.
-if [ -d "$HOME/services/deployd/state" ]; then
-  touch "$HOME/services/deployd/state/$NAME.disabled"
+DEPLOYD_STATE="$HOME/services/deployd/state"
+if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
+  raw="$(sed -n 's/^ *SERVICE_HOME=//p' "$SERVICE_DIR/../deployd/.env" | tail -1)"
+  raw="$(printf '%s' "$raw" | sed 's/\\\(.\)/\1/g')"
+  [ -n "$raw" ] && DEPLOYD_STATE="$raw/state"
+fi
+if [ -d "$DEPLOYD_STATE" ]; then
+  touch "$DEPLOYD_STATE/$NAME.disabled"
   ok "deployd will skip $NAME until $NAME.disabled is removed and setup.sh re-runs"
 fi
 

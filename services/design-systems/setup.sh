@@ -68,8 +68,13 @@ if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
   raw="$(printf '%s' "$raw" | sed 's/\\\(.\)/\1/g')"
   [ -n "$raw" ] && DEPLOYD_STATE="$raw/state"
 fi
-DEPLOYD_FLAG="$DEPLOYD_STATE/design-systems.disabled"
-[ ! -f "$DEPLOYD_FLAG" ] || die "design-systems is paused: $DEPLOYD_FLAG exists (written by teardown.sh or the Studio cutover). Refusing to resume auto-deploys and republish :$HTTPS_PORT. To bring the service back: rm $DEPLOYD_FLAG, then re-run ./setup.sh"
+# A flag parked under the default home before deployd's home moved — or by
+# an older teardown that did not resolve the custom home — still holds.
+DEPLOYD_FLAG=""
+for f in "$DEPLOYD_STATE/design-systems.disabled" "$HOME/services/deployd/state/design-systems.disabled"; do
+  if [ -f "$f" ]; then DEPLOYD_FLAG="$f"; break; fi
+done
+[ -z "$DEPLOYD_FLAG" ] || die "design-systems is paused: $DEPLOYD_FLAG exists (written by teardown.sh or the Studio cutover). Refusing to resume auto-deploys and republish :$HTTPS_PORT. To bring the service back: rm $DEPLOYD_FLAG, then re-run ./setup.sh"
 
 # A re-run (e.g. under deployd, whose PATH is minimal) finds tools where
 # the first install recorded them in .env — put those dirs on PATH first.
