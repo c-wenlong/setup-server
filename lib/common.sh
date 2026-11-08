@@ -39,15 +39,38 @@ refuse_root() {
   [ "$(id -u)" -ne 0 ] || die "${1:-Run as a regular user, not root.}"
 }
 
-# Sets TAILSCALE to the CLI: PATH first, then the macOS app bundle.
+# Sets TAILSCALE to the CLI, resolved once to an absolute path: PATH first,
+# then the macOS app bundle. Pinning matters — a bare `tailscale` would
+# re-resolve through PATH on every call, so a shadowing binary could fake
+# `serve status` (defeating ts_serve_foreign) or `status --json` (poisoning
+# tailnet_host). As a sanity check the resolved binary must answer
+# `version`: exit 0, and whatever it prints must look like Tailscale's —
+# it mentions tailscale or starts like a version number. Empty output
+# passes (the test fakes answer `version` silently); the point is refusing
+# a binary that plainly is not Tailscale, not auditing the real one.
 resolve_tailscale() {
-  if command -v tailscale >/dev/null; then
-    TAILSCALE="tailscale"
-  elif [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
-    TAILSCALE="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-  else
-    die "Tailscale is not installed: https://tailscale.com/download"
+  local cand ver
+  cand="$(command -v tailscale 2>/dev/null || true)"
+  # command -v can also name a shell function, an alias or a relative PATH
+  # entry — pin only real, executable files.
+  case "$cand" in
+    /*) ;;
+    ?*) cand="$(cd "$(dirname "$cand")" 2>/dev/null && pwd)/$(basename "$cand")" ;;
+  esac
+  if [ -z "$cand" ] || [ ! -x "$cand" ]; then
+    if [ "$OS" = "Darwin" ] && [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+      cand="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    else
+      die "Tailscale is not installed: https://tailscale.com/download"
+    fi
   fi
+  ver="$("$cand" version 2>&1)" \
+    || die "$cand: 'tailscale version' failed — refusing to run a binary that may not be Tailscale"
+  case "$ver" in
+    ''|*tailscale*|*Tailscale*|[0-9]*) ;;
+    *) die "$cand does not look like Tailscale (version said: $ver)" ;;
+  esac
+  TAILSCALE="$cand"
 }
 
 # Dies unless tailscaled reports BackendState "Running". Needs TAILSCALE.
@@ -101,12 +124,15 @@ wait_http() {
 # ts_serve_foreign HTTPS_PORT TARGET: 0 when `serve status` shows a /
 # handler on HTTPS_PORT proxying anywhere but TARGET — a deliberate repoint
 # (like the design-systems → Studio cutover on :8108) that a publish must
-# not steal — and 1 otherwise, including an unreadable status, which is no
-# evidence and lets the publish go ahead. Needs TAILSCALE.
+# not steal — and 1 otherwise. A `serve status` that cannot be read at all
+# is FATAL, not "no evidence": like teardown.sh, we refuse to guess who
+# owns the port, since guessing wrong means `serve --bg` overwrites another
+# service's mapping. Empty output with a clean exit is fine — the node
+# simply publishes nothing yet. Needs TAILSCALE.
 ts_serve_foreign() {
   local https_port="$1" target="$2" status
-  status="$("$TAILSCALE" serve status 2>/dev/null)" || return 1
-  [ -n "$status" ] || return 1
+  status="$("$TAILSCALE" serve status 2>&1)" \
+    || die "Could not read Tailscale Serve status: ${status:-empty output}. Refusing to touch HTTPS :$https_port without knowing who owns the port (is tailscaled running?)"
   [ "$(printf '%s\n' "$status" | awk -v want=":$https_port" -v t="$target" '
     /^[A-Za-z][A-Za-z0-9+.-]*:\/\// {
       inport = 0
@@ -125,7 +151,8 @@ ts_serve_foreign() {
 # http://127.0.0.1:<port>) tailnet-only on HTTPS_PORT. Never steals the
 # port: when ts_serve_foreign sees / handlers proxying elsewhere it warns
 # and leaves the mapping alone; a port that is free or already ours is
-# republished as before (Serve replaces the mapping).
+# republished as before (Serve replaces the mapping); an unreadable
+# `serve status` aborts the publish outright.
 # On Linux a first publish failure is usually tailscaled refusing a
 # non-operator, so it grants operator rights once via sudo. If Serve still
 # fails it is the one-time enablement link: Tailscale prints it, we wait
@@ -141,7 +168,9 @@ ts_serve_publish() {
   if ! "$TAILSCALE" serve --bg --https="$https_port" "$target" >/dev/null 2>&1; then
     if [ "$OS" = "Linux" ]; then
       info "Direct serve failed — trying operator grant (needs sudo, one time)"
-      sudo tailscale set --operator="$USER"
+      # The resolved absolute path, not `sudo tailscale`: sudo's secure_path
+      # could otherwise resolve a different binary than the one we verified.
+      sudo "$TAILSCALE" set --operator="$USER"
     fi
     while :; do
       if ts_serve_foreign "$https_port" "$target"; then
@@ -157,4 +186,31 @@ ts_serve_publish() {
     done
   fi
   ok "Tailscale Serve: HTTPS :$https_port -> $target"
+}
+
+# ------------------------------------------------------------------ .env
+
+# env_lint FILE: die unless FILE is a .env that is safe to source
+# (`set -a; . FILE`). Every non-blank, non-comment line must be KEY=value
+# (KEY an identifier — an optional `export` prefix and leading whitespace
+# are allowed), no key may appear twice, and no value may use command
+# substitution ($() or backticks), since a sourced file runs as shell.
+# Note the teardowns keep their own stricter env_lint: theirs also enforces
+# how Docker Compose parses quotes and escapes, because they read .env
+# without running it and must not disagree with Compose. Those copies are
+# intentionally untouched — new code that sources a .env should call this
+# one before `set -a; . "$ENV_FILE"; set +a`.
+env_lint() {
+  local env_file="$1" problem
+  problem="$(awk '
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      line = $0; sub(/\r$/, "", line)
+      sub(/^[[:space:]]*(export[[:space:]]+)?/, "", line)
+      if (!match(line, /^[A-Za-z_][A-Za-z0-9_]*=/)) { print "line " NR " is not KEY=value"; exit }
+      key = substr(line, 1, RLENGTH - 1); val = substr(line, RLENGTH + 1)
+      if (seen[key]++) { print key " is set more than once"; exit }
+      if (index(val, "$(") || index(val, "`")) { print "the value of " key " uses command substitution"; exit }
+    }' "$env_file")"
+  [ -z "$problem" ] || die "$env_file: $problem. Fix that line and re-run — a sourced .env runs as shell."
 }

@@ -815,7 +815,7 @@ test_operator_escalation() {
   setup
   run_deploy
   check "exits zero" [ "$CODE" -eq 0 ]
-  [ "$OS" = "Linux" ] && check "granted operator" calls_have "sudo tailscale set --operator="
+  [ "$OS" = "Linux" ] && check "granted operator" calls_have "tailscale set --operator="
   check "eventually published :8097" calls_have "tailscale serve --bg --https=8097 http://127.0.0.1:8097"
   check "eventually published :8099" calls_have "tailscale serve --bg --https=8099 http://127.0.0.1:8099"
   teardown

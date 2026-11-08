@@ -329,7 +329,7 @@ test_operator_escalation() {
   touch "$STATE_DIR/linger"
   run_deploy
   check "exits zero" [ "$CODE" -eq 0 ]
-  [ "$OS" = "Linux" ] && check "granted operator" calls_have "sudo tailscale set --operator="
+  [ "$OS" = "Linux" ] && check "granted operator" calls_have "tailscale set --operator="
   check "eventually published Paperclip" calls_have "tailscale serve --bg --https=3100 http://127.0.0.1:3100"
   teardown
 }

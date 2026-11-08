@@ -137,7 +137,7 @@ fi
 if ! "$TAILSCALE" serve --bg "http://127.0.0.1:$PORT" >/dev/null 2>&1; then
   if [ "$OS" = "Linux" ]; then
     info "Granting Tailscale operator rights to $USER (needs sudo, one time)"
-    sudo tailscale set --operator="$USER"
+    sudo "$TAILSCALE" set --operator="$USER"
   fi
   until "$TAILSCALE" serve --bg "http://127.0.0.1:$PORT"; do
     echo

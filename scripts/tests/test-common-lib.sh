@@ -124,7 +124,7 @@ teardown
 echo "• resolve_tailscale / require_tailscale_up / tailnet_host"
 setup
 lib 'detect_os; resolve_tailscale; echo "ts=$TAILSCALE"; require_tailscale_up; echo "host=$(tailnet_host)"'
-check "CLI found on PATH"                  out_has "ts=tailscale"
+check "CLI found on PATH, pinned absolute" out_has "ts=$SB/bin/tailscale"
 check "MagicDNS name, trailing dot gone"   out_has "host=box.tail1.ts.net"
 FAKE_TS_STATE=Stopped lib 'detect_os; resolve_tailscale; require_tailscale_up'
 check "a stopped tailscaled is fatal"      [ "$CODE" -ne 0 ]
@@ -136,6 +136,22 @@ FAKE_TS_NO_DNS=1 lib 'detect_os; resolve_tailscale; host="$(tailnet_host)"; echo
 check "no DNSName: empty, not a silent exit" out_has "reached host=[]"
 FAKE_TS_STATUS_FAILS=1 lib 'detect_os; resolve_tailscale; host="$(tailnet_host)"; echo "reached host=[$host]"'
 check "status fails: empty, not a silent exit" out_has "reached host=[]"
+# A PATH-shadowing impostor is refused before it can fake `serve status` or
+# `status --json`: `version` must exit 0 and look like Tailscale's output.
+stub tailscale '[ "${1:-}" != version ]'
+lib 'detect_os; resolve_tailscale; echo reached'
+check "a fake that fails version is refused" [ "$CODE" -ne 0 ]
+check "  says why"                         out_has "may not be Tailscale"
+stub tailscale 'if [ "${1:-}" = version ]; then echo "garbage-cli 9.9"; fi; exit 0'
+lib 'detect_os; resolve_tailscale; echo reached'
+check "foreign version output is refused"  [ "$CODE" -ne 0 ]
+check "  says why"                         out_has "does not look like Tailscale"
+stub tailscale 'exit 0'
+lib 'detect_os; resolve_tailscale; echo "ts=$TAILSCALE"'
+check "a silent version answer still resolves (test-fake shape)" out_has "ts=$SB/bin/tailscale"
+chmod -x "$SB/bin/tailscale"
+BARE=1 lib 'detect_os; resolve_tailscale'
+check "a non-executable tailscale is not found" out_has "Tailscale is not installed"
 rm "$SB/bin/tailscale"
 BARE=1 lib 'detect_os; resolve_tailscale'
 check "no CLI at all is fatal"             out_has "Tailscale is not installed"
@@ -192,7 +208,7 @@ check "  confirms the mapping"             out_has "Tailscale Serve: HTTPS :8443
 teardown
 setup
 FAKE_SERVE_FAILS=1 lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'
-check "Linux, first try denied: operator grant via sudo" calls_have "sudo tailscale set --operator="
+check "Linux, first try denied: operator grant via sudo" calls_have "sudo $SB/bin/tailscale set --operator="
 check "  then succeeds"                    [ "$CODE" -eq 0 ]
 teardown
 setup
@@ -263,7 +279,35 @@ check "  no second publish"                [ "$(grep -c 'serve --bg' "$SB/calls.
 teardown
 setup
 FAKE_SERVE_STATUS_FAILS=1 lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'
-check "status unreadable: publishes"       calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8081"
+check "status unreadable: refuses"         [ "$CODE" -ne 0 ]
+check "  never runs serve --bg"            no_call "serve --bg"
+check "  says why"                         out_has "Could not read Tailscale Serve status"
+teardown
+
+echo "• env_lint"
+setup
+cat > "$SB/good.env" <<'EOF'
+# a comment and a blank line below
+
+LOCAL_PORT=8081
+export DATA_DIR=$HOME/services/x
+QUOTED="a b"
+TRAILING=v # a trailing comment
+EOF
+lib "env_lint '$SB/good.env'; echo clean"
+check "a clean .env passes"                out_has "clean"
+printf 'A=1\nB=2\nA=3\n' > "$SB/dup.env"
+lib "env_lint '$SB/dup.env'"
+check "a duplicated key is fatal"          out_has "A is set more than once"
+printf 'A=$(rm -rf x)\n' > "$SB/cmdsub.env"
+lib "env_lint '$SB/cmdsub.env'"
+check "command substitution is fatal"      out_has "command substitution"
+printf 'A=`id`\n' > "$SB/backtick.env"
+lib "env_lint '$SB/backtick.env'"
+check "backticks are fatal"                out_has "command substitution"
+printf 'not an assignment\n' > "$SB/bad.env"
+lib "env_lint '$SB/bad.env'"
+check "a non KEY=value line is fatal"      out_has "not KEY=value"
 teardown
 
 echo
