@@ -2,6 +2,10 @@
 # curl stub — fakes the Immich REST API. State in $STATE_DIR:
 #   admin_exists     — exists => /auth/admin-sign-up returns 400 (already set up)
 #   login_fails      — exists => /auth/login returns 401
+#   conn_fail        — exists => API calls other than /api/server/ping act like
+#                      a refused connection: print 000 for -w and exit 7, the
+#                      way real curl does (this is what `|| echo 000` used to
+#                      concatenate into the nonsense code "000000")
 #   config_put.json  — written with the body of a PUT /admin/config
 #
 # Understands the flag shapes setup.sh actually uses: -X, -o, -w %{http_code},
@@ -27,6 +31,14 @@ emit() {  # emit <http_code> <json>
   [ "$want_code" = "1" ] && printf '%s' "$1"
   return 0
 }
+
+if [ -f "$STATE_DIR/conn_fail" ]; then
+  case "$url" in
+    */api/server/ping) ;;                       # readiness still passes
+    *) [ "$want_code" = "1" ] && printf '000'
+       exit 7 ;;                                # CURLE_COULDNT_CONNECT
+  esac
+fi
 
 case "$url" in
   */api/server/ping)

@@ -560,8 +560,11 @@ audit_port() {  # audit_port PORT LABEL
                                                    # glob: '[' is an invalid
                                                    # pattern under zsh
     host="${host%\%*}"                             # drop %lo etc
+    # `*` is NOT loopback: it is how the wildcard publish renders — `*:PORT`
+    # from lsof on macOS, and `*` for [::] from ss — so it belongs in the
+    # violation list beside 0.0.0.0, not in this accept list.
     case "$host" in
-      127.*|::1|localhost|'*') continue ;;
+      127.*|::1|localhost) continue ;;
     esac
     [ -n "$TS_IP" ]  && [ "$host" = "$TS_IP" ]  && continue
     [ -n "$TS_IP6" ] && [ "$host" = "$TS_IP6" ] && continue

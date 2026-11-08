@@ -54,6 +54,7 @@ check() {
 }
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
+out_lacks()  { ! grep -qF -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
@@ -167,6 +168,35 @@ test_signup_warns() {
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "warns about God Mode"  out_has "god-mode"
   check "still prints the URL"  out_has "https://test-host.tailfake.ts.net:8105"
+  teardown
+}
+
+test_signup_code_not_concatenated() {
+  echo "• sign-up connection refused: warns HTTP 000, never the doubled 000000"
+  # curl -w %{http_code} already prints 000 on a refused connection and exits
+  # non-zero; a `|| echo 000` fallback concatenated that into the nonsense
+  # code "000000" in this warning.
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/signup_conn_fail"
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  check "warns HTTP 000"       out_has "admins/sign-up/ returned HTTP 000."
+  check "never 000000"         out_lacks "000000"
+  teardown
+}
+
+test_admin_email_override() {
+  echo "• PLANE_ADMIN_EMAIL is honoured on a first run and read back from .env"
+  setup
+  touch "$STATE_DIR/operator"
+  export PLANE_ADMIN_EMAIL=me@real.example
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check ".env records the real email" grep -qx 'PLANE_ADMIN_EMAIL=me@real.example' "$SVC/.env"
+  check "seeded as that address"      out_has "First instance admin seeded (me@real.example)"
+  unset PLANE_ADMIN_EMAIL
+  run_deploy
+  check "re-run keeps it"             grep -qx 'PLANE_ADMIN_EMAIL=me@real.example' "$SVC/.env"
   teardown
 }
 
@@ -796,6 +826,8 @@ test_preflight_tailscale_down
 test_preflight_bad_port
 test_fresh_deploy
 test_signup_warns
+test_signup_code_not_concatenated
+test_admin_email_override
 test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot

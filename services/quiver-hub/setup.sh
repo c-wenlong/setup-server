@@ -67,6 +67,9 @@ detect_os
 # A manual ./setup.sh re-installs the service: clear deployd's disabled
 # flag (written by teardown.sh) so auto-deploy resumes. deployd itself
 # never invokes this while the flag is set, so clearing is always manual.
+# This path is a documented contract, not an internal detail — deployd's
+# SETUP.md ("Disable / re-enable a service") states a service's setup.sh
+# clears state/<key>.disabled on re-run, and teardown.sh's side writes it.
 rm -f "$HOME/services/deployd/state/quiver-hub.disabled"
 
 # Captured, then grepped: `cmd | grep -q` under pipefail fails spuriously when

@@ -44,7 +44,7 @@ An HTML5 gateway (`guacd`) that translates browser input into RDP against
 - ⚠️ **Host-level installs.** `xfce4` + `xrdp` via apt, with sudo. Every
   other service in this repo is a container or a user unit that touches
   nothing outside `$HOME`. This is a real deviation from the repo's grain
-  and the reason a service-level `AGENTS.md` is warranted.
+  and is called out in `SETUP.md` ("The sudo deviation").
 - ⚠️ **RAM.** ~400 MB idle (Tomcat JVM + guacd), plus ~400–600 MB per
   active XFCE session. EXPLORATION.md's rule is "keep new always-on
   services in the tens-of-MB class"; this breaks it by an order of

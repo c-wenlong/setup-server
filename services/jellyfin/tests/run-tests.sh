@@ -155,8 +155,9 @@ test_preflight_bad_port() {
 }
 
 test_preflight_bad_username() {
-  echo "• preflight rejects an admin username that would break the JSON body"
-  # The username is interpolated into {"Name":"..."} with printf, not escaped.
+  echo "• preflight rejects an admin username outside the allowlist"
+  # The JSON body is escaped by json.dumps now; the allowlist stays because a
+  # clear error beats a stored account name you cannot type on a TV.
   setup
   export JELLYFIN_ADMIN_USERNAME='admin" ,"x'
   run_deploy

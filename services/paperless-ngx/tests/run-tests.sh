@@ -671,6 +671,16 @@ test_wildcard_listener_is_caught() {
   teardown
 
   setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/listen_star"
+  run_deploy
+  # The same wildcard publish as 0.0.0.0, rendered the way lsof -nP prints it
+  # on macOS (*:PORT). An accept rule that whitelists only 127.*/::1 must not
+  # wave `*` through — it is every interface, loopback included only by luck.
+  check "the *:PORT form is caught too" [ "$CODE" -ne 0 ]
+  check "  names the exposure"          out_hasF "is listening on non-tailnet address(es): *"
+  teardown
+
+  setup
   touch "$STATE_DIR/operator" "$STATE_DIR/listen_lan"
   run_deploy
   check "a LAN address is caught too" [ "$CODE" -ne 0 ]

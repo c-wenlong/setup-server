@@ -3,6 +3,10 @@
 #   health_fails_left  — countdown of 503s from /api/heartbeat
 #   password_rotated   — generated password already works; default umami does not
 #   rotate_fail        — POST /api/users/.../password returns 500
+#   rotate_conn_fail   — POST /api/users/.../password acts like a refused
+#                        connection: prints 000 for -w and exits 7, the way
+#                        real curl does (this is what `|| echo 000`
+#                        concatenated into 000000)
 echo "curl $*" >> "$CALLS_LOG"
 
 method="GET"; out=""; url=""; want_code=0; failonerr=0; data=""
@@ -67,6 +71,10 @@ case "$url" in
     ;;
   */api/users/*/password|*/api/users/*/password/)
     if [ "$method" = "POST" ]; then
+      if [ -f "$STATE_DIR/rotate_conn_fail" ]; then
+        [ "$want_code" = "1" ] && printf '000'
+        exit 7                        # CURLE_COULDNT_CONNECT
+      fi
       if [ -f "$STATE_DIR/rotate_fail" ]; then
         emit 500 '{"error":"rotate failed"}'
       fi

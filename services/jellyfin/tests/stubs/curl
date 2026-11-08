@@ -2,8 +2,9 @@
 # curl stub — fakes the Jellyfin HTTP surface. State in $STATE_DIR:
 #
 #   conn_refused_left  — countdown of connection refusals (container not
-#                        listening yet); curl exits 7 with no output, which is
-#                        what makes setup.sh's `|| echo 000` produce JF_CODE=000
+#                        listening yet); curl exits 7 having already printed
+#                        000 for -w %{http_code}, which is what setup.sh's
+#                        normaliser keeps as JF_CODE=000
 #   startup_503_left   — countdown of 503s from *every* /Startup/* endpoint.
 #                        THIS IS THE READINESS RACE: the real server answers
 #                        /System/Info/Public with 200 while it is still loading
@@ -79,8 +80,10 @@ countdown() {
 
 LOADING='{"Message":"Jellyfin Server is loading. Please try again shortly."}'
 
-# Nothing is listening yet — the container is still starting.
+# Nothing is listening yet — the container is still starting. Real curl
+# prints 000 for -w %{http_code} before exiting 7 on a refused connection.
 if countdown conn_refused_left; then
+  [ "$want_code" = "1" ] && printf '000'
   echo "curl: (7) Failed to connect: Connection refused" >&2
   exit 7
 fi
