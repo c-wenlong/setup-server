@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # curl stub. State in $STATE_DIR:
-#   ntfy_down  — exists => the ntfy health check fails
+#   ntfy_down         — exists => the ntfy health check fails
+#   ntfy_auth         — exists => topic probes answer 401 without a -u
+#                       credential, 200 with one (ntfy has auth on)
+#   ntfy_auth_reject  — exists => topic probes answer 401 even with -u
+#                       (stored credentials are stale)
 echo "curl $*" >> "$CALLS_LOG"
 
 if [ -f "$STATE_DIR/ntfy_down" ]; then
@@ -8,4 +12,22 @@ if [ -f "$STATE_DIR/ntfy_down" ]; then
     case "$a" in */v1/health) exit 7;; esac
   done
 fi
+
+# -w '%{http_code}' write-out: the auth probe reads this and nothing else.
+for a in "$@"; do
+  case "$a" in
+    *'%{http_code}'*)
+      code=200
+      if [ -f "$STATE_DIR/ntfy_auth" ]; then
+        have_u=0
+        for b in "$@"; do [ "$b" = "-u" ] && have_u=1; done
+        [ -f "$STATE_DIR/ntfy_auth_reject" ] && have_u=0
+        [ "$have_u" = "1" ] || code=401
+      fi
+      printf '%s' "$code"
+      exit 0
+      ;;
+  esac
+done
+
 exit 0

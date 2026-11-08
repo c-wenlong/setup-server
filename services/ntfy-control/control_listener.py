@@ -9,10 +9,12 @@ Commands (message text, case-insensitive):
     status                       state of every controllable service
     stop|start|restart <svc>     e.g. `stop seafile`
 
-Security model: the tailnet is the auth layer (only Kai's devices can reach
-ntfy), and on top of that message text is only ever *matched* against the
-allowlist below — it is never executed. Worst case for a bogus message is a
-"usage" reply.
+Security model: the ntfy server is tailnet-only AND requires a login —
+this listener authenticates with NTFY_USER/NTFY_PASS (the `control`
+account: read on CONTROL_TOPIC, write-only on REPLY_TOPIC, created by
+services/monitoring/setup.sh). On top of that message text is only ever
+*matched* against the allowlist below — it is never executed. Worst case
+for a bogus message is a "usage" reply.
 
 THE ALLOWLIST IS NOT IN THIS FILE. For services it is the per-service
 `control` block in `app/web/services.json`, which the launcher's web UI
@@ -44,6 +46,8 @@ Modes:
 
 Config via env (systemd EnvironmentFile= / launchd EnvironmentVariables):
     NTFY_BASE_URL, CONTROL_TOPIC, REPLY_TOPIC, KUMA_ENV_FILE,
+    NTFY_USER, NTFY_PASS (basic-auth credentials; empty = anonymous,
+        which only works on an ntfy server without auth configured)
     CONTROL_REGISTRY (optional explicit path to app/web/services.json)
     CONTROL_APPS_DIR (optional explicit path to the launcher apps dir)
 """
@@ -63,6 +67,12 @@ PUBLIC_NTFY = os.environ.get("PUBLIC_NTFY_URL", "") or os.environ.get("NTFY_BASE
 CONTROL_TOPIC = os.environ.get("CONTROL_TOPIC", "control")
 REPLY_TOPIC = os.environ.get("REPLY_TOPIC", "alerts")
 KUMA_ENV_FILE = os.environ.get("KUMA_ENV_FILE", "")
+# The ntfy server requires a login (auth-default-access=deny-all). Sent as
+# HTTP Basic on every subscribe/publish; empty = anonymous, kept so the
+# listener still works against a pre-auth monitoring deploy.
+NTFY_USER = os.environ.get("NTFY_USER", "")
+NTFY_PASS = os.environ.get("NTFY_PASS", "")
+AUTH = ["-u", f"{NTFY_USER}:{NTFY_PASS}"] if NTFY_USER else []
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 VERBS = ("start", "stop", "restart")
@@ -390,7 +400,7 @@ def usage():
 # ------------------------------------------------------------------ ntfy
 
 def notify(text, actions=None):
-    cmd = ["curl", "-fsS", "-o", "/dev/null", "-H", "Title: server-control", "-d", text]
+    cmd = ["curl", "-fsS", "-o", "/dev/null"] + AUTH + ["-H", "Title: server-control", "-d", text]
     if actions:
         cmd += ["-H", "X-Actions: " + json.dumps(actions)]
     cmd.append(f"{NTFY}/{REPLY_TOPIC}")
@@ -643,7 +653,7 @@ def subscribe_forever():
     load_registry()   # log which allowlist file is in force, at startup
     while True:
         try:
-            proc = subprocess.Popen(["curl", "-sN", url], stdout=subprocess.PIPE, text=True)
+            proc = subprocess.Popen(["curl", "-sN"] + AUTH + [url], stdout=subprocess.PIPE, text=True)
             for line in proc.stdout:
                 line = line.strip()
                 if not line:

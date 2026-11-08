@@ -88,17 +88,35 @@ test_fresh_deploy() {
   check ".env has admin password"     sh -c "grep -E '^KUMA_ADMIN_PASSWORD=.+' '$SVC/.env' >/dev/null"
   check ".env is mode 600"            sh -c "[ \"\$(stat -c %a '$SVC/.env' 2>/dev/null || stat -f %Lp '$SVC/.env')\" = 600 ]"
   check ".env has ntfy base url"      env_has "NTFY_BASE_URL=https://test-host.tailfake.ts.net:3003"
+  check ".env pins the ntfy image"    env_has "NTFY_IMAGE=binwiederhier/ntfy:v2.14.0"
+  check ".env has phone creds"        sh -c "grep -E '^NTFY_PHONE_USER=phone$' '$SVC/.env' && grep -E '^NTFY_PHONE_PASS=[0-9a-f]{32}$' '$SVC/.env'"
+  check ".env has kuma creds"         env_has "NTFY_KUMA_USER=kuma"
+  check ".env has control creds"      env_has "NTFY_CONTROL_USER=control"
+  check ".env records control topic"  env_has "CONTROL_TOPIC=control"
+  check "compose denies anonymous"    sh -c "grep -q 'NTFY_AUTH_DEFAULT_ACCESS=deny-all' '$SVC/docker-compose.yml'"
+  check "compose sets auth file"      sh -c "grep -q 'NTFY_AUTH_FILE=/var/lib/ntfy/auth.db' '$SVC/docker-compose.yml'"
+  check "compose mounts auth volume"  sh -c "grep -q 'ntfy-auth:/var/lib/ntfy' '$SVC/docker-compose.yml'"
   check "compose up invoked"          [ -f "$STATE_DIR/compose_up" ]
+  check "phone user created"          calls_have "ntfy user add phone"
+  check "kuma user created"           calls_have "ntfy user add kuma"
+  check "control user created"        calls_have "ntfy user add control"
+  check "phone reads alerts"          calls_have "ntfy access phone alerts read-only"
+  check "phone drives control"        calls_have "ntfy access phone control read-write"
+  check "kuma writes alerts"          calls_have "ntfy access kuma alerts write-only"
+  check "control reads commands"      calls_have "ntfy access control control read-write"
+  check "control writes replies"      calls_have "ntfy access control alerts write-only"
+  check "all three users reported"    out_has "ntfy users created: phone kuma control"
   check "seed attempted via uv"       calls_have "uv run --with uptime-kuma-api"
   check "kuma served on :3002"        calls_have "tailscale serve --bg --https=3002 http://127.0.0.1:3002"
   check "ntfy served on :3003"        calls_have "tailscale serve --bg --https=3003 http://127.0.0.1:3003"
   check "prints dashboard URL"        out_has "https://test-host.tailfake.ts.net:3002"
   check "prints phone setup hint"     out_has "install the ntfy app"
+  check "hint includes credentials"   out_has "NTFY_PHONE_USER / NTFY_PHONE_PASS"
   teardown
 }
 
 test_idempotent_rerun() {
-  echo "• re-run: .env (credentials) preserved, no sudo"
+  echo "• re-run: .env (credentials) preserved, auth db not re-created, no sudo"
   setup
   touch "$STATE_DIR/operator"
   cat > "$SVC/.env" <<'EOF'
@@ -111,10 +129,27 @@ NTFY_TOPIC=alerts
 KUMA_ADMIN_USER=admin
 KUMA_ADMIN_PASSWORD=my-custom-secret
 EOF
+  # a pre-auth .env: the migration appends the account block once
   run_deploy
-  check "exits zero"              [ "$CODE" -eq 0 ]
-  check "existing .env untouched" env_has "my-custom-secret"
-  check "never invoked sudo"      no_call "^sudo "
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "existing .env untouched"     env_has "my-custom-secret"
+  check "migration added creds"       env_has "NTFY_CONTROL_USER=control"
+  check "migration added phone creds" env_has "NTFY_PHONE_USER=phone"
+  check "migration added topic"       env_has "CONTROL_TOPIC=control"
+  check "users created"               calls_have "ntfy user add"
+  check "never invoked sudo"          no_call "^sudo "
+
+  # second run: creds and users both exist — nothing is regenerated or
+  # re-added, but the grants still run (upsert repairs drift)
+  pass="$(sed -n 's/^NTFY_CONTROL_PASS=//p' "$SVC/.env")"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "creds not regenerated"    [ "$(sed -n 's/^NTFY_CONTROL_PASS=//p' "$SVC/.env")" = "$pass" ]
+  check "no user add on re-run"    no_call "ntfy user add"
+  check "users + ACLs verified"    out_has "ntfy users + ACLs verified"
+  check "grants re-applied"        calls_have "ntfy access phone alerts read-only"
+  check "all five grants run"      sh -c "[ \$(grep -c 'ntfy access' '$CALLS_LOG') -eq 5 ]"
   teardown
 }
 
@@ -203,8 +238,31 @@ class UptimeKumaApi:
     def need_setup(self): return False
     def setup(self, *a): pass
     def login(self, *a): pass
-    def get_notifications(self): return []
-    def add_notification(self, **kw): return {"id": 1}
+    def get_notifications(self):
+        # one canned notification per line of $FAKE_KUMA_NOTIFS:
+        # "id name auth-method [username]"
+        path = os.environ.get("FAKE_KUMA_NOTIFS", "")
+        out = []
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    parts = line.split()
+                    d = {"id": int(parts[0]), "name": parts[1],
+                         "ntfyAuthenticationMethod": parts[2]}
+                    if len(parts) > 3:
+                        d["ntfyusername"] = parts[3]
+                    out.append(d)
+        except OSError:
+            pass
+        return out
+    def delete_notification(self, nid):
+        with open(os.environ["FAKE_KUMA_LOG"], "a") as fh:
+            fh.write("delnotif:%d\n" % nid)
+    def add_notification(self, **kw):
+        with open(os.environ["FAKE_KUMA_LOG"], "a") as fh:
+            fh.write("notif:%s:%s:%s\n" % (kw["name"], kw.get("ntfyAuthenticationMethod"),
+                                           kw.get("ntfyusername", "")))
+        return {"id": 1}
     def get_monitors(self):
         # one canned monitor per line of $FAKE_KUMA_HAVE: "id name url"
         path = os.environ.get("FAKE_KUMA_HAVE", "")
@@ -256,6 +314,34 @@ test_seed_studio_monitor() {
   teardown
 }
 
+test_seed_ntfy_auth() {
+  echo "• seed: the ntfy channel uses the kuma account; a stale 'none' channel is replaced"
+  setup
+  # creds in env => channel created with username-password auth
+  NTFY_KUMA_USER=kuma NTFY_KUMA_PASS=sekrit run_seed "$SANDBOX/absent.env"
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "created with user+pass auth" grep -qx 'notif:ntfy-alerts:username-password:kuma' "$SANDBOX/kuma.log"
+
+  # an existing unauthenticated channel gets replaced, not kept failing
+  printf '7 ntfy-alerts none\n' > "$SANDBOX/notifs"
+  : > "$SANDBOX/kuma.log"
+  FAKE_KUMA_NOTIFS="$SANDBOX/notifs" NTFY_KUMA_USER=kuma NTFY_KUMA_PASS=sekrit run_seed "$SANDBOX/absent.env"
+  check "old channel deleted"         grep -qx 'delnotif:7' "$SANDBOX/kuma.log"
+  check "recreated with auth"         grep -qx 'notif:ntfy-alerts:username-password:kuma' "$SANDBOX/kuma.log"
+
+  # a channel already on the right account is left alone
+  printf '7 ntfy-alerts username-password kuma\n' > "$SANDBOX/notifs"
+  : > "$SANDBOX/kuma.log"
+  FAKE_KUMA_NOTIFS="$SANDBOX/notifs" NTFY_KUMA_USER=kuma NTFY_KUMA_PASS=sekrit run_seed "$SANDBOX/absent.env"
+  check "matching channel kept"       sh -c "! grep -q 'delnotif' '$SANDBOX/kuma.log' && ! grep -q 'notif:' '$SANDBOX/kuma.log'"
+
+  # no creds (pre-auth env) => the old anonymous behaviour is unchanged
+  : > "$SANDBOX/kuma.log"
+  run_seed "$SANDBOX/absent.env"
+  check "no creds -> method none"     grep -qx 'notif:ntfy-alerts:none:' "$SANDBOX/kuma.log"
+  teardown
+}
+
 test_seed_renamed_monitors() {
   echo "• seed: a pre-rename self-learn monitor is re-keyed, not duplicated"
   setup
@@ -282,6 +368,7 @@ test_idempotent_rerun
 test_port_override
 test_operator_escalation
 test_seed_studio_monitor
+test_seed_ntfy_auth
 test_seed_renamed_monitors
 
 if [ "${1:-}" = "--live" ]; then

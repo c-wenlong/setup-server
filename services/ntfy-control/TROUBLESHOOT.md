@@ -45,7 +45,7 @@ unit and this endpoint deliberately has no sudo path.
 systemctl --user is-active ntfy-control            # listener up?
 journalctl --user -u ntfy-control -n 20            # what it saw/did + registry line
 curl -fsS http://127.0.0.1:3003/v1/health          # ntfy up? {"healthy":true}
-curl -d "status" http://127.0.0.1:3003/control     # end-to-end from the box
+curl -u "$NTFY_USER:$NTFY_PASS" -d "status" http://127.0.0.1:3003/control   # end-to-end from the box (creds in .env)
 ```
 
 The last one really does push a card to the phone — it is the end-to-end test,
@@ -53,15 +53,22 @@ not a silent read. `status`, `list` and `menu` are all aliases for `panel`.
 
 ## Layer 1 — nothing happens when I send a command
 
-- **From the box**, run `curl -d "status" http://127.0.0.1:3003/control`.
-  If a reply lands in the `alerts` topic, the server side is fine — the
-  problem is the phone (Layer 0 below).
+- **From the box**, run `curl -u "$NTFY_USER:$NTFY_PASS" -d "status"
+  http://127.0.0.1:3003/control` (credentials in `.env`). If a reply lands
+  in the `alerts` topic, the server side is fine — the problem is the
+  phone (Layer 0 below).
 - No reply → is the listener running?
   `systemctl --user restart ntfy-control`, then check
   `journalctl --user -u ntfy-control -n 20` — a healthy start logs
   `listening on http://127.0.0.1:3003/control/json`.
+- `curl -d` (no `-u`) answering **401** is expected — ntfy is deny-all.
+  But if the `-u` form is also refused, `.env`'s `NTFY_USER/NTFY_PASS` are
+  stale: fix them from `NTFY_CONTROL_*` in `services/monitoring/.env` and
+  restart the unit.
 - Repeated `subscribe error: … — reconnecting in 5s` (or `subscription
-  dropped — reconnecting in 5s`) → ntfy itself is down:
+  dropped — reconnecting in 5s`) → ntfy itself is down *or* the listener's
+  credentials are being refused (a 401 ends the stream the same way) —
+  check `docker logs ntfy` and the `.env` credentials:
   `docker start ntfy` (this is why ntfy isn't remotely controllable).
 
 ## Layer 1b — it replies, but "unknown service" / the panel is empty
@@ -92,10 +99,11 @@ either `no control registry found — nothing is controllable` or
   browser.
 - Service URL must be exactly `https://homeserver.tail-name.ts.net:3003`
   — https, port included, no trailing path.
-- Username/password: leave empty. If the app version insists on
-  credentials on that screen, you're likely in "Manage users / default
-  server" — add the server during **subscribe** ("Use another server")
-  instead.
+- Username/password is **required** — ntfy is deny-all to anonymous. Use
+  `NTFY_PHONE_USER` / `NTFY_PHONE_PASS` from `services/monitoring/.env`,
+  entered on the **subscribe** screen ("Use another server"), not in
+  "Manage users". An anonymous subscription connects fine and simply
+  receives nothing — the classic "phone gets no alerts" cause.
 
 ## Layer 2 — command runs but reports FAILED
 

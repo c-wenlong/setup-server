@@ -40,6 +40,30 @@ serve ports, not just 443/8443/10000.
 Kuma is **pinned to 1.23.x**: the seeding library (`uptime-kuma-api`) does
 not support Kuma 2.x. Don't bump the image without replacing `seed_kuma.py`.
 
+## ntfy auth — deny-all to anonymous
+
+The tailnet is the boundary, but it is a *network* boundary: anything on it
+could read any topic, post fake alerts, or drive the `control` topic that
+ntfy-control acts on. So ntfy runs with `auth-file` (a users.db in the
+`ntfy-auth` named volume) plus `auth-default-access=deny-all`, and setup.sh
+creates one account per role on first run:
+
+| Account (.env) | `alerts` | `control` | Used by |
+|---|---|---|---|
+| `NTFY_PHONE_*` | read | read-write | the phone app — subscribe to `alerts`, post commands to `control` |
+| `NTFY_KUMA_*` | write-only | — | Kuma's `ntfy-alerts` notification channel (can publish, cannot read) |
+| `NTFY_CONTROL_*` | write-only | read-write | the ntfy-control listener — reads commands, replies on `alerts` |
+
+Everyone else is denied outright. Users are created only when absent (a
+password rotated inside ntfy is left alone); the ACL grants are upserts and
+re-run every deploy. New accounts for scripts can be added by hand:
+`docker exec -e NTFY_PASSWORD=… ntfy ntfy user add <name>` then
+`docker exec ntfy ntfy access <name> <topic> <read-only|write-only|read-write>`.
+
+The one manual step: **the phone app needs a login.** Subscribe to `alerts`
+with server `https://<host>:3003` and username/password `NTFY_PHONE_USER` /
+`NTFY_PHONE_PASS` from `.env` — anonymous subscriptions get nothing.
+
 ## Deploy
 
 ```sh
@@ -61,17 +85,19 @@ the web UI instead.
 1. Install **ntfy** (App Store / Play Store)
 2. Add server: `https://<host>.<tailnet>.ts.net:3003` (Tailscale must be
    connected on the phone)
-3. Subscribe to topic **`alerts`**
+3. Subscribe to topic **`alerts`**, entering username/password
+   **`NTFY_PHONE_USER` / `NTFY_PHONE_PASS` from `.env`** — the server is
+   deny-all, so an anonymous subscription connects but receives nothing.
 
 Instant delivery on iOS relies on `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh`:
 self-hosted ntfy forwards a "poke" through ntfy.sh's APNS pipeline; message
 content stays on your server. Remove that env var in `docker-compose.yml` if
 you'd rather have delayed-but-fully-private delivery.
 
-Send anything to your phone from scripts:
+Send anything to your phone from scripts — with a write-capable account:
 
 ```sh
-curl -d "backup finished" https://<host>.<tailnet>.ts.net:3003/alerts
+curl -u "$NTFY_KUMA_USER:$NTFY_KUMA_PASS" -d "backup finished" https://<host>.<tailnet>.ts.net:3003/alerts
 ```
 
 ## Adding monitors for future services

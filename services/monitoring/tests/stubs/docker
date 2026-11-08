@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # docker stub. State in $STATE_DIR:
 #   docker_no_perm  — exists => `docker ps` fails like a non-docker-group user
+#   ntfy_users      — one username per line: what `docker exec ntfy ntfy user
+#                     list` reports and `user add` appends to (pre-seed it to
+#                     simulate an auth db that already has the accounts)
 echo "docker $*" >> "$CALLS_LOG"
 
 case "$1" in
@@ -9,6 +12,32 @@ case "$1" in
       echo "permission denied while trying to connect to the docker API" >&2
       exit 1
     fi
+    ;;
+  exec)
+    # docker exec [-e K=V ...] <container> <binary> <args> — only ntfy's own
+    # CLI is emulated, matching real output:
+    #   user list  -> "user <name> (role: user, tier: none)" per line
+    #   user add   -> appends to ntfy_users, prints "user <name> added ..."
+    #   access     -> upsert; the calls.log entry above is the record
+    shift
+    while [ "${1:-}" = "-e" ]; do shift 2; done
+    shift 2  # container + binary
+    case "${1:-}" in
+      user)
+        case "${2:-}" in
+          list)
+            if [ -f "$STATE_DIR/ntfy_users" ]; then
+              while read -r u; do echo "user $u (role: user, tier: none)"; done < "$STATE_DIR/ntfy_users"
+            fi
+            ;;
+          add)
+            u="${!#}"
+            echo "$u" >> "$STATE_DIR/ntfy_users"
+            echo "user $u added with role user"
+            ;;
+        esac
+        ;;
+    esac
     ;;
   compose)
     case "$2" in
