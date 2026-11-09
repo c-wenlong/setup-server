@@ -884,11 +884,14 @@ _favicon_slots = threading.BoundedSemaphore(FAVICON_MAX_WORKERS)
 # API — so the chain is bounded and http(s)-only.
 class _FaviconRedirect(urllib.request.HTTPRedirectHandler):
     """Tighter redirect policy for the favicon fetch: at most a few hops
-    (urllib's default is ten, more than a moved page needs) and every hop
-    http(s). urllib's own allowlist also admits ftp, which is refused here.
+    (urllib's default is ten, more than a moved page needs), any URL may be
+    visited only once (a bounce loop is an error on the second visit, not
+    after four rounds of it), and every hop http(s). urllib's own allowlist
+    also admits ftp, which is refused here.
     """
 
     max_redirections = 4
+    max_repeats = 1
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urllib.parse.urlsplit(newurl).scheme not in ("http", "https"):

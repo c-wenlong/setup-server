@@ -822,6 +822,23 @@ class FaviconRedirectPolicyTest(unittest.TestCase):
             self.assertIsNotNone(new, target)
             self.assertEqual(new.full_url, target)
 
+    def test_a_bounce_to_an_already_visited_url_errors(self):
+        # urllib's max_redirections bounds how many DISTINCT urls a chain
+        # visits, so A->B->A->B... would keep bouncing until each repeat
+        # hit the default max_repeats (4) — 16 hops through a loop the
+        # fetch should have refused on the first bounce.
+        import email.message
+        import urllib.error
+        import urllib.request
+        self.assertEqual(server._FaviconRedirect.max_repeats, 1)
+        h = server._FaviconRedirect()
+        req = urllib.request.Request("http://127.0.0.1:1/a")
+        req.redirect_dict = {"http://127.0.0.1:1/a": 1}
+        headers = email.message.Message()
+        headers["location"] = "http://127.0.0.1:1/a"
+        with self.assertRaises(urllib.error.HTTPError):
+            h.http_error_302(req, None, 302, "", headers)
+
 
 class FaviconPageTest(SandboxTest):
     """favicon_page builds the loopback page a tile's icon is read from."""
