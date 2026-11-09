@@ -113,16 +113,11 @@ It's in `.env` (`KUMA_ADMIN_PASSWORD`). If `.env` is gone too:
 
 ## Nuke and pave (destroys monitor history + accounts)
 
-```sh
-docker compose --project-directory . down
-rm -rf ~/services/monitoring .env
-./setup.sh
-```
+`./teardown.sh` unpublishes both Serve ports and runs `compose down`,
+keeping `.env` and the data dirs — `./setup.sh` brings the stack back
+exactly as it was. `./teardown.sh --purge` is the actual nuke: it asks for
+the service name, then deletes `.env` and the data dirs too.
 
 State is `~/services/monitoring/kuma` and `~/services/monitoring/ntfy`
 (`KUMA_VOLUME` / `NTFY_VOLUME` in `.env`) — not `~/monitoring`, which was the
 pre-2026-09-07 layout and no longer exists.
-
-Deliberately **not** in that list: `tailscale serve --https=3002 off` and
-`--https=3003 off`. `setup.sh` re-publishes both, and leaving them up means
-the dashboard comes back the moment the containers do.
