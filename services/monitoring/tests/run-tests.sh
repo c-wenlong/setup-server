@@ -30,18 +30,44 @@ setup() {
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/docker-compose.yml" "$SERVICE_DIR/seed_kuma.py" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" \
+     "$SERVICE_DIR/docker-compose.yml" "$SERVICE_DIR/seed_kuma.py" "$SVC/"
 }
 
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID KUMA_PORT NTFY_PORT KUMA_HTTPS_PORT NTFY_HTTPS_PORT STATE_DIR CALLS_LOG
+  unset FAKE_UID KUMA_PORT NTFY_PORT KUMA_HTTPS_PORT NTFY_HTTPS_PORT \
+        NTFY_TOPIC STATE_DIR CALLS_LOG
 }
 
 run_deploy() {
   OUT="$(printf '%s' "${1:-}" | PATH="$STUBS:$PATH" bash "$SVC/setup.sh" 2>&1)"
   CODE=$?
+}
+
+# $1 = stdin (e.g. the --purge confirmation), $2 = flags (--purge).
+run_teardown() {
+  OUT="$(printf '%s\n' "${1:-}" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" ${2:+"$2"} 2>&1)"
+  CODE=$?
+}
+
+# A .env as a pre-existing deploy would have written it. $1 = port pair
+# ("3002 3003" default).
+write_env() {
+  set -- ${1:-3002 3003}
+  cat > "$SVC/.env" <<EOF
+KUMA_VOLUME=$HOME/services/monitoring/kuma
+NTFY_VOLUME=$HOME/services/monitoring/ntfy
+KUMA_PORT=$1
+NTFY_PORT=$2
+KUMA_HTTPS_PORT=$1
+NTFY_HTTPS_PORT=$2
+NTFY_BASE_URL=https://test-host.tailfake.ts.net:$2
+NTFY_TOPIC=alerts
+KUMA_ADMIN_USER=admin
+KUMA_ADMIN_PASSWORD=my-custom-secret
+EOF
 }
 
 check() {
@@ -88,6 +114,7 @@ test_fresh_deploy() {
   check ".env has admin password"     sh -c "grep -E '^KUMA_ADMIN_PASSWORD=.+' '$SVC/.env' >/dev/null"
   check ".env is mode 600"            sh -c "[ \"\$(stat -c %a '$SVC/.env' 2>/dev/null || stat -f %Lp '$SVC/.env')\" = 600 ]"
   check ".env has ntfy base url"      env_has "NTFY_BASE_URL=https://test-host.tailfake.ts.net:3003"
+  check ".env records https ports"    env_has "KUMA_HTTPS_PORT=3002"
   check "compose up invoked"          [ -f "$STATE_DIR/compose_up" ]
   check "seed attempted via uv"       calls_have "uv run --with uptime-kuma-api"
   check "kuma served on :3002"        calls_have "tailscale serve --bg --https=3002 http://127.0.0.1:3002"
@@ -119,13 +146,98 @@ EOF
 }
 
 test_port_override() {
-  echo "• KUMA_PORT override flows through"
+  echo "• KUMA_PORT override flows through (first run, when .env is written)"
   setup
   touch "$STATE_DIR/operator"
   export KUMA_PORT=3012
   run_deploy
   check "exits zero"            [ "$CODE" -eq 0 ]
+  check ".env records :3012"    env_has "KUMA_PORT=3012"
   check "served on :3012"       calls_have "tailscale serve --bg --https=3012 http://127.0.0.1:3012"
+  teardown
+}
+
+test_env_wins_on_rerun() {
+  echo "• re-run: .env is the source of truth — a shell override warns and loses"
+  setup
+  touch "$STATE_DIR/operator"
+  write_env                      # .env says :3002/:3003, topic alerts
+  export KUMA_PORT=3012 NTFY_TOPIC=other
+  run_deploy
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  check "warns KUMA_PORT ignored"    out_has "KUMA_PORT=3012 ignored"
+  check "warns NTFY_TOPIC ignored"   out_has "NTFY_TOPIC=other ignored"
+  check "serves the .env port"       calls_have "tailscale serve --bg --https=3002 http://127.0.0.1:3002"
+  check "readiness probed :3002"     calls_have "http://127.0.0.1:3002/"
+  check "nothing ever used :3012"    no_call "3012"
+  teardown
+}
+
+test_https_port_readback() {
+  echo "• re-run: old .env without HTTPS keys keeps published=local; an override warns"
+  setup
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<EOF
+KUMA_VOLUME=$HOME/services/monitoring/kuma
+NTFY_VOLUME=$HOME/services/monitoring/ntfy
+KUMA_PORT=3002
+NTFY_PORT=3003
+NTFY_BASE_URL=https://test-host.tailfake.ts.net:3003
+NTFY_TOPIC=alerts
+KUMA_ADMIN_USER=admin
+KUMA_ADMIN_PASSWORD=x
+EOF
+  export KUMA_HTTPS_PORT=8443
+  run_deploy
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "warns the override lost"   out_has "KUMA_HTTPS_PORT=8443 ignored"
+  check "publishes :3002"           calls_have "tailscale serve --bg --https=3002 http://127.0.0.1:3002"
+  check "never touched :8443"       no_call "8443"
+  teardown
+}
+
+test_port_not_numeric() {
+  echo "• non-numeric ports die before .env write or compose — shell and .env"
+  setup
+  export KUMA_PORT=abc
+  run_deploy
+  check "exits non-zero"            [ "$CODE" -ne 0 ]
+  check "names the bad value"       out_has "KUMA_PORT must be numeric (got: abc)"
+  check "no .env written"           [ ! -f "$SVC/.env" ]
+  check "compose up never ran"      no_call " up -d"
+  # a hand-corrupted .env on re-run dies the same way
+  unset KUMA_PORT
+  write_env
+  sed -i.bak 's/^KUMA_PORT=.*/KUMA_PORT=oops/' "$SVC/.env" && rm "$SVC/.env.bak"
+  run_deploy
+  check "poisoned .env dies"        out_has "KUMA_PORT must be numeric (got: oops)"
+  check "compose up still not run"  no_call " up -d"
+  teardown
+}
+
+test_missing_openssl() {
+  echo "• preflight: missing openssl dies early naming the install fix"
+  setup
+  # openssl lives in /usr/bin on real boxes, so hiding it needs a PATH with
+  # only what the script uses before the check: bash/uname/dirname + stubs.
+  mini="$STATE_DIR/mini-bin"; mkdir -p "$mini"
+  for t in bash uname dirname; do ln -s "$(command -v "$t")" "$mini/$t"; done
+  OUT="$(printf '' | PATH="$STUBS:$mini" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "names the fix"           out_has "apt install openssl"
+  check "wrote no .env"           [ ! -f "$SVC/.env" ]
+  teardown
+}
+
+test_missing_uv() {
+  echo "• preflight: missing uv dies early naming the install fix"
+  setup
+  nouv="$STATE_DIR/no-uv"; mkdir -p "$nouv"
+  for s in "$STUBS"/*; do [ "${s##*/}" = uv ] || ln -s "$s" "$nouv/${s##*/}"; done
+  OUT="$(printf '' | PATH="$nouv:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"; CODE=$?
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "names the fix"           out_has "astral.sh/uv/install.sh"
+  check "wrote no .env"           [ ! -f "$SVC/.env" ]
   teardown
 }
 
@@ -136,6 +248,91 @@ test_operator_escalation() {
   check "exits zero" [ "$CODE" -eq 0 ]
   [ "$OS" = "Linux" ] && check "granted operator" calls_have "sudo tailscale set --operator="
   check "both eventually published" sh -c "grep -c 'tailscale serve --bg --https=' '$CALLS_LOG' | grep -qv '^[01]$'"
+  teardown
+}
+
+# ------------------------------------------------------- teardown tests
+test_teardown() {
+  echo "• teardown: unpublishes its two Serve ports, compose down, keeps .env + data"
+  setup
+  write_env
+  mkdir -p "$HOME/services/monitoring/kuma" "$HOME/services/monitoring/ntfy"
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net:3002 (tailnet only)
+|-- / proxy http://127.0.0.1:3002
+
+https://test-host.tailfake.ts.net:3003 (tailnet only)
+|-- / proxy http://127.0.0.1:3003
+
+https://test-host.tailfake.ts.net:8443 (tailnet only)
+|-- / proxy http://127.0.0.1:8081
+EOF
+  run_teardown
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "kuma port off"           calls_have "serve --https=3002 off"
+  check "ntfy port off"           calls_have "serve --https=3003 off"
+  check "neighbour port kept"     no_call "serve --https=8443 off"
+  check "compose down"            calls_have "compose --project-directory .* down"
+  check "no volume nuke"          no_call "down -v"
+  check ".env kept"               [ -f "$SVC/.env" ]
+  check "kuma data kept"          [ -d "$HOME/services/monitoring/kuma" ]
+  check "ntfy data kept"          [ -d "$HOME/services/monitoring/ntfy" ]
+  teardown
+}
+
+test_teardown_shared_port() {
+  echo "• teardown: a Serve port shared with another service is left on with a warning"
+  setup
+  write_env
+  cat > "$STATE_DIR/serve_status" <<EOF
+https://test-host.tailfake.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8080
+|-- /mon proxy http://127.0.0.1:3002
+EOF
+  run_teardown
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "warns it stayed"         out_has "also serves something else"
+  check "never turned :443 off"   no_call "serve --https=443 off"
+  check "still did compose down"  calls_have "compose --project-directory .* down"
+  teardown
+}
+
+test_teardown_needs_env() {
+  echo "• teardown: no .env means nothing to tear down"
+  setup
+  run_teardown
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says nothing deployed"   out_has "nothing here was deployed"
+  teardown
+}
+
+test_teardown_serve_unreadable() {
+  echo "• teardown: unreadable serve status aborts before touching anything"
+  setup
+  write_env
+  touch "$STATE_DIR/serve_status_fails"
+  run_teardown
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "explains"                out_has "Could not read Tailscale Serve status"
+  check "never ran compose down"  no_call "compose --project-directory .* down"
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: confirms the name, deletes data dirs + .env only then"
+  setup
+  write_env
+  mkdir -p "$HOME/services/monitoring/kuma/data" "$HOME/services/monitoring/ntfy/cache"
+  run_teardown "nope" "--purge"
+  check "wrong name: refused"     [ "$CODE" -ne 0 ]
+  check ".env survived"           [ -f "$SVC/.env" ]
+  check "data survived"           [ -d "$HOME/services/monitoring/kuma/data" ]
+  run_teardown "monitoring" "--purge"
+  check "confirmed: exits zero"   [ "$CODE" -eq 0 ]
+  check "kuma dir gone"           [ ! -e "$HOME/services/monitoring/kuma" ]
+  check "ntfy dir gone"           [ ! -e "$HOME/services/monitoring/ntfy" ]
+  check ".env gone"               [ ! -f "$SVC/.env" ]
+  check "service root rmdir'd"    [ ! -e "$HOME/services/monitoring" ]
   teardown
 }
 
@@ -280,7 +477,17 @@ test_preflight_tailscale_down
 test_fresh_deploy
 test_idempotent_rerun
 test_port_override
+test_env_wins_on_rerun
+test_https_port_readback
+test_port_not_numeric
+test_missing_openssl
+test_missing_uv
 test_operator_escalation
+test_teardown
+test_teardown_shared_port
+test_teardown_needs_env
+test_teardown_serve_unreadable
+test_teardown_purge
 test_seed_studio_monitor
 test_seed_renamed_monitors
 
