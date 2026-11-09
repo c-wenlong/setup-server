@@ -1090,9 +1090,11 @@
         "locked": "stopping ntfy would remove the only way to start anything again from the phone"
       },
       "login": [
-        "No sign-in — subscribe to a topic and publish to it; the tailnet is the boundary."
+        "Auth is deny-all to anonymous; accounts + per-topic ACLs live in `.env` (created at deploy).",
+        "Phone app: subscribe to `alerts` with `NTFY_PHONE_USER` / `NTFY_PHONE_PASS`.",
+        "Web app: sign in with any of the accounts; scripts publish with `curl -u $NTFY_KUMA_USER:$NTFY_KUMA_PASS -d msg .../alerts`."
       ],
-      "description": "Push notifications to the phone. Kuma's alerts land on topic `alerts`, and anything on the box can post one with curl -d msg .../alerts. It also carries the `control` topic that ntfy-control listens on, which is how services get started and stopped from the phone. Open to the whole tailnet — no per-topic auth. Deployed together with Uptime Kuma from services/monitoring/."
+      "description": "Push notifications to the phone. Kuma's alerts land on topic `alerts`, and anything on the box can post one with curl -u kuma:… -d msg .../alerts. It also carries the `control` topic that ntfy-control listens on, which is how services get started and stopped from the phone. Auth is deny-all to anonymous — per-topic ACLs for the phone, Kuma and ntfy-control accounts in .env. Deployed together with Uptime Kuma from services/monitoring/."
     },
     {
       "key": "uptime-kuma",
