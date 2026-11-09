@@ -54,6 +54,52 @@ ok "$OS + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
 host="$(tailnet_host)"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 
+# .env is the authority for ports, paths and credentials. Values are read
+# the way Docker Compose reads them (an optional `export `, matching single
+# or double quotes, escapes inside double quotes, an inline ` #` comment
+# after an unquoted value) WITHOUT executing the file — sourcing it would
+# run a hand-edited or corrupt value as shell, which teardown.sh refuses
+# to do on purpose.
+env_get() {
+  local line value tail quote="" rest
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    \"*)
+      quote='"'
+      # Compose decodes escapes inside double quotes (\\, \", \', \n, \r,
+      # \t), so the closing quote is the first UNescaped one — cutting at
+      # the first `"` would truncate a value like "p\"w" mid-string.
+      rest="${value#\"}"; value=""
+      while [ -n "$rest" ]; do
+        case "$rest" in
+          \"*)    rest="${rest#\"}"; break ;;
+          \\\\*)  value+='\';   rest="${rest#??}" ;;
+          \\\"*)  value+='"';   rest="${rest#??}" ;;
+          \\\'*)  value+="'";   rest="${rest#??}" ;;
+          \\n*)   value+=$'\n'; rest="${rest#??}" ;;
+          \\r*)   value+=$'\r'; rest="${rest#??}" ;;
+          \\t*)   value+=$'\t'; rest="${rest#??}" ;;
+          \\*)    value+="${rest:0:2}"; rest="${rest#??}" ;;
+          *)      value+="${rest:0:1}"; rest="${rest:1}" ;;
+        esac
+      done ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  # Compose interpolates $HOME / ${HOME} in unquoted and double-quoted
+  # values (single quotes are literal). That one variable is all a value
+  # here may use; anything else is left as written.
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
+  printf '%s' "$value"
+}
+
 # ---------------------------------------------------------------- .env
 if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
@@ -77,10 +123,15 @@ EOF
 fi
 
 # Read back: an existing .env is the source of truth for ports, paths and
-# credentials, so a re-run can never silently move a live deployment.
+# credentials, so a re-run can never silently move a live deployment. The
+# file is parsed by env_get, never executed — a stored value holding
+# spaces or quotes would otherwise break the read (or run as shell).
 REQUESTED_PORT="$LOCAL_PORT"
-set -a; . "$ENV_FILE"; set +a
-DATA_DIR="${N8N_VOLUME:?N8N_VOLUME missing from $ENV_FILE}"
+LOCAL_PORT="$(env_get LOCAL_PORT)"
+LOCAL_PORT="${LOCAL_PORT:?LOCAL_PORT missing from $ENV_FILE}"
+DATA_DIR="$(env_get N8N_VOLUME)"
+DATA_DIR="${DATA_DIR:?N8N_VOLUME missing from $ENV_FILE}"
+PUBLIC_URL="$(env_get PUBLIC_URL)"
 require_numeric LOCAL_PORT
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
@@ -118,32 +169,9 @@ for i in $(seq 1 40); do
 done
 
 info "Seeding owner account (idempotent)"
-# .env is the authority for the credentials. Values are read the way Docker
-# Compose reads them (an optional `export `, matching single or double
-# quotes, an inline ` #` comment after an unquoted value) without executing
-# the file — the same helper teardown.sh uses. A plain `sed 's/^K=//'`
-# takes quotes and comments literally instead.
-env_get() {
-  local line value tail quote=""
-  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
-  [ -n "$line" ] || return 0
-  value="${line#*=}"
-  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
-  case "$value" in
-    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
-    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
-    *) value="${value%%[[:space:]]#*}"
-       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
-  esac
-  # Compose interpolates $HOME / ${HOME} in unquoted and double-quoted values
-  # (single quotes are literal). That one variable is all a value here may
-  # use; anything else is left as written.
-  if [ "$quote" != "'" ]; then
-    value="${value//\$\{HOME\}/$HOME}"
-    value="${value//\$HOME/$HOME}"
-  fi
-  printf '%s' "$value"
-}
+# .env is the authority for the credentials — env_get above parses them
+# without executing the file. A plain `sed 's/^K=//'` takes quotes and
+# comments literally instead.
 owner_email="$(env_get OWNER_EMAIL)"
 owner_pw="$(env_get OWNER_PASSWORD)"
 # json.dumps, not string interpolation: a `"` or `\` in a hand-edited

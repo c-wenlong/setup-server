@@ -272,6 +272,32 @@ EOF
   teardown
 }
 
+test_env_get_decodes_tricky_values() {
+  echo "• .env values with escaped quotes or spaces are read whole, never executed"
+  setup
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<'EOF'
+N8N_VOLUME=$HOME/services/n8n/data
+LOCAL_PORT=5678
+PUBLIC_HOST=test-host.tailfake.ts.net
+PUBLIC_URL=https://test-host.tailfake.ts.net:5678/
+N8N_ENCRYPTION_KEY=k
+OWNER_EMAIL=x@y.z
+OWNER_PASSWORD="Password123\"tail"
+EOF
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "escaped quote decoded whole" calls_have_f 'Password123\"tail'
+  # A value with an unquoted space reads whole — and sourcing would have
+  # run `Pass123` as a command; env_get never executes anything.
+  sed -i.bak 's/^OWNER_PASSWORD=.*/OWNER_PASSWORD=My Pass123/' "$SVC/.env"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero again"            [ "$CODE" -eq 0 ]
+  check "spaced value read whole"     calls_have_f 'My Pass123'
+  teardown
+}
+
 test_operator_escalation() {
   echo "• serve denied: grants operator via sudo, then succeeds"
   setup
@@ -618,6 +644,7 @@ test_preflight_bad_local_port
 test_preflight_no_openssl
 test_env_volume_used
 test_seed_json_escapes_password
+test_env_get_decodes_tricky_values
 test_operator_escalation
 test_teardown_safe
 test_teardown_custom_https_port

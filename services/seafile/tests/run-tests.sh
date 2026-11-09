@@ -130,6 +130,8 @@ test_idempotent_rerun() {
   setup
   touch "$STATE_DIR/operator"
   cat > "$SVC/.env" <<'EOF'
+LOCAL_PORT=8081
+HTTPS_PORT=8443
 SEAFILE_SERVER_HOSTNAME=test-host.tailfake.ts.net:8443
 INIT_SEAFILE_ADMIN_EMAIL=x@y.z
 INIT_SEAFILE_ADMIN_PASSWORD=my-custom-secret
