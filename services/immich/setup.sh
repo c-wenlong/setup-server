@@ -80,10 +80,18 @@ require_numeric LOCAL_PORT HTTPS_PORT
 # hand-edited COMPOSE_PROFILES=ml was never seen.
 if [ -n "${IMMICH_ML:-}" ]; then
   ML_MODE="$IMMICH_ML"
-elif [ -f "$ENV_FILE" ] && grep -qE '^COMPOSE_PROFILES=(.*,)?ml(,|$)' "$ENV_FILE"; then
-  ML_MODE="on"
-elif [ -f "$ENV_FILE" ] && grep -q '^COMPOSE_PROFILES=$' "$ENV_FILE"; then
-  ML_MODE="off"
+elif [ -f "$ENV_FILE" ] && grep -qE '^[[:space:]]*COMPOSE_PROFILES=' "$ENV_FILE"; then
+  # Parse the value out of .env before comparing — Compose strips
+  # surrounding quotes, so COMPOSE_PROFILES="ml" and COMPOSE_PROFILES='ml'
+  # both mean the profile is on. Elements still count whole-token only.
+  profiles="$(grep -E '^[[:space:]]*COMPOSE_PROFILES=' "$ENV_FILE" | tail -1 | sed 's/^[^=]*=//')"
+  profiles="${profiles%\"}"; profiles="${profiles#\"}"
+  profiles="${profiles%\'}"; profiles="${profiles#\'}"
+  case ",$profiles," in
+    ,,) ML_MODE="off" ;;        # COMPOSE_PROFILES= is an explicit off
+    *,ml,*) ML_MODE="on" ;;
+    *) ML_MODE="$(cat "$ML_MARKER" 2>/dev/null || echo off)" ;;
+  esac
 elif [ -f "$ML_MARKER" ]; then
   ML_MODE="$(cat "$ML_MARKER")"
 else

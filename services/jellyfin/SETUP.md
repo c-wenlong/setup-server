@@ -437,7 +437,7 @@ rejected, rather than reporting success over an account you cannot log into.
 | Docker + Compose v2 | the one container | ✅ (incl. daemon reachability) |
 | curl | readiness polling, the wizard POSTs, the auth verification | ✅ |
 | Tailscale, logged in, MagicDNS | publishing | ✅ (`BackendState` must be `Running`) |
-| python3 | password generation — optional, falls back to `/dev/urandom` | — |
+| python3 | JSON-encodes the wizard and login bodies (a quote or backslash in the admin password would corrupt a printf body); also used for password generation | ✅ |
 | Disk for `cache/` | transcode scratch; a 4K transcode can write GBs | ⚠️ warns |
 | **NOT** an NVIDIA runtime | hardware transcoding is out of scope — see above | — |
 

@@ -419,10 +419,10 @@ import json, sys
 print(json.dumps({"UICulture": sys.argv[1], "MetadataCountryCode": sys.argv[2],
                   "PreferredMetadataLanguage": sys.argv[3]}, separators=(",", ":")))
 ' "$UI_CULTURE" "$METADATA_COUNTRY" "$METADATA_LANGUAGE" > "$WORK/config.json"
-  python3 -c '
-import json, sys
-print(json.dumps({"Name": sys.argv[1], "Password": sys.argv[2]}, separators=(",", ":")))
-' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" > "$WORK/user.json"
+  JF_NAME="$ADMIN_USERNAME" JF_PW="$ADMIN_PASSWORD" python3 -c '
+import json, os
+print(json.dumps({"Name": os.environ["JF_NAME"], "Password": os.environ["JF_PW"]}, separators=(",", ":")))
+' > "$WORK/user.json"
   # Remote access on, automatic port mapping off: UPnP would try to punch a
   # hole in the router, and this server is reachable over the tailnet only.
   printf '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}' > "$WORK/remote.json"
@@ -466,10 +466,10 @@ fi
 # marked visible on the login screen and returns [] on a perfectly healthy
 # server, which makes a working deploy look broken.
 JF_BASE="$url"
-python3 -c '
-import json, sys
-print(json.dumps({"Username": sys.argv[1], "Pw": sys.argv[2]}, separators=(",", ":")))
-' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" > "$WORK/auth.json"
+JF_NAME="$ADMIN_USERNAME" JF_PW="$ADMIN_PASSWORD" python3 -c '
+import json, os
+print(json.dumps({"Username": os.environ["JF_NAME"], "Pw": os.environ["JF_PW"]}, separators=(",", ":")))
+' > "$WORK/auth.json"
 jf POST /Users/AuthenticateByName "$WORK/auth.json"
 case "$JF_CODE" in
   401|403)

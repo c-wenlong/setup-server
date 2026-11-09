@@ -363,6 +363,35 @@ test_idempotent_rerun() {
   teardown
 }
 
+test_password_escaping_round_trip() {
+  echo "• a quote/backslash password reaches both JSON bodies verbatim"
+  # Regression cover for the json.dumps writers: the old printf bodies would
+  # corrupt exactly this value, and the happy-path hex passwords never
+  # exercised it. The .env is still sourced, so the hostile value arrives
+  # single-quoted — literal `p"w\sd` either way.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  sed -i.bak "s|^JELLYFIN_ADMIN_PASSWORD=.*|JELLYFIN_ADMIN_PASSWORD='p\"w\\\\sd'|" "$SVC/.env"
+  rm -f "$HOME/services/jellyfin/.wizard-complete" \
+        "$STATE_DIR/wizard_done" "$STATE_DIR/wizard_steps"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "wizard body decodes verbatim" \
+    python3 - "$STATE_DIR/body_User" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["Password"] == 'p"w\\sd'
+PY
+  check "auth body decodes verbatim" \
+    python3 - "$STATE_DIR/auth_body" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["Pw"] == 'p"w\\sd'
+PY
+  teardown
+}
+
+test_password_escaping_round_trip
 test_marker_lost_but_wizard_done() {
   echo "• marker lost, server already set up: recovers instead of re-wizarding"
   setup
@@ -1209,6 +1238,7 @@ test_wizard_step_fails
 test_wizard_step_503
 test_wizard_says_incomplete
 test_idempotent_rerun
+test_password_escaping_round_trip
 test_marker_lost_but_wizard_done
 test_stale_marker
 test_password_drift

@@ -193,6 +193,7 @@ test_admin_email_override() {
   run_deploy
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env records the real email" grep -qx 'PLANE_ADMIN_EMAIL=me@real.example' "$SVC/.env"
+  check "sign-up POSTs that email"    calls_have "--data-urlencode email=me@real.example"
   check "seeded as that address"      out_has "First instance admin seeded (me@real.example)"
   unset PLANE_ADMIN_EMAIL
   run_deploy
