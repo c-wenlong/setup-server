@@ -46,7 +46,7 @@ setup() {
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
-  unset FAKE_UID FAKE_OS OMB_PORT HTTPS_PORT STATE_DIR CALLS_LOG
+  unset FAKE_UID FAKE_OS OMB_PORT HTTPS_PORT OMB_VERSION STATE_DIR CALLS_LOG
 }
 
 # run_deploy [stdin-string] — runs setup.sh under stubs; sets OUT and CODE
@@ -128,8 +128,10 @@ test_fresh_deploy() {
   run_deploy
   check "exits zero"                          [ "$CODE" -eq 0 ]
   check "installed fake openmausbot"          [ -x "$HOME/.local/bin/openmausbot" ]
-  check "npm -g used, no npx"                 calls_have "npm install -g openmausbot"
+  check "npm -g pinned install, no npx"       calls_have "npm install -g openmausbot@0.1.149"
+  check "no bare unpinned install"            no_call "npm install -g openmausbot "
   check "no prefix move under HOME"           no_call "npm config set prefix"
+  check ".env records the pin"                env_has "OMB_VERSION=0.1.149"
   check ".env written mode 600"               [ "$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")" = "600" ]
   check ".env has OMB_PORT"                   env_has "OMB_PORT=8799"
   check ".env has HTTPS_PORT"                 env_has "HTTPS_PORT=8799"
@@ -183,7 +185,7 @@ test_idempotent_rerun() {
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check ".env left untouched"           grep -q "my-custom-marker" "$SVC/.env"
   check "says config untouched"         out_has "leaving untouched"
-  check "still upgrades the package"    calls_have "npm install -g openmausbot"
+  check "still reinstalls the pinned package" calls_have "npm install -g openmausbot@0.1.149"
   check "never invoked sudo"            no_call "sudo "
   if [ "$OS" = "Linux" ]; then
     check "service still restarted"     calls_have "systemctl --user restart openmausbot"
@@ -205,6 +207,29 @@ test_port_override() {
   check "https follows"            env_has "HTTPS_PORT=9900"
   check "public URL uses 9900"     env_has "OMB_PUBLIC_URL=https://test-host.tailfake.ts.net:9900"
   check "serve proxies 9900"       calls_have "tailscale serve --bg --https=9900 http://127.0.0.1:9900"
+  teardown
+}
+
+test_version_override() {
+  echo "• OMB_VERSION override wins over default and saved .env value"
+  setup
+  touch "$STATE_DIR/linger" "$STATE_DIR/operator"
+  run_deploy
+  export OMB_VERSION=0.9.9-test
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "installs the override"         calls_have "npm install -g openmausbot@0.9.9-test"
+  check "saved .env pin kept"           env_has "OMB_VERSION=0.1.149"
+  teardown
+  setup
+  touch "$STATE_DIR/linger" "$STATE_DIR/operator"
+  run_deploy
+  printf 'OMB_VERSION=0.2.0\n' >> "$SVC/.env"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "saved .env version wins"       calls_have "npm install -g openmausbot@0.2.0"
+  check "no default install this run"   no_call "openmausbot@0.1.149"
   teardown
 }
 
@@ -642,6 +667,7 @@ for t in \
   test_npm_system_prefix_moved \
   test_idempotent_rerun \
   test_port_override \
+  test_version_override \
   test_env_port_wins_over_cli \
   test_serve_approval_retry \
   test_serve_port_owned_by_another \

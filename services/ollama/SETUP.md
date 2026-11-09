@@ -48,7 +48,8 @@ also retires the `0.0.0.0` bind for good.
 |---|---|
 | Linux + systemd user session | the unit |
 | macOS + launchd | the LaunchAgent |
-| curl | tarball download, health probe |
+| curl | release asset + checksum download, health probe |
+| zstd + sha256sum (Linux, download path only) | unpack + verify the `.tar.zst` |
 | `loginctl` (Linux) | lingering |
 | sudo (Linux, once) | `systemctl disable --now ollama.service` on the stock unit, `loginctl enable-linger` |
 
@@ -58,9 +59,14 @@ also retires the `0.0.0.0` bind for good.
    is fixed at `11434`: the launcher's health probe and seed_kuma's monitor
    both assume it.
 2. **Binary** — reuses `~/.local/bin/ollama`, then `command -v ollama`
-   (covers a stock `/usr/local/bin/ollama`); otherwise downloads
-   `ollama-linux-<arch>.tgz` into `~/.local`. On macOS it uses
-   `brew install ollama` (there is no standalone darwin tarball).
+   (covers a stock `/usr/local/bin/ollama`); otherwise downloads the pinned
+   GitHub release asset (`ollama-linux-<arch>.tar.zst`,
+   `OLLAMA_VERSION` near the top of `setup.sh`, env-overridable) into
+   `~/.local`. Before a byte is extracted, the asset's sha256 is checked
+   against the `sha256sum.txt` shipped with the same release — a mismatch,
+   a missing checksum entry, or a failed checksum download all refuse the
+   install. On macOS it uses `brew install ollama` (there is no standalone
+   darwin tarball).
 3. **Retire the stock system unit (Linux)** — if `systemctl cat
    ollama.service` finds a unit file that is still enabled or active:
    `sudo systemctl disable --now ollama.service`. The unit file is left on

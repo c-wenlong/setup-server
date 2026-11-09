@@ -8,10 +8,14 @@ answers "is it up?"). Dashboard: `https://homeserver.tail-name.ts.net:8092`.
 
 Two parts:
 
-- **Hub** (`henrygd/beszel` Docker image): PocketBase-backed web UI + store.
-  Host networking, bound to `127.0.0.1:8092` (`serve --http` override in
+- **Hub** (`henrygd/beszel` Docker image, pinned via `BESZEL_VERSION` —
+  no floating `:latest`): PocketBase-backed web UI + store. Host
+  networking, bound to `127.0.0.1:8092` (`serve --http` override in
   docker-compose.yml), published tailnet-only via `tailscale serve :8092`.
-  Data in `~/services/beszel/hub`.
+  Data in `~/services/beszel/hub`. First boot reads `USER_EMAIL` /
+  `USER_PASSWORD` from the environment (sourced from `.env`) to create
+  the superuser + UI user, so the admin password never appears in a
+  `docker exec` argv.
 - **Agent** (native Go binary, `~/.local/bin/beszel-agent`, systemd **user**
   unit `beszel-agent.service` on Linux, launchd LaunchAgent
   `com.henrygd.beszel-agent` on macOS): reads /proc, hwmon temps,

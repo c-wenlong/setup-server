@@ -162,8 +162,8 @@ test_fresh_deploy() {
   check ".env is mode 600"                   [ "$(file_mode "$SVC/.env")" = "600" ]
   check ".env records Paperclip port"        grep -qx 'PAPERCLIP_PORT=3100' "$SVC/.env"
   check "public Paperclip URL is HTTPS"      grep -q '^PAPERCLIP_PUBLIC_URL=https://test-host\.tailfake\.ts\.net:3100$' "$SVC/.env"
-  check ".env has placeholder email"         grep -qx 'PAPERCLIP_EMAIL=changeme@example.com' "$SVC/.env"
-  check ".env has placeholder password"      grep -qx 'PAPERCLIP_PASSWORD=changeme' "$SVC/.env"
+  check ".env invents no credentials"        ! grep -q '^PAPERCLIP_\(EMAIL\|PASSWORD\)=' "$SVC/.env"
+  check ".env points at Settings → Profile"  grep -q 'Settings → Profile' "$SVC/.env"
   check "no OpenHands keys in .env"          ! grep -q '^OPENHANDS_' "$SVC/.env"
   check "workspaces created"                 [ -f "$HOME/agent-workspaces/paperclip-test/README.md" ]
   check "  and not the OpenHands one"        [ ! -f "$HOME/agent-workspaces/openhands-test/README.md" ]
@@ -202,7 +202,8 @@ test_managed_install_when_missing() {
   touch "$STATE_DIR/operator" "$STATE_DIR/linger"
   run_deploy_no_cli
   check "exits zero"                    [ "$CODE" -eq 0 ]
-  check "npx paperclipai install --yes" calls_have "npx paperclipai install --yes"
+  check "pinned npx install"          calls_have "npx paperclipai@2026.1106.0 install --yes"
+  check "no floating npx install"     no_call "npx paperclipai install"
   check "wrote the managed shim"        [ -x "$HOME/.local/bin/paperclipai" ]
   check "still onboarded"               [ -f "$STATE_DIR/onboarded" ]
   check "still published"               calls_have "tailscale serve --bg --https=3100"
@@ -249,23 +250,26 @@ PY
   check "re-applied serve map"         calls_have "tailscale serve --bg --https=3100"
   check "CEO invite not rotated"       out_has "already minted"
   check "overlay script injected once" [ "$(grep -c 'pc-profile-credentials.js' "$HOME/.paperclip/cli/current/node_modules/@paperclipai/server/ui-dist/index.html")" -eq 1 ]
-  check "login placeholders not duplicated" [ "$(grep -c '^PAPERCLIP_EMAIL=' "$SVC/.env")" -eq 1 ]
+  check "operator login keys not duplicated" [ "$(grep -c '^PAPERCLIP_EMAIL=' "$SVC/.env")" -le 1 ]
   teardown
 }
 
-test_appends_login_placeholders() {
-  echo "• existing .env without login keys: placeholders appended, rest kept"
+test_appends_supplied_login_keys() {
+  echo "• operator-supplied login keys land in .env; unset stays absent"
   setup
   touch "$STATE_DIR/operator" "$STATE_DIR/linger"
   run_deploy
-  grep -vE '^PAPERCLIP_(EMAIL|PASSWORD)=' "$SVC/.env" > "$SVC/.env.tmp"
-  mv "$SVC/.env.tmp" "$SVC/.env"
+  check "unset: no email key"           ! grep -q '^PAPERCLIP_EMAIL=' "$SVC/.env"
+  check "unset: no password key"        ! grep -q '^PAPERCLIP_PASSWORD=' "$SVC/.env"
   echo '# keep-me' >> "$SVC/.env"
+  export PAPERCLIP_EMAIL=kai@example.com PAPERCLIP_PASSWORD=s3cret-real
   run_deploy
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check "rest of .env kept"             env_has "keep-me"
-  check "email placeholder appended"    grep -qx 'PAPERCLIP_EMAIL=changeme@example.com' "$SVC/.env"
-  check "password placeholder appended" grep -qx 'PAPERCLIP_PASSWORD=changeme' "$SVC/.env"
+  check "supplied email appended"       grep -qx 'PAPERCLIP_EMAIL=kai@example.com' "$SVC/.env"
+  check "supplied password appended"    grep -qx 'PAPERCLIP_PASSWORD=s3cret-real' "$SVC/.env"
+  run_deploy
+  check "re-run: still exactly one"     [ "$(grep -c '^PAPERCLIP_EMAIL=' "$SVC/.env")" -eq 1 ]
   teardown
 }
 
@@ -1197,7 +1201,7 @@ test_fresh_deploy
 test_managed_install_when_missing
 test_repairs_local_trusted
 test_idempotent_rerun
-test_appends_login_placeholders
+test_appends_supplied_login_keys
 test_port_override
 test_https_follows_local_port
 test_slow_first_boot

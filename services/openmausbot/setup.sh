@@ -41,6 +41,11 @@ set -euo pipefail
 OMB_PORT="${OMB_PORT:-8799}"
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$OMB_PORT}"
+# Pinned package version (issue #179): a bare `npm install -g openmausbot`
+# pulls whatever upstream ships next. Written into .env on first run and
+# read back after that — bump it there (or once via OMB_VERSION=…) to
+# upgrade.
+OMB_VERSION="${OMB_VERSION:-}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
@@ -55,7 +60,12 @@ if [ -f "$ENV_FILE" ]; then
     d="$(sed -n "s/^$k=\(.*\)\$/\1/p" "$ENV_FILE" | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
     [ -n "$d" ] && [ -d "$d" ] && PATH="$d:$PATH"
   done
+  # Saved package version wins over the default unless OMB_VERSION is set.
+  if [ -z "$OMB_VERSION" ]; then
+    OMB_VERSION="$(sed -n 's/^OMB_VERSION=\(.*\)$/\1/p' "$ENV_FILE" | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
+  fi
 fi
+OMB_VERSION="${OMB_VERSION:-0.1.149}"
 
 # Compare dotted versions without GNU sort: node_at_least 24
 node_at_least() {
@@ -110,10 +120,10 @@ NPM_BIN="$NPM_PREFIX/bin"
 NODE_BIN="$(dirname "$(command -v node)")"
 
 # ------------------------------------------------------- install / upgrade
-info "Installing openmausbot (npm -g, user prefix $NPM_PREFIX)"
-npm install -g openmausbot >/dev/null
+info "Installing openmausbot@$OMB_VERSION (npm -g, user prefix $NPM_PREFIX)"
+npm install -g "openmausbot@$OMB_VERSION" >/dev/null
 OMB_BIN="$NPM_BIN/openmausbot"
-[ -x "$OMB_BIN" ] || die "npm install -g openmausbot did not produce $OMB_BIN"
+[ -x "$OMB_BIN" ] || die "npm install -g openmausbot@$OMB_VERSION did not produce $OMB_BIN"
 ok "openmausbot: $("$OMB_BIN" --version 2>/dev/null | head -1 || echo installed)"
 
 # ---------------------------------------------------------------- .env
@@ -151,10 +161,19 @@ SERVICE_HOME=$HOME/services/openmausbot
 NODE_BIN=$NODE_BIN
 NPM_BIN=$NPM_BIN
 OMB_BIN=$OMB_BIN
+
+# Pinned package version — bump this and re-run to upgrade deliberately.
+OMB_VERSION=$OMB_VERSION
 EOF
   )
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
+fi
+
+# Backfill for deployments created before the pin: record the version so it
+# is discoverable and overridable in .env like the other knobs.
+if ! grep -q '^OMB_VERSION=' "$ENV_FILE"; then
+  printf 'OMB_VERSION=%s\n' "$OMB_VERSION" >> "$ENV_FILE"
 fi
 
 # Read back: an existing .env is the source of truth for ports, paths and the

@@ -69,6 +69,10 @@ check "sudo only for lingering + tailscale operator" \
 check "hub bound to loopback" grep -q 'serve --http "127.0.0.1' "$COMPOSE"
 check "hub uses host networking (reaches agent loopback)" \
       grep -q 'network_mode: host' "$COMPOSE"
+check "hub image is pinned (no floating :latest)" \
+      bash -c "grep -q 'henrygd/beszel:\${BESZEL_VERSION:-[0-9]' '$COMPOSE' && ! grep -q 'beszel:latest' '$COMPOSE'"
+check "first boot gets superuser from .env, not argv" \
+      bash -c "grep -q 'USER_EMAIL' '$COMPOSE' && grep -q 'USER_PASSWORD' '$COMPOSE'"
 check "agent listens loopback only" grep -q 'LISTEN=127.0.0.1' "$SETUP"
 check "agent KEY env is quoted (contains a space)" \
       grep -q 'Environment="KEY=' "$SETUP"
