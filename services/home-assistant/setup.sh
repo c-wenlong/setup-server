@@ -367,7 +367,7 @@ HTTP_STORE="$CONFIG_DIR/.storage/http"
 # strings (_ip_network_str), not bare addresses. The remaining keys are
 # HTTP_STORAGE_SCHEMA's own defaults, spelled out so the file is complete.
 write_http_store() {  # write_http_store PATH
-  printf '{"version":2,"minor_version":2,"key":"http","data":{"stable":{"server_host":["127.0.0.1"],"server_port":%s,"cors_allowed_origins":["https://cast.home-assistant.io"],"use_x_forwarded_for":true,"trusted_proxies":["127.0.0.1/32","::1/128"],"login_attempts_threshold":-1,"ip_ban_enabled":true,"ssl_profile":"modern","use_x_frame_options":true,"created_at":"%s","error":null,"error_message":null},"pending":null,"yaml_migration_done":true}}\n' \
+  printf '{"version":2,"minor_version":2,"key":"http","data":{"stable":{"server_host":["127.0.0.1"],"server_port":%s,"cors_allowed_origins":["https://cast.home-assistant.io"],"use_x_forwarded_for":true,"trusted_proxies":["127.0.0.1/32","::1/128"],"login_attempts_threshold":5,"ip_ban_enabled":true,"ssl_profile":"modern","use_x_frame_options":true,"created_at":"%s","error":null,"error_message":null},"pending":null,"yaml_migration_done":true}}\n' \
     "$LOCAL_PORT" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "$1"
 }
 
@@ -479,7 +479,7 @@ stable.update({
 })
 stable.setdefault("server_port", port)
 stable.setdefault("cors_allowed_origins", ["https://cast.home-assistant.io"])
-stable.setdefault("login_attempts_threshold", -1)
+stable.setdefault("login_attempts_threshold", 5)
 stable.setdefault("ip_ban_enabled", True)
 stable.setdefault("ssl_profile", "modern")
 stable.setdefault("use_x_frame_options", True)

@@ -178,6 +178,8 @@ test_fresh_deploy() {
   check "compose publishes no host wildcard" no_host_wildcard_port
   check "compose has no AI service"          compose_lacks '^[[:space:]]*ai:'
   check "compose has no search service"      compose_lacks '^[[:space:]]*appflowy_search:'
+  check "GoTrue allow-list is narrowed"      compose_hasF 'GOTRUE_URI_ALLOW_LIST: "appflowy-flutter://**,${APPFLOWY_WEB_URL}/**"'
+  check "  and not an open redirector"       compose_lacks 'GOTRUE_URI_ALLOW_LIST:[[:space:]]+"\*\*"'
   check "nginx listens on 80 only"           nginx_hasF 'listen 80'
   check "nginx has no TLS listen"            nginx_lacks 'listen[[:space:]]+443'
   check "nginx has no ssl_certificate"       nginx_lacks 'ssl_certificate'
@@ -284,6 +286,18 @@ test_idempotent_rerun() {
   check "never invoked sudo"          no_call "^sudo "
   check "compose up re-invoked"       [ -f "$STATE_DIR/compose_up" ]
   check "re-applied serve config"     calls_have "tailscale serve --bg --https=8102 http://127.0.0.1:8102"
+  teardown
+}
+
+test_env_is_data_not_code() {
+  echo "• a code-looking .env line is data, not a command"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  printf 'PWNED=$(touch %s)\n' "$SANDBOX/pwned" >> "$SVC/.env"
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "nothing was executed"     [ ! -e "$SANDBOX/pwned" ]
   teardown
 }
 
@@ -879,6 +893,7 @@ test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot
 test_idempotent_rerun
+test_env_is_data_not_code
 test_base_url_drift
 test_operator_escalation
 test_serve_approval_prompt

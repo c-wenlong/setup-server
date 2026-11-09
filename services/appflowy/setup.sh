@@ -94,6 +94,31 @@ if [ -n "${avail_mb:-}" ] && [ "$avail_mb" -lt 1024 ]; then
   warn "Only ~${avail_mb} MB RAM available. AppFlowy Cloud idles several hundred MiB with the caps in docker-compose.yml; unload ollama or stop another service if a container gets OOM-killed."
 fi
 
+# Values are read from .env the way Docker Compose reads them (an optional
+# `export `, matching single or double quotes, an inline ` #` comment after
+# an unquoted value, $HOME / ${HOME} expanded where Compose expands them)
+# without executing the file — a hand edit must not become a command. Same
+# parser teardown.sh uses for its paths.
+env_get() {
+  local key="$1" line value tail quote=""
+  [ -f "$ENV_FILE" ] || return 0
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
+  printf '%s' "$value"
+}
+
 # ---------------------------------------------------------------- .env
 if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
@@ -193,14 +218,21 @@ EOF
 fi
 
 # Read back: an existing .env is the source of truth for ports, paths and
-# credentials, so a re-run can never silently move a live deployment.
+# credentials, so a re-run can never silently move a live deployment. It is
+# read the way Compose reads it (env_get above) — never by executing the file.
 REQUESTED_PORT="$LOCAL_PORT"
-set -a; . "$ENV_FILE"; set +a
-GOTRUE_ADMIN_EMAIL="${GOTRUE_ADMIN_EMAIL:?GOTRUE_ADMIN_EMAIL missing from $ENV_FILE}"
-GOTRUE_ADMIN_PASSWORD="${GOTRUE_ADMIN_PASSWORD:?GOTRUE_ADMIN_PASSWORD missing from $ENV_FILE}"
-DATA_DIR="${APPFLOWY_DATA:?APPFLOWY_DATA missing from $ENV_FILE}"
-APPFLOWY_BASE_URL="${APPFLOWY_BASE_URL:?APPFLOWY_BASE_URL missing from $ENV_FILE}"
-API_EXTERNAL_URL="${API_EXTERNAL_URL:?API_EXTERNAL_URL missing from $ENV_FILE}"
+env_port="$(env_get LOCAL_PORT)"
+[ -z "$env_port" ] || LOCAL_PORT="$env_port"
+GOTRUE_ADMIN_EMAIL="$(env_get GOTRUE_ADMIN_EMAIL)"
+[ -n "$GOTRUE_ADMIN_EMAIL" ] || die "GOTRUE_ADMIN_EMAIL missing from $ENV_FILE"
+GOTRUE_ADMIN_PASSWORD="$(env_get GOTRUE_ADMIN_PASSWORD)"
+[ -n "$GOTRUE_ADMIN_PASSWORD" ] || die "GOTRUE_ADMIN_PASSWORD missing from $ENV_FILE"
+DATA_DIR="$(env_get APPFLOWY_DATA)"
+[ -n "$DATA_DIR" ] || die "APPFLOWY_DATA missing from $ENV_FILE"
+APPFLOWY_BASE_URL="$(env_get APPFLOWY_BASE_URL)"
+[ -n "$APPFLOWY_BASE_URL" ] || die "APPFLOWY_BASE_URL missing from $ENV_FILE"
+API_EXTERNAL_URL="$(env_get API_EXTERNAL_URL)"
+[ -n "$API_EXTERNAL_URL" ] || die "API_EXTERNAL_URL missing from $ENV_FILE"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi

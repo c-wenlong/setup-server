@@ -130,7 +130,10 @@ services:
       GOTRUE_ADMIN_PASSWORD: ${GOTRUE_ADMIN_PASSWORD:?GOTRUE_ADMIN_PASSWORD missing from .env}
       GOTRUE_DISABLE_SIGNUP: ${GOTRUE_DISABLE_SIGNUP:-true}
       GOTRUE_SITE_URL: appflowy-flutter://
-      GOTRUE_URI_ALLOW_LIST: "**"
+      # Redirect targets GoTrue may send a session token to. Not upstream's
+      # `**` (an open redirector): the desktop/mobile deep-link scheme and
+      # this box's own web origin (its /auth/callback) are all a login needs.
+      GOTRUE_URI_ALLOW_LIST: "appflowy-flutter://**,${APPFLOWY_WEB_URL}/**"
       GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET:?GOTRUE_JWT_SECRET missing from .env}
       GOTRUE_JWT_EXP: ${GOTRUE_JWT_EXP:-604800}
       GOTRUE_JWT_ADMIN_GROUP_NAME: supabase_admin

@@ -373,6 +373,18 @@ test_operator_escalation() {
   teardown
 }
 
+test_env_is_data_not_code() {
+  echo "• a code-looking .env line is data, not a command"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  printf 'PWNED=$(touch %s)\n' "$SANDBOX/pwned" >> "$SVC/.env"
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "nothing was executed"     [ ! -e "$SANDBOX/pwned" ]
+  teardown
+}
+
 test_serve_approval_prompt() {
   echo "• serve needs tailnet approval: retries after Enter"
   setup
@@ -803,6 +815,7 @@ test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot
 test_idempotent_rerun
+test_env_is_data_not_code
 test_operator_escalation
 test_serve_approval_prompt
 test_teardown_safe

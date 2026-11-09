@@ -37,14 +37,20 @@ docker compose --project-directory . logs --tail=100
   against an old `coolify-db` volume will auth-fail forever. Either put
   the old password back or `docker volume rm coolify-db` (destroys the
   database).
-- **Redis healthcheck failing** — the image requires a password
-  (`--requirepass`). Compose sets `REDISCLI_AUTH` from `REDIS_PASSWORD`
-  so `redis-cli ping` authenticates. If you removed that env, the probe
-  is `NOAUTH` and Coolify never becomes healthy.
+- **Redis healthcheck failing** — the password lives in `redis.conf`
+  (generated from `REDIS_PASSWORD` in `.env`, mounted read-only). The
+  probe reads `requirepass` out of that same mount, so a stale or missing
+  `redis.conf` is `NOAUTH` — re-run `./setup.sh` to regenerate it. Do not
+  put the password back on `command:` or in `environment:`; both show up
+  in `docker inspect`.
+- **Redis loops on config errors** — `install` and `docker-entrypoint.sh`
+  come from the `redis:7-alpine` image; `docker compose
+  --project-directory . logs redis` shows the exact line. A hand-edited
+  `redis.conf` is overwritten on the next `./setup.sh`.
 - **Permission errors on `/var/www/html/storage/app/ssh`** — uid 9999
   inside the container cannot read `~/services/coolify/ssh`. `setup.sh`
-  grants that with `setfacl` (or `chmod a+rwx` where ACL is missing).
-  Re-run `./setup.sh`.
+  grants that with `setfacl`, or `sudo chown 9999:9999` where ACL is
+  missing (never world-writable). Re-run `./setup.sh`.
 - **Exit 137 (OOM-killed)** — ollama with a model loaded claims ~5 GB.
   `docker stats` and `free -h`. Caps in compose are 768/256/128/256 MiB;
   if the dashboard is still the victim, stop another service first.

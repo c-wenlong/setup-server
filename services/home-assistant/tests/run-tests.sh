@@ -237,7 +237,7 @@ stable = {"server_host": ["127.0.0.1"], "server_port": 8123,
           "cors_allowed_origins": ["https://cast.home-assistant.io"],
           "use_x_forwarded_for": True,
           "trusted_proxies": ["127.0.0.1/32", "::1/128"],
-          "login_attempts_threshold": -1, "ip_ban_enabled": True,
+          "login_attempts_threshold": 5, "ip_ban_enabled": True,
           "ssl_profile": "modern", "use_x_frame_options": True,
           "created_at": "2026-09-10T18:48:23.030301+00:00",
           "error": None, "error_message": None}
@@ -378,6 +378,8 @@ test_config_written_before_first_boot() {
   check "  use_x_forwarded_for: true"                   boot_http_is 's.get("use_x_forwarded_for") is True'
   check "  trusted_proxies lists 127.0.0.1"             boot_http_is '"127.0.0.1/32" in (s.get("trusted_proxies") or [])'
   check "  trusted_proxies lists ::1"                   boot_http_is '"::1/128" in (s.get("trusted_proxies") or [])'
+  # Brute-force lockout stays on at the upstream default: -1 disables it.
+  check "  login_attempts_threshold is 5 (bans on)"      boot_http_is 's.get("login_attempts_threshold") == 5'
   # No pending trial to revert to the wildcard defaults five minutes later,
   # and the YAML marked migrated so a stray http: block can never re-migrate.
   check "  no pending trial waiting to revert"          boot_http_is 'd.get("pending") is None'
@@ -938,13 +940,15 @@ test_repair_preserves_unrelated_keys() {
   # loss would only surface much later.
   setup
   touch "$STATE_DIR/operator"
-  seed_store '{"server_host": null, "server_port": 8199, "ssl_profile": "intermediate", "login_attempts_threshold": 5}' 'null'
+  # 3 is deliberately NOT the seeded default of 5: if the repair overwrote
+  # the threshold instead of setdefault-ing it, this check could not tell.
+  seed_store '{"server_host": null, "server_port": 8199, "ssl_profile": "intermediate", "login_attempts_threshold": 3}' 'null'
   run_deploy
   check "exits zero"                     [ "$CODE" -eq 0 ]
   check "server_host repaired"           [ "$(store_field 's.get("server_host")')" = "['127.0.0.1']" ]
   check "hand-set port preserved"        [ "$(store_field 's.get("server_port")')" = "8199" ]
   check "hand-set ssl_profile preserved" [ "$(store_field 's.get("ssl_profile")')" = "'intermediate'" ]
-  check "hand-set threshold preserved"   [ "$(store_field 's.get("login_attempts_threshold")')" = "5" ]
+  check "hand-set threshold preserved"   [ "$(store_field 's.get("login_attempts_threshold")')" = "3" ]
   teardown
 }
 

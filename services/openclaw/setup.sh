@@ -69,6 +69,31 @@ TS_HOST="$(tailnet_host)"
 [ -n "$TS_HOST" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 ok "Tailnet name: $TS_HOST"
 
+# Values are read from .env the way Docker Compose reads them (an optional
+# `export `, matching single or double quotes, an inline ` #` comment after
+# an unquoted value, $HOME / ${HOME} expanded where Compose expands them)
+# without executing the file — a hand edit must not become a command. Same
+# parser teardown.sh uses for its paths.
+env_get() {
+  local key="$1" line value tail quote=""
+  [ -f "$ENV_FILE" ] || return 0
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
+  printf '%s' "$value"
+}
+
 # ---------------------------------------------------------------- .env
 if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
@@ -95,7 +120,7 @@ TZ=$tz
 
 # State, config, workspace and auth-profile secrets — the only things here
 # worth backing up. Moving them means moving the directories too. Double
-# quotes keep a path with spaces valid for both `set -a; .` and Compose.
+# quotes keep a path with spaces valid for both the parser and Compose.
 OPENCLAW_CONFIG_DIR="$STATE/config"
 OPENCLAW_WORKSPACE_DIR="$STATE/workspace"
 OPENCLAW_AUTH_PROFILE_SECRET_DIR="$STATE/auth-secrets"
@@ -116,23 +141,30 @@ EOF
 fi
 
 # Read back: an existing .env is the source of truth for ports and paths, so
-# a re-run can never silently move a live deployment.
+# a re-run can never silently move a live deployment. It is read the way
+# Compose reads it (env_get above) — never by executing the file.
 REQUESTED_PORT="$LOCAL_PORT"
 REQUESTED_HTTPS_PORT="${HTTPS_PORT_EXPLICIT:+$HTTPS_PORT}"
-# Unset first, so a post-source value can only have come from .env — then
-# every assignment form the shell accepts (export, leading whitespace)
-# counts as recorded, not just a literal `HTTPS_PORT=` at column 0.
-unset HTTPS_PORT
-set -a; . "$ENV_FILE"; set +a
-CONFIG_DIR="${OPENCLAW_CONFIG_DIR:?OPENCLAW_CONFIG_DIR missing from $ENV_FILE}"
-WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:?OPENCLAW_WORKSPACE_DIR missing from $ENV_FILE}"
-SECRET_DIR="${OPENCLAW_AUTH_PROFILE_SECRET_DIR:?OPENCLAW_AUTH_PROFILE_SECRET_DIR missing from $ENV_FILE}"
+env_port="$(env_get LOCAL_PORT)"
+[ -z "$env_port" ] || LOCAL_PORT="$env_port"
+# Whether .env records a publish port is a presence question, separate from
+# the value: `HTTPS_PORT=` at column 0, after `export`, or indented all
+# count as recorded — the same forms the old `set -a; .` accepted.
+env_https_recorded="$(grep -cE '^[[:space:]]*(export[[:space:]]+)?HTTPS_PORT=' "$ENV_FILE" || true)"
+env_https="$(env_get HTTPS_PORT)"
+CONFIG_DIR="$(env_get OPENCLAW_CONFIG_DIR)"
+[ -n "$CONFIG_DIR" ] || die "OPENCLAW_CONFIG_DIR missing from $ENV_FILE"
+WORKSPACE_DIR="$(env_get OPENCLAW_WORKSPACE_DIR)"
+[ -n "$WORKSPACE_DIR" ] || die "OPENCLAW_WORKSPACE_DIR missing from $ENV_FILE"
+SECRET_DIR="$(env_get OPENCLAW_AUTH_PROFILE_SECRET_DIR)"
+[ -n "$SECRET_DIR" ] || die "OPENCLAW_AUTH_PROFILE_SECRET_DIR missing from $ENV_FILE"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
-if [ -n "${HTTPS_PORT+x}" ]; then
+if [ "$env_https_recorded" -gt 0 ]; then
   # .env already decided the publish port (an earlier explicit override);
   # an explicit value on this re-run is as ignored as LOCAL_PORT is.
+  HTTPS_PORT="$env_https"
   if [ -n "$HTTPS_PORT_EXPLICIT" ] && [ "$HTTPS_PORT" != "$REQUESTED_HTTPS_PORT" ]; then
     warn "HTTPS_PORT=$REQUESTED_HTTPS_PORT ignored — the existing $ENV_FILE says $HTTPS_PORT. Edit .env and re-run to move the publish port."
   fi

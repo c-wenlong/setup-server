@@ -129,6 +129,14 @@ Login is **not** a substitute for the tailnet. Anyone on the tailnet
 who can read the webapp logs can grab a magic link. That is the same
 trust boundary as every other service here.
 
+- **Residual exposure — deliberate.** The magic link is a bearer token
+  printed to `docker logs trigger-webapp`: whoever can read container
+  logs (the `docker` group is effectively root anyway) can take the
+  session. And the dashboard admin can `deploy` arbitrary task images,
+  which the supervisor runs as containers on this box — dashboard access
+  is code execution here. Keep `WHITELISTED_EMAILS` / `ADMIN_EMAILS` to
+  yourself.
+
 ## Dependencies
 
 | Need | Why |

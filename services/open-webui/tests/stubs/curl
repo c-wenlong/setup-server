@@ -1,12 +1,85 @@
 #!/usr/bin/env bash
-# curl stub: health checks succeed. When asked for an http_code write-out,
-# prints 200 (the script greps for a 2xx/3xx).
+# curl stub — health checks succeed, and the Open WebUI auth surface is
+# faked from $STATE_DIR:
+#
+#   webui_users        — exists => the instance has users (no "onboarding").
+#                        Touched by a successful POST /api/v1/auths/signup.
+#   webui_signup_open  — exists => /api/config reports enable_signup:true.
+#                        Cleared by the first successful signup, the way the
+#                        pinned image records enable_signup=false itself.
+#   webui_signup_fails — exists => POST /api/v1/auths/signup answers 403.
+#   webui_config_down  — exists => GET /api/config fails to connect (000).
+#
+# Recorded for assertions:
+#   signup_body        — the JSON body of the last signup POST.
 echo "curl $*" >> "$CALLS_LOG"
 
-for a in "$@"; do
-  if [ "$a" = "%{http_code}" ]; then
-    printf '200'
-    exit 0
-  fi
+method="GET"; out=""; url=""; want_code=0; failonerr=0; body=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o|--output) out="$2"; shift 2 ;;
+    -w|--write-out) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -d|--data|--data-raw|--data-binary|--data-urlencode)
+      piece="$2"
+      case "$piece" in @*) piece="$(cat "${piece#@}" 2>/dev/null)" ;; esac
+      if [ -z "$body" ]; then body="$piece"; else body="$body&$piece"; fi
+      shift 2 ;;
+    -H|--header|--max-time|--connect-timeout|--retry) shift 2 ;;
+    -I|--head) shift ;;
+    -[a-zA-Z]*)
+      case "$1" in *f*) failonerr=1 ;; esac
+      shift ;;
+    --fail) failonerr=1; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
 done
-exit 0
+: "$method"
+
+emit() {  # emit <http_code> <body>
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */api/v1/auths/signup)
+    printf '%s\n' "$body" > "$STATE_DIR/signup_body"
+    [ -f "$STATE_DIR/webui_signup_fails" ] && emit 403 '{"detail":"Signup is disabled"}'
+    if [ -f "$STATE_DIR/webui_users" ]; then
+      # Users already exist: only an open instance lets another register.
+      [ -f "$STATE_DIR/webui_signup_open" ] \
+        && emit 200 '{"token":"tok","token_type":"Bearer","id":"u9","email":"peer@x","name":"Peer","role":"pending"}'
+      emit 403 '{"detail":"Signup is disabled"}'
+    fi
+    touch "$STATE_DIR/webui_users"
+    rm -f "$STATE_DIR/webui_signup_open"   # the first signup closes signup itself
+    emit 200 '{"token":"tok","token_type":"Bearer","id":"u1","email":"admin@x","name":"Admin","role":"admin"}'
+    ;;
+
+  */api/config)
+    if [ -f "$STATE_DIR/webui_config_down" ]; then
+      echo "curl: (7) Failed to connect to 127.0.0.1: Connection refused" >&2
+      [ "$want_code" = "1" ] && printf '000'
+      exit 7
+    fi
+    onb=""
+    [ -f "$STATE_DIR/webui_users" ] || onb='"onboarding":true,'
+    es="false"
+    [ -f "$STATE_DIR/webui_signup_open" ] && es="true"
+    emit 200 "{\"status\":true,${onb}\"name\":\"Open WebUI\",\"version\":\"0.13.2\",\"features\":{\"enable_signup\":$es}}"
+    ;;
+
+  *)
+    emit 200 '{}'
+    ;;
+esac

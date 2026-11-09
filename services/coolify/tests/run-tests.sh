@@ -66,9 +66,21 @@ no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
 
 file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+file_owner() { stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null; }
 
 compose_has()      { sed 's/#.*//' "$SVC/docker-compose.yml" | grep -qE -- "$1"; }
 compose_hasF()     { sed 's/#.*//' "$SVC/docker-compose.yml" | grep -qF -- "$1"; }
+compose_lacks()    { ! compose_has "$1"; }
+compose_lacksF()   { ! compose_hasF "$1"; }
+
+# uid 9999 can write $1: an ACL entry, a sudo chown recorded by the stub,
+# or real ownership. Never a+rwx — that is the fallback that was removed.
+coolify_writable() {
+  getfacl -p "$1" 2>/dev/null | grep -q 'user:9999:rwx' && return 0
+  grep -qF "chown 9999:9999 $1" "$STATE_DIR/sudo_chown" 2>/dev/null && return 0
+  [ "$(file_owner "$1")" = "9999" ]
+}
+not_world_writable() { [ -z "$(find "$1" -maxdepth 0 -perm -0002 2>/dev/null)" ]; }
 
 # Ports mappings only — SOKETI_HOST=0.0.0.0 is an in-container listen.
 no_host_wildcard_port() {
@@ -168,6 +180,16 @@ test_fresh_deploy() {
   check "warns about Traefik :80/:443"    out_has "Traefik"
   check "SSH key written"                 [ -f "$(data_dir)/ssh/keys/id.${USER}@host.docker.internal" ]
   check "pubkey landed in authorized_keys" grep -q coolify "$HOME/.ssh/authorized_keys"
+  check "redis.conf generated"            [ -f "$SVC/redis.conf" ]
+  check "redis.conf is mode 600"          [ "$(file_mode "$SVC/redis.conf")" = "600" ]
+  check "redis.conf carries the .env password" \
+    sh -c 'pw="$(sed -n "s/^REDIS_PASSWORD=//p" "$1/.env")"; grep -qx "requirepass $pw" "$1/redis.conf"' _ "$SVC"
+  check "redis.conf keeps save + loglevel" sh -c 'grep -qx "save 20 1" "$1" && grep -qx "loglevel warning" "$1"' _ "$SVC/redis.conf"
+  check "compose mounts redis.conf ro"    compose_hasF './redis.conf:/usr/local/etc/redis/redis.conf:ro'
+  check "password never on redis argv"    compose_lacksF '--requirepass'
+  check "password not in redis env"       compose_lacks 'REDIS_PASSWORD: |REDISCLI_AUTH: '
+  check "state dirs writable by uid 9999" coolify_writable "$(data_dir)"
+  check "  and not world-writable"        not_world_writable "$(data_dir)"
   teardown
 }
 
@@ -315,7 +337,7 @@ test_operator_escalation() {
   setup
   run_deploy
   check "exits zero" [ "$CODE" -eq 0 ]
-  [ "$OS" = "Linux" ] && check "granted operator" calls_have "sudo tailscale set --operator="
+  [ "$OS" = "Linux" ] && check "granted operator via the resolved binary" calls_have "sudo tailscale set --operator="
   check "eventually published" calls_have "tailscale serve --bg --https=8101 http://127.0.0.1:8101"
   teardown
 }
@@ -329,6 +351,65 @@ test_serve_approval_prompt() {
   check "exits zero"                [ "$CODE" -eq 0 ]
   check "printed the approval hint" out_has "approve, then press Enter"
   check "published on retry"        calls_have "tailscale serve --bg --https=8101 http://127.0.0.1:8101"
+  teardown
+}
+
+test_grant_fallback_chown() {
+  echo "• no working setfacl: grants fall back to sudo chown, never a+rwx — and the SSH key still lands"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/setfacl_fails"
+  run_deploy
+  check "exits zero"                        [ "$CODE" -eq 0 ]
+  check "explains why sudo is needed"       out_has "chowned"
+  check "chowned state dir to uid 9999"     calls_have "sudo chown 9999:9999 $(data_dir)"
+  check "chowned the ssh keys dir"          calls_have "sudo chown 9999:9999 $(data_dir)/ssh/keys"
+  check "never chmod a+rwx"                 no_call "chmod a+rwx"
+  check "state dir not world-writable"      not_world_writable "$(data_dir)"
+  check "ssh dir not world-writable"        not_world_writable "$(data_dir)/ssh"
+  check "key generated BEFORE the chown"    [ -f "$(data_dir)/ssh/keys/id.${USER}@host.docker.internal" ]
+  check "  so authorized_keys got it"       grep -q coolify "$HOME/.ssh/authorized_keys"
+  check "private key not world-open"        not_world_writable "$(data_dir)/ssh/keys/id.${USER}@host.docker.internal"
+  check "still published"                   calls_have "tailscale serve --bg --https=8101"
+  teardown
+}
+
+test_grant_fails_hard() {
+  echo "• neither ACL nor chown works: die rather than world-write Coolify's keys"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/setfacl_fails" "$STATE_DIR/sudo_fails"
+  run_deploy
+  check "exits non-zero"        [ "$CODE" -ne 0 ]
+  check "names the failure"     out_has "Could not grant Coolify write access"
+  check "never chmod a+rwx"     no_call "chmod a+rwx"
+  check "no container started"  [ ! -f "$STATE_DIR/compose_up" ]
+  check "never published"       no_call "tailscale serve"
+  teardown
+}
+
+test_redis_conf_rewritten_from_env() {
+  echo "• redis.conf is regenerated from .env each run — a rotated password follows"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  check "redis.conf written"             [ -f "$SVC/redis.conf" ]
+  sed -i.bak 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=rotatedsecret123/' "$SVC/.env"
+  rm -f "$SVC/.env.bak"
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "conf follows the new password"  grep -qx 'requirepass rotatedsecret123' "$SVC/redis.conf"
+  check "still mode 600"                 [ "$(file_mode "$SVC/redis.conf")" = "600" ]
+  teardown
+}
+
+test_env_not_executed() {
+  echo "• a code-looking .env line is data, not a command"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  printf 'PWNED=$(touch %s)\n' "$SANDBOX/pwned" >> "$SVC/.env"
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "nothing was executed"     [ ! -e "$SANDBOX/pwned" ]
   teardown
 }
 
@@ -593,6 +674,7 @@ test_teardown_purge() {
   check "data dir gone"               [ ! -e "$dir" ]
   check "marker ~/services/coolify gone" [ ! -e "$HOME/services/coolify" ]
   check ".env gone"                   [ ! -f "$SVC/.env" ]
+  check "redis.conf gone too"         [ ! -f "$SVC/redis.conf" ]
   check "serve off for :8101"         calls_have "tailscale serve --https=8101 off"
   check "serve off for :6001"         calls_have "tailscale serve --https=6001 off"
   check "services dir itself kept"    [ -d "$HOME/services" ]
@@ -1192,6 +1274,10 @@ test_idempotent_rerun
 test_app_url_drift
 test_operator_escalation
 test_serve_approval_prompt
+test_grant_fallback_chown
+test_grant_fails_hard
+test_redis_conf_rewritten_from_env
+test_env_not_executed
 test_teardown_safe
 test_teardown_leaves_coolify_apps
 test_teardown_units_not_touched

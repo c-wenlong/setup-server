@@ -53,13 +53,20 @@ docker compose --project-directory . logs --tail 100 open-webui
 
 ## Login / accounts
 
-- **Locked out / lost admin password** — user DB is
-  `~/services/open-webui/data/webui.db`. Simplest recovery if there's nothing
-  to keep: `docker compose --project-directory . down`, move
-  `~/services/open-webui/data` aside, `up -d`, re-register (first account =
-  admin again).
-- **Unexpected signups** — only tailnet devices can reach it, but you can
-  disable signups: Admin Panel → Settings → Enable New Sign Ups → off.
+- **Locked out / lost admin password** — the owner account's generated
+  password is `WEBUI_ADMIN_PASSWORD` in `.env`. If it was changed and lost,
+  the user DB is `~/services/open-webui/data/webui.db`. Simplest recovery
+  if there's nothing to keep: `docker compose --project-directory . down`,
+  move `~/services/open-webui/data` aside, `up -d`, then re-run `./setup.sh`
+  — it sees the empty instance, seeds a fresh owner over the API, and
+  appends the new credentials to `.env`.
+- **Signups are off and I want more users** — `ENABLE_SIGNUP=false` is
+  deliberate (the first signup would have been a race for the admin role).
+  Add people from Admin Panel → Users instead; open registration stays
+  closed.
+- **Unexpected signups** — should be impossible with `ENABLE_SIGNUP=false`.
+  If `setup.sh` warned that signups are still open, someone flipped it in
+  Admin Panel → Settings → "Enable New Sign Ups"; flip it back.
 
 ## Responses are slow
 
@@ -108,7 +115,8 @@ cd ~/dev/setup-server/services/open-webui
 ./setup.sh               # back, fresh if you purged
 ```
 
-There is no undo for `--purge`: chats, accounts and uploads go, and the first
-account registered afterwards becomes the admin. From a terminal, pause the
+There is no undo for `--purge`: chats, accounts and uploads go, and the next
+`./setup.sh` seeds a fresh owner account from new `WEBUI_ADMIN_*` entries it
+appends to `.env`. From a terminal, pause the
 `open-webui` monitor in Uptime Kuma first, or it pages; the launcher's Remove
 does that.

@@ -390,7 +390,7 @@ EOF
   if [ -n "$PUB_LINE" ] && [ -f "$AUTH" ] && grep -qxF -- "$PUB_LINE" "$AUTH"; then
     key_msg="removes Coolify's key line (only that line) from $AUTH"
   fi
-  warn "--purge deletes the volumes coolify-db and coolify-redis (Coolify's database: every server, project and setting),${targets:- nothing on disk} and $ENV_FILE (APP_KEY), and $key_msg. This cannot be undone."
+  warn "--purge deletes the volumes coolify-db and coolify-redis (Coolify's database: every server, project and setting),${targets:- nothing on disk}, $ENV_FILE (APP_KEY) and $SERVICE_DIR/redis.conf (REDIS_PASSWORD), and $key_msg. This cannot be undone."
   printf 'Type %s to confirm: ' "$NAME"
   answer=""
   read -r answer || true
@@ -557,7 +557,7 @@ EOF
   for d in "$P_SSH" "$P_BACKUPS" "$P_IMAGES" "$P_DATA"; do
     purge_dir "$d"
   done
-  rm -f -- "$ENV_FILE"
+  rm -f -- "$ENV_FILE" "$SERVICE_DIR/redis.conf"
   # ~/services/<name> is the launcher's install marker. Try it even when the
   # data dir was already gone, so a purged app never reads as installed;
   # rmdir only ever removes an empty directory.
