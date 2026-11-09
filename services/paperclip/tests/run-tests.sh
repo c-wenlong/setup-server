@@ -244,7 +244,7 @@ PY
   check "exits zero"                   [ "$CODE" -eq 0 ]
   check "existing .env untouched"      env_has "my-custom-marker"
   check "never invoked sudo"           no_call "^sudo "
-  check "did not re-install the CLI"   no_call "npx paperclipai install"
+  check "did not re-install the CLI"   sh -c "! grep -qE '^npx paperclipai(@[^ ]+)? install' '$CALLS_LOG'"
   check "did not re-run onboard"       no_call "onboard"
   check "custom config field kept"     grep -q 'please-keep' "$(pc_cfg)"
   check "re-applied serve map"         calls_have "tailscale serve --bg --https=3100"

@@ -91,8 +91,11 @@ elif [ "$OS" = "Linux" ]; then
   want="$(awk -v a="$ASSET" '$NF == a {print $1; exit}' "$tmp/sha256sum.txt")"
   [ -n "$want" ] \
     || die "$ASSET is not listed in $OLLAMA_VERSION's sha256sum.txt — refusing to install."
-  got="$(sha256sum "$tmp/$ASSET" 2>/dev/null | awk '{print $1}')"
-  [ -n "$got" ] || got="$(shasum -a 256 "$tmp/$ASSET" | awk '{print $1}')"
+  if command -v sha256sum >/dev/null; then
+    got="$(sha256sum "$tmp/$ASSET" | awk '{print $1}')"
+  else
+    got="$(shasum -a 256 "$tmp/$ASSET" | awk '{print $1}')"
+  fi
   [ "$got" = "$want" ] \
     || die "Checksum mismatch for $ASSET (want $want, got $got) — not installing."
   ok "sha256 verified against the release's sha256sum.txt"

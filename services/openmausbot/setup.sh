@@ -54,15 +54,35 @@ ENV_FILE="$SERVICE_DIR/.env"
 
 # A re-run finds node and the global bin dir where the first install recorded
 # them in .env — an ssh-triggered run's PATH often misses a user-level node
-# (nvm, ~/.local) or the prefix set below.
+# (nvm, ~/.local) or the prefix set below. Values are read the same way
+# sourcing .env reads them (optional `export `, surrounding quotes, unquoted
+# trailing `#` comments, $HOME/${HOME} interpolation).
+env_get() {
+  local line value tail quote=""
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" 2>/dev/null | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
+  printf '%s' "$value"
+}
 if [ -f "$ENV_FILE" ]; then
   for k in NODE_BIN NPM_BIN; do
-    d="$(sed -n "s/^$k=\(.*\)\$/\1/p" "$ENV_FILE" | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
+    d="$(env_get "$k")"
     [ -n "$d" ] && [ -d "$d" ] && PATH="$d:$PATH"
   done
   # Saved package version wins over the default unless OMB_VERSION is set.
   if [ -z "$OMB_VERSION" ]; then
-    OMB_VERSION="$(sed -n 's/^OMB_VERSION=\(.*\)$/\1/p' "$ENV_FILE" | tail -1 | sed "s/^'//; s/'\$//; s/^\"//; s/\"\$//")"
+    OMB_VERSION="$(env_get OMB_VERSION)"
   fi
 fi
 OMB_VERSION="${OMB_VERSION:-0.1.149}"
@@ -172,7 +192,7 @@ fi
 
 # Backfill for deployments created before the pin: record the version so it
 # is discoverable and overridable in .env like the other knobs.
-if ! grep -q '^OMB_VERSION=' "$ENV_FILE"; then
+if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?OMB_VERSION=' "$ENV_FILE"; then
   printf 'OMB_VERSION=%s\n' "$OMB_VERSION" >> "$ENV_FILE"
 fi
 

@@ -116,8 +116,11 @@ else
   key_asc="$(mktemp)"
   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey -o "$key_asc" \
     || die "Could not fetch NVIDIA's signing key."
+  # Check every primary key fingerprint in the bundle (subkey fpr records
+  # follow `sub:` and are skipped) so a bundle with extra primary keys appended
+  # after NVIDIA's is rejected before gpg --dearmor trusts the whole file.
   got_fpr="$(gpg --with-colons --import-options show-only --dry-run --import "$key_asc" 2>/dev/null \
-    | awk -F: '$1 == "fpr" { print $10; exit }')"
+    | awk -F: '$1 == "pub" { mode="pub"; next } $1 == "sub" { mode="sub"; next } $1 == "fpr" { if (mode == "sub") { mode="done"; next } fprs = (fprs ? fprs "," : "") $10; mode="done" } END { print fprs }')"
   [ "$got_fpr" = "$NVIDIA_KEY_FPR" ] \
     || { rm -f "$key_asc"; die "NVIDIA signing key fingerprint mismatch (got: ${got_fpr:-unreadable}, want: $NVIDIA_KEY_FPR). Not trusting it — investigate before retrying."; }
   sudo gpg --dearmor --yes -o "$KEYRING" "$key_asc" \

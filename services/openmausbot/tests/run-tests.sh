@@ -230,6 +230,14 @@ test_version_override() {
   run_deploy
   check "saved .env version wins"       calls_have "npm install -g openmausbot@0.2.0"
   check "no default install this run"   no_call "openmausbot@0.1.149"
+
+  # inline comment and export prefix are parsed the same way sourcing does
+  sed -i.bak 's/^OMB_VERSION=0\.2\.0$/export OMB_VERSION=0.3.0 # tested pin/' "$SVC/.env"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exported+commented pin exits zero" [ "$CODE" -eq 0 ]
+  check "installs exported+commented pin"   calls_have "npm install -g openmausbot@0.3.0"
+  check "does not duplicate OMB_VERSION"    [ "$(grep -cE '^[[:space:]]*(export[[:space:]]+)?OMB_VERSION=' "$SVC/.env")" -eq 2 ]
   teardown
 }
 
