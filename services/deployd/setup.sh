@@ -133,11 +133,12 @@ TMP_BIN="$BIN_DIR/.deployd.tmp.$$"
 # Both rewrites go through python3 with the values passed in the
 # environment, never through the source text: an .env path holding '"',
 # '|', '&' or a backslash would corrupt a sed replacement or break out of
-# the Python string it lands in. json.dumps emits the literal Python parses
-# back to the exact path.
+# the Python string it lands in. ascii() emits the literal Python parses
+# back to the exact path — json.dumps would escape characters beyond
+# U+FFFF as lone surrogates (e.g. an emoji), which Python cannot decode
+# back to the original path.
 DEPLOYD_BAKE_ENV="$ENV_FILE" DEPLOYD_BAKE_PY="$PYTHON3" \
   python3 - "$SERVICE_DIR/deployd" > "$TMP_BIN" <<'PY' || { rm -f "$TMP_BIN"; die "Could not bake the installed poller"; }
-import json
 import os
 import sys
 
@@ -149,7 +150,7 @@ for i, line in enumerate(open(sys.argv[1]).read().splitlines(True)):
         line = "#!%s\n" % os.environ["DEPLOYD_BAKE_PY"]
     elif line.startswith(marker):
         line = "ENV_BAKED = %s%s" % (
-            json.dumps(os.environ["DEPLOYD_BAKE_ENV"]), line[len(marker):])
+            ascii(os.environ["DEPLOYD_BAKE_ENV"]), line[len(marker):])
         found = True
     out.append(line)
 if not found:

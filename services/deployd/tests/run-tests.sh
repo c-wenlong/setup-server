@@ -183,7 +183,7 @@ test_fresh_setup_linux() {
   check "wrote .env"               env_has "POLL_SECONDS=60"
   check ".env points at checkout"  env_has "SETUP_REPO=$REPO"
   check "poller installed"         [ -x "$BIN_DIR/deployd" ]
-  check "env path baked"           grep -qF "ENV_BAKED = \"$ENVF\"" "$BIN_DIR/deployd"
+  check "env path baked"           grep -qF "ENV_BAKED = '$ENVF'" "$BIN_DIR/deployd"
   check "python3 baked"            grep -qF "#!$(command -v python3)" "$BIN_DIR/deployd"
   check "timer written"            [ -f "$TIMER" ]
   check "timer cadence"            grep -qF "OnUnitActiveSec=60" "$TIMER"
@@ -686,11 +686,12 @@ test_teardown_purge() {
   check "aborts on a wrong name"   [ "$CODE" -ne 0 ]
   check "says nothing changed"     out_has "nothing was changed"
   check "nothing deleted yet"      [ -d "$HOME/services/deployd" ]
-  check "unit file kept"           [ -f "$TIMER" ]
   check ".env kept"                [ -f "$ENVF" ]
   if [ "$OS" = "Linux" ]; then
+    check "unit file kept"         [ -f "$TIMER" ]
     check "timer untouched"        no_call "disable --now deployd.timer"
   else
+    check "plist kept"             [ -f "$PLIST" ]
     check "agent untouched"        no_call "disable"
   fi
   run_teardown "" --purge
@@ -700,8 +701,11 @@ test_teardown_purge() {
   CODE=$?
   check "purge succeeds"        [ "$CODE" -eq 0 ]
   check "service home gone"     [ ! -d "$HOME/services/deployd" ]
-  check "unit files gone"       [ ! -f "$TIMER" ]
-  check "plist gone"            [ ! -f "$PLIST" ]
+  if [ "$OS" = "Linux" ]; then
+    check "unit files gone"       [ ! -f "$TIMER" ]
+  else
+    check "plist gone"            [ ! -f "$PLIST" ]
+  fi
   check ".env gone"             [ ! -f "$ENVF" ]
   teardown
 }
@@ -755,6 +759,30 @@ test_teardown_purge_custom_home() {
   teardown
 }
 
+test_teardown_escaped_home() {
+  echo "• teardown decodes a %q-escaped SERVICE_HOME and refuses undecodable escapes"
+  setup
+  run_setup
+  # A custom home whose path contains a space is written %q-style
+  # (backslash-escaped) by setup.sh; teardown must decode it to find the
+  # poll lock under the real directory.
+  CUSTOM="$SANDBOX/my services/deployd"
+  mkdir -p "$CUSTOM/.poll.lock"
+  printf 'SERVICE_HOME=%s\n' "$SANDBOX/my\\ services/deployd" > "$ENVF"
+  run_teardown
+  check "decoded path finds the lock"   [ "$CODE" -ne 0 ]
+  check "  says mid-run"                out_has "mid-run"
+  printf 'SERVICE_HOME=%s\n' "\$'/tmp/deploy\\n'" > "$ENVF"
+  run_teardown
+  check "\$'...' escape form refused"   [ "$CODE" -ne 0 ]
+  check "  says cannot decode"          out_has "cannot decode"
+  printf 'SERVICE_HOME=/tmp/deploy\\\n' > "$ENVF"
+  run_teardown
+  check "lone trailing backslash refused" [ "$CODE" -ne 0 ]
+  check "  says incomplete escape"      out_has "incomplete escape"
+  teardown
+}
+
 test_teardown_purge_symlink_home() {
   echo "• teardown --purge refuses a symlinked service home"
   setup
@@ -786,7 +814,7 @@ test_setup_env_path_special_chars() {
   CODE=$?
   check "succeeds"                [ "$CODE" -eq 0 ]
   check ".env written"            [ -f "$WROOT/services/deployd/.env" ]
-  check "baked line present"      grep -qF 'ENV_BAKED = "' "$BIN_DIR/deployd"
+  check "baked line present"      grep -qE "ENV_BAKED = ['\"]" "$BIN_DIR/deployd"
   OUT="$(PATH="$STUBS:$PATH" python3 "$BIN_DIR/deployd" --status 2>&1)"
   CODE=$?
   check "baked .env loads"        [ "$CODE" -eq 0 ]
@@ -844,6 +872,7 @@ for t in \
   test_teardown_requires_env \
   test_teardown_env_inert \
   test_teardown_purge_custom_home \
+  test_teardown_escaped_home \
   test_teardown_purge_symlink_home \
   test_setup_env_path_special_chars \
   test_poll_rejects_dash_remote; do

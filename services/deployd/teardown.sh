@@ -84,7 +84,28 @@ env_get() {
     \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
     \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
     *) value="${value%%[[:space:]]#*}"
-       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+       # setup.sh writes unquoted values %q-escaped (spaces and shell
+       # specials get a backslash), so source-parity here means decoding
+       # each \X as X. The one form %q can emit that this cannot decode is
+       # the $'...' wrap (a newline or control char in the value) — refuse
+       # it rather than read a path that is not what setup wrote.
+       case "$value" in
+         "\$'"*) die "$ENV_FILE: $1 uses an escape form teardown cannot decode — fix that value and re-run." ;;
+       esac
+       if [[ "$value" == *'\'* ]]; then
+         local decoded="" rest="$value"
+         while [[ "$rest" == *'\'* ]]; do
+           decoded+="${rest%%\\*}"
+           rest="${rest#*\\}"
+           # A lone trailing backslash is not %q output (a real trailing
+           # backslash is escaped as \\); refuse rather than guess.
+           [ -n "$rest" ] || die "$ENV_FILE: $1 ends in an incomplete escape — fix that value and re-run."
+           decoded+="${rest:0:1}"
+           rest="${rest:1}"
+         done
+         value="$decoded$rest"
+       fi ;;
   esac
   # setup.sh interpolates no variables itself, but a hand edit may write
   # $HOME / ${HOME} the way Compose would; that one variable is all a path
