@@ -143,7 +143,7 @@ test_fresh_deploy() {
     check "enabled the unit"                 calls_have "systemctl --user enable quiver-hub.service"
     check "restarted the unit"               calls_have "systemctl --user restart quiver-hub.service"
     check "enabled lingering via sudo"       calls_have "sudo loginctl enable-linger"
-    check "granted operator via sudo"        calls_have "tailscale set --operator="
+    check "granted operator via sudo"        calls_have "sudo tailscale set --operator="
   else
     check "wrote LaunchAgent plist"          [ -f "$PLIST" ]
     check "plist binds 127.0.0.1"            plist_has "<string>--host=127.0.0.1</string>"
@@ -466,7 +466,7 @@ test_serve_approval_retry() {
   check "exits zero after retry"     [ "$CODE" -eq 0 ]
   check "showed the approval prompt" out_has "approval URL"
   check "eventually published"       out_has "Tailscale Serve: HTTPS :8477"
-  [ "$OS" = "Linux" ] && check "granted operator on 1st failure" calls_have "tailscale set --operator="
+  [ "$OS" = "Linux" ] && check "granted operator on 1st failure" calls_have "sudo tailscale set --operator="
   teardown
 }
 

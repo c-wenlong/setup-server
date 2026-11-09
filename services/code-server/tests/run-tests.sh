@@ -105,7 +105,7 @@ test_fresh_deploy() {
     check "wrote systemd unit"              [ -f "$HOME/.config/systemd/user/code-server.service" ]
     check "enabled + restarted service"     calls_have "systemctl --user restart code-server"
     check "enabled lingering via sudo"      calls_have "sudo loginctl enable-linger"
-    check "granted operator via sudo"       calls_have "tailscale set --operator="
+    check "granted operator via sudo"       calls_have "sudo tailscale set --operator="
   else
     check "wrote LaunchAgent plist"         [ -f "$HOME/Library/LaunchAgents/com.coder.code-server.plist" ]
     check "bootstrapped LaunchAgent"        calls_have "launchctl bootstrap"
@@ -157,7 +157,7 @@ test_serve_approval_retry() {
   check "exits zero after retry"     [ "$CODE" -eq 0 ]
   check "showed the approval prompt" out_has "one-time enablement"
   check "eventually published"       out_has "Tailscale Serve: HTTPS :443"
-  [ "$OS" = "Linux" ] && check "granted operator on 1st failure" calls_have "tailscale set --operator="
+  [ "$OS" = "Linux" ] && check "granted operator on 1st failure" calls_have "sudo tailscale set --operator="
   teardown
 }
 

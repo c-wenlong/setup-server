@@ -147,6 +147,20 @@ ts_serve_foreign() {
     END { print bad ? "foreign" : "clean" }')" = "foreign" ]
 }
 
+# ts_operator_grant: give $USER tailscaled operator rights via sudo. Never
+# sudo a binary we could have written: a planted `tailscale` in a
+# user-writable dir passes the `version` check above, so the resolved path
+# is only used directly when neither the file nor its directory is writable
+# by us. Otherwise `sudo tailscale` resolves through sudo's root-controlled
+# secure_path instead of our PATH. Needs TAILSCALE (and USER).
+ts_operator_grant() {
+  if [ ! -w "$TAILSCALE" ] && [ ! -w "$(dirname "$TAILSCALE")" ]; then
+    sudo "$TAILSCALE" set --operator="$USER"
+  else
+    sudo tailscale set --operator="$USER"
+  fi
+}
+
 # ts_serve_publish HTTPS_PORT TARGET: publish TARGET (usually
 # http://127.0.0.1:<port>) tailnet-only on HTTPS_PORT. Never steals the
 # port: when ts_serve_foreign sees / handlers proxying elsewhere it warns
@@ -168,9 +182,7 @@ ts_serve_publish() {
   if ! "$TAILSCALE" serve --bg --https="$https_port" "$target" >/dev/null 2>&1; then
     if [ "$OS" = "Linux" ]; then
       info "Direct serve failed — trying operator grant (needs sudo, one time)"
-      # The resolved absolute path, not `sudo tailscale`: sudo's secure_path
-      # could otherwise resolve a different binary than the one we verified.
-      sudo "$TAILSCALE" set --operator="$USER"
+      ts_operator_grant
     fi
     while :; do
       if ts_serve_foreign "$https_port" "$target"; then
@@ -193,24 +205,50 @@ ts_serve_publish() {
 # env_lint FILE: die unless FILE is a .env that is safe to source
 # (`set -a; . FILE`). Every non-blank, non-comment line must be KEY=value
 # (KEY an identifier — an optional `export` prefix and leading whitespace
-# are allowed), no key may appear twice, and no value may use command
-# substitution ($() or backticks), since a sourced file runs as shell.
+# are allowed), no key may appear twice, no value may use command
+# substitution ($() or backticks), and each value must be a quoted string
+# or a run of shell-inert characters — `A=1; id` and `A=1 id` would
+# otherwise execute when the file is sourced.
 # Note the teardowns keep their own stricter env_lint: theirs also enforces
 # how Docker Compose parses quotes and escapes, because they read .env
 # without running it and must not disagree with Compose. Those copies are
 # intentionally untouched — new code that sources a .env should call this
 # one before `set -a; . "$ENV_FILE"; set +a`.
 env_lint() {
-  local env_file="$1" problem
-  problem="$(awk '
-    /^[[:space:]]*(#|$)/ { next }
-    {
-      line = $0; sub(/\r$/, "", line)
-      sub(/^[[:space:]]*(export[[:space:]]+)?/, "", line)
-      if (!match(line, /^[A-Za-z_][A-Za-z0-9_]*=/)) { print "line " NR " is not KEY=value"; exit }
-      key = substr(line, 1, RLENGTH - 1); val = substr(line, RLENGTH + 1)
-      if (seen[key]++) { print key " is set more than once"; exit }
-      if (index(val, "$(") || index(val, "`")) { print "the value of " key " uses command substitution"; exit }
-    }' "$env_file")"
-  [ -z "$problem" ] || die "$env_file: $problem. Fix that line and re-run — a sourced .env runs as shell."
+  local env_file="$1" line key val n=0 keys=$'\n'
+  [ -r "$env_file" ] \
+    || die "$env_file: cannot read it to check it is safe to source."
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line%$'\r'}"
+    val="${line#"${line%%[![:space:]]*}"}"   # leading whitespace, if any
+    case "$val" in ''|'#'*) continue;; esac
+    case "$val" in 'export '*) val="${val#export }";; esac
+    key="${val%%=*}"
+    case "$key" in
+      [A-Za-z_]*|*[!A-Za-z0-9_]*) ;;
+      *) die "$env_file: line $n is not KEY=value. Fix it and re-run — a sourced .env runs as shell.";;
+    esac
+    [ "$val" = "$key" ] \
+      && die "$env_file: line $n is not KEY=value. Fix it and re-run — a sourced .env runs as shell."
+    case "$keys" in *$'\n'"$key"$'\n'*)
+      die "$env_file: $key is set more than once.";; esac
+    keys+="$key"$'\n'
+    val="${val#*=}"
+    case "$val" in *'$('*|*'`'*)
+      die "$env_file: the value of $key uses command substitution — a sourced .env runs as shell.";; esac
+    case "$val" in
+      \'*)
+        [[ "$val" =~ ^\'[^\']*\'[[:space:]]*(#.*)?$ ]] \
+          || die "$env_file: the value of $key is an unbalanced single-quoted string.";;
+      \"*)
+        [[ "$val" =~ ^\"([^\"\\]|\\.)*\"[[:space:]]*(#.*)?$ ]] \
+          || die "$env_file: the value of $key is an unbalanced double-quoted string.";;
+      *)
+        # Unquoted: shell-inert characters only, then optional trailing space
+        # and a comment. `A=1; id`, `A=1 id`, `A=x|y` would all execute.
+        [[ "$val" =~ ^[A-Za-z0-9._/:+,@%^~$={}-]*[[:space:]]*(#.*)?$ ]] \
+          || die "$env_file: the value of $key is not safe to source (metacharacters or spaces; quote it)." ;;
+    esac
+  done < "$env_file"
 }

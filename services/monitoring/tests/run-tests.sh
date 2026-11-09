@@ -134,7 +134,7 @@ test_operator_escalation() {
   setup
   run_deploy
   check "exits zero" [ "$CODE" -eq 0 ]
-  [ "$OS" = "Linux" ] && check "granted operator" calls_have "tailscale set --operator="
+  [ "$OS" = "Linux" ] && check "granted operator" calls_have "sudo tailscale set --operator="
   check "both eventually published" sh -c "grep -c 'tailscale serve --bg --https=' '$CALLS_LOG' | grep -qv '^[01]$'"
   teardown
 }

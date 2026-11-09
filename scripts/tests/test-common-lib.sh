@@ -208,8 +208,21 @@ check "  confirms the mapping"             out_has "Tailscale Serve: HTTPS :8443
 teardown
 setup
 FAKE_SERVE_FAILS=1 lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'
-check "Linux, first try denied: operator grant via sudo" calls_have "sudo $SB/bin/tailscale set --operator="
+check "Linux, first try denied: operator grant via sudo" calls_have "sudo tailscale set --operator="
+check "  falls back: stub lives in a writable dir"   no_call "sudo $SB/bin/tailscale"
 check "  then succeeds"                    [ "$CODE" -eq 0 ]
+teardown
+setup
+# The privileged path is taken only when the resolved binary cannot be
+# replaced or rewritten by us: a stub in a read-only directory simulates a
+# system-installed tailscale.
+mkdir -p "$SB/sysbin"; cp "$SB/bin/tailscale" "$SB/sysbin/tailscale"
+chmod 555 "$SB/sysbin/tailscale" "$SB/sysbin"
+mv "$SB/bin/tailscale" "$SB/bin/tailscale-off"
+PATH="$SB/sysbin:$SB/bin:$PATH" FAKE_SERVE_FAILS=1 lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'
+check "system-installed binary: sudo uses the resolved absolute path" calls_have "sudo $SB/sysbin/tailscale set --operator="
+check "  then succeeds"                    [ "$CODE" -eq 0 ]
+chmod 755 "$SB/sysbin"
 teardown
 setup
 FAKE_OS=Darwin FAKE_SERVE_FAILS=1 lib 'detect_os; resolve_tailscale; ts_serve_publish 8443 http://127.0.0.1:8081'
@@ -308,6 +321,20 @@ check "backticks are fatal"                out_has "command substitution"
 printf 'not an assignment\n' > "$SB/bad.env"
 lib "env_lint '$SB/bad.env'"
 check "a non KEY=value line is fatal"      out_has "not KEY=value"
+printf 'A=1; id\n' > "$SB/semi.env"
+lib "env_lint '$SB/semi.env'"
+check "A=1; id is fatal"                   out_has "not safe to source"
+printf 'A=1 id\n' > "$SB/space.env"
+lib "env_lint '$SB/space.env'"
+check "A=1 id is fatal"                    out_has "not safe to source"
+printf 'A=x|y\n' > "$SB/pipe.env"
+lib "env_lint '$SB/pipe.env'"
+check "a pipe in a value is fatal"         out_has "not safe to source"
+printf 'A="unterminated\n' > "$SB/unbal.env"
+lib "env_lint '$SB/unbal.env'"
+check "an unbalanced quote is fatal"       out_has "unbalanced"
+lib "env_lint '$SB/no-such.env'"
+check "an unreadable file is fatal"        out_has "cannot read"
 teardown
 
 echo
