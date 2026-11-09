@@ -250,34 +250,42 @@ EOF
 }
 
 test_plist_escapes_env_values() {
-  echo "• launchd plist: XML-special characters in .env values are escaped"
+  echo "• launchd plist: XML-special characters in .env values are escaped and mode is 600"
   setup
   touch "$STATE_DIR/fake_macos"
   export CONTROL_TOPIC='a<b&c'
-  run_deploy
   PLIST="$HOME/Library/LaunchAgents/com.ntfy-control.listener.plist"
+  mkdir -p "$(dirname "$PLIST")"
+  : > "$PLIST"
+  chmod 644 "$PLIST"
+  run_deploy
+  mode="$(stat -c '%a' "$PLIST" 2>/dev/null || stat -f '%Lp' "$PLIST")"
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "plist written"           [ -f "$PLIST" ]
+  check "plist mode 600"          [ "$mode" = "600" ]
   check "value is escaped"        grep -q 'a&lt;b&amp;c' "$PLIST"
   check "no raw chars left"       sh -c "! grep -q 'a<b&c' '$PLIST'"
   teardown
 }
 
 test_handle_sends_credentials() {
-  echo "• listener: every ntfy call carries basic auth from NTFY_USER/NTFY_PASS"
+  echo "• listener: every ntfy call and HTTP action button carries basic auth from NTFY_USER/NTFY_PASS"
   setup
-  run_handle "status"
+  run_handle "panel"
+  expected_b64="$(printf 'control:testpass123' | base64 | tr -d '\n')"
   check "reply used -u"           calls_have '\-u control:testpass123'
   check "reply hit alerts"        calls_have 'http://127.0.0.1:3003/alerts$'
+  check "buttons carry auth hdr"  calls_have "X-Actions.*\"Authorization\": \"Basic $expected_b64\""
   teardown
 }
 
 test_handle_anonymous() {
-  echo "• listener without creds sends no -u (pre-auth ntfy keeps working)"
+  echo "• listener without creds sends no -u and no action auth header (pre-auth ntfy keeps working)"
   setup
-  TEST_NTFY_USER="" TEST_NTFY_PASS="" run_handle "status"
-  check "still replies"           calls_have 'server-control'
+  TEST_NTFY_USER="" TEST_NTFY_PASS="" run_handle "panel"
+  check "still replies"           calls_have 'pick start'
   check "no -u sent"              no_call ' -u '
+  check "no action auth header"   no_call '"Authorization"'
   teardown
 }
 
@@ -523,12 +531,19 @@ live_check() {
 
 test_live() {
   echo "• live: verify the real deployment on this machine"
-  local port topic user pass cred
+  local port topic user pass cred read_user read_pass read_cred mon_env
   port="$(sed -n 's|^NTFY_BASE_URL=http://127.0.0.1:\([0-9]*\)$|\1|p' "$SERVICE_DIR/.env")"
   topic="$(sed -n 's/^CONTROL_TOPIC=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   user="$(sed -n 's/^NTFY_USER=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   pass="$(sed -n 's/^NTFY_PASS=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   cred=""; [ -n "$user" ] && cred="-u $user:$pass"
+  # The control account has write-only access on alerts; read the reply back
+  # using the phone account (read-only on alerts) from monitoring/.env.
+  mon_env="$SERVICE_DIR/../monitoring/.env"
+  read_user="$(sed -n 's/^NTFY_PHONE_USER=\(.*\)$/\1/p' "$mon_env" 2>/dev/null || true)"
+  read_pass="$(sed -n 's/^NTFY_PHONE_PASS=\(.*\)$/\1/p' "$mon_env" 2>/dev/null || true)"
+  read_cred="$cred"
+  [ -n "$read_user" ] && [ -n "$read_pass" ] && read_cred="-u $read_user:$read_pass"
   live_check "ntfy healthy"          curl -fsS "http://127.0.0.1:$port/v1/health"
   if [ "$OS" = "Linux" ]; then
     live_check "listener active"     sh -c "systemctl --user is-active ntfy-control | grep -qx active"
@@ -539,7 +554,7 @@ test_live() {
   # end-to-end: publish `status`, expect the listener to reply on the alerts
   # topic — authenticated, since the server is deny-all.
   curl -fsS -o /dev/null $cred -d "status" "http://127.0.0.1:$port/$topic" && sleep 3
-  live_check "status round-trip"     sh -c "curl -fsS $cred 'http://127.0.0.1:$port/alerts/json?poll=1&since=30s' | grep -q 'server-control'"
+  live_check "status round-trip"     sh -c "curl -fsS $read_cred 'http://127.0.0.1:$port/alerts/json?poll=1&since=30s' | grep -q 'server-control'"
 }
 
 # A stop_guard is a script in the repo, so these run against a fixture repo

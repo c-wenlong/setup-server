@@ -21,8 +21,9 @@
 # seeding step; optional).
 #
 # Idempotent: safe to re-run; existing .env (holds admin + ntfy credentials)
-# is never overwritten; ntfy users/ACLs are created once and re-applied
-# (ntfy access is an upsert); seeding skips anything that already exists.
+# is never overwritten; ntfy users are created once, then kept in sync —
+# passwords re-aligned to .env, ACLs re-applied (ntfy access is an upsert);
+# seeding skips anything that already exists.
 
 set -euo pipefail
 
@@ -98,8 +99,7 @@ fi
 # Migration: a .env from before ntfy auth has no account block, and deny-all
 # in the compose file would lock every client out. Append it, then fall
 # through to the same read-back a fresh .env gets.
-env_val() { sed -n "s/^$1=//p" "$ENV_FILE" | head -1; }
-if ! grep -q '^NTFY_CONTROL_USER=' "$ENV_FILE"; then
+if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?NTFY_CONTROL_USER=' "$ENV_FILE"; then
   info "Adding the ntfy account block to the existing .env (new in this version)"
   cat >> "$ENV_FILE" <<EOF
 # ntfy accounts, one per role (hex only, so they survive .env, JSON bodies
@@ -108,7 +108,6 @@ if ! grep -q '^NTFY_CONTROL_USER=' "$ENV_FILE"; then
 #   kuma    — write-only on NTFY_TOPIC (publishes alerts, cannot read)
 #   control — read-write on CONTROL_TOPIC, write-only on NTFY_TOPIC (replies)
 # Anything else is denied outright (auth-default-access=deny-all).
-CONTROL_TOPIC=${CONTROL_TOPIC:-control}
 NTFY_PHONE_USER=phone
 NTFY_PHONE_PASS=$(openssl rand -hex 16)
 NTFY_KUMA_USER=kuma
@@ -116,11 +115,43 @@ NTFY_KUMA_PASS=$(openssl rand -hex 16)
 NTFY_CONTROL_USER=control
 NTFY_CONTROL_PASS=$(openssl rand -hex 16)
 EOF
+  # Only when the key is absent entirely: .env is last-assignment-wins when
+  # sourced, so appending CONTROL_TOPIC unconditionally would shadow one the
+  # user already pinned further up the file.
+  grep -qE '^[[:space:]]*(export[[:space:]]+)?CONTROL_TOPIC=' "$ENV_FILE" \
+    || echo "CONTROL_TOPIC=${CONTROL_TOPIC:-control}" >> "$ENV_FILE"
   ok ".env now carries the ntfy accounts"
 fi
 # The block above holds passwords — enforce 600 even on a .env created
 # before it existed.
 chmod 600 "$ENV_FILE"
+
+# env_val KEY: KEY's value in .env, read the way Docker Compose (and the
+# seeding step's `set -a; . .env`) sees it — an optional `export ` prefix,
+# one pair of surrounding quotes stripped, an unquoted trailing ` #`
+# comment dropped, $HOME/${HOME} interpolated outside single quotes, last
+# assignment wins. The ACL grants and the credential checks below consume
+# these values directly, so this reader must agree with the source or a
+# quoted `NTFY_TOPIC="alerts"` grants on `"alerts"` while Kuma publishes to
+# `alerts`. Same parser teardown.sh uses for the same reason.
+env_val() {
+  local line value tail quote=""
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
+  printf '%s' "$value"
+}
 
 NTFY_PHONE_USER="$(env_val NTFY_PHONE_USER)";     NTFY_PHONE_PASS="$(env_val NTFY_PHONE_PASS)"
 NTFY_KUMA_USER="$(env_val NTFY_KUMA_USER)";       NTFY_KUMA_PASS="$(env_val NTFY_KUMA_PASS)"
@@ -152,8 +183,11 @@ done
 # ---------------------------------------------------------------- ntfy auth
 # One user per role in the auth db (the ntfy-auth named volume), deny-all to
 # everything else. `ntfy user list` prints "user <name> (role: ...)" blocks;
-# a user is added only when absent, so a password rotated inside ntfy is
-# left alone — .env holds what was set at creation, not a live mirror.
+# a user is added only when absent, and an existing one gets `change-pass`
+# back to the .env password — .env is the authority for credentials (it is
+# what ntfy-control and the seeder read), which also self-heals the reset
+# where .env was regenerated but the auth volume survived. To rotate a
+# password, edit .env and re-run; changing it inside ntfy is reverted here.
 # `ntfy access` is an upsert, so the grants run every time and repair drift.
 info "Configuring ntfy auth (one user per role; anonymous denied)"
 ntfy_user_exists() {
@@ -163,7 +197,9 @@ ntfy_user_exists() {
 new_users=""
 for pair in "$NTFY_PHONE_USER $NTFY_PHONE_PASS" "$NTFY_KUMA_USER $NTFY_KUMA_PASS" "$NTFY_CONTROL_USER $NTFY_CONTROL_PASS"; do
   set -- $pair
-  if ! ntfy_user_exists "$1"; then
+  if ntfy_user_exists "$1"; then
+    docker exec -e "NTFY_PASSWORD=$2" ntfy ntfy user change-pass "$1" >/dev/null
+  else
     docker exec -e "NTFY_PASSWORD=$2" ntfy ntfy user add "$1" >/dev/null
     new_users="$new_users $1"
   fi
@@ -182,7 +218,7 @@ ntfy_grant "$NTFY_CONTROL_USER" "$NTFY_TOPIC" write-only
 if [ -n "$new_users" ]; then
   ok "ntfy users created:$new_users (anonymous: deny-all)"
 else
-  ok "ntfy users + ACLs verified"
+  ok "ntfy users + ACLs verified (passwords synced from .env)"
 fi
 
 # ---------------------------------------------------------------- seed

@@ -72,7 +72,31 @@ fi
 # The listener's ntfy credentials live in monitoring/.env (the auth db is
 # created there) and are copied in here as NTFY_USER/NTFY_PASS.
 MON_ENV="$(cd "$SERVICE_DIR/.." && pwd)/monitoring/.env"
-env_val() { sed -n "s/^$1=//p" "$2" 2>/dev/null | head -1; }
+# env_val KEY FILE: KEY's value in FILE, read the way Compose/source sees it
+# — an optional `export ` prefix, one pair of surrounding quotes stripped,
+# an unquoted trailing ` #` comment dropped, $HOME/${HOME} interpolated
+# outside single quotes, last assignment wins. These values become the
+# credentials and topic names the listener authenticates with, so a quoted
+# `NTFY_PASS="x"` must not reach the server with its quotes still on. Same
+# parser teardown.sh uses for the same reason.
+env_val() {
+  local line value tail quote=""
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$2" 2>/dev/null | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
+  printf '%s' "$value"
+}
 
 if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
@@ -99,7 +123,7 @@ EOF
 fi
 
 # Migration: add PUBLIC_NTFY_URL to .envs generated before action buttons.
-if ! grep -q '^PUBLIC_NTFY_URL=' "$ENV_FILE"; then
+if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?PUBLIC_NTFY_URL=' "$ENV_FILE"; then
   echo "PUBLIC_NTFY_URL=$PUBLIC_NTFY_URL" >> "$ENV_FILE"
   ok "Added PUBLIC_NTFY_URL to existing .env"
 fi
@@ -107,7 +131,7 @@ fi
 # Migration: add the ntfy credentials to .envs generated before ntfy auth.
 # Empty values mean monitoring is older still — the probe below dies with
 # instructions if the server actually requires auth.
-if ! grep -q '^NTFY_USER=' "$ENV_FILE"; then
+if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?NTFY_USER=' "$ENV_FILE"; then
   {
     echo "NTFY_USER=$(env_val NTFY_CONTROL_USER "$MON_ENV")"
     echo "NTFY_PASS=$(env_val NTFY_CONTROL_PASS "$MON_ENV")"
@@ -214,7 +238,11 @@ with open(sys.argv[1], encoding="utf-8") as fh:
             print("    <key>%s</key><string>%s</string>" % (m.group(1), escape(m.group(2))))
 PY
 )"
-  cat > "$PLIST" <<EOF
+  # The plist embeds NTFY_PASS in EnvironmentVariables — create it with 0600
+  # from the first byte AND chmod so a pre-existing lax file is re-locked.
+  (
+    umask 077
+    cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -234,6 +262,8 @@ $ENV_XML
 </dict>
 </plist>
 EOF
+  )
+  chmod 600 "$PLIST"
   launchctl bootout "gui/$(id -u)/com.ntfy-control.listener" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
   ok "LaunchAgent loaded (logs: ~/Library/Logs/ntfy-control.log)"

@@ -52,6 +52,7 @@ Config via env (systemd EnvironmentFile= / launchd EnvironmentVariables):
     CONTROL_APPS_DIR (optional explicit path to the launcher apps dir)
 """
 
+import base64
 import json
 import os
 import re
@@ -73,6 +74,12 @@ KUMA_ENV_FILE = os.environ.get("KUMA_ENV_FILE", "")
 NTFY_USER = os.environ.get("NTFY_USER", "")
 NTFY_PASS = os.environ.get("NTFY_PASS", "")
 AUTH = ["-u", f"{NTFY_USER}:{NTFY_PASS}"] if NTFY_USER else []
+# The same login as an Authorization header, for the http action buttons:
+# the request a button fires is a plain POST to the control topic — denied
+# like any other anonymous call on a deny-all server — and the app sends
+# only what the action carries.
+AUTH_HEADER = ("Basic " + base64.b64encode(
+    f"{NTFY_USER}:{NTFY_PASS}".encode()).decode()) if NTFY_USER else ""
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 VERBS = ("start", "stop", "restart")
@@ -409,9 +416,15 @@ def notify(text, actions=None):
 
 def action(label, message):
     """A tappable button: the phone POSTs the command back to the control
-    topic — same path as a typed message, same allowlist."""
-    return {"action": "http", "label": label, "method": "POST",
-            "url": f"{PUBLIC_NTFY}/{CONTROL_TOPIC}", "body": message}
+    topic — same path as a typed message, same allowlist. It authenticates
+    as the listener's own account (read-write on the control topic, which
+    the POST needs); without the header a deny-all server answers 401 and
+    the tap silently does nothing."""
+    a = {"action": "http", "label": label, "method": "POST",
+         "url": f"{PUBLIC_NTFY}/{CONTROL_TOPIC}", "body": message}
+    if AUTH_HEADER:
+        a["headers"] = {"Authorization": AUTH_HEADER}
+    return a
 
 
 # ----------------------------------------------------------------- state

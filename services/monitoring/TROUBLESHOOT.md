@@ -116,14 +116,23 @@ It's in `.env` (`KUMA_ADMIN_PASSWORD`). If `.env` is gone too:
 ## Nuke and pave (destroys monitor history + accounts)
 
 ```sh
-docker compose --project-directory . down
+docker compose --project-directory . down -v
 rm -rf ~/services/monitoring .env
 ./setup.sh
 ```
 
+The `-v` is not optional anymore: ntfy's users.db lives in the `ntfy-auth`
+named volume, and a plain `down` leaves it behind. Drop `.env` but keep that
+volume and the re-run generates fresh passwords for accounts that already
+exist — every login then fails. (`setup.sh` also re-syncs passwords from
+`.env` on each run, so even an already-broken reset heals on the next
+deploy.) Equivalent by hand:
+`docker compose --project-directory . down && docker volume rm monitoring_ntfy-auth`.
+
 State is `~/services/monitoring/kuma` and `~/services/monitoring/ntfy`
-(`KUMA_VOLUME` / `NTFY_VOLUME` in `.env`) — not `~/monitoring`, which was the
-pre-2026-09-07 layout and no longer exists.
+(`KUMA_VOLUME` / `NTFY_VOLUME` in `.env`) plus the `ntfy-auth` docker volume
+(ntfy's users + ACLs) — not `~/monitoring`, which was the pre-2026-09-07
+layout and no longer exists.
 
 Deliberately **not** in that list: `tailscale serve --https=3002 off` and
 `--https=3003 off`. `setup.sh` re-publishes both, and leaving them up means

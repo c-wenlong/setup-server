@@ -189,7 +189,9 @@ notification_name = "ntfy-alerts"
 # dedicated kuma account (write-only on the alerts topic). Credentials come
 # from monitoring/.env via setup.sh; absent env = an unauthenticated ntfy,
 # which is what `none` means. An existing channel is REPLACED when its auth
-# does not match — a pre-auth `none` channel would only ever get 401s.
+# does not match — a pre-auth `none` channel would only ever get 401s, and a
+# password rotated in .env has to reach the stored channel: Kuma keeps the
+# old one otherwise and every alert fails auth while looking configured.
 ntfy_auth = {"ntfyAuthenticationMethod": "none"}
 if os.environ.get("NTFY_KUMA_USER") and os.environ.get("NTFY_KUMA_PASS"):
     ntfy_auth = {
@@ -202,6 +204,7 @@ existing = next((n for n in api.get_notifications() if n["name"] == notification
 if existing and (
     existing.get("ntfyAuthenticationMethod", "none") != ntfy_auth["ntfyAuthenticationMethod"]
     or existing.get("ntfyusername") != ntfy_auth.get("ntfyusername")
+    or existing.get("ntfypassword") != ntfy_auth.get("ntfypassword")
 ):
     api.delete_notification(existing["id"])
     print("replaced ntfy notification (auth changed)")

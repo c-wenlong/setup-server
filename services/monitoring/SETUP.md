@@ -54,9 +54,12 @@ creates one account per role on first run:
 | `NTFY_KUMA_*` | write-only | — | Kuma's `ntfy-alerts` notification channel (can publish, cannot read) |
 | `NTFY_CONTROL_*` | write-only | read-write | the ntfy-control listener — reads commands, replies on `alerts` |
 
-Everyone else is denied outright. Users are created only when absent (a
-password rotated inside ntfy is left alone); the ACL grants are upserts and
-re-run every deploy. New accounts for scripts can be added by hand:
+Everyone else is denied outright. Users are created when absent and their
+passwords re-synced from `.env` on every deploy — `.env` is the authority,
+so rotate a password by editing it there (a `change-pass` done inside ntfy
+is reverted on the next run, and a reset that regenerated `.env` while the
+auth volume survived self-heals). The ACL grants are upserts and re-run
+every deploy. New accounts for scripts can be added by hand:
 `docker exec -e NTFY_PASSWORD=… ntfy ntfy user add <name>` then
 `docker exec ntfy ntfy access <name> <topic> <read-only|write-only|read-write>`.
 
@@ -119,7 +122,10 @@ docker compose $D pull && docker compose $D up -d   # upgrade ntfy (Kuma: see pi
 ```
 
 Kuma state (monitors, history, admin account): `~/services/monitoring/kuma`.
-ntfy cache: `~/services/monitoring/ntfy`. Back both up if you care about history.
+ntfy cache: `~/services/monitoring/ntfy`. ntfy accounts + ACLs: the
+`ntfy-auth` docker volume (`docker volume rm monitoring_ntfy-auth` resets
+them — `.env` passwords are re-created/re-synced on the next `./setup.sh`).
+Back the first two up if you care about history.
 
 ## Tests
 

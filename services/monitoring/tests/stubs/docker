@@ -35,6 +35,10 @@ case "$1" in
             echo "$u" >> "$STATE_DIR/ntfy_users"
             echo "user $u added with role user"
             ;;
+          change-pass)
+            # succeeds; the calls.log entry above is the record the suite
+            # asserts on (setup.sh re-syncs .env passwords every run)
+            ;;
         esac
         ;;
     esac
