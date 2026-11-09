@@ -173,6 +173,25 @@ test_env_wins_on_rerun() {
   teardown
 }
 
+test_https_port_formats() {
+  echo "• re-run: HTTPS port set quoted, exported or commented in .env still wins"
+  setup
+  touch "$STATE_DIR/operator"
+  # write_env puts KUMA_HTTPS_PORT=3002 on a plain line; swap the spelling of
+  # the value and the published port must still follow it, not KUMA_PORT.
+  for fmt in 'KUMA_HTTPS_PORT="8443"' "KUMA_HTTPS_PORT='8443'" \
+             'export KUMA_HTTPS_PORT=8443' 'KUMA_HTTPS_PORT=8443 # tls port'; do
+    write_env
+    sed -i.bak "s|^KUMA_HTTPS_PORT=.*|$fmt|" "$SVC/.env" && rm "$SVC/.env.bak"
+    : > "$CALLS_LOG"
+    run_deploy
+    check "exits zero: $fmt"          [ "$CODE" -eq 0 ]
+    check "serves :8443 -> :3002"     calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:3002"
+    check "never fell back to :3002"  no_call "tailscale serve --bg --https=3002 "
+  done
+  teardown
+}
+
 test_https_port_readback() {
   echo "• re-run: old .env without HTTPS keys keeps published=local; an override warns"
   setup
@@ -336,6 +355,75 @@ test_teardown_purge() {
   teardown
 }
 
+test_teardown_purge_unsafe_paths() {
+  echo "• teardown --purge: unsafe data paths refuse before anything changes"
+  setup
+  mkdir -p "$HOME/services/monitoring/kuma" "$HOME/services/monitoring/ntfy" \
+          "$HOME/services/other-svc"
+
+  # a sibling service's directory is never a purge target
+  write_env
+  sed -i.bak "s|^KUMA_VOLUME=.*|KUMA_VOLUME=$HOME/services/other-svc|" "$SVC/.env" && rm "$SVC/.env.bak"
+  run_teardown "monitoring" "--purge"
+  check "sibling dir: refused"          [ "$CODE" -ne 0 ]
+  check "sibling dir survives"          [ -d "$HOME/services/other-svc" ]
+  check "no serve port turned off"      no_call "serve --https="
+  check "compose never ran down"        no_call "compose --project-directory"
+  check ".env kept"                     [ -f "$SVC/.env" ]
+
+  # a symlinked leaf pointing at a sibling — same refusal
+  write_env
+  rm -rf "$HOME/services/monitoring/kuma"
+  ln -s "$HOME/services/other-svc" "$HOME/services/monitoring/kuma"
+  : > "$CALLS_LOG"
+  run_teardown "monitoring" "--purge"
+  check "symlink leaf: refused"         [ "$CODE" -ne 0 ]
+  check "link itself survives"          [ -L "$HOME/services/monitoring/kuma" ]
+  check "link target survives"          [ -d "$HOME/services/other-svc" ]
+  check "no serve port turned off"      no_call "serve --https="
+  check "compose never ran down"        no_call "compose --project-directory"
+  check ".env kept"                     [ -f "$SVC/.env" ]
+
+  # a '..' component escaping ~/services/monitoring — same refusal
+  write_env
+  rm -f "$HOME/services/monitoring/kuma" && mkdir -p "$HOME/services/monitoring/kuma"
+  sed -i.bak "s|^KUMA_VOLUME=.*|KUMA_VOLUME=$HOME/services/monitoring/../other-svc|" "$SVC/.env" && rm "$SVC/.env.bak"
+  : > "$CALLS_LOG"
+  run_teardown "monitoring" "--purge"
+  check ".. path: refused"              [ "$CODE" -ne 0 ]
+  check "explains"                      out_has "\.\."
+  check "sibling dir survives"          [ -d "$HOME/services/other-svc" ]
+  check "own data dir survives"         [ -d "$HOME/services/monitoring/kuma" ]
+  check "no serve port turned off"      no_call "serve --https="
+  check "compose never ran down"        no_call "compose --project-directory"
+  check ".env kept"                     [ -f "$SVC/.env" ]
+  teardown
+}
+
+test_teardown_purge_path_boundaries() {
+  echo "• teardown --purge: a path with a space or a glob char deletes itself only"
+  setup
+  write_env
+  mkdir -p "$HOME/services/monitoring/kuma" \
+          "$HOME/services/monitoring/kuma data" \
+          "$HOME/services/monitoring/ntfy*" \
+          "$HOME/services/monitoring/ntfy-other"
+  # 'kuma data' must be deleted whole; a word-split sibling 'kuma' and the
+  # 'ntfy*' glob matches must survive — the purge list keeps path boundaries.
+  sed -i.bak \
+    -e "s|^KUMA_VOLUME=.*|KUMA_VOLUME=$HOME/services/monitoring/kuma data|" \
+    -e "s|^NTFY_VOLUME=.*|NTFY_VOLUME=$HOME/services/monitoring/ntfy*|" \
+    "$SVC/.env" && rm "$SVC/.env.bak"
+  run_teardown "monitoring" "--purge"
+  check "exits zero"                    [ "$CODE" -eq 0 ]
+  check "spaced dir deleted"            [ ! -e "$HOME/services/monitoring/kuma data" ]
+  check "split-off sibling survives"    [ -d "$HOME/services/monitoring/kuma" ]
+  check "literal glob dir deleted"      [ ! -e "$HOME/services/monitoring/ntfy*" ]
+  check "glob match survives"           [ -d "$HOME/services/monitoring/ntfy-other" ]
+  check ".env gone"                     [ ! -f "$SVC/.env" ]
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -478,6 +566,7 @@ test_fresh_deploy
 test_idempotent_rerun
 test_port_override
 test_env_wins_on_rerun
+test_https_port_formats
 test_https_port_readback
 test_port_not_numeric
 test_missing_openssl
@@ -488,6 +577,8 @@ test_teardown_shared_port
 test_teardown_needs_env
 test_teardown_serve_unreadable
 test_teardown_purge
+test_teardown_purge_unsafe_paths
+test_teardown_purge_path_boundaries
 test_seed_studio_monitor
 test_seed_renamed_monitors
 

@@ -94,10 +94,32 @@ set -a; . "$ENV_FILE"; set +a
 # The HTTPS port keys may be absent from an .env written before they
 # existed — read the file by name, because sourcing would silently keep the
 # shell value, which is exactly the drift read-back exists to stop. Absent
-# means that deployment published on the local port.
-env_val() { sed -n "s/^$1=\(.*\)\$/\1/p" "$ENV_FILE" | head -1; }
-KUMA_HTTPS_PORT="$(env_val KUMA_HTTPS_PORT)"; KUMA_HTTPS_PORT="${KUMA_HTTPS_PORT:-$KUMA_PORT}"
-NTFY_HTTPS_PORT="$(env_val NTFY_HTTPS_PORT)"; NTFY_HTTPS_PORT="${NTFY_HTTPS_PORT:-$NTFY_PORT}"
+# means that deployment published on the local port. The value is parsed the
+# way Docker Compose reads it (an optional `export `, matching single or
+# double quotes, an inline ` #` comment after an unquoted value, $HOME /
+# ${HOME} interpolation) — raw file text like KUMA_HTTPS_PORT="8443" must not
+# reach require_numeric, and `export KUMA_HTTPS_PORT=…` must not read as
+# absent (the same helper teardown.sh uses).
+env_get() {
+  local line value tail quote=""
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+  fi
+  printf '%s' "$value"
+}
+KUMA_HTTPS_PORT="$(env_get KUMA_HTTPS_PORT)"; KUMA_HTTPS_PORT="${KUMA_HTTPS_PORT:-$KUMA_PORT}"
+NTFY_HTTPS_PORT="$(env_get NTFY_HTTPS_PORT)"; NTFY_HTTPS_PORT="${NTFY_HTTPS_PORT:-$NTFY_PORT}"
 # The file is user-editable — check it too, before compose or serve see it.
 require_numeric KUMA_PORT NTFY_PORT KUMA_HTTPS_PORT NTFY_HTTPS_PORT
 env_ignored() { # <name> <explicit shell value> <resolved value>

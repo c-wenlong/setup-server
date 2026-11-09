@@ -187,7 +187,10 @@ SERVE_STATUS="$("$TAILSCALE" serve status 2>&1)" \
 
 # --purge confirmation comes before anything changes, so a mistyped name
 # leaves the service exactly as it was.
-PURGE_DIRS=""
+# PURGE_DIRS is an array, never a joined string: word-splitting "$PURGE_DIRS a
+# path with spaces" would rm both halves of one path (and expand glob chars).
+# Every element enters it only through real_dir.
+PURGE_DIRS=()
 if [ "$PURGE" -eq 1 ]; then
   for var in KUMA_VOLUME NTFY_VOLUME; do
     d="$(env_get "$var")"
@@ -211,10 +214,10 @@ if [ "$PURGE" -eq 1 ]; then
         "$root"/?*) ;;
         *) die "$var=$d resolves to $resolved, which is not a folder inside $root — refusing." ;;
       esac
-      PURGE_DIRS="$PURGE_DIRS $resolved"
+      PURGE_DIRS+=("$resolved")
     fi
   done
-  warn "--purge deletes${PURGE_DIRS:- nothing (no data dirs on disk)} and $ENV_FILE. This cannot be undone."
+  warn "--purge deletes ${PURGE_DIRS[*]:-nothing (no data dirs on disk)} and $ENV_FILE. This cannot be undone."
   printf 'Type %s to confirm: ' "$NAME"
   answer=""
   read -r answer || true
@@ -274,10 +277,10 @@ ok "Containers removed; data in $KUMA_VOLUME + $NTFY_VOLUME kept"
 # ---------------------------------------------------------------- purge
 if [ "$PURGE" -eq 1 ]; then
   info "Purging data"
-  for d in $PURGE_DIRS; do rm -rf -- "$d"; done
+  for d in ${PURGE_DIRS[@]+"${PURGE_DIRS[@]}"}; do rm -rf -- "$d"; done
   rm -f -- "$ENV_FILE"
   rmdir "$HOME/services/$NAME" 2>/dev/null || true
-  ok "Deleted${PURGE_DIRS:- (no data dirs)} and $ENV_FILE"
+  ok "Deleted ${PURGE_DIRS[*]:-nothing (no data dirs)} and $ENV_FILE"
 fi
 
 echo
