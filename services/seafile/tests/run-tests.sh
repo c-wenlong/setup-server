@@ -118,7 +118,10 @@ test_fresh_deploy() {
   check "data dirs created under HOME"   [ -d "$HOME/services/seafile/data" ]
   check "served on tailscale :8443"      calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8081"
   check "prints final URL"               out_has "https://test-host.tailfake.ts.net:8443"
-  check "prints admin credentials"       out_has "ADMIN_EMAIL"
+  check "points at .env for the password" out_has "INIT_SEAFILE_ADMIN_PASSWORD"
+  check "state root is mode 700"         sh -c "[ \"\$(stat -c %a '$HOME/services/seafile' 2>/dev/null || stat -f %Lp '$HOME/services/seafile')\" = 700 ]"
+  admin_pw="$(sed -n 's/^INIT_SEAFILE_ADMIN_PASSWORD=//p' "$SVC/.env")"
+  check "admin password never echoed"    bash -c '! grep -qF "$1" <<<"$2"' _ "$admin_pw" "$OUT"
   teardown
 }
 
@@ -127,6 +130,8 @@ test_idempotent_rerun() {
   setup
   touch "$STATE_DIR/operator"
   cat > "$SVC/.env" <<'EOF'
+LOCAL_PORT=8081
+HTTPS_PORT=8443
 SEAFILE_SERVER_HOSTNAME=test-host.tailfake.ts.net:8443
 INIT_SEAFILE_ADMIN_EMAIL=x@y.z
 INIT_SEAFILE_ADMIN_PASSWORD=my-custom-secret
@@ -140,6 +145,26 @@ EOF
   teardown
 }
 
+test_env_wins_on_rerun() {
+  echo "• re-run with port overrides: .env wins, the override is warned"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  : > "$CALLS_LOG"
+  export LOCAL_PORT=9081 HTTPS_PORT=10000
+  run_deploy
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  check "warns LOCAL_PORT ignored"   out_has "LOCAL_PORT=9081 ignored"
+  check "warns HTTPS_PORT ignored"   out_has "HTTPS_PORT=10000 ignored"
+  check "serves .env's ports"        calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8081"
+  check "never the override port"    no_call "https=10000"
+  check "health-checked :8081"       calls_have "http://127.0.0.1:8081/"
+  check "  never the override"       no_call "127.0.0.1:9081"
+  check ".env keeps its port"        env_has "LOCAL_PORT=8081"
+  check "prints .env's URL"          out_has "https://test-host.tailfake.ts.net:8443"
+  teardown
+}
+
 test_port_override() {
   echo "• LOCAL_PORT/HTTPS_PORT override"
   setup
@@ -148,6 +173,7 @@ test_port_override() {
   run_deploy
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check ".env has custom local port"  env_has "LOCAL_PORT=9081"
+  check ".env records HTTPS_PORT"     env_has "HTTPS_PORT=10000"
   check "hostname carries 10000"      env_has "SEAFILE_SERVER_HOSTNAME=test-host.tailfake.ts.net:10000"
   check "served on :10000 -> 9081"    calls_have "tailscale serve --bg --https=10000 http://127.0.0.1:9081"
   teardown
@@ -867,6 +893,7 @@ test_preflight_tailscale_down
 test_preflight_bad_https_port
 test_fresh_deploy
 test_idempotent_rerun
+test_env_wins_on_rerun
 test_port_override
 test_operator_escalation
 test_teardown_safe
