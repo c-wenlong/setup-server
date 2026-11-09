@@ -60,7 +60,7 @@ services:
 
   db:
     container_name: metabase-db
-    image: postgres:${POSTGRES_VERSION:-16-alpine}
+    image: postgres:${POSTGRES_VERSION:-16.15-alpine}
     restart: unless-stopped
     logging: *logging-config
     mem_limit: ${METABASE_DB_MEM_LIMIT:-256m}

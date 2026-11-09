@@ -218,6 +218,10 @@ seed_admin() {
   curl -sS -c "$WORK/cookies" -o /dev/null --max-time 15 \
     "http://127.0.0.1:$LOCAL_PORT/auth/get-csrf-token/" >/dev/null 2>&1 || true
   csrf="$(awk '$6 == "csrftoken" { print $7 }' "$WORK/cookies" 2>/dev/null | tail -1)"
+  # curl already prints 000 to stdout when it cannot connect AND exits
+  # non-zero, so a `|| echo 000` fallback CONCATENATES and turns a plain
+  # connection failure into the nonsense code "000000" in the warn below.
+  # Take curl's own output and normalise anything unexpected.
   code="$(curl -sS -b "$WORK/cookies" -c "$WORK/cookies" -o "$WORK/signup.json" -w '%{http_code}' --max-time 60 \
     -X POST \
     -H "X-CSRFToken: ${csrf:-none}" \
@@ -225,7 +229,11 @@ seed_admin() {
     --data-urlencode "password=$PLANE_ADMIN_PASSWORD" \
     --data-urlencode "first_name=${PLANE_ADMIN_FIRST_NAME:-Admin}" \
     --data-urlencode "last_name=${PLANE_ADMIN_LAST_NAME:-User}" \
-    "http://127.0.0.1:$LOCAL_PORT/api/instances/admins/sign-up/" 2>/dev/null || echo 000)"
+    "http://127.0.0.1:$LOCAL_PORT/api/instances/admins/sign-up/" 2>/dev/null)" || true
+  case "$code" in
+    [0-9][0-9][0-9]) ;;
+    *) code=000 ;;
+  esac
   case "$code" in
     200|201|302)
       ok "First instance admin seeded ($PLANE_ADMIN_EMAIL)"

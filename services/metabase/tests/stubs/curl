@@ -3,6 +3,9 @@
 #   health_fails_left  — countdown of 503s from /api/health
 #   no_setup_token     — /api/session/properties has no setup-token
 #   setup_fail         — POST /api/setup returns 500
+#   setup_conn_fail    — POST /api/setup acts like a refused connection:
+#                        prints 000 for -w and exits 7, the way real curl does
+#                        (this is what `|| echo 000` concatenated into 000000)
 #   setup_done         — has-user-setup is already true
 echo "curl $*" >> "$CALLS_LOG"
 
@@ -57,6 +60,10 @@ case "$url" in
     ;;
   */api/setup|*/api/setup/)
     if [ "$method" = "POST" ]; then
+      if [ -f "$STATE_DIR/setup_conn_fail" ]; then
+        [ "$want_code" = "1" ] && printf '000'
+        exit 7                        # CURLE_COULDNT_CONNECT
+      fi
       if [ -f "$STATE_DIR/setup_fail" ]; then
         emit 500 '{"error":"setup failed"}'
       fi
