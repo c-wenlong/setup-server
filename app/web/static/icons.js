@@ -94,10 +94,6 @@
     'metabase':      { file: 'metabase' },                    /* #509ee3    */
     'plane':         { file: 'plane' },                       /* #5275fc    */
     'umami':         { file: 'umami', dark: true },           /* black ink  */
-    /* The designs repo's own favicon, copied unchanged (a Next.js build
-       asset): white-and-spectrum mark on a near-black plate, reads on
-       both tile themes, so no -dark pair. */
-    'design-systems': { file: 'design-systems' },
     /* Red-gradient lobster, reads on both tile themes. */
     'openclaw':      { file: 'openclaw' },
     /* App-icon plate: white bg for the light tile, #0d1117 for dark. */
