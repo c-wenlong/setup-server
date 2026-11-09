@@ -69,8 +69,6 @@ so the licence table does not cover them):
 mark (`apps/web/public/brand/mark.png`) from the gnosia repo, and
 `sources.svg` is the sources repo's own `site/favicon.svg` copied unchanged —
 each service's own artwork, the repo owner's in each case.
-`design-systems.svg` is the designs repo's own favicon copied unchanged
-(the docs site's `/media/docs/assets/favicon.svg`, a Next.js build asset).
 `launcher.svg` is the launcher's own mark (three fused white tiles sliding
 right, with three fading echoes behind them, on near-black), original to
 this repo.
