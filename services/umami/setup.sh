@@ -178,17 +178,24 @@ rotate_admin() {
   login_json() {
     UMAMI_USER="$1" UMAMI_PASS="$2" python3 -c 'import json,os; print(json.dumps({"username":os.environ["UMAMI_USER"],"password":os.environ["UMAMI_PASS"]}))'
   }
+  # curl already prints 000 to stdout when it cannot connect AND exits
+  # non-zero, so a `|| echo 000` fallback CONCATENATES and turns a plain
+  # connection failure into the nonsense code "000000". Take curl's own
+  # output and normalise anything unexpected.
+  http_code() { case "$1" in [0-9][0-9][0-9]) printf '%s' "$1" ;; *) printf '000' ;; esac; }
   # Already rotated?
   code="$(curl -sS -o "$WORK/login.json" -w '%{http_code}' --max-time 30 \
     -X POST -H 'Content-Type: application/json' --data-binary "$(login_json "$UMAMI_ADMIN_USER" "$UMAMI_ADMIN_PASSWORD")" \
-    "http://127.0.0.1:$LOCAL_PORT/api/auth/login" 2>/dev/null || echo 000)"
+    "http://127.0.0.1:$LOCAL_PORT/api/auth/login" 2>/dev/null)" || true
+  code="$(http_code "$code")"
   if [ "$code" = "200" ]; then
     ok "Admin password already matches .env"
     return 0
   fi
   code="$(curl -sS -o "$WORK/login.json" -w '%{http_code}' --max-time 30 \
     -X POST -H 'Content-Type: application/json' --data-binary "$(login_json "$UMAMI_ADMIN_USER" umami)" \
-    "http://127.0.0.1:$LOCAL_PORT/api/auth/login" 2>/dev/null || echo 000)"
+    "http://127.0.0.1:$LOCAL_PORT/api/auth/login" 2>/dev/null)" || true
+  code="$(http_code "$code")"
   if [ "$code" != "200" ]; then
     warn "Could not log in as $UMAMI_ADMIN_USER with either the generated password or the upstream default (umami). Set the password in the UI."
     return 0
@@ -203,7 +210,8 @@ rotate_admin() {
   code="$(curl -sS -o "$WORK/pw.json" -w '%{http_code}' --max-time 30 \
     -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $token" \
     --data-binary "$payload" \
-    "http://127.0.0.1:$LOCAL_PORT/api/users/$user_id/password" 2>/dev/null || echo 000)"
+    "http://127.0.0.1:$LOCAL_PORT/api/users/$user_id/password" 2>/dev/null)" || true
+  code="$(http_code "$code")"
   case "$code" in
     200)
       ok "Rotated the default admin/umami password"

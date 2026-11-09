@@ -112,7 +112,8 @@ Step by step:
    the x86-64-v2 CPU feature check. Then RAM and free-disk advisories.
 2. **`.env`** — written only if absent, mode 600: generated hex `DB_PASSWORD`
    (Immich requires `[A-Za-z0-9]` only) and `IMMICH_ADMIN_PASSWORD`, paths
-   under `~/services/immich`, `IMMICH_VERSION=v3`, and `TZ` read from
+   under `~/services/immich`, `IMMICH_VERSION=v3.1.0` pinned exactly, and
+   `TZ` read from
    `readlink /etc/localtime`. `COMPOSE_PROFILES` is the one line setup.sh
    owns and will rewrite — only when you pass `IMMICH_ML` explicitly.
 3. **Compose up** — with `--profile ml` when ML is on. First run pulls ~2 GB.
@@ -224,10 +225,11 @@ and the serve-approval prompt.
 - Port 2283 is Immich's default and the HTTPS port matches the local port,
   following the newer convention in this repo.
 - The compose file pins the redis and postgres image digests exactly as
-  upstream ships them, and pins the app to the `v3` tag rather than
-  `release`, so a `docker compose pull` cannot jump a major version by
-  surprise. Bump `IMMICH_VERSION` in `.env` deliberately, and read the
-  release notes first — Immich's breaking changes are real.
+  upstream ships them, and the app to the exact `v3.1.0` tag — not the
+  `v3` moving tag, let alone `release` — so a `docker compose pull` cannot
+  jump even a minor version by surprise. Bump `IMMICH_VERSION` in `.env`
+  deliberately, and read the release notes first — Immich's breaking
+  changes are real.
 - Postgres `shm_size` is raised to 1 GB (upstream default 128 MB): HNSW
   index builds on the vector columns otherwise fail with "could not resize
   shared memory segment" partway through a large import.

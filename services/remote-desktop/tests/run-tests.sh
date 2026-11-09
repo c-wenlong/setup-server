@@ -997,7 +997,7 @@ test_serve_operator_escalation() {
   setup
   run_deploy
   check "exits zero"            [ "$CODE" -eq 0 ]
-  check "granted operator"      calls_have "tailscale set --operator="
+  check "granted operator"      calls_have "sudo tailscale set --operator="
   check "eventually published"  calls_have "tailscale serve --bg --https=8094 http://127.0.0.1:8094/guacamole/$"
   teardown
 }

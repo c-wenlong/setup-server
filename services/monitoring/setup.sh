@@ -14,18 +14,28 @@
 #
 # Usage:
 #   ./setup.sh
-#   KUMA_PORT=3012 NTFY_TOPIC=my-alerts ./setup.sh
+#   KUMA_PORT=3012 NTFY_TOPIC=my-alerts ./setup.sh   # first run only —
+#                                                    # .env wins after that
 #
-# Requirements: Linux or macOS, curl, openssl (passwords), Docker + Compose
-# v2, Tailscale >= 1.90 (arbitrary HTTPS serve ports), uv (for the Kuma
-# seeding step; optional).
+# Requirements: Linux or macOS, curl, openssl (passwords), uv (the Kuma
+# seeding step), Docker + Compose v2, Tailscale >= 1.90 (arbitrary HTTPS
+# serve ports).
 #
-# Idempotent: safe to re-run; existing .env (holds admin + ntfy credentials)
-# is never overwritten; ntfy users are created once, then kept in sync —
-# passwords re-aligned to .env, ACLs re-applied (ntfy access is an upsert);
-# seeding skips anything that already exists.
+# Idempotent: safe to re-run; existing .env (ports + admin + ntfy credentials)
+# is the source of truth — a shell override that disagrees warns and is
+# ignored; ntfy users are created once, then kept in sync (passwords
+# re-aligned to .env, ACLs re-applied); seeding skips anything that already
+# exists.
 
 set -euo pipefail
+
+# Which of these the caller set explicitly, remembered before defaults are
+# applied — only an explicit override earns a warning in the read-back below.
+REQ_KUMA_PORT="${KUMA_PORT-}"
+REQ_NTFY_PORT="${NTFY_PORT-}"
+REQ_KUMA_HTTPS_PORT="${KUMA_HTTPS_PORT-}"
+REQ_NTFY_HTTPS_PORT="${NTFY_HTTPS_PORT-}"
+REQ_NTFY_TOPIC="${NTFY_TOPIC-}"
 
 KUMA_PORT="${KUMA_PORT:-3002}"
 NTFY_PORT="${NTFY_PORT:-3003}"
@@ -48,10 +58,12 @@ info "Preflight checks ($OS)"
 refuse_root
 command -v curl >/dev/null || die "curl is required."
 command -v openssl >/dev/null || die "openssl is required (generates the Kuma admin + ntfy account passwords). Install it first: sudo apt install openssl (macOS: it ships with the OS)."
+command -v uv >/dev/null || die "uv is required (it runs the Kuma seed step). Install it first: curl -LsSf https://astral.sh/uv/install.sh | sh"
+require_numeric KUMA_PORT NTFY_PORT KUMA_HTTPS_PORT NTFY_HTTPS_PORT
 resolve_tailscale
 require_docker_compose
 require_tailscale_up
-ok "$OS + curl + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
+ok "$OS + curl + openssl + uv + Docker (daemon reachable) + Compose v2 + Tailscale (running)"
 
 host="$(tailnet_host)"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
@@ -72,6 +84,11 @@ KUMA_VOLUME=$HOME/services/monitoring/kuma
 NTFY_VOLUME=$HOME/services/monitoring/ntfy
 KUMA_PORT=$KUMA_PORT
 NTFY_PORT=$NTFY_PORT
+# The HTTPS ports Tailscale Serve publishes on (they default to the local
+# ports). Moving one later also needs the old mapping removed by hand:
+#   tailscale serve --https=<old port> off
+KUMA_HTTPS_PORT=$KUMA_HTTPS_PORT
+NTFY_HTTPS_PORT=$NTFY_HTTPS_PORT
 NTFY_BASE_URL=https://$host:$NTFY_HTTPS_PORT
 NTFY_TOPIC=$NTFY_TOPIC
 # Topic the ntfy-control listener reads commands from. Must match
@@ -126,15 +143,18 @@ fi
 # before it existed.
 chmod 600 "$ENV_FILE"
 
-# env_val KEY: KEY's value in .env, read the way Docker Compose (and the
+# Read back: the existing .env is the source of truth for ports, paths and
+# credentials, so a re-run can never silently move a live deployment —
+# everything below uses these values, not whatever the shell passed.
+set -a; . "$ENV_FILE"; set +a
+# env_get KEY: KEY's value in .env, read the way Docker Compose (and the
 # seeding step's `set -a; . .env`) sees it — an optional `export ` prefix,
 # one pair of surrounding quotes stripped, an unquoted trailing ` #`
 # comment dropped, $HOME/${HOME} interpolated outside single quotes, last
-# assignment wins. The ACL grants and the credential checks below consume
-# these values directly, so this reader must agree with the source or a
-# quoted `NTFY_TOPIC="alerts"` grants on `"alerts"` while Kuma publishes to
-# `alerts`. Same parser teardown.sh uses for the same reason.
-env_val() {
+# assignment wins. Used for keys that may be absent from older .envs
+# (KUMA_HTTPS_PORT, NTFY_HTTPS_PORT) and for the ntfy account/topic values
+# consumed by the ACL grants below.
+env_get() {
   local line value tail quote=""
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -1 || true)"
   [ -n "$line" ] || return 0
@@ -153,15 +173,28 @@ env_val() {
   printf '%s' "$value"
 }
 
-NTFY_PHONE_USER="$(env_val NTFY_PHONE_USER)";     NTFY_PHONE_PASS="$(env_val NTFY_PHONE_PASS)"
-NTFY_KUMA_USER="$(env_val NTFY_KUMA_USER)";       NTFY_KUMA_PASS="$(env_val NTFY_KUMA_PASS)"
-NTFY_CONTROL_USER="$(env_val NTFY_CONTROL_USER)"; NTFY_CONTROL_PASS="$(env_val NTFY_CONTROL_PASS)"
-CONTROL_TOPIC="$(env_val CONTROL_TOPIC)";         CONTROL_TOPIC="${CONTROL_TOPIC:-control}"
-NTFY_TOPIC="$(env_val NTFY_TOPIC)";               NTFY_TOPIC="${NTFY_TOPIC:-alerts}"
+NTFY_PHONE_USER="$(env_get NTFY_PHONE_USER)";     NTFY_PHONE_PASS="$(env_get NTFY_PHONE_PASS)"
+NTFY_KUMA_USER="$(env_get NTFY_KUMA_USER)";       NTFY_KUMA_PASS="$(env_get NTFY_KUMA_PASS)"
+NTFY_CONTROL_USER="$(env_get NTFY_CONTROL_USER)"; NTFY_CONTROL_PASS="$(env_get NTFY_CONTROL_PASS)"
+CONTROL_TOPIC="$(env_get CONTROL_TOPIC)";         CONTROL_TOPIC="${CONTROL_TOPIC:-control}"
+NTFY_TOPIC="$(env_get NTFY_TOPIC)";               NTFY_TOPIC="${NTFY_TOPIC:-alerts}"
 for v in NTFY_PHONE_USER NTFY_PHONE_PASS NTFY_KUMA_USER NTFY_KUMA_PASS \
          NTFY_CONTROL_USER NTFY_CONTROL_PASS; do
   [ -n "${!v}" ] || die "$v is empty or missing from $ENV_FILE — fix that line, or delete .env and re-run to regenerate the accounts."
 done
+KUMA_HTTPS_PORT="$(env_get KUMA_HTTPS_PORT)"; KUMA_HTTPS_PORT="${KUMA_HTTPS_PORT:-$KUMA_PORT}"
+NTFY_HTTPS_PORT="$(env_get NTFY_HTTPS_PORT)"; NTFY_HTTPS_PORT="${NTFY_HTTPS_PORT:-$NTFY_PORT}"
+# The file is user-editable — check it too, before compose or serve see it.
+require_numeric KUMA_PORT NTFY_PORT KUMA_HTTPS_PORT NTFY_HTTPS_PORT
+env_ignored() { # <name> <explicit shell value> <resolved value>
+  [ -n "$2" ] && [ "$2" != "$3" ] || return 0
+  warn "$1=$2 ignored — the existing $ENV_FILE says $3. Edit .env and re-run to change it."
+}
+env_ignored KUMA_PORT "$REQ_KUMA_PORT" "$KUMA_PORT"
+env_ignored NTFY_PORT "$REQ_NTFY_PORT" "$NTFY_PORT"
+env_ignored KUMA_HTTPS_PORT "$REQ_KUMA_HTTPS_PORT" "$KUMA_HTTPS_PORT"
+env_ignored NTFY_HTTPS_PORT "$REQ_NTFY_HTTPS_PORT" "$NTFY_HTTPS_PORT"
+env_ignored NTFY_TOPIC "$REQ_NTFY_TOPIC" "$NTFY_TOPIC"
 
 mkdir -p "$HOME/services/monitoring/kuma" "$HOME/services/monitoring/ntfy"
 
@@ -222,20 +255,16 @@ else
 fi
 
 # ---------------------------------------------------------------- seed
-if command -v uv >/dev/null; then
-  info "Seeding Kuma (admin account, monitors, ntfy alert channel)"
-  # TAILNET_HOST: monitors probe the tailnet HTTPS URLs, so the seeder needs
-  # this node's MagicDNS name. ADGUARD_DNS_IP: the adguard-dns monitor asks
-  # this node's resolver a question — the tailnet v4, resolved the same way.
-  dns_ip="$("$TAILSCALE" ip -4 2>/dev/null || true)"
-  if (set -a; . "$ENV_FILE"; TAILNET_HOST="$host" ADGUARD_DNS_IP="$dns_ip"; set +a; \
-      uv run --with uptime-kuma-api python3 "$SERVICE_DIR/seed_kuma.py"); then
-    ok "Kuma seeded"
-  else
-    warn "Seeding failed — Kuma still works, configure via the web UI (see SETUP.md)."
-  fi
+info "Seeding Kuma (admin account, monitors, ntfy alert channel)"
+# TAILNET_HOST: monitors probe the tailnet HTTPS URLs, so the seeder needs
+# this node's MagicDNS name. ADGUARD_DNS_IP: the adguard-dns monitor asks
+# this node's resolver a question — the tailnet v4, resolved the same way.
+dns_ip="$("$TAILSCALE" ip -4 2>/dev/null || true)"
+if (set -a; . "$ENV_FILE"; TAILNET_HOST="$host" ADGUARD_DNS_IP="$dns_ip"; set +a; \
+    uv run --with uptime-kuma-api python3 "$SERVICE_DIR/seed_kuma.py"); then
+  ok "Kuma seeded"
 else
-  warn "uv not found — skipping auto-seed. Configure Kuma via the web UI (see SETUP.md)."
+  warn "Seeding failed — Kuma still works, configure via the web UI (see SETUP.md)."
 fi
 
 # ------------------------------------------------------- tailscale serve

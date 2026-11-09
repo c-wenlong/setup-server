@@ -115,25 +115,26 @@ It's in `.env` (`KUMA_ADMIN_PASSWORD`). If `.env` is gone too:
 
 ## Nuke and pave (destroys monitor history + accounts)
 
+`./teardown.sh` unpublishes both Serve ports and runs `compose down`,
+keeping `.env` and the data dirs — `./setup.sh` brings the stack back
+exactly as it was. `./teardown.sh --purge` is the actual nuke: it asks for
+the service name, then deletes `.env` and the data dirs too.
+
+If resetting by hand:
 ```sh
 docker compose --project-directory . down -v
 rm -rf ~/services/monitoring .env
 ./setup.sh
 ```
 
-The `-v` is not optional anymore: ntfy's users.db lives in the `ntfy-auth`
-named volume, and a plain `down` leaves it behind. Drop `.env` but keep that
-volume and the re-run generates fresh passwords for accounts that already
-exist — every login then fails. (`setup.sh` also re-syncs passwords from
-`.env` on each run, so even an already-broken reset heals on the next
-deploy.) Equivalent by hand:
-`docker compose --project-directory . down && docker volume rm monitoring_ntfy-auth`.
+The `-v` is not optional on a manual reset: ntfy's users.db lives in the
+`ntfy-auth` named volume, and a plain `down` leaves it behind. Drop `.env`
+but keep that volume and the re-run generates fresh passwords for accounts
+that already exist (`setup.sh` re-syncs passwords from `.env` on each run,
+so even an already-broken reset heals on the next deploy). Equivalent by
+hand: `docker compose --project-directory . down && docker volume rm monitoring_ntfy-auth`.
 
 State is `~/services/monitoring/kuma` and `~/services/monitoring/ntfy`
 (`KUMA_VOLUME` / `NTFY_VOLUME` in `.env`) plus the `ntfy-auth` docker volume
 (ntfy's users + ACLs) — not `~/monitoring`, which was the pre-2026-09-07
 layout and no longer exists.
-
-Deliberately **not** in that list: `tailscale serve --https=3002 off` and
-`--https=3003 off`. `setup.sh` re-publishes both, and leaving them up means
-the dashboard comes back the moment the containers do.

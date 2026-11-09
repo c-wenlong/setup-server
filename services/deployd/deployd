@@ -147,7 +147,9 @@ def resolve_ref(repo_url, ref):
         return ref
     patterns = [ref] if ref.startswith("refs/") else [
         "refs/heads/%s" % ref, "refs/tags/%s^{}" % ref, "refs/tags/%s" % ref]
-    rc, out = run(["git", "ls-remote", repo_url] + patterns,
+    # "--" keeps an operand that slipped through validation from being read
+    # as an option; scan_entries already rejects leading-dash repo/ref.
+    rc, out = run(["git", "ls-remote", "--", repo_url] + patterns,
                   env={"GIT_TERMINAL_PROMPT": "0"})
     if rc != 0:
         warn("ls-remote %s failed: %s" % (repo_url, out.strip().splitlines()[-1]
@@ -171,6 +173,13 @@ POLLER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 def _valid_deploy(repo, cmd):
     return isinstance(repo, str) and bool(repo) \
         and isinstance(cmd, str) and bool(cmd)
+
+
+def _valid_remote(repo, ref):
+    """repo and ref become `git ls-remote` operands. A leading "-" is
+    option injection (ls-remote would parse it as a flag); refuse it
+    outright rather than lean on the "--" resolve_ref passes."""
+    return not repo.startswith("-") and not ref.startswith("-")
 
 
 def load_overrides(state_dir):
@@ -258,6 +267,10 @@ def scan_entries(setup_repo, state_dir=None):
         if not isinstance(ref, str):
             warn("%s: deploy \"ref\" must be a string" % manifest)
             continue
+        if not _valid_remote(repo, ref):
+            warn("%s: deploy \"repo\"/\"ref\" must not start with \"-\""
+                 % manifest)
+            continue
         seen[key] = len(entries)
         entries.append({"key": key, "repo": repo, "ref": ref, "cmd": cmd,
                         "source": "manifest"})
@@ -283,6 +296,10 @@ def scan_entries(setup_repo, state_dir=None):
                 continue
             if not isinstance(ref, str):
                 warn("state/pollers.json: %r \"ref\" must be a string" % key)
+                continue
+            if not _valid_remote(repo, ref):
+                warn("state/pollers.json: %r \"repo\"/\"ref\" must not "
+                     "start with \"-\"" % key)
                 continue
             entry = {"key": key, "repo": repo, "ref": ref, "cmd": cmd,
                      "source": "override" if key in seen else "custom"}

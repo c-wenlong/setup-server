@@ -130,9 +130,33 @@ mkdir -p "$BIN_DIR" "$SERVICE_HOME/state"
 # a poll is running).
 info "Installing poller to $BIN_DIR/deployd"
 TMP_BIN="$BIN_DIR/.deployd.tmp.$$"
-sed -e "1s|^#!.*|#!$PYTHON3|" \
-    -e "s|^ENV_BAKED = \"__ENV_FILE__\"|ENV_BAKED = \"$ENV_FILE\"|" \
-  "$SERVICE_DIR/deployd" > "$TMP_BIN"
+# Both rewrites go through python3 with the values passed in the
+# environment, never through the source text: an .env path holding '"',
+# '|', '&' or a backslash would corrupt a sed replacement or break out of
+# the Python string it lands in. ascii() emits the literal Python parses
+# back to the exact path — json.dumps would escape characters beyond
+# U+FFFF as lone surrogates (e.g. an emoji), which Python cannot decode
+# back to the original path.
+DEPLOYD_BAKE_ENV="$ENV_FILE" DEPLOYD_BAKE_PY="$PYTHON3" \
+  python3 - "$SERVICE_DIR/deployd" > "$TMP_BIN" <<'PY' || { rm -f "$TMP_BIN"; die "Could not bake the installed poller"; }
+import os
+import sys
+
+marker = 'ENV_BAKED = "__ENV_FILE__"'
+found = False
+out = []
+for i, line in enumerate(open(sys.argv[1]).read().splitlines(True)):
+    if i == 0 and line.startswith("#!"):
+        line = "#!%s\n" % os.environ["DEPLOYD_BAKE_PY"]
+    elif line.startswith(marker):
+        line = "ENV_BAKED = %s%s" % (
+            ascii(os.environ["DEPLOYD_BAKE_ENV"]), line[len(marker):])
+        found = True
+    out.append(line)
+if not found:
+    sys.exit("no %r line in %s" % (marker, sys.argv[1]))
+sys.stdout.write("".join(out))
+PY
 chmod 755 "$TMP_BIN"
 mv -f "$TMP_BIN" "$BIN_DIR/deployd"
 ok "Installed $BIN_DIR/deployd"

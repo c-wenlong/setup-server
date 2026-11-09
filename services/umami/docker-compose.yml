@@ -37,7 +37,6 @@ services:
       TWO_FACTOR_ENCRYPTION_KEY: ${UMAMI_TWO_FACTOR_KEY:?UMAMI_TWO_FACTOR_KEY missing from .env}
       DISABLE_TELEMETRY: "1"
       CLIENT_IP_HEADER: x-forwarded-for
-      TRACKER_WEBSITE_ID_HEADER: ""
       HOSTNAME: "0.0.0.0"
     ports:
       - '127.0.0.1:${LOCAL_PORT:-8106}:3000'

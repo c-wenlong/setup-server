@@ -71,17 +71,32 @@ with server `https://<host>:3003` and username/password `NTFY_PHONE_USER` /
 
 ```sh
 ./setup.sh
-KUMA_PORT=3012 NTFY_TOPIC=my-alerts ./setup.sh   # overrides
+KUMA_PORT=3012 NTFY_TOPIC=my-alerts ./setup.sh   # overrides — first run only
 ```
+
+Requirements beyond Docker + Tailscale: `curl`, `openssl` (generates the
+Kuma admin password) and `uv` (runs the Kuma seed script). Preflight checks
+all of them and names the install fix for whatever is missing; the four
+ports must be numeric.
+
+`.env` is the **source of truth once written**: ports, topic and
+credentials all come from it on a re-run, and a shell override that
+disagrees prints a warning and is ignored — a stray `KUMA_PORT=3012
+./setup.sh` can no longer repoint the deployment while Compose still runs
+on the old port. To move a port deliberately, edit `.env` and re-run; for
+`KUMA_HTTPS_PORT`/`NTFY_HTTPS_PORT` also drop the old mapping first
+(`tailscale serve --https=<old port> off`) or both stay published. `.env`
+files written before the HTTPS keys existed are read as "published port =
+local port", which is what those deployments actually did.
 
 What it does beyond the usual (preflight → .env → compose up → serve →
 verify): **auto-seeds Kuma via its API** using `uv run --with
 uptime-kuma-api` — creates the admin account (credentials generated into
 `.env`, mode 600), an ntfy notification channel (default, applied to
 everything), and one HTTP monitor per service (60s interval, 2 retries).
-Seeding is idempotent (skips whatever exists) and best-effort: if `uv` is
-missing or the API changes, the deploy still succeeds and you configure via
-the web UI instead.
+Seeding is idempotent (skips whatever exists) and best-effort: if the API
+changes, the deploy still succeeds and you configure via the web UI
+instead.
 
 ## Phone setup (the point of all this)
 

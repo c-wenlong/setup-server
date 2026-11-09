@@ -3,6 +3,9 @@
 #   health_fails_left  — countdown of 503s from /api/instances/
 #   setup_done         — instance already has an admin
 #   signup_fail        — POST /api/instances/admins/sign-up/ returns 500
+#   signup_conn_fail   — POST sign-up acts like a refused connection: prints
+#                        000 for -w and exits 7, the way real curl does (this
+#                        is what `|| echo 000` concatenated into 000000)
 echo "curl $*" >> "$CALLS_LOG"
 
 method="GET"; out=""; url=""; want_code=0; failonerr=0; cookie_out=""
@@ -59,6 +62,10 @@ case "$url" in
     ;;
   */api/instances/admins/sign-up/|*/api/instances/admins/sign-up)
     if [ "$method" = "POST" ]; then
+      if [ -f "$STATE_DIR/signup_conn_fail" ]; then
+        [ "$want_code" = "1" ] && printf '000'
+        exit 7                        # CURLE_COULDNT_CONNECT
+      fi
       if [ -f "$STATE_DIR/signup_fail" ]; then
         emit 500 '{"error":"signup failed"}'
       fi

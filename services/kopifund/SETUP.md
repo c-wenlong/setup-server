@@ -28,6 +28,10 @@ tailnet HTTPS :8300
                           │
                           ▼
               MacBook does the same dance on its own ~/.kopifund
+
+              kopifund-analyse user timer, every ANALYSE_SECONDS:
+              rebuild ~/.kopifund/cache (stat results are per-machine,
+              gitignored — the dashboard reads them)
 ```
 
 Two repos, two jobs:
@@ -71,7 +75,7 @@ Two repos, two jobs:
 2. Writes `.env` (mode 600) if absent: ports, repo URLs,
    `SERVICE_HOME=~/services/kopifund`, `KOPIFUND_DATA=~/.kopifund`,
    `KOPIFUND_HOSTS`/`KOPIFUND_TAILNET_URL` from `tailscale status`,
-   `SYNC_SECONDS=300`. Never overwrites.
+   `SYNC_SECONDS=300`, `ANALYSE_SECONDS=86400`. Never overwrites.
 3. Clones or hard-resets `~/services/kopifund/repo` to `origin/$KOPIFUND_REF`.
 4. Provisions the data folder:
    - absent → clone kopifund-hub, `git-crypt unlock` with the key file
@@ -83,16 +87,23 @@ Two repos, two jobs:
 5. Stops the old `app-kopifund-finance` container if it still runs (same
    app, same port; it is the old writer, so it goes down before the copy,
    and deleting its launcher tile is a manual last step).
-6. Adopts `~/services/apps/kopifund-finance/data` once (the launcher app's
-   data), only when the hub side is not already newer — compared by
-   snapshot age (the clone's last `kopifund.db` commit vs the legacy db's
-   own mtime), never by clone checkout time; marked done at
+6. Merges `~/services/apps/kopifund-finance/data` in once (the launcher
+   app's data): files the clone lacks are filled in without clobbering
+   anything already there; `kopifund.db` is overwritten only when the
+   launcher's record is measurably richer — the `txn` row count decides,
+   because a live app's db always *looks* newest by mtime even when it
+   holds an empty record. When a side can't be counted it falls back to
+   snapshot age (the clone's last `kopifund.db` commit vs the legacy
+   db's own mtime, never clone checkout time). Marked done at
    `~/services/kopifund/state/legacy-adopted`.
-7. Installs `~/services/kopifund/bin/sync.sh` and the timer — systemd user
-   `kopifund-sync.timer` on Linux (plus `loginctl enable-linger`, sudo at
-   most once), `com.kopifund.sync` LaunchAgent on macOS.
+7. Installs `~/services/kopifund/bin/{sync,analyse}.sh` and two timers —
+   systemd user `kopifund-sync.timer` + `kopifund-analyse.timer` on Linux
+   (plus `loginctl enable-linger`, sudo at most once), `com.kopifund.sync`
+   + `com.kopifund.analyse` LaunchAgents on macOS.
 8. `docker compose up -d --build`, waits on `/api/health`, publishes via
-   Serve, verifies end-to-end HTTPS.
+   Serve, verifies end-to-end HTTPS, then runs a first stats rebuild — a
+   fresh clone's `cache/` is empty, and an empty cache is an empty
+   dashboard.
 
 ## First deploy on this box (the checklist that actually ran)
 
@@ -140,6 +151,14 @@ lands in the next sync snapshot, and the Mac pulls it on its next tick.
   gitignored upstream — they never sync. Rows committed into
   `kopifund.db-wal` would be stranded by that rule, so each tick first runs
   a passive SQLite checkpoint to fold them into the `.db` that does sync.
+- `cache/` being per-machine means the stat results never travel: the
+  app rebuilds them itself only after an in-app write, and a sync pull is
+  no such write. `kopifund-analyse` exists for exactly this — every
+  `ANALYSE_SECONDS` it runs `server/finance.py analyse --no-publish`
+  inside the container (`--no-publish`: the machine that runs
+  `make analyse` owns the Notion hub page; a second writer pushing the
+  same metrics is redundant). Manual refresh anytime:
+  `~/services/kopifund/bin/analyse.sh`.
 - A **sealed** clone (files still `\0GITCRYPT…`) is never committed:
   `sync.sh` refuses until `git-crypt unlock <key>` runs.
 - Manual snapshot anytime: `cd ~/.kopifund && git add -A && git commit &&
@@ -153,10 +172,12 @@ lands in the next sync snapshot, and the Mac pulls it on its next tick.
 docker compose --project-directory services/kopifund ps|logs|restart
 curl http://127.0.0.1:8300/api/health
 
-# sync
-systemctl --user status kopifund-sync.timer
-journalctl --user -u kopifund-sync -f        # macOS: ~/Library/Logs/kopifund-sync.log
-~/services/kopifund/bin/sync.sh              # run a tick now
+# sync + stats
+systemctl --user status kopifund-sync.timer kopifund-analyse.timer
+journalctl --user -u kopifund-sync -u kopifund-analyse -f
+                                           # macOS: ~/Library/Logs/kopifund-{sync,analyse}.log
+~/services/kopifund/bin/sync.sh              # run a sync tick now
+~/services/kopifund/bin/analyse.sh           # rebuild the stats cache now
 git -C ~/.kopifund status
 
 # re-deploy / upgrade — deployd does this on upstream commits

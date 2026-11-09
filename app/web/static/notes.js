@@ -95,6 +95,10 @@
     }
     opts.cache = 'no-store';
     opts.credentials = 'same-origin';
+    /* The API's CSRF gate: writes must carry this fixed header, which a
+       cross-site "simple" request cannot add. Sent on reads too. */
+    opts.headers = opts.headers || {};
+    opts.headers['X-Requested-With'] = 'launcher';
 
     return fetch(path, opts).then(function (res) {
       if (timer) clearTimeout(timer);

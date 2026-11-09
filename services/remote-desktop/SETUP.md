@@ -414,8 +414,8 @@ docker compose --project-directory . start
 Every other service here is a container or a user unit that touches
 nothing outside `$HOME`. This one configures a **system** daemon, so it
 needs `sudo` on a run that changes backend state. That is a real
-deviation and it is documented in this service's `AGENTS.md` so a future
-agent does not "fix" it.
+deviation and it is documented in this section so a future agent does
+not "fix" it.
 
 The rule it must still obey: **a re-run with everything already
 configured needs no sudo at all.** The script checks state first and acts

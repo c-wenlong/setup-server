@@ -217,47 +217,17 @@
           }
         ],
         "kuma": "kopifund",
-        "_comment": "Single container; the data folder it mounts is a git-crypt clone synced by a separate user timer, which is not a part the launcher should stop."
+        "_comment": "Single container; the data folder it mounts is a git-crypt clone synced by separate user timers, which are not parts the launcher should stop."
       },
       "login": [
         "No sign-in: loopback and the tailnet are the boundary. Phones pair once from Settings -> Link a phone (QR), then read over the tailnet with a device bearer."
       ],
-      "description": "Kopifund personal finance tracker (private c-wenlong/kopifund-finance repo): bank/wallet/brokerage/CPF PDF statements parsed into one categorised ledger, from a Singapore user's own accounts. Built from a machine-managed clone at ~/services/kopifund/repo, hard-reset per deploy; the container it makes mounts the data folder at ~/.kopifund — upstream's own data root — which is an unlocked git-crypt clone of the private kopifund-hub repo: the versioned, Mac-shared state. A systemd user timer / LaunchAgent snapshots it back to the hub every SYNC_SECONDS and merges the other machines' snapshots (newer tip wins a raced file; the loser is kept as <name>.loser-<sha>). Replaces the launcher's From-GitHub deployment of the same app.",
+      "description": "Kopifund personal finance tracker (private c-wenlong/kopifund-finance repo): bank/wallet/brokerage/CPF PDF statements parsed into one categorised ledger, from a Singapore user's own accounts. Built from a machine-managed clone at ~/services/kopifund/repo, hard-reset per deploy; the container it makes mounts the data folder at ~/.kopifund — upstream's own data root — which is an unlocked git-crypt clone of the private kopifund-hub repo: the versioned, Mac-shared state. A systemd user timer / LaunchAgent snapshots it back to the hub every SYNC_SECONDS and merges the other machines' snapshots (newer tip wins a raced file; the loser is kept as <name>.loser-<sha>); a second rebuilds the per-machine stats cache every ANALYSE_SECONDS. Replaces the launcher's From-GitHub deployment of the same app.",
       "deploy": {
         "repo": "https://github.com/c-wenlong/kopifund-finance",
         "ref": "main",
         "cmd": "services/kopifund/setup.sh"
       }
-    },
-    {
-      "key": "design-systems",
-      "name": "design-systems",
-      "tagline": "Design",
-      "group": "mine",
-      "icon": "palette",
-      "author": "c-wenlong",
-      "url": "https://HOST:8108/gallery/",
-      "health": "http://127.0.0.1:8108/gallery/",
-      "marker": "~/services/design-systems",
-      "setup": "services/design-systems/setup.sh",
-      "env": "services/design-systems/.env",
-      "control": {
-        "parts": [
-          {
-            "container": "design-systems"
-          }
-        ],
-        "kuma": "design-systems"
-      },
-      "deploy": {
-        "repo": "https://github.com/c-wenlong/designs.git",
-        "ref": "main",
-        "cmd": "services/design-systems/setup.sh"
-      },
-      "login": [
-        "No sign-in — the tailnet is the only boundary."
-      ],
-      "description": "The private designs repo as a browsable library: the gallery of every captured design system (tokens, screenshots, components) plus the docs site and scorecard. nginx listens on 127.0.0.1:8108 behind Serve and proxies the Next.js gallery app (designs-web.service, 127.0.0.1:8191) for /gallery/ and the API, and proxies /systems/, /tools/, /catalog.json and /README.md through the app's /media/ route, which reads the working clone at ~/dev/design-systems live (it refuses gitignored files, dot paths and symlink escapes; the ~300 MB of LFS screenshots are never copied into a release). /example/ is not served. No passphrase: the repo's own Pages deploy strips and encrypts the gallery, but the tailnet is the boundary here. deployd rebuilds when the clone's HEAD moves; ~/services/design-systems/bin/deploy.sh --force rebuilds now."
     },
     {
       "key": "manimkc",
