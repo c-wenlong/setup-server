@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# stat stub: after the sudo stub's chown ran ($STATE_DIR/minio_chowned),
+# `stat -c %u` reports uid 1001 — the postcondition the real chown sets.
+# Everything else, including mode probes (-c %a / -f %Lp), defers to the
+# real stat.
+if [ -f "$STATE_DIR/minio_chowned" ] && [ "${1:-}" = "-c" ] && [ "${2:-}" = "%u" ]; then
+  echo 1001
+  exit 0
+fi
+PATH=/usr/bin:/bin exec stat "$@"

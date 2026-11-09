@@ -168,7 +168,11 @@ memory, a lost repository is lost work with no other copy.
   instance; new accounts are created from the CLI, deliberately.
 - **The admin account is created by `setup.sh` from the CLI**, before anyone
   can reach the instance — there is no window in which a stranger on the
-  tailnet claims the admin slot by loading the page first.
+  tailnet claims the admin slot by loading the page first. Forgejo's CLI
+  offers no password-stdin/password-file hand-off, so setup.sh uses
+  `--random-password` and reads the generated password back from stdout:
+  the password never sits in a `docker exec` argv (host `ps`) or in any
+  exec'd process's argv inside the container.
 - **Secrets** are generated into the gitignored `.env` (mode 600):
   `FORGEJO_ADMIN_PASSWORD` and `FORGEJO_SECRET_KEY`. `.env` is read by
   Compose for interpolation only — it is deliberately **not** passed as
@@ -190,9 +194,13 @@ rejected rather than reporting success over a locked-out account.
 
 ```bash
 docker exec -u git forgejo forgejo admin user create --admin \
-  --username admin --password '<generated>' --email <mail> \
+  --username admin --random-password --email <mail> \
   --must-change-password=false
 ```
+
+(`--random-password` because Forgejo's CLI has no stdin/file password
+hand-off — a `--password` flag would expose the value in argv; the
+generated value is read back from stdout and stored in `.env`.)
 
 That last flag is **load-bearing — do not "clean it up"**. The Forgejo CLI
 defaults new admin accounts to must-change-password. Without the flag the
@@ -364,10 +372,11 @@ mobile app worth installing.
 - Upgrade within the LTS line:
   `docker compose --project-directory . pull && ./setup.sh`
   (setup.sh re-applies the serve config and re-verifies the admin login)
-- New user account:
+- New user account (prints a generated password — copy it, never pass
+  `--password`, which would sit in host `ps` argv):
   ```bash
   docker exec -u git forgejo forgejo admin user create \
-    --username <name> --email <mail> --password '<pw>' \
+    --username <name> --email <mail> --random-password \
     --must-change-password=false
   ```
 - Reset a password:
@@ -375,7 +384,10 @@ mobile app worth installing.
   docker exec -u git forgejo forgejo admin user change-password \
     --username admin --password '<new>' --must-change-password=false
   ```
-  …then mirror it into `.env`.
+  …then mirror it into `.env`. `change-password` has no
+  `--random-password`/stdin path, so the value shows in argv while the
+  exec runs — do it from a private shell, then rotate in the web UI if
+  the box is shared.
 - Official backup (consistent, includes the DB, repos and config):
   ```bash
   docker exec -u git forgejo forgejo dump -c /data/gitea/conf/app.ini \

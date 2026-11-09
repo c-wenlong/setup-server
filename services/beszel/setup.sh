@@ -147,15 +147,47 @@ done
 ok "hub answering on 127.0.0.1:$PORT"
 
 # ------------------------------------------------- superuser + UI user + key
+# Credential handling (issue #182): the admin password never lands on a
+# host-visible argv. First boot the hub creates the superuser from the
+# USER_EMAIL/USER_PASSWORD compose env; on every later run we probe
+# auth-with-password first (body on curl's stdin, not `-d`), so the only
+# time `docker exec superuser upsert` runs is a repair where the stored
+# password stopped authenticating. That CLI takes the password
+# positionally and the image has no shell or stdin path, so on that
+# repair path the password is briefly visible in the exec'd process argv
+# (host ps, dockerd's exec audit) — unavoidable without the compose-env
+# first-boot path, and bounded to a one-shot recovery.
 info "Ensuring superuser"
-docker exec beszel /beszel superuser upsert \
-  "$BESZEL_ADMIN_EMAIL" "$BESZEL_ADMIN_PASSWORD" >/dev/null
-ok "superuser $BESZEL_ADMIN_EMAIL"
+admin_auths() {
+  printf '{"identity":"%s","password":"%s"}' \
+    "$BESZEL_ADMIN_EMAIL" "$BESZEL_ADMIN_PASSWORD" \
+    | curl -fsS -o /dev/null -X POST -H 'Content-Type: application/json' \
+        --data-binary @- "$API/collections/_superusers/auth-with-password"
+}
+if admin_auths; then
+  ok "superuser $BESZEL_ADMIN_EMAIL"
+else
+  warn "stored admin password does not authenticate — repairing via the hub CLI (its argv carries the password briefly)"
+  docker exec beszel /beszel superuser upsert \
+    "$BESZEL_ADMIN_EMAIL" "$BESZEL_ADMIN_PASSWORD" >/dev/null \
+    || die "could not create/update the superuser"
+  admin_auths || die "superuser still not authenticating after upsert"
+  ok "superuser $BESZEL_ADMIN_EMAIL (repaired)"
+fi
 
-WIRE_OUT=$(python3 - "$API" "$BESZEL_ADMIN_EMAIL" "$BESZEL_ADMIN_PASSWORD" "$AGENT_PORT" "$SYSTEM_NAME" <<'PYEOF'
-import json, sys, urllib.request
+# python3 reads the credentials from its environment, never sys.argv:
+# `python3 - "$API" "$EMAIL" "$PW"` puts the password on the process list.
+WIRE_OUT=$(BESZEL_API="$API" BESZEL_SU_EMAIL="$BESZEL_ADMIN_EMAIL" \
+  BESZEL_SU_PASSWORD="$BESZEL_ADMIN_PASSWORD" \
+  BESZEL_AGENT_PORT="$AGENT_PORT" BESZEL_SYSTEM_NAME="$SYSTEM_NAME" \
+  python3 - <<'PYEOF'
+import json, os, urllib.request
 
-api, email, pw, agent_port, system_name = sys.argv[1:6]
+api         = os.environ["BESZEL_API"]
+email       = os.environ["BESZEL_SU_EMAIL"]
+pw          = os.environ["BESZEL_SU_PASSWORD"]
+agent_port  = os.environ["BESZEL_AGENT_PORT"]
+system_name = os.environ["BESZEL_SYSTEM_NAME"]
 
 def req(path, data=None, token=None, method=None):
     r = urllib.request.Request(api + path,
@@ -310,9 +342,15 @@ ok "Tailscale Serve: HTTPS :$PORT -> http://127.0.0.1:$PORT (tailnet only)"
 
 # ---------------------------------------------------------------- verify
 info "Waiting for agent to report stats"
-UP=$(python3 - "$API" "$BESZEL_ADMIN_EMAIL" "$BESZEL_ADMIN_PASSWORD" "$SYSTEM_NAME" <<'PYEOF'
-import json, sys, time, urllib.request
-api, email, pw, system_name = sys.argv[1:5]
+UP=$(BESZEL_API="$API" BESZEL_SU_EMAIL="$BESZEL_ADMIN_EMAIL" \
+  BESZEL_SU_PASSWORD="$BESZEL_ADMIN_PASSWORD" \
+  BESZEL_SYSTEM_NAME="$SYSTEM_NAME" \
+  python3 - <<'PYEOF'
+import json, os, time, urllib.request
+api         = os.environ["BESZEL_API"]
+email       = os.environ["BESZEL_SU_EMAIL"]
+pw          = os.environ["BESZEL_SU_PASSWORD"]
+system_name = os.environ["BESZEL_SYSTEM_NAME"]
 def req(path, data=None, token=None):
     r = urllib.request.Request(api + path,
         data=json.dumps(data).encode() if data else None,

@@ -84,6 +84,19 @@ check "GPU stats enabled" grep -q 'GPU=true' "$SETUP"
 check "Kuma monitor row exists" \
       grep -q 'beszel' "$SERVICE_DIR/../monitoring/seed_kuma.py"
 
+# Issue #182: the admin password never rides a host-visible argv. The hub
+# creates the superuser from compose env on first boot; a re-run probes
+# auth first so `superuser upsert` (password positional, no shell/stdin
+# path in the image) only fires on a repair.
+check "superuser upsert gated behind an auth probe" \
+      bash -c "grep -q 'if admin_auths' '$SETUP' && grep -q 'docker exec beszel /beszel superuser upsert' '$SETUP'"
+check "auth probe posts its body on stdin, not a -d literal" \
+      grep -q -- '--data-binary @-' "$SETUP"
+check "python wiring reads creds from env, not argv" \
+      bash -c "grep -q 'os.environ\[\"BESZEL_SU_PASSWORD\"\]' '$SETUP' && ! grep -v '^[[:space:]]*#' '$SETUP' | grep -q 'sys\.argv' && ! grep -qE 'python3 - .*BESZEL_ADMIN_PASSWORD' '$SETUP'"
+check "compose bootstraps the admin via env, not exec argv" \
+      grep -qF 'USER_PASSWORD: ${BESZEL_ADMIN_PASSWORD:?}' "$COMPOSE"
+
 # ------------------------------------------------------------- teardown
 # teardown.sh, unlike setup.sh, never talks to the hub's API, so it CAN run
 # for real in a sandbox: temp $HOME, and small PATH stubs that this file

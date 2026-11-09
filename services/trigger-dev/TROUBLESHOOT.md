@@ -64,8 +64,10 @@ First boot runs Prisma migrations and can take a few minutes.
   endpoint down.
 - **MinIO `Permission denied` on `/bitnami/minio/data/.root_user`** —
   Bitnami MinIO runs as uid 1001 and cannot write a host-owned bind
-  mount. `setup.sh` `chmod 0777`s `TRIGGER_MINIO` for that reason.
-  If you created the dir some other way: `chmod 0777 ~/services/trigger-dev/minio`
+  mount. `setup.sh` `sudo chown 1001:1001`s `TRIGGER_MINIO` for that
+  reason (a mode-777 dir would be world-writable — any local user could
+  read or poison task payloads). If you created the dir some other way:
+  `sudo chown 1001:1001 ~/services/trigger-dev/minio`
   then `docker compose --project-directory . up -d`.
 - MinIO must be healthy before the webapp is useful for deploys.
   `docker logs trigger-minio` — the `packets` bucket is created by

@@ -64,6 +64,8 @@ out_lacks()  { ! grep -qi "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
+script_has()  { grep -q "$1" "$SVC/setup.sh"; }
+script_lacks(){ ! grep -q "$1" "$SVC/setup.sh"; }
 
 file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 
@@ -158,9 +160,17 @@ test_fresh_deploy() {
   check "compose binds no wildcard"          no_wildcard_bind
   check "shared dir created"                 [ -d "$HOME/services/trigger-dev/shared" ]
   check "postgres dir created"               [ -d "$HOME/services/trigger-dev/postgres" ]
-  check "minio dir is world-writable"        [ "$(file_mode "$HOME/services/trigger-dev/minio")" = "777" ]
+  check "minio dir is mode 700"              [ "$(file_mode "$HOME/services/trigger-dev/minio")" = "700" ]
+  check "minio chowned to bitnami uid 1001"  calls_have "sudo chown 1001:1001 $HOME/services/trigger-dev/minio"
   check "htpasswd written"                   [ -s "$HOME/services/trigger-dev/registry/auth.htpasswd" ]
   check "htpasswd is mode 600"               [ "$(file_mode "$HOME/services/trigger-dev/registry/auth.htpasswd")" = "600" ]
+  check "htpasswd reads password on stdin"   calls_have "htpasswd -Bni"
+  check "no -Bbn password-in-argv variant"   no_call "htpasswd -Bbn"
+  check "registry password never in argv"    no_call "$(sed -n 's/^DOCKER_REGISTRY_PASSWORD=//p' "$SVC/.env")"
+  check "setup.sh: container htpasswd also -Bni" script_has 'docker run --rm -i .*htpasswd -Bni'
+  check "setup.sh: no -Bbn left anywhere"    bash -c '! grep -v "^[[:space:]]*#" "$1" | grep -q "htpasswd -Bbn"' _ "$SVC/setup.sh"
+  check "setup.sh: helper image pinned"      script_has 'HTPASSWD_IMAGE="${HTPASSWD_IMAGE:-httpd:2\.4\.66-alpine}"'
+  check "setup.sh: minio chowned not chmodded" script_lacks 'chmod 0*777'
   check "compose up invoked"                 [ -f "$STATE_DIR/compose_up" ]
   check "waited on /healthcheck"             calls_have "127.0.0.1:8030/healthcheck"
   check "requested a magic link"             [ -f "$STATE_DIR/magic_posts" ]
@@ -168,7 +178,7 @@ test_fresh_deploy() {
   check "logged the host into the registry"  [ -f "$STATE_DIR/docker_login" ]
   check "worker token on disk"               [ -s "$HOME/services/trigger-dev/shared/worker_token" ]
   check "served on tailscale :8030"          calls_have "tailscale serve --bg --https=8030 http://127.0.0.1:8030"
-  check "no sudo needed (operator set)"      no_call "^sudo "
+  check "sudo only for the minio chown"      [ "$(grep -c '^sudo ' "$CALLS_LOG")" -eq 1 ]
   check "prints final URL"                   out_has "https://test-host.tailfake.ts.net:8030"
   check "mentions the CLI"                   out_has "npx trigger.dev"
   check "warns there is no backup here"      out_has "nothing backs this box up"
