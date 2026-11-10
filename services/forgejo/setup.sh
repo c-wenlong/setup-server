@@ -88,9 +88,11 @@ TS_HOST="$(tailnet_host)"
 ok "Tailnet name: $TS_HOST"
 
 # ---------------------------------------------------------------- .env
+WROTE_ENV_THIS_RUN=0
 if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
 else
+  WROTE_ENV_THIS_RUN=1
   info "Writing .env (generated admin password + SECRET_KEY)"
   admin_pw="$(randhex)"
   secret_key="$(randhex)"
@@ -214,21 +216,35 @@ else
       --must-change-password=false 2>&1)"; then
     genpw="$(printf '%s\n' "$out" | sed -n "s/.*password is '\(.*\)'.*/\1/p" | tail -1)"
     [ -n "$genpw" ] \
-      || die "Admin account was created but its generated password could not be read — Forgejo's output shape may have changed ($out is not echoed here because it contains the password). Reset it and mirror into $ENV_FILE: docker exec -u git $CONTAINER forgejo admin user change-password --username $ADMIN_USERNAME --password '<new>' --must-change-password=false"
-    # Keep .env truthful: the generated password replaces the placeholder
-    # written before the container existed. Escape the sed replacement —
-    # Forgejo's alphabet is not hex.
-    genpw_esc="$(printf '%s' "$genpw" | sed 's/[&|\\]/\\&/g')"
-    if grep -q '^FORGEJO_ADMIN_PASSWORD=' "$ENV_FILE"; then
-      sed -i'.bak' "s|^FORGEJO_ADMIN_PASSWORD=.*|FORGEJO_ADMIN_PASSWORD=$genpw_esc|" "$ENV_FILE" \
-        && rm -f "$ENV_FILE.bak"
-    else
-      printf 'FORGEJO_ADMIN_PASSWORD=%s\n' "$genpw" >> "$ENV_FILE"
-    fi
-    ADMIN_PASSWORD="$genpw"
-    ok "Admin account created: $ADMIN_USERNAME"
+      || die "Admin account was created but its generated password could not be read — Forgejo's output shape may have changed (output is not echoed here because it contains the password). Reset it and mirror into $ENV_FILE: docker exec -u git $CONTAINER forgejo admin user change-password --username $ADMIN_USERNAME --password '<new>' --must-change-password=false"
     mkdir -p "$STATE"
     printf '%s\n' "$ADMIN_USERNAME" > "$ADMIN_MARKER"
+    # Replace only the placeholder written by THIS run, using pure-Bash
+    # builtin printf so the password never lands in an external command's
+    # argv (sed/awk would expose it in ps). If .env already existed before
+    # this run, never overwrite the user's saved FORGEJO_ADMIN_PASSWORD.
+    if [ "$WROTE_ENV_THIS_RUN" -eq 1 ]; then
+      tmp_env="$(mktemp "$ENV_FILE.XXXXXX")"
+      chmod 600 "$tmp_env"
+      replaced_pw=0
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          FORGEJO_ADMIN_PASSWORD=*)
+            printf 'FORGEJO_ADMIN_PASSWORD=%s\n' "$genpw"
+            replaced_pw=1
+            ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done < "$ENV_FILE" > "$tmp_env"
+      if [ "$replaced_pw" -eq 0 ]; then
+        printf 'FORGEJO_ADMIN_PASSWORD=%s\n' "$genpw" >> "$tmp_env"
+      fi
+      mv "$tmp_env" "$ENV_FILE"
+      ADMIN_PASSWORD="$genpw"
+      ok "Admin account created: $ADMIN_USERNAME"
+    else
+      die "Admin account $ADMIN_USERNAME was created with a random password because $ENV_FILE already existed (never overwritten). Sync it to FORGEJO_ADMIN_PASSWORD in $ENV_FILE: docker exec -u git $CONTAINER forgejo admin user change-password --username $ADMIN_USERNAME --password '<from .env>' --must-change-password=false"
+    fi
   else
     case "$out" in
       *"already exists"*)

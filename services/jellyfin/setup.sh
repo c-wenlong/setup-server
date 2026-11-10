@@ -31,7 +31,8 @@
 # A flag set without that runtime is caught below rather than left to surface
 # as an unstartable container.
 #
-# Requirements: Linux or macOS, curl, Docker + Compose v2, Tailscale logged in.
+# Requirements: Linux or macOS, curl, python3, Docker + Compose v2,
+# Tailscale logged in.
 #
 # Idempotent: safe to re-run; it upgrades the image and repairs the publish.
 # An existing .env is never overwritten, and the setup wizard runs at most
@@ -96,13 +97,15 @@ detect_os
 info "Preflight checks ($OS)"
 refuse_root
 command -v curl >/dev/null || die "curl is required."
+command -v python3 >/dev/null || die "python3 is required (JSON encoding for the Jellyfin API)."
 resolve_tailscale
 require_docker_compose
 require_tailscale_up
 require_numeric LOCAL_PORT HTTPS_PORT
 
-# The username goes into a JSON body verbatim; keep it to characters that
-# need no escaping rather than shipping a hand-rolled JSON escaper.
+# The username is allowlisted, not merely escaped (json.dumps below would
+# take anything): a clear preflight error beats a stored account name you
+# cannot type on a TV's on-screen keyboard.
 case "$ADMIN_USERNAME" in
   ''|*[!A-Za-z0-9._-]*) die "JELLYFIN_ADMIN_USERNAME must be [A-Za-z0-9._-] only (got: $ADMIN_USERNAME)";;
 esac
@@ -408,9 +411,18 @@ else
     esac
   }
 
-  printf '{"UICulture":"%s","MetadataCountryCode":"%s","PreferredMetadataLanguage":"%s"}' \
-    "$UI_CULTURE" "$METADATA_COUNTRY" "$METADATA_LANGUAGE" > "$WORK/config.json"
-  printf '{"Name":"%s","Password":"%s"}' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" > "$WORK/user.json"
+  # JSON bodies go through json.dumps, never printf interpolation: a quote or
+  # backslash in a value would produce invalid JSON silently. Compact
+  # separators keep the byte shape the test suite and Jellyfin both see.
+  python3 -c '
+import json, sys
+print(json.dumps({"UICulture": sys.argv[1], "MetadataCountryCode": sys.argv[2],
+                  "PreferredMetadataLanguage": sys.argv[3]}, separators=(",", ":")))
+' "$UI_CULTURE" "$METADATA_COUNTRY" "$METADATA_LANGUAGE" > "$WORK/config.json"
+  JF_NAME="$ADMIN_USERNAME" JF_PW="$ADMIN_PASSWORD" python3 -c '
+import json, os
+print(json.dumps({"Name": os.environ["JF_NAME"], "Password": os.environ["JF_PW"]}, separators=(",", ":")))
+' > "$WORK/user.json"
   # Remote access on, automatic port mapping off: UPnP would try to punch a
   # hole in the router, and this server is reachable over the tailnet only.
   printf '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}' > "$WORK/remote.json"
@@ -454,7 +466,10 @@ fi
 # marked visible on the login screen and returns [] on a perfectly healthy
 # server, which makes a working deploy look broken.
 JF_BASE="$url"
-printf '{"Username":"%s","Pw":"%s"}' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" > "$WORK/auth.json"
+JF_NAME="$ADMIN_USERNAME" JF_PW="$ADMIN_PASSWORD" python3 -c '
+import json, os
+print(json.dumps({"Username": os.environ["JF_NAME"], "Pw": os.environ["JF_PW"]}, separators=(",", ":")))
+' > "$WORK/auth.json"
 jf POST /Users/AuthenticateByName "$WORK/auth.json"
 case "$JF_CODE" in
   401|403)

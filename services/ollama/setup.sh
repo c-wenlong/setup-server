@@ -35,6 +35,10 @@ set -euo pipefail
 # pinned to 11434, so a custom port was never supported end-to-end — a
 # second run silently reverted it and the tile read as an outage.
 PORT=11434
+# Pinned release (issue #179): the download is verified against the
+# release's own sha256sum.txt, so bumping is a deliberate edit (or a
+# one-shot OLLAMA_VERSION=vX.Y.Z ./setup.sh).
+OLLAMA_VERSION="${OLLAMA_VERSION:-v0.40.15}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODELS="$HOME/.ollama"
 
@@ -64,18 +68,39 @@ fi
 if [ -n "$OLLAMA_BIN" ]; then
   ok "Reusing existing ollama binary: $OLLAMA_BIN"
 elif [ "$OS" = "Linux" ]; then
-  info "Installing ollama to ~/.local (official tarball)"
+  info "Installing ollama $OLLAMA_VERSION to ~/.local (official release)"
   case "$(uname -m)" in
     x86_64|amd64)   OLLAMA_ARCH=amd64 ;;
     aarch64|arm64)  OLLAMA_ARCH=arm64 ;;
     *) die "Unsupported CPU architecture: $(uname -m)" ;;
   esac
+  command -v zstd >/dev/null \
+    || die "zstd is required to unpack the release tarball (e.g. sudo apt install zstd)."
+  command -v sha256sum >/dev/null || command -v shasum >/dev/null \
+    || die "sha256sum (or shasum) is required to verify the download."
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL "https://ollama.com/download/ollama-linux-$OLLAMA_ARCH.tgz" \
-    -o "$tmp/ollama.tgz"
+  ASSET="ollama-linux-$OLLAMA_ARCH.tar.zst"
+  BASE="https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION"
+  curl -fsSL "$BASE/$ASSET" -o "$tmp/$ASSET" \
+    || die "Download failed: $BASE/$ASSET (does release $OLLAMA_VERSION exist?)"
+  # Upstream signs nothing, but publishes sha256sum.txt next to the assets —
+  # fetch it from the same release and verify before a byte lands on disk.
+  curl -fsSL "$BASE/sha256sum.txt" -o "$tmp/sha256sum.txt" \
+    || die "Could not fetch $BASE/sha256sum.txt — refusing to install an unverifiable binary."
+  want="$(awk -v a="$ASSET" '$NF == a {print $1; exit}' "$tmp/sha256sum.txt")"
+  [ -n "$want" ] \
+    || die "$ASSET is not listed in $OLLAMA_VERSION's sha256sum.txt — refusing to install."
+  if command -v sha256sum >/dev/null; then
+    got="$(sha256sum "$tmp/$ASSET" | awk '{print $1}')"
+  else
+    got="$(shasum -a 256 "$tmp/$ASSET" | awk '{print $1}')"
+  fi
+  [ "$got" = "$want" ] \
+    || die "Checksum mismatch for $ASSET (want $want, got $got) — not installing."
+  ok "sha256 verified against the release's sha256sum.txt"
   mkdir -p "$HOME/.local"
-  tar -xzf "$tmp/ollama.tgz" -C "$HOME/.local"
+  zstd -dc "$tmp/$ASSET" | tar -x -C "$HOME/.local"
   rm -rf "$tmp"
   trap - EXIT
   OLLAMA_BIN="$HOME/.local/bin/ollama"

@@ -40,38 +40,82 @@ serve ports, not just 443/8443/10000.
 Kuma is **pinned to 1.23.x**: the seeding library (`uptime-kuma-api`) does
 not support Kuma 2.x. Don't bump the image without replacing `seed_kuma.py`.
 
+## ntfy auth — deny-all to anonymous
+
+The tailnet is the boundary, but it is a *network* boundary: anything on it
+could read any topic, post fake alerts, or drive the `control` topic that
+ntfy-control acts on. So ntfy runs with `auth-file` (a users.db in the
+`ntfy-auth` named volume) plus `auth-default-access=deny-all`, and setup.sh
+creates one account per role on first run:
+
+| Account (.env) | `alerts` | `control` | Used by |
+|---|---|---|---|
+| `NTFY_PHONE_*` | read | read-write | the phone app — subscribe to `alerts`, post commands to `control` |
+| `NTFY_KUMA_*` | write-only | — | Kuma's `ntfy-alerts` notification channel (can publish, cannot read) |
+| `NTFY_CONTROL_*` | write-only | read-write | the ntfy-control listener — reads commands, replies on `alerts` |
+
+Everyone else is denied outright. Users are created when absent and their
+passwords re-synced from `.env` on every deploy — `.env` is the authority,
+so rotate a password by editing it there (a `change-pass` done inside ntfy
+is reverted on the next run, and a reset that regenerated `.env` while the
+auth volume survived self-heals). The ACL grants are upserts and re-run
+every deploy. New accounts for scripts can be added by hand:
+`docker exec -e NTFY_PASSWORD=… ntfy ntfy user add <name>` then
+`docker exec ntfy ntfy access <name> <topic> <read-only|write-only|read-write>`.
+
+The one manual step: **the phone app needs a login.** Subscribe to `alerts`
+with server `https://<host>:3003` and username/password `NTFY_PHONE_USER` /
+`NTFY_PHONE_PASS` from `.env` — anonymous subscriptions get nothing.
+
 ## Deploy
 
 ```sh
 ./setup.sh
-KUMA_PORT=3012 NTFY_TOPIC=my-alerts ./setup.sh   # overrides
+KUMA_PORT=3012 NTFY_TOPIC=my-alerts ./setup.sh   # overrides — first run only
 ```
+
+Requirements beyond Docker + Tailscale: `curl`, `openssl` (generates the
+Kuma admin password) and `uv` (runs the Kuma seed script). Preflight checks
+all of them and names the install fix for whatever is missing; the four
+ports must be numeric.
+
+`.env` is the **source of truth once written**: ports, topic and
+credentials all come from it on a re-run, and a shell override that
+disagrees prints a warning and is ignored — a stray `KUMA_PORT=3012
+./setup.sh` can no longer repoint the deployment while Compose still runs
+on the old port. To move a port deliberately, edit `.env` and re-run; for
+`KUMA_HTTPS_PORT`/`NTFY_HTTPS_PORT` also drop the old mapping first
+(`tailscale serve --https=<old port> off`) or both stay published. `.env`
+files written before the HTTPS keys existed are read as "published port =
+local port", which is what those deployments actually did.
 
 What it does beyond the usual (preflight → .env → compose up → serve →
 verify): **auto-seeds Kuma via its API** using `uv run --with
 uptime-kuma-api` — creates the admin account (credentials generated into
 `.env`, mode 600), an ntfy notification channel (default, applied to
 everything), and one HTTP monitor per service (60s interval, 2 retries).
-Seeding is idempotent (skips whatever exists) and best-effort: if `uv` is
-missing or the API changes, the deploy still succeeds and you configure via
-the web UI instead.
+Seeding is idempotent (skips whatever exists) and best-effort: if the API
+changes, the deploy still succeeds and you configure via the web UI
+instead.
 
 ## Phone setup (the point of all this)
 
 1. Install **ntfy** (App Store / Play Store)
 2. Add server: `https://<host>.<tailnet>.ts.net:3003` (Tailscale must be
    connected on the phone)
-3. Subscribe to topic **`alerts`**
+3. Subscribe to topic **`alerts`**, entering username/password
+   **`NTFY_PHONE_USER` / `NTFY_PHONE_PASS` from `.env`** — the server is
+   deny-all, so an anonymous subscription connects but receives nothing.
 
 Instant delivery on iOS relies on `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh`:
 self-hosted ntfy forwards a "poke" through ntfy.sh's APNS pipeline; message
 content stays on your server. Remove that env var in `docker-compose.yml` if
 you'd rather have delayed-but-fully-private delivery.
 
-Send anything to your phone from scripts:
+Send anything to your phone from scripts — with a write-capable account:
 
 ```sh
-curl -d "backup finished" https://<host>.<tailnet>.ts.net:3003/alerts
+curl -u "$NTFY_KUMA_USER:$NTFY_KUMA_PASS" -d "backup finished" https://<host>.<tailnet>.ts.net:3003/alerts
 ```
 
 ## Adding monitors for future services
@@ -93,7 +137,10 @@ docker compose $D pull && docker compose $D up -d   # upgrade ntfy (Kuma: see pi
 ```
 
 Kuma state (monitors, history, admin account): `~/services/monitoring/kuma`.
-ntfy cache: `~/services/monitoring/ntfy`. Back both up if you care about history.
+ntfy cache: `~/services/monitoring/ntfy`. ntfy accounts + ACLs: the
+`ntfy-auth` docker volume (`docker volume rm monitoring_ntfy-auth` resets
+them — `.env` passwords are re-created/re-synced on the next `./setup.sh`).
+Back the first two up if you care about history.
 
 ## Tests
 

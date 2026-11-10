@@ -418,7 +418,8 @@
         keepalive: true,
         cache: 'no-store',
         credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json',
+                   'X-Requested-With': 'launcher' },
         body: JSON.stringify({ event: event })
       });
       if (p && typeof p.then === 'function') p.then(noop, noop);

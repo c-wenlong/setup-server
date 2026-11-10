@@ -25,7 +25,7 @@ name: immich
 services:
   immich-server:
     container_name: immich_server
-    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-v3.1.0}
     volumes:
       # Do not edit the next line. To move media, change UPLOAD_LOCATION in .env
       - ${UPLOAD_LOCATION}:/data
@@ -44,7 +44,7 @@ services:
 
   immich-machine-learning:
     container_name: immich_machine_learning
-    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-v3.1.0}
     profiles: [ml]
     volumes:
       - model-cache:/cache

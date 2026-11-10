@@ -332,6 +332,20 @@ test_admin_already_exists() {
   check "marker written anyway"      [ -f "$HOME/services/forgejo/.admin-created" ]
   check "still published"            calls_have "tailscale serve --bg --https=3000"
   teardown
+
+  echo "• pre-existing .env without marker: saved password is never overwritten"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  rm -f "$HOME/services/forgejo/.admin-created" "$STATE_DIR/user_exists"
+  sed -i.bak 's/^FORGEJO_ADMIN_PASSWORD=.*/FORGEJO_ADMIN_PASSWORD=user-chosen-secret/' "$SVC/.env"
+  rm -f "$SVC/.env.bak"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "pre-existing .env: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "pre-existing .env: password preserved"   grep -qx 'FORGEJO_ADMIN_PASSWORD=user-chosen-secret' "$SVC/.env"
+  check "pre-existing .env: prints recovery hint" out_has "admin user change-password"
+  teardown
 }
 
 test_operator_escalation() {

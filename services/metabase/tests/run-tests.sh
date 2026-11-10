@@ -57,6 +57,7 @@ check() {
 }
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
+out_lacks()  { ! grep -qF -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 data_dir()   { sed -n 's/^METABASE_DATA=//p' "$SVC/.env"; }
@@ -140,6 +141,8 @@ test_fresh_deploy() {
   check ".env is mode 600"                   [ "$(file_mode "$SVC/.env")" = "600" ]
   check ".env records the local port"        grep -qx 'LOCAL_PORT=8104' "$SVC/.env"
   check "pinned to v0.63.17.3"               grep -qx 'METABASE_VERSION=v0.63.17.3' "$SVC/.env"
+  check "postgres pinned exactly"            grep -qx 'POSTGRES_VERSION=16.15-alpine' "$SVC/.env"
+  check "compose fallback does not float"    compose_hasF 'postgres:${POSTGRES_VERSION:-16.15-alpine}'
   check "SITE_URL is the tailnet URL"        grep -q '^MB_SITE_URL=https://test-host\.tailfake\.ts\.net:8104$' "$SVC/.env"
   check "admin email written"                grep -qx 'MB_ADMIN_EMAIL=admin@example.com' "$SVC/.env"
   check "admin password written"             grep -q '^MB_ADMIN_PASSWORD=.' "$SVC/.env"
@@ -164,6 +167,20 @@ test_setup_api_warns() {
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "warns about the API"   out_has "POST /api/setup returned HTTP"
   check "still prints the URL"  out_has "https://test-host.tailfake.ts.net:8104"
+  teardown
+}
+
+test_setup_api_code_not_concatenated() {
+  echo "• setup API connection refused: warns HTTP 000, never the doubled 000000"
+  # curl -w %{http_code} already prints 000 on a refused connection and exits
+  # non-zero; a `|| echo 000` fallback concatenated that into the nonsense
+  # code "000000" in this warning.
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/setup_conn_fail"
+  run_deploy
+  check "exits zero"           [ "$CODE" -eq 0 ]
+  check "warns HTTP 000"       out_has "POST /api/setup returned HTTP 000."
+  check "never 000000"         out_lacks "000000"
   teardown
 }
 
@@ -630,6 +647,7 @@ test_preflight_tailscale_down
 test_preflight_bad_port
 test_fresh_deploy
 test_setup_api_warns
+test_setup_api_code_not_concatenated
 test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot

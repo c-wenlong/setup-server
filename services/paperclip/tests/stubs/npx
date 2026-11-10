@@ -2,7 +2,7 @@
 echo "npx $*" >> "$CALLS_LOG"
 # Official managed install: writes ~/.local/bin/paperclipai
 case "$*" in
-  *"paperclipai install"*)
+  *paperclipai*install*)
     mkdir -p "$HOME/.local/bin"
     here="$(cd "$(dirname "$0")" && pwd)"
     src="$here/paperclipai"

@@ -2,6 +2,8 @@
 # docker stub. State in $STATE_DIR:
 #   docker_no_perm     — exists => `docker ps` fails like a non-docker-group user
 #   docker_containers  — one container name per line, printed by `docker ps`
+#   running_<name>     — exists => `inspect -f {{.State.Running}} <name>` says true
+#   exec_fails         — exists => `docker exec` exits 1 (analyse failed)
 #   compose_up / compose_down / compose_pull — touched by compose verbs
 echo "docker $*" >> "$CALLS_LOG"
 
@@ -15,6 +17,7 @@ case "$1" in
     ;;
 
   stop)
+    rm -f "$STATE_DIR/running_$2"
     if [ -f "$STATE_DIR/docker_containers" ]; then
       grep -vx "$2" "$STATE_DIR/docker_containers" > "$STATE_DIR/.dc" 2>/dev/null || true
       mv "$STATE_DIR/.dc" "$STATE_DIR/docker_containers"
@@ -22,10 +25,20 @@ case "$1" in
     ;;
 
   inspect)
+    # docker inspect -f '{{.State.Running}}' <name> — "true" only when the
+    # test marked that container running; otherwise behave like docker
+    # does on a missing/stopped one (false/absent + non-zero).
+    if [ "${2:-}" = "-f" ]; then
+      if [ -f "$STATE_DIR/running_${4:-}" ]; then echo true; exit 0; fi
+      echo false; exit 1
+    fi
     echo running
     ;;
 
   exec)
+    # docker exec <container> <cmd> — the stats rebuild; exec_fails turns
+    # it into the failure the timer must report.
+    [ -f "$STATE_DIR/exec_fails" ] && exit 1
     ;;
 
   compose)
@@ -34,9 +47,23 @@ case "$1" in
       *)
         for a in "$@"; do
           case "$a" in
-            up)   touch "$STATE_DIR/compose_up" ;;
+            up)
+              touch "$STATE_DIR/compose_up"
+              # A successful up leaves the project container running —
+              # setup's first-run analyse must see it that way.
+              touch "$STATE_DIR/running_kopifund"
+              grep -qx kopifund "$STATE_DIR/docker_containers" 2>/dev/null \
+                || echo kopifund >> "$STATE_DIR/docker_containers"
+              ;;
             pull) touch "$STATE_DIR/compose_pull" ;;
-            down) touch "$STATE_DIR/compose_down" ;;
+            down)
+              touch "$STATE_DIR/compose_down"
+              rm -f "$STATE_DIR/running_kopifund"
+              if [ -f "$STATE_DIR/docker_containers" ]; then
+                grep -vx kopifund "$STATE_DIR/docker_containers" > "$STATE_DIR/.dc" 2>/dev/null || true
+                mv "$STATE_DIR/.dc" "$STATE_DIR/docker_containers"
+              fi
+              ;;
           esac
         done
         ;;

@@ -8,11 +8,16 @@ answers "is it up?"). Dashboard: `https://homeserver.tail-name.ts.net:8092`.
 
 Two parts:
 
-- **Hub** (`henrygd/beszel` Docker image): PocketBase-backed web UI + store.
-  Host networking, bound to `127.0.0.1:8092` (`serve --http` override in
+- **Hub** (`henrygd/beszel` Docker image, pinned via `BESZEL_VERSION` —
+  no floating `:latest`): PocketBase-backed web UI + store. Host
+  networking, bound to `127.0.0.1:8092` (`serve --http` override in
   docker-compose.yml), published tailnet-only via `tailscale serve :8092`.
-  Data in `~/services/beszel/hub`.
-- **Agent** (native Go binary, `~/.local/bin/beszel-agent`, systemd **user**
+  Data in `~/services/beszel/hub`. First boot reads `USER_EMAIL` /
+  `USER_PASSWORD` from the environment (sourced from `.env`) to create
+  the superuser + UI user, so the admin password never appears in a
+  `docker exec` argv.
+- **Agent** (native Go binary, `~/.local/bin/beszel-agent`, pinned to the
+  same `BESZEL_VERSION` release as the hub; systemd **user**
   unit `beszel-agent.service` on Linux, launchd LaunchAgent
   `com.henrygd.beszel-agent` on macOS): reads /proc, hwmon temps,
   `nvidia-smi` (GPU stats — needs no container toolkit precisely because it
@@ -32,8 +37,8 @@ Host networking on the hub is load-bearing: on the bridge network the hub's
   (issue #182): first boot the hub builds the superuser from the
   `USER_EMAIL`/`USER_PASSWORD` compose env (visible via `docker
   inspect`, but only to the docker group — root-equivalent already);
-  re-runs authenticate through the API with the credential body on
-  curl's stdin, and the python API wiring reads them from its
+  re-runs authenticate through the API with the credential body built via
+  `json.dumps` on curl's stdin, and the python API wiring reads them from its
   environment. `docker exec superuser upsert` — which takes the
   password positionally and so exposes it in argv for its brief run —
   is the fallback only when the stored password stopped

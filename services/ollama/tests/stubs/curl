@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# curl stub: logs every call. Serves a fake ollama tarball for the download
-# URL (a real .tgz with bin/ollama inside, so setup.sh's tar extract works);
-# answers /api/version unless $STATE_DIR/health_down exists.
+# curl stub: logs every call. Serves a fake ollama release asset for the
+# pinned download URL (a real .tar.zst with bin/ollama inside, so setup.sh's
+# zstd|tar extract works) and a matching sha256sum.txt — the digest of the
+# tarball it just produced is stashed in $STATE_DIR so the checksum call
+# can return it. Touch $STATE_DIR/bad_checksum to serve a wrong digest.
+# Answers /api/version unless $STATE_DIR/health_down exists.
 echo "curl $*" >> "$CALLS_LOG"
 
 url="" out="" prev=""
@@ -12,13 +15,24 @@ for a in "$@"; do
 done
 
 case "$url" in
-  *ollama.com/download*ollama-linux*)
+  *releases/download/*sha256sum.txt)
+    if [ -f "$STATE_DIR/bad_checksum" ]; then
+      digest="0000000000000000000000000000000000000000000000000000000000000000"
+    else
+      digest="$(cat "$STATE_DIR/asset_sha" 2>/dev/null)"
+      [ -n "$digest" ] || { echo "curl: (22) no asset served yet" >&2; exit 22; }
+    fi
+    printf '%s  ollama-linux-amd64.tar.zst\n%s  ollama-linux-arm64.tar.zst\n' \
+      "$digest" "$digest" > "${out:-/dev/stdout}"
+    ;;
+  *releases/download/*ollama-linux*)
     payload="$(mktemp -d)"
     mkdir -p "$payload/bin"
     printf '#!/bin/sh\necho "ollama fake 9.9.9"\n' > "$payload/bin/ollama"
     chmod +x "$payload/bin/ollama"
-    tar -czf "${out:-/dev/stdout}" -C "$payload" bin
+    tar -cf - -C "$payload" bin | zstd -q -o "${out:-/dev/stdout}"
     rm -rf "$payload"
+    sha256sum "${out:-/dev/stdout}" 2>/dev/null | awk '{print $1}' > "$STATE_DIR/asset_sha"
     ;;
   */api/version*)
     [ ! -f "$STATE_DIR/health_down" ] || { echo "curl: (7) connection refused" >&2; exit 7; }

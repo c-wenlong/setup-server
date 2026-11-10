@@ -26,11 +26,19 @@ Clients (browser) ──HTTPS──▶ Tailscale Serve (:5678) ──▶ n8n (12
 
 ## Deploy
 
+Prereqs: Docker + Compose v2, Tailscale, curl, openssl (generates the
+encryption key and owner password), python3 (builds the owner-seed request).
+
 ```sh
 ./setup.sh
 OWNER_EMAIL=me@x.com OWNER_PASSWORD='MyPass123' ./setup.sh   # owner creds
-LOCAL_PORT=5679 ./setup.sh                                   # HTTPS port follows
+LOCAL_PORT=5679 ./setup.sh   # HTTPS follows local; first run only, .env wins after
 ```
+
+`.env` is read back after generation, so it is the source of truth on a
+re-run: a `LOCAL_PORT` override is warned and ignored (edit `.env` to move
+the port — `PUBLIC_URL` must match the Serve port or webhooks die), and the
+data dir created is the one `N8N_VOLUME` names.
 
 Owner account is seeded via n8n's setup API (`/rest/owner/setup` — requires
 a `browser-id` header on 2.x, and the REST API only comes up after DB

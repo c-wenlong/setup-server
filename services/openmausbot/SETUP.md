@@ -52,14 +52,18 @@ engine CLIs on this box (claude, codex, opencode, ...)  -- as THIS user
 
 1. Preflight: Linux or macOS, not root, `node --version` >= 24, npm present,
    Tailscale up, tailnet DNS name resolvable.
-2. npm global install: `npm install -g openmausbot` under a prefix inside
-   `$HOME` (moves the prefix to `~/.local` first if npm's is system-owned,
-   e.g. `/usr`). No sudo, no `npx` cache for the daemon.
+2. npm global install: `npm install -g openmausbot@<pin>` under a prefix
+   inside `$HOME` (moves the prefix to `~/.local` first if npm's is
+   system-owned, e.g. `/usr`). The version is pinned — an unpinned install
+   would silently pull whatever upstream ships next. No sudo, no `npx`
+   cache for the daemon.
 3. Writes `services/openmausbot/.env` **only if absent** (mode 600):
    `OMB_PORT`, `HTTPS_PORT`, `OMB_DATA_DIR=~/services/openmausbot/data`,
    `OMB_PUBLIC_URL`, `OMB_LOOPBACK_TRUST=owner`, plus `NODE_BIN`, `NPM_BIN`,
-   `OMB_BIN` so the unit knows where the toolchain lives. An existing `.env`
-   wins over CLI port flags (a warning says so).
+   `OMB_BIN` so the unit knows where the toolchain lives, and `OMB_VERSION`
+   recording the pin (edit it, or pass `OMB_VERSION=x.y.z` to `setup.sh`,
+   to upgrade). An existing `.env` wins over CLI port flags (a warning
+   says so).
 4. Installs a **systemd user unit** (`~/.config/systemd/user/openmausbot.service`,
    `Restart=always`, `EnvironmentFile=` the `.env`, `PATH=` the npm bin dir +
    node dir) or a **LaunchAgent** (`~/Library/LaunchAgents/com.openmausbot.server.plist`)

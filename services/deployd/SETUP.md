@@ -60,9 +60,10 @@ service definition:
 }
 ```
 
-- `repo` — git URL `ls-remote` polls. Required.
+- `repo` — git URL `ls-remote` polls. Required; must not start with `-`
+  (that would read as a git option). Passed after `--` regardless.
 - `ref` — branch or tag name, or a full 40-char sha (then no lookup is
-  needed; `main` is the default when omitted).
+  needed; `main` is the default when omitted). No leading `-` either.
 - `cmd` — shell run via `bash -c` with the checkout as cwd. `$DEPLOY_SHA`,
   `$DEPLOY_REF`, `$DEPLOY_NAME`, `$DEPLOY_REPO` are in the environment; the
   pinned-sha form above avoids a second resolve race. The command must be
@@ -134,9 +135,13 @@ by hand.
 ## Update / Remove
 
 - `./setup.sh` again — refreshes the poller + units; never rewrites `.env`.
-- `./teardown.sh` — disables the timer/agent, keeps everything else.
-- `./teardown.sh --purge` — also deletes `~/services/deployd` and `.env`
-  (asks for `deployd` typed confirmation).
+- `./teardown.sh` — disables the timer/agent, keeps everything else. Dies
+  when `.env` is missing or malformed — it is read, never sourced.
+- `./teardown.sh --purge` — also deletes `~/services/deployd`, the
+  unit/plist files and `.env`; asks for `deployd` typed confirmation
+  *before* anything changes. A `SERVICE_HOME` outside `~/services/deployd`
+  is kept — the .env value alone cannot prove the data there is deployd's —
+  and teardown prints the `rm -rf` line to finish the job by hand.
 
 ## Tests
 

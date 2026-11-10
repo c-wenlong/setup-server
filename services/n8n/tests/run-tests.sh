@@ -44,6 +44,34 @@ run_deploy() {
   CODE=$?
 }
 
+# A PATH holding nothing but the stubs and the real utilities setup.sh
+# shells out to — with named commands left out. That is how "this box has
+# no openssl" is made true: with the real one still reachable, the
+# preflight check would never fire. Same shape as syncthing's suite.
+minimal_path() {  # minimal_path <dir> [command-to-omit ...]
+  local dir="$1"; shift
+  mkdir -p "$dir"
+  local c p s base omit skip
+  for c in bash sh env uname mktemp rm cat head tail cut sed awk grep tr \
+           chmod mkdir rmdir df cp mv ln ls stat od readlink dirname \
+           basename seq touch sort wc sleep hostname openssl python3; do
+    skip=0
+    for omit in "$@"; do [ "$c" = "$omit" ] && skip=1; done
+    p="$(command -v "$c" 2>/dev/null)" && [ "$skip" = "0" ] && ln -sf "$p" "$dir/$c"
+  done
+  for s in "$STUBS"/*; do
+    base="$(basename "$s")"
+    skip=0
+    for omit in "$@"; do [ "$base" = "$omit" ] && skip=1; done
+    [ "$skip" = "1" ] || ln -sf "$s" "$dir/$base"
+  done
+}
+
+run_deploy_path() {  # run_deploy_path <path> [stdin]
+  OUT="$(printf '%s' "${2:-}" | PATH="$1" bash "$SVC/setup.sh" 2>&1)"
+  CODE=$?
+}
+
 check() {
   local desc="$1"; shift
   if "$@"; then
@@ -55,6 +83,7 @@ check() {
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
+calls_have_f() { grep -qF -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
 
@@ -104,7 +133,7 @@ test_idempotent_rerun() {
   setup
   touch "$STATE_DIR/operator"
   cat > "$SVC/.env" <<'EOF'
-N8N_VOLUME=/tmp/x
+N8N_VOLUME=$HOME/services/n8n/data
 LOCAL_PORT=5678
 PUBLIC_HOST=test-host.tailfake.ts.net
 PUBLIC_URL=https://test-host.tailfake.ts.net:5678/
@@ -128,6 +157,144 @@ test_port_override() {
   run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "served on :5679 -> 5679" calls_have "tailscale serve --bg --https=5679 http://127.0.0.1:5679"
+  teardown
+}
+
+test_env_wins_on_rerun() {
+  echo "• re-run with a port override: .env wins, the override is warned"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  : > "$CALLS_LOG"
+  export LOCAL_PORT=5679
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "warns LOCAL_PORT ignored"   out_has "LOCAL_PORT=5679 ignored"
+  check "serves .env's port"         calls_have "tailscale serve --bg --https=5678 http://127.0.0.1:5678"
+  check "never the override port"    no_call "https=5679"
+  check ".env keeps its port"        env_has "LOCAL_PORT=5678"
+  check "PUBLIC_URL still :5678"     env_has "PUBLIC_URL=https://test-host.tailfake.ts.net:5678/"
+  check "no PUBLIC_URL drift warn"   bash -c '! grep -q "PUBLIC_URL in .env" <<<"$1"' _ "$OUT"
+  teardown
+}
+
+test_env_explicit_https_drift() {
+  echo "• re-run with an explicit HTTPS_PORT: honoured, but the stale PUBLIC_URL is warned"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  : > "$CALLS_LOG"
+  export HTTPS_PORT=9999
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "served on :9999 -> 5678"     calls_have "tailscale serve --bg --https=9999 http://127.0.0.1:5678"
+  check "warns PUBLIC_URL is stale"   out_has "PUBLIC_URL in .env is https://test-host.tailfake.ts.net:5678/"
+  check "gives the fix"               out_has "set PUBLIC_URL=https://test-host.tailfake.ts.net:9999/"
+  teardown
+}
+
+test_preflight_bad_local_port() {
+  echo "• preflight rejects a non-numeric LOCAL_PORT — in env and in .env"
+  setup
+  export LOCAL_PORT=abc
+  run_deploy
+  check "override: exits non-zero"   [ "$CODE" -ne 0 ]
+  check "override: says numeric"     out_has "LOCAL_PORT must be numeric"
+  unset LOCAL_PORT
+  teardown
+  setup
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<'EOF'
+N8N_VOLUME=$HOME/services/n8n/data
+LOCAL_PORT=abc
+PUBLIC_HOST=test-host.tailfake.ts.net
+PUBLIC_URL=https://test-host.tailfake.ts.net:5678/
+N8N_ENCRYPTION_KEY=k
+OWNER_EMAIL=x@y.z
+OWNER_PASSWORD=Custom123
+EOF
+  run_deploy
+  check ".env: exits non-zero"       [ "$CODE" -ne 0 ]
+  check ".env: says numeric"         out_has "LOCAL_PORT must be numeric"
+  check "started no container"       [ ! -f "$STATE_DIR/compose_up" ]
+  teardown
+}
+
+test_preflight_no_openssl() {
+  echo "• preflight fails early without openssl (it generates the secrets)"
+  setup
+  touch "$STATE_DIR/operator"
+  minimal_path "$SANDBOX/nossl" openssl
+  run_deploy_path "$SANDBOX/nossl"
+  check "exits non-zero"           [ "$CODE" -ne 0 ]
+  check "names openssl"            out_has "openssl is required"
+  check "names the install fix"    out_has "apt-get install"
+  check "wrote no .env"            [ ! -f "$SVC/.env" ]
+  teardown
+}
+
+test_env_volume_used() {
+  echo "• the data dir created is .env's N8N_VOLUME, not the hardcoded default"
+  setup
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<'EOF'
+N8N_VOLUME=$HOME/services/n8n/custom-data
+LOCAL_PORT=5678
+PUBLIC_HOST=test-host.tailfake.ts.net
+PUBLIC_URL=https://test-host.tailfake.ts.net:5678/
+N8N_ENCRYPTION_KEY=k
+OWNER_EMAIL=x@y.z
+OWNER_PASSWORD=Custom123
+EOF
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "custom data dir created"  [ -d "$HOME/services/n8n/custom-data" ]
+  check "default dir not created"  [ ! -d "$HOME/services/n8n/data" ]
+  teardown
+}
+
+test_seed_json_escapes_password() {
+  echo "• owner seed: quotes and backslashes in .env values are JSON-escaped"
+  setup
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<'EOF'
+N8N_VOLUME=$HOME/services/n8n/data
+LOCAL_PORT=5678
+PUBLIC_HOST=test-host.tailfake.ts.net
+PUBLIC_URL=https://test-host.tailfake.ts.net:5678/
+N8N_ENCRYPTION_KEY=k
+OWNER_EMAIL=x@y.z
+OWNER_PASSWORD='P"ss\Word'
+EOF
+  run_deploy
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "seed body is escaped"     calls_have_f 'P\"ss\\Word'
+  teardown
+}
+
+test_env_get_decodes_tricky_values() {
+  echo "• .env values with escaped quotes or spaces are read whole, never executed"
+  setup
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<'EOF'
+N8N_VOLUME=$HOME/services/n8n/data
+LOCAL_PORT=5678
+PUBLIC_HOST=test-host.tailfake.ts.net
+PUBLIC_URL=https://test-host.tailfake.ts.net:5678/
+N8N_ENCRYPTION_KEY=k
+OWNER_EMAIL=x@y.z
+OWNER_PASSWORD="Password123\"tail"
+EOF
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "escaped quote decoded whole" calls_have_f 'Password123\"tail'
+  # A value with an unquoted space reads whole — and sourcing would have
+  # run `Pass123` as a command; env_get never executes anything.
+  sed -i.bak 's/^OWNER_PASSWORD=.*/OWNER_PASSWORD=My Pass123/' "$SVC/.env"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero again"            [ "$CODE" -eq 0 ]
+  check "spaced value read whole"     calls_have_f 'My Pass123'
   teardown
 }
 
@@ -471,6 +638,13 @@ test_preflight_tailscale_down
 test_fresh_deploy
 test_idempotent_rerun
 test_port_override
+test_env_wins_on_rerun
+test_env_explicit_https_drift
+test_preflight_bad_local_port
+test_preflight_no_openssl
+test_env_volume_used
+test_seed_json_escapes_password
+test_env_get_decodes_tricky_values
 test_operator_escalation
 test_teardown_safe
 test_teardown_custom_https_port

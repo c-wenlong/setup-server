@@ -90,13 +90,17 @@ Step by step:
 1. **Preflight** — OS, non-root, curl, python3, Node ≥ 24.11, Tailscale
    `Running`, numeric ports.
 2. **Inspect** Claude / Codex — versions and auth, read-only.
-3. **`.env`** — generated once (ports, paths, placeholder
-   `PAPERCLIP_EMAIL` / `PAPERCLIP_PASSWORD`). Those login keys are not
-   applied to the instance yet; edit them in `.env` or the launcher.
-   Missing keys are appended on a re-run. If `paperclip-openhands/.env`
-   still exists, Paperclip keys are copied from it (nothing is rotated).
+3. **`.env`** — generated once (ports, paths). `PAPERCLIP_EMAIL` /
+   `PAPERCLIP_PASSWORD` are **not** invented: create the real pair at
+   Settings → Profile after the CEO invite, then add them to `.env` (or
+   supply them on the command line and setup.sh appends them). They are
+   bookkeeping for the launcher — never applied to the instance. If
+   `paperclip-openhands/.env` still exists, Paperclip keys are copied
+   from it (nothing is rotated).
 4. **Workspace** — `~/agent-workspaces/paperclip-test`.
-5. **Paperclip** — managed CLI if missing; `onboard --yes --bind tailnet`
+5. **Paperclip** — managed CLI if missing (`npx paperclipai@<pin> install`;
+   the installer is pinned, the managed CLI still self-updates after);
+   `onboard --yes --bind tailnet`
    only when no config exists (`--yes` would otherwise start a foreground
    server and never return); rewrite bind to loopback; allowlist MagicDNS;
    `service install --enable-linger`.

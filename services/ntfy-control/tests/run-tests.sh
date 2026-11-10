@@ -34,17 +34,23 @@ setup() {
   export STATE_DIR="$SANDBOX/state"
   export CALLS_LOG="$SANDBOX/calls.log"
   SVC="$SANDBOX/repo/services/ntfy-control"
-  mkdir -p "$HOME" "$STATE_DIR" "$SVC"
+  mkdir -p "$HOME" "$STATE_DIR" "$SVC" "$SANDBOX/repo/services/monitoring"
   copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
   cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/control_listener.py" "$SERVICE_DIR/kuma_toggle.py" "$SVC/"
+  # The listener's credentials come out of monitoring/.env (its setup.sh
+  # creates the `control` account there); this fixture stands in for it.
+  cat > "$SANDBOX/repo/services/monitoring/.env" <<'EOF'
+NTFY_CONTROL_USER=control
+NTFY_CONTROL_PASS=testpass123
+EOF
 }
 
 teardown() {
   rm -rf "$SANDBOX"
   export HOME="$ORIG_HOME"
   unset FAKE_UID NTFY_PORT CONTROL_TOPIC REPLY_TOPIC STATE_DIR CALLS_LOG \
-        CONTROL_APPS_DIR
+        CONTROL_APPS_DIR TEST_NTFY_USER TEST_NTFY_PASS
 }
 
 run_deploy() {
@@ -52,10 +58,13 @@ run_deploy() {
   CODE=$?
 }
 
-# Run the listener's one-shot handler as the subscribe loop would.
+# Run the listener's one-shot handler as the subscribe loop would. The
+# deployed unit gets NTFY_USER/NTFY_PASS from .env; TEST_NTFY_USER="" runs
+# the anonymous variant (a pre-auth ntfy deploy).
 run_handle() {
   OUT="$(NTFY_BASE_URL=http://127.0.0.1:3003 CONTROL_TOPIC=control REPLY_TOPIC=alerts \
     PUBLIC_NTFY_URL=https://test-host.tailfake.ts.net:3003 \
+    NTFY_USER="${TEST_NTFY_USER-control}" NTFY_PASS="${TEST_NTFY_PASS-testpass123}" \
     KUMA_ENV_FILE="$SANDBOX/kuma.env" \
     PATH="$STUBS:$PATH" python3 "$SERVICE_DIR/control_listener.py" --handle "$1" 2>&1)"
   CODE=$?
@@ -136,6 +145,10 @@ test_fresh_install() {
   check ".env has control topic"    env_has "CONTROL_TOPIC=control"
   check ".env has reply topic"      env_has "REPLY_TOPIC=alerts"
   check ".env has tailnet URL"      env_has "PUBLIC_NTFY_URL=https://test-host.tailfake.ts.net:3003"
+  check ".env has ntfy user"        env_has "NTFY_USER=control"
+  check ".env has ntfy pass"        env_has "NTFY_PASS=testpass123"
+  check ".env is mode 600"          sh -c "[ \"\$(stat -c %a '$SVC/.env' 2>/dev/null || stat -f %Lp '$SVC/.env')\" = 600 ]"
+  check "auth probe ran"            calls_have 'control/json?poll=1'
   check "listener installed"        [ -x "$HOME/services/ntfy-control/bin/control_listener.py" ]
   check "kuma toggle installed"     [ -f "$HOME/services/ntfy-control/bin/kuma_toggle.py" ]
   if [ "$OS" = "Linux" ]; then
@@ -149,7 +162,7 @@ test_fresh_install() {
     check "launch agent written"    [ -f "$HOME/Library/LaunchAgents/com.ntfy-control.listener.plist" ]
   fi
   check "prints usage"              out_has "stop seafile"
-  check "publishes panel to phone"  calls_have '\-d panel http://127.0.0.1:3003/control'
+  check "panel sent with creds"     calls_have '\-u control:testpass123 -d panel http://127.0.0.1:3003/control'
   check "no phone -> onboarding"    out_has "No phone detected"
   check "onboarding has server URL" out_has "https://test-host.tailfake.ts.net:3003"
   teardown
@@ -175,7 +188,104 @@ test_idempotent_rerun() {
   run_deploy
   check "exits zero"             [ "$CODE" -eq 0 ]
   check "edited .env preserved"  env_has "CUSTOM-MARK"
+  check "creds still there"      env_has "NTFY_PASS=testpass123"
   check "never invoked sudo"     no_call "^sudo "
+  teardown
+}
+
+test_auth_required() {
+  echo "• ntfy requires auth: stored creds are verified then used"
+  setup
+  touch "$STATE_DIR/ntfy_auth"
+  run_deploy
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  check "says auth verified"         out_has "ntfy auth verified for user 'control'"
+  check "probe carried the creds"    calls_have '\-u control:testpass123 http://127.0.0.1:3003/control/json?poll=1'
+  check "panel sent with creds"      calls_have '\-u control:testpass123 -d panel'
+  teardown
+}
+
+test_auth_required_no_creds() {
+  echo "• ntfy requires auth but .env has none: dies naming the fix"
+  setup
+  rm "$SANDBOX/repo/services/monitoring/.env"   # monitoring too old to have creds
+  touch "$STATE_DIR/ntfy_auth"
+  run_deploy
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "names monitoring setup"  out_has "services/monitoring/setup.sh"
+  check "no unit installed"       [ ! -f "$HOME/.config/systemd/user/ntfy-control.service" ]
+  teardown
+}
+
+test_auth_rejected() {
+  echo "• ntfy rejects the stored creds: dies naming the fix"
+  setup
+  touch "$STATE_DIR/ntfy_auth" "$STATE_DIR/ntfy_auth_reject"
+  run_deploy
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says rejected"           out_has "ntfy rejected the NTFY_USER/NTFY_PASS"
+  check "no unit installed"       [ ! -f "$HOME/.config/systemd/user/ntfy-control.service" ]
+  teardown
+}
+
+test_env_migration_adds_creds() {
+  echo "• a pre-auth .env gains NTFY_USER/NTFY_PASS pulled from monitoring/.env"
+  setup
+  cat > "$SVC/.env" <<'EOF'
+NTFY_BASE_URL=http://127.0.0.1:3003
+PUBLIC_NTFY_URL=https://test-host.tailfake.ts.net:3003
+CONTROL_TOPIC=control
+REPLY_TOPIC=alerts
+KUMA_ENV_FILE=/tmp/monitoring.env
+SERVICE_HOME=/tmp/svc
+TOOL_DIR=/tmp
+EOF
+  touch "$STATE_DIR/ntfy_auth"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "user appended"           env_has "NTFY_USER=control"
+  check "pass appended"           env_has "NTFY_PASS=testpass123"
+  check "verified with them"      out_has "ntfy auth verified for user 'control'"
+  teardown
+}
+
+test_plist_escapes_env_values() {
+  echo "• launchd plist: XML-special characters in .env values are escaped and mode is 600"
+  setup
+  touch "$STATE_DIR/fake_macos"
+  export CONTROL_TOPIC='a<b&c'
+  PLIST="$HOME/Library/LaunchAgents/com.ntfy-control.listener.plist"
+  mkdir -p "$(dirname "$PLIST")"
+  : > "$PLIST"
+  chmod 644 "$PLIST"
+  run_deploy
+  mode="$(stat -c '%a' "$PLIST" 2>/dev/null || stat -f '%Lp' "$PLIST")"
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "plist written"           [ -f "$PLIST" ]
+  check "plist mode 600"          [ "$mode" = "600" ]
+  check "value is escaped"        grep -q 'a&lt;b&amp;c' "$PLIST"
+  check "no raw chars left"       sh -c "! grep -q 'a<b&c' '$PLIST'"
+  teardown
+}
+
+test_handle_sends_credentials() {
+  echo "• listener: every ntfy call and HTTP action button carries basic auth from NTFY_USER/NTFY_PASS"
+  setup
+  run_handle "panel"
+  expected_b64="$(printf 'control:testpass123' | base64 | tr -d '\n')"
+  check "reply used -u"           calls_have '\-u control:testpass123'
+  check "reply hit alerts"        calls_have 'http://127.0.0.1:3003/alerts$'
+  check "buttons carry auth hdr"  calls_have "X-Actions.*\"Authorization\": \"Basic $expected_b64\""
+  teardown
+}
+
+test_handle_anonymous() {
+  echo "• listener without creds sends no -u and no action auth header (pre-auth ntfy keeps working)"
+  setup
+  TEST_NTFY_USER="" TEST_NTFY_PASS="" run_handle "panel"
+  check "still replies"           calls_have 'pick start'
+  check "no -u sent"              no_call ' -u '
+  check "no action auth header"   no_call '"Authorization"'
   teardown
 }
 
@@ -421,9 +531,19 @@ live_check() {
 
 test_live() {
   echo "• live: verify the real deployment on this machine"
-  local port topic
+  local port topic user pass cred read_user read_pass read_cred mon_env
   port="$(sed -n 's|^NTFY_BASE_URL=http://127.0.0.1:\([0-9]*\)$|\1|p' "$SERVICE_DIR/.env")"
   topic="$(sed -n 's/^CONTROL_TOPIC=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  user="$(sed -n 's/^NTFY_USER=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  pass="$(sed -n 's/^NTFY_PASS=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  cred=""; [ -n "$user" ] && cred="-u $user:$pass"
+  # The control account has write-only access on alerts; read the reply back
+  # using the phone account (read-only on alerts) from monitoring/.env.
+  mon_env="$SERVICE_DIR/../monitoring/.env"
+  read_user="$(sed -n 's/^NTFY_PHONE_USER=\(.*\)$/\1/p' "$mon_env" 2>/dev/null || true)"
+  read_pass="$(sed -n 's/^NTFY_PHONE_PASS=\(.*\)$/\1/p' "$mon_env" 2>/dev/null || true)"
+  read_cred="$cred"
+  [ -n "$read_user" ] && [ -n "$read_pass" ] && read_cred="-u $read_user:$read_pass"
   live_check "ntfy healthy"          curl -fsS "http://127.0.0.1:$port/v1/health"
   if [ "$OS" = "Linux" ]; then
     live_check "listener active"     sh -c "systemctl --user is-active ntfy-control | grep -qx active"
@@ -431,9 +551,10 @@ test_live() {
   else
     live_check "launch agent loaded" sh -c "launchctl print gui/$(id -u)/com.ntfy-control.listener"
   fi
-  # end-to-end: publish `status`, expect the listener to reply on the alerts topic
-  curl -fsS -o /dev/null -d "status" "http://127.0.0.1:$port/$topic" && sleep 3
-  live_check "status round-trip"     sh -c "curl -fsS 'http://127.0.0.1:$port/alerts/json?poll=1&since=30s' | grep -q 'server-control'"
+  # end-to-end: publish `status`, expect the listener to reply on the alerts
+  # topic — authenticated, since the server is deny-all.
+  curl -fsS -o /dev/null $cred -d "status" "http://127.0.0.1:$port/$topic" && sleep 3
+  live_check "status round-trip"     sh -c "curl -fsS $read_cred 'http://127.0.0.1:$port/alerts/json?poll=1&since=30s' | grep -q 'server-control'"
 }
 
 # A stop_guard is a script in the repo, so these run against a fixture repo
@@ -708,6 +829,13 @@ test_preflight_docker_perms
 test_fresh_install
 test_fresh_install_with_phone
 test_idempotent_rerun
+test_auth_required
+test_auth_required_no_creds
+test_auth_rejected
+test_env_migration_adds_creds
+test_plist_escapes_env_values
+test_handle_sends_credentials
+test_handle_anonymous
 test_handle_stop
 test_handle_start
 test_handle_immich

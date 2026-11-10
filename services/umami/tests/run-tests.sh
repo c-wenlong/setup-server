@@ -54,6 +54,7 @@ check() {
 }
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
+out_lacks()  { ! grep -qF -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
@@ -162,6 +163,21 @@ test_rotate_fails() {
   check "exits non-zero"        [ "$CODE" -ne 0 ]
   check "names the default"     out_has "upstream default"
   check "did not serve"         no_call "tailscale serve --bg --https=8106"
+  teardown
+}
+
+test_rotate_code_not_concatenated() {
+  echo "• rotation connection refused: dies HTTP 000, never the doubled 000000"
+  # curl -w %{http_code} already prints 000 on a refused connection and exits
+  # non-zero; a `|| echo 000` fallback concatenated that into the nonsense
+  # code "000000" in the die message.
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/rotate_conn_fail"
+  run_deploy
+  check "exits non-zero"       [ "$CODE" -ne 0 ]
+  check "dies on HTTP 000"     out_has "returned HTTP 000."
+  check "never 000000"         out_lacks "000000"
+  check "did not serve"        no_call "tailscale serve --bg --https=8106"
   teardown
 }
 
@@ -630,6 +646,7 @@ test_preflight_tailscale_down
 test_preflight_bad_port
 test_fresh_deploy
 test_rotate_fails
+test_rotate_code_not_concatenated
 test_port_override
 test_https_port_follows_local_port
 test_slow_first_boot

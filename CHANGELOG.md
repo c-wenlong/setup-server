@@ -214,6 +214,27 @@ first, dated by merge.
   source of truth). The upstream Git repo itself is still
   `c-wenlong/self-learn`.
 
+### Removed
+
+- **design-systems (the service) is gone; the box serves Studio instead.**
+  Since the 2026-11-07 "Studio cutover", tailnet :8108 proxies straight to
+  the designs repo's own research app (`design-research.service`, `next
+  start` on `127.0.0.1:8845`), which deploys and updates itself via
+  `scripts/studio-deploy.sh` + `design-research-update.timer` in that repo
+  — the nginx gallery stack here had nothing left to serve, and its
+  `.disabled` flag only existed to stop this stack taking the port back.
+  Removed: `services/design-systems/` (setup.sh, deploy.sh, teardown.sh,
+  suite, docs, compose), the app.json/registry row so deployd stops
+  watching `designs@main`, the README/DIRECTORY rows, the Kuma seed and
+  the brand icon. On the box: the nginx container, the :8110 Serve
+  mapping and the Kuma monitor are gone, the retired `designs-web` /
+  `designs-api` / `designs-trigger` units were stopped and removed, and
+  the deployd flag retires with the watcher. Kept:
+  `~/services/design-systems/media/refero/` — Studio's
+  `DESIGN_SYSTEMS_MEDIA` and `mirror_media.py`'s documented default root —
+  and the working clone at `~/dev/design-systems`. Resurrect the service
+  from git history only if Studio itself is going away.
+
 ### Fixed
 
 - **sources: the Jobs page is back.** The deploy clone build (PR #139)

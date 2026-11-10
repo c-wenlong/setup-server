@@ -294,6 +294,22 @@ test_admin_email_override() {
   check ".env records the email"     grep -qx 'ADMIN_EMAIL=operator@example.com' "$SVC/.env"
   check "whitelist matches it"       grep -q 'operator@example\.com' "$SVC/.env"
   teardown
+
+  echo "• without host htpasswd, docker helper image runs with password on stdin"
+  setup
+  touch "$STATE_DIR/operator"
+  NO_HTPASSWD_STUBS="$SANDBOX/stubs_no_htpasswd"
+  mkdir -p "$NO_HTPASSWD_STUBS"
+  cp "$STUBS"/* "$NO_HTPASSWD_STUBS/"
+  rm -f "$NO_HTPASSWD_STUBS/htpasswd"
+  OUT="$(HTPASSWD_IMAGE=httpd:2.4.99-custom PATH="$NO_HTPASSWD_STUBS:/usr/bin:/bin" bash "$SVC/setup.sh" 2>&1)"
+  CODE=$?
+  reg_pw="$(sed -n 's/^DOCKER_REGISTRY_PASSWORD=//p' "$SVC/.env")"
+  check "docker htpasswd fallback exits zero"   [ "$CODE" -eq 0 ]
+  check "used HTPASSWD_IMAGE override"          calls_have "docker run --rm -i httpd:2.4.99-custom htpasswd -Bni registry-user"
+  check "password arrived on docker stdin"      [ "$(cat "$STATE_DIR/htpasswd_stdin" 2>/dev/null)" = "$reg_pw" ]
+  check "password never in docker argv"         no_call "$reg_pw"
+  teardown
 }
 
 test_operator_escalation() {

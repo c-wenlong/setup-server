@@ -5,7 +5,9 @@
 # for nvidia-smi + hwmon + docker-socket access.
 services:
   beszel:
-    image: henrygd/beszel:latest
+    # Pinned: `latest` would silently pull whatever upstream ships next.
+    # Keep in step with the agent BESZEL_VERSION in .env (setup.sh).
+    image: henrygd/beszel:${BESZEL_VERSION:-0.21.1}
     container_name: beszel
     restart: unless-stopped
     network_mode: host

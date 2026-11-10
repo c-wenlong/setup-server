@@ -122,9 +122,14 @@ none is configured.
   path to `:8384` carrying a foreign Host is Serve, which is tailnet-only.
 - **Version pinned, self-upgrade off.** `SYNCTHING_VERSION` in `.env` is the
   only way the binary changes; the download is verified against the
-  release's sha256 list. Syncthing's own updater (`--no-upgrade`,
-  `autoUpgradeIntervalH=0`) is disabled so it cannot replace the binary
-  behind the pin.
+  release's sha256 list. That list is shipped as a PGP-signed file
+  (`sha256sum.txt.asc`) but setup.sh deliberately does **not** verify the
+  signature — it would need a trusted keyring and a `gpg` dependency for a
+  gain that still bottoms out at "did GitHub serve this file". The sha256
+  check protects against corrupted or tampered-in-transit downloads; a
+  compromised GitHub release itself is out of scope. Syncthing's own
+  updater (`--no-upgrade`, `autoUpgradeIntervalH=0`) is disabled so it
+  cannot replace the binary behind the pin.
 - **The unit is hardened** with upstream's own lines: `ProtectSystem=full`,
   `PrivateTmp`, `NoNewPrivileges`, `MemoryDenyWriteExecute`. Consequence:
   Syncthing can sync folders anywhere under your home and `~/services`, but

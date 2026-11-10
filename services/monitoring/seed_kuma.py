@@ -100,9 +100,6 @@ PUBLISHED = [
     # "/" is the app shell (200): the whole corpus is encrypted blobs, so no
     # deeper endpoint exists — this proves nginx serves, nothing more.
     ("sources", 8098, "/"),
-    # /gallery/ is the point of the service and a static 200; it also proves
-    # the built site (not just the repo-path aliases) is what nginx serves.
-    ("design-systems", 8108, "/gallery/"),
     # /login.html, not / — "/" is a 302 to it and Kuma scores a 302 as down.
     # This proves the web UI is up and says nothing about DNS; the resolver
     # gets its own monitor below, because those two fail independently.
@@ -184,7 +181,31 @@ if api.need_setup():
 api.login(user, password)
 
 notification_name = "ntfy-alerts"
+
+# ntfy is deny-all to anonymous callers, so the channel authenticates as the
+# dedicated kuma account (write-only on the alerts topic). Credentials come
+# from monitoring/.env via setup.sh; absent env = an unauthenticated ntfy,
+# which is what `none` means. An existing channel is REPLACED when its auth
+# does not match — a pre-auth `none` channel would only ever get 401s, and a
+# password rotated in .env has to reach the stored channel: Kuma keeps the
+# old one otherwise and every alert fails auth while looking configured.
+ntfy_auth = {"ntfyAuthenticationMethod": "none"}
+if os.environ.get("NTFY_KUMA_USER") and os.environ.get("NTFY_KUMA_PASS"):
+    ntfy_auth = {
+        "ntfyAuthenticationMethod": "username-password",
+        "ntfyusername": os.environ["NTFY_KUMA_USER"],
+        "ntfypassword": os.environ["NTFY_KUMA_PASS"],
+    }
+
 existing = next((n for n in api.get_notifications() if n["name"] == notification_name), None)
+if existing and (
+    existing.get("ntfyAuthenticationMethod", "none") != ntfy_auth["ntfyAuthenticationMethod"]
+    or existing.get("ntfyusername") != ntfy_auth.get("ntfyusername")
+    or existing.get("ntfypassword") != ntfy_auth.get("ntfypassword")
+):
+    api.delete_notification(existing["id"])
+    print("replaced ntfy notification (auth changed)")
+    existing = None
 if existing:
     notification_id = existing["id"]
 else:
@@ -196,7 +217,7 @@ else:
         ntfyserverurl=f"http://127.0.0.1:{os.environ['NTFY_PORT']}",
         ntfytopic=os.environ.get("NTFY_TOPIC", "alerts"),
         ntfyPriority=5,
-        ntfyAuthenticationMethod="none",
+        **ntfy_auth,
     )
     notification_id = result["id"]
     print("created ntfy notification")

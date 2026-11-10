@@ -66,6 +66,23 @@ Deliberate — the running tick may be inside another service's setup.sh and
 killing it could leave that service half-configured. The timer is already
 disabled, so nothing new starts; re-run teardown when the lock clears.
 
+## "teardown --purge kept my SERVICE_HOME"
+
+`--purge` only deletes directories it can prove live at or inside
+`~/services/deployd` — a `.env` pointing `SERVICE_HOME` anywhere else
+(a custom state dir, a typo, a symlink) is kept on purpose, because the
+value alone cannot prove the data is deployd's. The units and `.env` are
+still removed; teardown prints the `rm -rf -- <path>` line for the kept
+directory so you can finish the job by hand.
+
+## "teardown refused: no .env / malformed .env"
+
+teardown reads `.env` to find `SERVICE_HOME` and never executes it. No file
+means setup.sh never ran here — nothing to tear down. A file it cannot
+read the way setup.sh would (a line that is not `KEY=value`, a key set
+twice, an unclosed quote, a backslash escape) is refused rather than
+guessed: fix the named line and re-run.
+
 ## "I edited a deploy block but the old one still runs"
 
 Check which checkout `SETUP_REPO` in `.env` names — `app.json` is read from
