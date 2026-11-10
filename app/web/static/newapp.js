@@ -44,6 +44,9 @@
     var timer = setTimeout(function () { xhr.abort(); done(null, 0); }, FETCH_TIMEOUT);
     xhr.open(method, path, true);
     xhr.setRequestHeader('Accept', 'application/json');
+    /* The API's CSRF gate: writes must carry this fixed header, which a
+       cross-site "simple" request cannot add. Sent on reads too. */
+    xhr.setRequestHeader('X-Requested-With', 'launcher');
     xhr.onreadystatechange = function () {
       if (xhr.readyState !== 4 || xhr.status === 0) return;
       clearTimeout(timer);

@@ -86,7 +86,7 @@ Per the repo's required-files table, plus two additions:
 | `SETUP.md` | Architecture, security model incl. the D1 reasoning, deps, step-by-step, Mac client setup, ops. |
 | `TROUBLESHOOT.md` | Layered triage (session → xrdp → guacd → webapp → serve → client). |
 | `tests/run-tests.sh` + `tests/stubs/` | Mocked default, `--live` suite. |
-| `AGENTS.md` | **Warranted here.** This service installs host packages and needs sudo on every run that changes them — a real deviation from the repo's container/user-unit norm. Document it so future agents don't "fix" it. |
+| `AGENTS.md` | **Planned, then folded into `SETUP.md`.** The sudo/host-package deviation it was meant to record lives in SETUP.md's "The sudo deviation" instead, where the people who need it actually look. |
 
 ## setup.sh — step spec
 

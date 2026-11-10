@@ -93,6 +93,15 @@ unaffected.
 Tailnet-only, like everything here, and the backend binds `127.0.0.1`. There is
 no login: the tailnet is the boundary, same as code-server and n8n.
 
+The tailnet boundary does nothing about a hostile page already open in the
+operator's browser, so writes are gated against CSRF directly: every mutating
+method (POST/PUT/PATCH/DELETE) must carry `X-Requested-With: launcher`, which a
+cross-origin "simple" request cannot send and any other cross-origin request
+can only send after a CORS preflight this server never answers. `Sec-Fetch-Site`
+and `Origin` are checked too when the browser sends them. Every response also
+carries `X-Frame-Options: DENY` and a `frame-ancestors 'none'` CSP, so nothing
+can frame the UI.
+
 **The deploy endpoint executes shell scripts, so this is the most dangerous
 surface on the box.** The design that makes that acceptable:
 

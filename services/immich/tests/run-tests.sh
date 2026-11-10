@@ -60,6 +60,7 @@ check() {
 }
 
 out_has()    { grep -q "$1" <<<"$OUT"; }
+out_lacks()  { ! grep -qF -- "$1" <<<"$OUT"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
@@ -133,7 +134,7 @@ test_fresh_deploy_ml_off() {
   check ".env generated"                 [ -f "$SVC/.env" ]
   check ".env has a hex DB password"     grep -qE '^DB_PASSWORD=[a-f0-9]{32}$' "$SVC/.env"
   check ".env has an admin password"     grep -qE '^IMMICH_ADMIN_PASSWORD=[a-f0-9]{32}$' "$SVC/.env"
-  check ".env pins the v3 line"          env_has "IMMICH_VERSION=v3"
+  check ".env pins v3.1.0 exactly"       grep -qx 'IMMICH_VERSION=v3.1.0' "$SVC/.env"
   check ".env has empty profiles"        grep -qx 'COMPOSE_PROFILES=' "$SVC/.env"
   check "compose up invoked"             [ -f "$STATE_DIR/compose_up" ]
   check "ML profile NOT started"         [ ! -f "$STATE_DIR/compose_up_ml" ]
@@ -264,6 +265,47 @@ test_hand_edited_profiles() {
   check "ML profile started"            [ -f "$STATE_DIR/compose_up_ml" ]
   check "machineLearning enabled"       put_cfg machineLearning.enabled true
   check "marker caught up to .env"      grep -qx on "$HOME/services/immich/.ml-mode"
+  teardown
+}
+
+test_profiles_ml_is_a_list_element() {
+  echo "• COMPOSE_PROFILES: ml counts mid-list, but not as a substring (xml)"
+  # The .env check anchors `ml` on the list's commas or the value's edges;
+  # `\b` would be the tempting way to write that and is GNU-only, which is
+  # why the script does not use it.
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  awk '/^COMPOSE_PROFILES=/{print "COMPOSE_PROFILES=debug,ml"; next} {print}' \
+    "$SVC/.env" > "$SVC/.env.new" && mv "$SVC/.env.new" "$SVC/.env"
+  rm -f "$STATE_DIR/compose_up_ml"
+  run_deploy
+  check "ml mid-list: ML turned on"      [ -f "$STATE_DIR/compose_up_ml" ]
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  awk '/^COMPOSE_PROFILES=/{print "COMPOSE_PROFILES=xml"; next} {print}' \
+    "$SVC/.env" > "$SVC/.env.new" && mv "$SVC/.env.new" "$SVC/.env"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "xml substring: exits zero"      [ "$CODE" -eq 0 ]
+  check "  and ML stays off"             [ ! -f "$STATE_DIR/compose_up_ml" ]
+  teardown
+}
+
+test_api_code_not_concatenated() {
+  echo "• API connection refused: reports HTTP 000, never the doubled 000000"
+  # curl -w %{http_code} already prints 000 when it cannot connect and exits
+  # non-zero; a `|| echo 000` fallback concatenated that into the nonsense
+  # code "000000" in this die message.
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/conn_fail"
+  run_deploy
+  check "dies on the failed call"  [ "$CODE" -ne 0 ]
+  check "reports HTTP 000"         out_has "admin-sign-up returned HTTP 000"
+  check "never 000000"             out_lacks "000000"
   teardown
 }
 
@@ -1060,6 +1102,8 @@ test_ml_toggle_on_then_off
 test_config_endpoint_rename
 test_resume_after_partial_failure
 test_hand_edited_profiles
+test_profiles_ml_is_a_list_element
+test_api_code_not_concatenated
 test_password_drift
 test_operator_escalation
 test_https_port_follows_local_port

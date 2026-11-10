@@ -68,10 +68,14 @@ git -C ~/.kopifund log --oneline -10
 | `*.loser-<sha>` files appear | two machines wrote the same file between ticks — expected, not an error | diff the loser against the live file, merge what matters by hand, `git rm` the loser and let the next tick push |
 | The Mac never sees server changes | its sync isn't running, or it keeps losing merges | on the Mac: `launchctl list com.kopifund.sync`, check its log; remember the newer commit wins — an idle Mac's stale write can still win if stamped newer |
 | `kopifund.db` looks rolled back | the other machine's newer snapshot won the merge | the losing db is beside it as `kopifund.db.loser-<sha>` — restore or re-import from it |
+| Dashboard is empty though `/api/health` answers | the stat results in `cache/` are per-machine (gitignored): a fresh clone or a pulled ledger has none until `analyse` runs | `~/services/kopifund/bin/analyse.sh`, then reload — `kopifund-analyse.timer` keeps it fresh after that (`journalctl --user -u kopifund-analyse`) |
+| The launcher's data "lost" after first setup | adoption kept the clone's ledger because its `txn` count was richer | the launcher's `kopifund.db` still sits in `~/services/apps/kopifund-finance/data/` — reconcile by hand; `~/services/kopifund/state/legacy-adopted` is the one-time marker |
 
-Manual control: `~/services/kopifund/bin/sync.sh` runs one tick now.
-`systemctl --user stop kopifund-sync.timer` pauses it (Linux) —
-`launchctl bootout gui/$(id -u)/com.kopifund.sync` on macOS.
+Manual control: `~/services/kopifund/bin/sync.sh` runs one sync tick now;
+`~/services/kopifund/bin/analyse.sh` rebuilds the stats cache now.
+`systemctl --user stop kopifund-sync.timer kopifund-analyse.timer` pauses
+both (Linux) — `launchctl bootout gui/$(id -u)/com.kopifund.{sync,analyse}`
+on macOS.
 
 ## 6. Deploy loop (deployd)
 

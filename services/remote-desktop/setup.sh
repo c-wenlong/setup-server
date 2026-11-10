@@ -18,7 +18,8 @@
 #    *system* daemon (gnome-remote-desktop.service, already installed and
 #    running on this box). Configuring it means `sudo grdctl --system`, a TLS
 #    keypair under /var/lib/gnome-remote-desktop, and a packet-filter rule.
-#    See AGENTS.md in this directory before "fixing" that.
+#    See SETUP.md ("The sudo deviation") in this directory before "fixing"
+#    that.
 #
 #    Sudo is announced before every prompt and is needed only on drift: a
 #    re-run against a working deployment asks for nothing.
@@ -121,7 +122,8 @@ have tailscale || die "Tailscale is not installed: https://tailscale.com/downloa
 ts_state="$(tailscale status --json 2>/dev/null | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
 [ "$ts_state" = "Running" ] || die "Tailscale is not up (state: ${ts_state:-unknown}). Run: sudo tailscale up"
 
-# The RDP backend. Decided empirically (see the de-risk note in AGENTS.md):
+# The RDP backend. Decided empirically (see "Why gnome-remote-desktop and not
+# xrdp" in SETUP.md):
 # gnome-remote-desktop is already installed, enabled and running on this box
 # at under a megabyte idle, so xrdp + a second desktop environment would cost
 # ~400 MB to replace something that is already there.
@@ -523,7 +525,7 @@ else
   echo
   warn "The password is passed to grdctl as an argument, so it will appear in sudo's"
   echo "   audit log (/var/log/auth.log, root-only) and briefly in 'ps'. grdctl offers"
-  echo "   no other way to set it. See AGENTS.md."
+  echo "   no other way to set it. See SETUP.md ('The sudo deviation')."
   echo "   GDM, the graphical session and the desktop you are using are NOT touched."
   echo
 

@@ -183,7 +183,7 @@ test_fresh_setup_linux() {
   check "wrote .env"               env_has "POLL_SECONDS=60"
   check ".env points at checkout"  env_has "SETUP_REPO=$REPO"
   check "poller installed"         [ -x "$BIN_DIR/deployd" ]
-  check "env path baked"           grep -qF "ENV_BAKED = \"$ENVF\"" "$BIN_DIR/deployd"
+  check "env path baked"           grep -qF "ENV_BAKED = '$ENVF'" "$BIN_DIR/deployd"
   check "python3 baked"            grep -qF "#!$(command -v python3)" "$BIN_DIR/deployd"
   check "timer written"            [ -f "$TIMER" ]
   check "timer cadence"            grep -qF "OnUnitActiveSec=60" "$TIMER"
@@ -257,6 +257,7 @@ test_poll_deploys_on_change_only() {
   check "clean tick"              [ "$CODE" -eq 0 ]
   check "svc-a deployed"          [ "$(deploy_count svc-a)" -eq 1 ]
   check "svc-b deployed"          [ "$(deploy_count svc-b)" -eq 1 ]
+  check "ls-remote ends options"  calls_have "ls-remote -- https://a.invalid/repo.git"
   check "cmd output reaches log"  out_has "svc-a deploying"
   check "env passed to cmd"       calls_have "DEPLOY svc-a sha=$SHA_A1 ref=main"
   check "bad-type entry skipped"  out_has 'deploy "ref" must be a string'
@@ -604,6 +605,8 @@ test_poll_overrides() {
   "svc-new": {"repo": "https://n.invalid/r.git", "ref": "main",
               "cmd": "echo DEPLOY svc-new sha=\$DEPLOY_SHA >> '$CALLS_LOG'"},
   "../evil": {"repo": "https://e.invalid/r.git", "cmd": "echo PWNED >> '$CALLS_LOG'"},
+  "svc-dash": {"repo": "--upload-pack=touch /tmp/pwn", "ref": "main",
+               "cmd": "echo PWNED2 >> '$CALLS_LOG'"},
   "svc-empty": {"repo": "https://e.invalid/r.git"}
 }}
 EOF
@@ -620,6 +623,8 @@ EOF
   check "svc-new sha recorded"      sha_is svc-new "dddd1111111111111111111111111111111111111111"
   check "bad key rejected"          out_has "bad poller entry"
   check "bad key never ran"         no_call "PWNED"
+  check "dash repo rejected"        out_has 'must not start with "-"'
+  check "dash repo never ran"       no_call "PWNED2"
   check "incomplete rejected"       out_has "svc-empty"
   check "manifest off wins"         out_has "manifest wins"
   run_poll --status
@@ -676,16 +681,161 @@ test_teardown_purge() {
   echo "• teardown --purge removes state, units and .env after confirm"
   setup
   run_setup
-  run_teardown "" --purge
-  check "aborts without the name"  [ "$CODE" -ne 0 ]
+  : > "$CALLS_LOG"
+  run_teardown "notdeployd" --purge
+  check "aborts on a wrong name"   [ "$CODE" -ne 0 ]
+  check "says nothing changed"     out_has "nothing was changed"
   check "nothing deleted yet"      [ -d "$HOME/services/deployd" ]
+  check ".env kept"                [ -f "$ENVF" ]
+  if [ "$OS" = "Linux" ]; then
+    check "unit file kept"         [ -f "$TIMER" ]
+    check "timer untouched"        no_call "disable --now deployd.timer"
+  else
+    check "plist kept"             [ -f "$PLIST" ]
+    check "agent untouched"        no_call "disable"
+  fi
+  run_teardown "" --purge
+  check "aborts on empty input"    [ "$CODE" -ne 0 ]
+  check "still nothing deleted"    [ -d "$HOME/services/deployd" ]
   OUT="$(printf 'deployd\n' | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge 2>&1)"
   CODE=$?
   check "purge succeeds"        [ "$CODE" -eq 0 ]
   check "service home gone"     [ ! -d "$HOME/services/deployd" ]
-  check "unit files gone"       [ ! -f "$TIMER" ]
-  check "plist gone"            [ ! -f "$PLIST" ]
+  if [ "$OS" = "Linux" ]; then
+    check "unit files gone"       [ ! -f "$TIMER" ]
+  else
+    check "plist gone"            [ ! -f "$PLIST" ]
+  fi
   check ".env gone"             [ ! -f "$ENVF" ]
+  teardown
+}
+
+test_teardown_requires_env() {
+  echo "• teardown refuses when .env is missing or malformed"
+  setup
+  run_teardown
+  check "no .env: fails"        [ "$CODE" -ne 0 ]
+  check "no .env: explains"     out_has "nothing here was deployed"
+  check "no .env: no mutations" no_call "disable"
+  run_setup
+  printf 'this is not an assignment\n' >> "$ENVF"
+  run_teardown
+  check "odd .env: fails"       [ "$CODE" -ne 0 ]
+  check "odd .env: lint says"   out_has "is not KEY=value"
+  printf 'SERVICE_HOME=/tmp/a\nSERVICE_HOME=/tmp/b\n' > "$ENVF"
+  run_teardown
+  check "dup key: fails"        [ "$CODE" -ne 0 ]
+  check "dup key: lint says"    out_has "set more than once"
+  teardown
+}
+
+test_teardown_env_inert() {
+  echo "• teardown never executes .env contents"
+  setup
+  run_setup
+  printf 'PWNED=$(touch %s/pwned)\n' "$HOME" >> "$ENVF"
+  run_teardown
+  check "succeeds"              [ "$CODE" -eq 0 ]
+  check "value never ran"       [ ! -e "$HOME/pwned" ]
+  teardown
+}
+
+test_teardown_purge_custom_home() {
+  echo "• teardown --purge keeps a SERVICE_HOME outside ~/services/deployd"
+  setup
+  run_setup
+  CUSTOM="$SANDBOX/custom-home"
+  mkdir -p "$CUSTOM/state"
+  printf 'SERVICE_HOME=%s\n' "$CUSTOM" > "$ENVF"
+  OUT="$(printf 'deployd\n' | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge 2>&1)"
+  CODE=$?
+  check "purge succeeds"          [ "$CODE" -eq 0 ]
+  check "custom home kept"        [ -d "$CUSTOM" ]
+  check "kept dir named"          out_has "$CUSTOM"
+  check "manual command printed"  out_has "rm -rf -- \"$CUSTOM\""
+  check "default home gone"       [ ! -d "$HOME/services/deployd" ]
+  check ".env gone"               [ ! -f "$ENVF" ]
+  check "unit files gone"         [ ! -f "$TIMER" ]
+  teardown
+}
+
+test_teardown_escaped_home() {
+  echo "• teardown decodes a %q-escaped SERVICE_HOME and refuses undecodable escapes"
+  setup
+  run_setup
+  # A custom home whose path contains a space is written %q-style
+  # (backslash-escaped) by setup.sh; teardown must decode it to find the
+  # poll lock under the real directory.
+  CUSTOM="$SANDBOX/my services/deployd"
+  mkdir -p "$CUSTOM/.poll.lock"
+  printf 'SERVICE_HOME=%s\n' "$SANDBOX/my\\ services/deployd" > "$ENVF"
+  run_teardown
+  check "decoded path finds the lock"   [ "$CODE" -ne 0 ]
+  check "  says mid-run"                out_has "mid-run"
+  printf 'SERVICE_HOME=%s\n' "\$'/tmp/deploy\\n'" > "$ENVF"
+  run_teardown
+  check "\$'...' escape form refused"   [ "$CODE" -ne 0 ]
+  check "  says cannot decode"          out_has "cannot decode"
+  printf 'SERVICE_HOME=/tmp/deploy\\\n' > "$ENVF"
+  run_teardown
+  check "lone trailing backslash refused" [ "$CODE" -ne 0 ]
+  check "  says incomplete escape"      out_has "incomplete escape"
+  teardown
+}
+
+test_teardown_purge_symlink_home() {
+  echo "• teardown --purge refuses a symlinked service home"
+  setup
+  run_setup
+  TARGET="$SANDBOX/real-elsewhere"
+  mkdir -p "$TARGET"
+  rm -rf "$HOME/services/deployd"
+  ln -s "$TARGET" "$HOME/services/deployd"
+  printf 'SERVICE_HOME=%s\n' "$HOME/services/deployd" > "$ENVF"
+  OUT="$(printf 'deployd\n' | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge 2>&1)"
+  CODE=$?
+  check "purge succeeds"          [ "$CODE" -eq 0 ]
+  check "symlink target kept"     [ -d "$TARGET" ]
+  check "symlink itself kept"     [ -L "$HOME/services/deployd" ]
+  check "manual command printed"  out_has "rm -rf --"
+  teardown
+}
+
+test_setup_env_path_special_chars() {
+  echo "• setup bakes the .env path safely when it holds quote/pipe chars"
+  setup
+  WROOT="$SANDBOX/we ird\"qu|te&"
+  mkdir -p "$WROOT/services/deployd"
+  copy_lib "$WROOT"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" "$SERVICE_DIR/deployd" \
+    "$WROOT/services/deployd/"
+  OUT="$(PATH="$STUBS:$PATH" SETUP_REPO="$REPO" \
+        bash "$WROOT/services/deployd/setup.sh" 2>&1)"
+  CODE=$?
+  check "succeeds"                [ "$CODE" -eq 0 ]
+  check ".env written"            [ -f "$WROOT/services/deployd/.env" ]
+  check "baked line present"      grep -qE "ENV_BAKED = ['\"]" "$BIN_DIR/deployd"
+  OUT="$(PATH="$STUBS:$PATH" python3 "$BIN_DIR/deployd" --status 2>&1)"
+  CODE=$?
+  check "baked .env loads"        [ "$CODE" -eq 0 ]
+  check "status sees entries"     out_has "svc-a"
+  teardown
+}
+
+test_poll_rejects_dash_remote() {
+  echo "• poll: repo/ref starting with '-' is rejected (git option injection)"
+  setup
+  mkdir -p "$REPO/services/svc-dashrepo" "$REPO/services/svc-dashref"
+  echo '{"key":"svc-dashrepo","deploy":{"repo":"--upload-pack=touch /tmp/pwn","ref":"main","cmd":"true"}}' \
+    > "$REPO/services/svc-dashrepo/app.json"
+  echo '{"key":"svc-dashref","deploy":{"repo":"https://d.invalid/r.git","ref":"-h","cmd":"true"}}' \
+    > "$REPO/services/svc-dashref/app.json"
+  run_poll
+  check "tick clean"              [ "$CODE" -eq 0 ]
+  check "dash repo warned"        out_has 'must not start with "-"'
+  check "dash repo never queried" no_call "upload-pack"
+  check "dash ref never queried"  no_call "refs/heads/-h"
+  check "real entries unaffected" calls_have "DEPLOY svc-a"
   teardown
 }
 
@@ -718,7 +868,14 @@ for t in \
   test_poll_overrides \
   test_teardown \
   test_teardown_lock_refusal \
-  test_teardown_purge; do
+  test_teardown_purge \
+  test_teardown_requires_env \
+  test_teardown_env_inert \
+  test_teardown_purge_custom_home \
+  test_teardown_escaped_home \
+  test_teardown_purge_symlink_home \
+  test_setup_env_path_special_chars \
+  test_poll_rejects_dash_remote; do
   "$t"
 done
 

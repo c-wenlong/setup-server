@@ -15,6 +15,8 @@
 #                      edit that puts an unauthenticated-by-default document
 #                      archive on the LAN)
 #   listen_wildcard  — the app port is on 0.0.0.0
+#   listen_star      — the app port renders as *:PORT, the wildcard form
+#                      lsof -nP prints on macOS (and ss prints for [::])
 #   web_port         — which port to report (default 8095)
 echo "ss $*" >> "$CALLS_LOG"
 
@@ -32,6 +34,8 @@ row() { printf 'LISTEN 0 4096 %s:%s 0.0.0.0:*\n' "$1" "$port"; }
 if [ "$port" = "$web_port" ]; then
   if [ -f "$STATE_DIR/listen_wildcard" ]; then
     row "0.0.0.0"
+  elif [ -f "$STATE_DIR/listen_star" ]; then
+    row "*"
   elif [ -f "$STATE_DIR/listen_lan" ]; then
     row "192.168.1.42"
   else

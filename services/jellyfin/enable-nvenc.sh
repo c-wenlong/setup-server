@@ -109,9 +109,24 @@ elif command -v nvidia-ctk >/dev/null; then
 else
   info "Adding NVIDIA's apt repo (needs sudo: writes $KEYRING and $APT_LIST)"
   info "  nvidia-container-toolkit is not in Ubuntu's archive, so this is unavoidable."
-  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-    | sudo gpg --dearmor --yes -o "$KEYRING" \
-    || die "Could not fetch or dearmor NVIDIA's signing key."
+  # The key arrives over TLS; pinning its fingerprint (the primary key NVIDIA
+  # documents for libnvidia-container, still what gpgkey serves today) means a
+  # tampered or mistaken fetch dies here instead of poisoning apt's keyring.
+  NVIDIA_KEY_FPR="C95B321B61E88C1809C4F759DDCAE044F796ECB0"
+  key_asc="$(mktemp)"
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey -o "$key_asc" \
+    || die "Could not fetch NVIDIA's signing key."
+  # Check every primary key fingerprint in the bundle (subkey fpr records
+  # follow `sub:` and are skipped) so a bundle with extra primary keys appended
+  # after NVIDIA's is rejected before gpg --dearmor trusts the whole file.
+  got_fpr="$(gpg --with-colons --import-options show-only --dry-run --import "$key_asc" 2>/dev/null \
+    | awk -F: '$1 == "pub" { mode="pub"; next } $1 == "sub" { mode="sub"; next } $1 == "fpr" { if (mode == "sub") { mode="done"; next } fprs = (fprs ? fprs "," : "") $10; mode="done" } END { print fprs }')"
+  [ "$got_fpr" = "$NVIDIA_KEY_FPR" ] \
+    || { rm -f "$key_asc"; die "NVIDIA signing key fingerprint mismatch (got: ${got_fpr:-unreadable}, want: $NVIDIA_KEY_FPR). Not trusting it — investigate before retrying."; }
+  sudo gpg --dearmor --yes -o "$KEYRING" "$key_asc" \
+    || { rm -f "$key_asc"; die "Could not dearmor NVIDIA's signing key."; }
+  rm -f "$key_asc"
+  ok "Signing key verified against the pinned fingerprint"
   curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
     | sed "s#deb https://#deb [signed-by=$KEYRING] https://#g" \
     | sudo tee "$APT_LIST" >/dev/null \

@@ -50,18 +50,22 @@ Prerequisites: Docker + Compose v2 installed, user in the `docker` group
 
 ```sh
 ./setup.sh                                  # local 8081, HTTPS 8443
-LOCAL_PORT=9081 HTTPS_PORT=10000 ./setup.sh # overrides
+LOCAL_PORT=9081 HTTPS_PORT=10000 ./setup.sh # first run only; .env wins after
 ADMIN_EMAIL=you@example.com ./setup.sh      # admin account email
 ```
 
-What it does: preflight (docker daemon reachable, tailscale up, valid HTTPS
-port) → generates `.env` with all secrets (mode 600, never overwritten on
-re-run) → `docker compose up -d` → waits for the web UI → publishes via
-`tailscale serve --https=8443` → verifies end-to-end → prints URL + admin
-login.
+What it does: preflight (docker daemon reachable, tailscale up, numeric
+ports) → generates `.env` with all secrets (mode 600, never overwritten on
+re-run) → reads `.env` back so it is the source of truth (a `LOCAL_PORT` /
+`HTTPS_PORT` override on a re-run is warned and ignored — edit `.env` to
+move a port) → `docker compose up -d` → waits for the web UI → publishes
+via `tailscale serve --https=8443` → verifies end-to-end → prints the URL.
+The admin password is never echoed: read `INIT_SEAFILE_ADMIN_EMAIL` /
+`INIT_SEAFILE_ADMIN_PASSWORD` out of `.env` (mode 600).
 
 State lives in:
 - `.env` (this directory) — **all secrets**; gitignored, mode 600
+- `~/services/seafile/` — mode 700 state root, created by `setup.sh`
 - `~/services/seafile/data` — Seafile's storage (chunked libraries, config, logs)
 - `~/services/seafile/mysql` — MariaDB data
 

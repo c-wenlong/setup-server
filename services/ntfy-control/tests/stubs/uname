@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# uname stub. State in $STATE_DIR:
+#   fake_macos — exists => `uname -s` reports Darwin, so the macOS branches
+#                (LaunchAgent plist, launchctl) are exercised on Linux.
+if [ -f "$STATE_DIR/fake_macos" ]; then
+  echo Darwin
+else
+  /usr/bin/uname "$@"
+fi

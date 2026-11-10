@@ -29,9 +29,11 @@ Walk the chain backwards:
 2. **Did Kuma fire the notification?** Monitor → latest events show
    notification attempts. If not attached: monitor → Edit → Notifications →
    tick `ntfy-alerts`.
-3. **Did ntfy get it?** Open `https://<host>:3003/alerts` in a browser and
-   test: `curl -d test https://<host>:3003/alerts` — the message should
-   appear live.
+3. **Did ntfy get it?** Open `https://<host>:3003/alerts` in a browser
+   (log in with an account from `.env`) and test:
+   `curl -u "$NTFY_KUMA_USER:$NTFY_KUMA_PASS" -d test https://<host>:3003/alerts`
+   — the message should appear live. A bare `curl -d` without `-u` gets a
+   401: ntfy is deny-all to anonymous callers.
 4. **Did the phone get it?** iOS instant delivery needs the upstream relay
    (`NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` in docker-compose.yml) and the
    phone needs the topic subscribed on the *self-hosted server* (not
@@ -113,16 +115,26 @@ It's in `.env` (`KUMA_ADMIN_PASSWORD`). If `.env` is gone too:
 
 ## Nuke and pave (destroys monitor history + accounts)
 
+`./teardown.sh` unpublishes both Serve ports and runs `compose down`,
+keeping `.env` and the data dirs — `./setup.sh` brings the stack back
+exactly as it was. `./teardown.sh --purge` is the actual nuke: it asks for
+the service name, then deletes `.env` and the data dirs too.
+
+If resetting by hand:
 ```sh
-docker compose --project-directory . down
+docker compose --project-directory . down -v
 rm -rf ~/services/monitoring .env
 ./setup.sh
 ```
 
-State is `~/services/monitoring/kuma` and `~/services/monitoring/ntfy`
-(`KUMA_VOLUME` / `NTFY_VOLUME` in `.env`) — not `~/monitoring`, which was the
-pre-2026-09-07 layout and no longer exists.
+The `-v` is not optional on a manual reset: ntfy's users.db lives in the
+`ntfy-auth` named volume, and a plain `down` leaves it behind. Drop `.env`
+but keep that volume and the re-run generates fresh passwords for accounts
+that already exist (`setup.sh` re-syncs passwords from `.env` on each run,
+so even an already-broken reset heals on the next deploy). Equivalent by
+hand: `docker compose --project-directory . down && docker volume rm monitoring_ntfy-auth`.
 
-Deliberately **not** in that list: `tailscale serve --https=3002 off` and
-`--https=3003 off`. `setup.sh` re-publishes both, and leaving them up means
-the dashboard comes back the moment the containers do.
+State is `~/services/monitoring/kuma` and `~/services/monitoring/ntfy`
+(`KUMA_VOLUME` / `NTFY_VOLUME` in `.env`) plus the `ntfy-auth` docker volume
+(ntfy's users + ACLs) — not `~/monitoring`, which was the pre-2026-09-07
+layout and no longer exists.
