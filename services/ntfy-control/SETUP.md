@@ -27,6 +27,11 @@ control_listener.py  (systemd user unit / launchd, Restart=always)
 
 - No new ports, nothing published — the listener subscribes over loopback;
   the only way to reach the control topic is via the tailnet-only ntfy.
+- ntfy requires a login (`auth-default-access=deny-all`). The listener
+  authenticates as the `control` account — read on `control`, write-only on
+  `alerts` — copied from `NTFY_CONTROL_*` in `services/monitoring/.env`
+  into `.env` as `NTFY_USER`/`NTFY_PASS` (mode 600). setup.sh probes the
+  topic and refuses to install with missing or rejected credentials.
 - Commands are a **strict allowlist**: the message is matched against fixed
   verbs (`status`/`stop`/`start`/`restart`) and a fixed service map, each
   resolving to a hard-coded `docker`/`systemctl` invocation. Arbitrary text
@@ -34,8 +39,8 @@ control_listener.py  (systemd user unit / launchd, Restart=always)
 - `ntfy` itself (and the monitoring stack's availability to restart it) is
   deliberately *not* controllable — stopping ntfy remotely would cut off
   the ability to undo it.
-- `.env` holds no secrets; Kuma credentials are read at call time from
-  `services/monitoring/.env`.
+- Kuma credentials are read at call time from `services/monitoring/.env`;
+  they never enter `.env` here.
 
 ## Controllable services
 
@@ -68,7 +73,9 @@ with a note in the reply if Kuma is unreachable — e.g. after
 1. Preflight: docker daemon, python3, curl, and ntfy healthy on
    `127.0.0.1:3003` (deploy `services/monitoring/` first).
 2. Writes `.env` if absent (topics, ntfy URL, path to `services/monitoring/.env`,
-   tool path for `uv`).
+   tool path for `uv`, the `NTFY_USER`/`NTFY_PASS` copied from monitoring's
+   `NTFY_CONTROL_*` account), then probes the control topic — 401/403 means
+   auth and the credentials must verify or it refuses to install.
 3. Installs `control_listener.py` + `kuma_toggle.py` into
    `~/services/ntfy-control/bin/` (refreshed every run).
 4. Installs and (re)starts the listener: systemd user unit with
@@ -88,9 +95,11 @@ Overrides: `CONTROL_TOPIC` (default `control`), `REPLY_TOPIC` (`alerts`),
 1. Install Tailscale on the phone and log in (the ntfy server is
    tailnet-only — without this nothing connects).
 2. ntfy app → add subscription → topic `alerts` → "Use another server" →
-   `https://homeserver.tail-name.ts.net:3003`. Leave
-   username/password **empty** — the server has no accounts; Tailscale is
-   the auth layer.
+   `https://homeserver.tail-name.ts.net:3003`, and enter a username/password:
+   **`NTFY_PHONE_USER` / `NTFY_PHONE_PASS` from `services/monitoring/.env`**.
+   The server is deny-all — without the login the subscription silently
+   receives nothing. The same account can publish to `control`, which is
+   what makes the command buttons below work.
 3. Sending commands — depends on platform:
    - **iOS (primary): notification buttons.** The iOS ntfy app is
      receive-only (no compose box), so the listener puts the controls *in*
@@ -126,5 +135,5 @@ Overrides: `CONTROL_TOPIC` (default `control`), `REPLY_TOPIC` (`alerts`),
 ```sh
 systemctl --user status ntfy-control
 journalctl --user -u ntfy-control -f          # every command is logged
-curl -d "status" http://127.0.0.1:3003/control   # test from the box
+curl -u "$NTFY_USER:$NTFY_PASS" -d "status" http://127.0.0.1:3003/control   # test from the box; creds in .env
 ```
