@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# stat stub: when $STATE_DIR/sudo_chown records a prior `sudo chown 9999:9999 <dir>`,
+# `stat -c %u <dir>` / `stat -f %u <dir>` reports 9999; before chown it reports 1000.
+if { [ "${1:-}" = "-c" ] || [ "${1:-}" = "-f" ]; } && [ "${2:-}" = "%u" ]; then
+  if grep -qF "chown 9999:9999 ${3:-}" "$STATE_DIR/sudo_chown" 2>/dev/null; then
+    echo 9999
+  else
+    echo 1000
+  fi
+  exit 0
+fi
+PATH=/usr/bin:/bin exec stat "$@"

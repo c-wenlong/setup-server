@@ -43,10 +43,14 @@ LOCAL_PORT=3005 HTTPS_PORT=8443 ./setup.sh  # overrides
 OLLAMA_BASE_URL=http://... ./setup.sh       # non-default ollama location
 ```
 
-**First login matters**: Open WebUI gives admin rights to the first account
-that signs up. Register immediately after deploying, then (optionally)
-disable further signups in Admin Panel → Settings. Tailnet-only exposure
-means only your own devices can race you to it.
+**Login is seeded, not raced**: the image is pinned (`0.13.2`, never
+`:main`) and starts with `ENABLE_SIGNUP=false`, so open registration is off
+from the first boot. `setup.sh` then creates the owner account over the API
+(`WEBUI_ADMIN_EMAIL` / `WEBUI_ADMIN_PASSWORD` in `.env`) — the first signup
+is exempt from the flag and lands the admin role, which is what keeps a
+tailnet peer from grabbing it. Extra users come from the Admin Panel
+("Add User"), not open signup; flip `ENABLE_SIGNUP=true` in `.env` only if
+you really want public-to-the-tailnet registration.
 
 ## Phone usage
 
@@ -59,7 +63,8 @@ Requires Tailscale connected on the phone.
 ```sh
 D="--project-directory <this dir>"
 docker compose $D ps|logs -f|restart|down
-docker compose $D pull && docker compose $D up -d   # upgrade (image is :main)
+# upgrade: bump WEBUI_IMAGE in .env to the next pinned tag, then
+docker compose $D pull && docker compose $D up -d
 ollama list                                          # models the UI can offer
 ollama pull <model>                                  # add models (UI picks up automatically)
 ```

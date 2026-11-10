@@ -91,7 +91,8 @@ brings it up for one command.
 2. Writes `.env` (mode 600) if absent: image tag, ports, state paths,
    generated `OPENCLAW_GATEWAY_TOKEN`. An existing `.env` is the source of
    truth and is never overwritten — port overrides after that are reported
-   and ignored.
+   and ignored. It is parsed the way Compose reads it (quotes, `export`,
+   ` #` comments), never executed — a code-looking line in `.env` is data.
 3. Creates `~/services/openclaw/{config,workspace,auth-secrets}`.
 4. Writes `docker-compose.creds.yml` once when `~/.claude` or `~/.codex`
    exists (the bind mounts above).

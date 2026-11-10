@@ -52,9 +52,14 @@ exist, a compose overlay mounts them once and is never overwritten.
 - **API-key gated.** The key is in `.env` (mode 600). Anyone who has it
   can drive the Agent Server; keep it off chat logs.
 - **Filesystem.** OpenHands sees `~/agent-workspaces` only. No `/`, no
-  `$HOME`, no `--privileged`. The data dir and workspaces are ACL'd for
-  the image user (uid `10001`); a host-only `0700` mount makes the
-  agent server exit and the UI 502 on `:18000`.
+  `$HOME`, no `--privileged`. `AGENT_WORKSPACES` is validated before it is
+  mounted: absolute, no `.`/`..` parts, not a symlinked leaf, resolved
+  strictly inside `$HOME`, and never overlapping `~/services`, `~/.claude`
+  or `~/.codex` — anything else dies with the reason. The data dir and
+  workspaces are ACL'd for the image user (uid `10001`); a host-only
+  `0700` mount makes the agent server exit and the UI 502 on `:18000`.
+  Without a working `setfacl` the directories are `sudo chown`ed to
+  `10001` instead — never made world-writable.
 
 ## Dependencies
 
@@ -83,7 +88,9 @@ Step by step:
 3. **`.env`** — generated once (ports, paths, API keys). If
    `paperclip-openhands/.env` still exists, OpenHands keys are copied
    from it (the API key is **not** rotated).
-4. **Workspace** — `~/agent-workspaces/openhands-test`, ACL'd for uid 10001.
+4. **Workspace** — `~/agent-workspaces/openhands-test`, ACL'd for uid
+   10001 (or `sudo chown 10001:10001` when `setfacl` is unavailable —
+   sudo announces why first; nothing is ever chmod'd world-writable).
 5. **Optional creds overlay** if `~/.claude` / `~/.codex` already exist
    (written once, never overwritten).
 6. **`docker compose up -d`**. If the old combined compose project still

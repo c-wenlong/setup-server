@@ -61,6 +61,8 @@ out_has()    { grep -q "$1" <<<"$OUT"; }
 calls_have() { grep -q "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
+compose_has(){ grep -q "$1" "$SVC/docker-compose.yml"; }
+compose_lacks() { ! compose_has "$1"; }
 
 # ----------------------------------------------------------------- tests
 test_preflight_docker_perms() {
@@ -106,12 +108,25 @@ test_fresh_deploy() {
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check ".env generated"                [ -f "$SVC/.env" ]
   check ".env points at local ollama"   env_has "OLLAMA_BASE_URL=http://127.0.0.1:11434"
+  check "image is pinned, not :main"    env_has "WEBUI_IMAGE=ghcr.io/open-webui/open-webui:0.13.2"
+  check "compose pins the same tag"     compose_has 'open-webui:0.13.2'
+  check "compose has no :main default"  compose_lacks 'open-webui:main'
+  check "signup off in .env"            env_has "ENABLE_SIGNUP=false"
+  check "signup off in container env"   compose_has 'ENABLE_SIGNUP='
+  check "owner email recorded"          env_has "WEBUI_ADMIN_EMAIL=admin@test-host.tailfake.ts.net"
+  check "owner password generated"      grep -qE '^WEBUI_ADMIN_PASSWORD=[a-f0-9]{32}$' "$SVC/.env"
+  check "owner seeded over the API"     calls_have "api/v1/auths/signup"
+  check "  with the recorded email"     grep -q 'admin@test-host.tailfake.ts.net' "$STATE_DIR/signup_body"
+  check "  password sent on stdin, not argv" no_call "$(sed -n 's/^WEBUI_ADMIN_PASSWORD=//p' "$SVC/.env")"
+  check "says the account was created"  out_has "Owner account created"
+  check "  and that signup is off"      out_has "Open signup is off"
   check "compose up invoked"            [ -f "$STATE_DIR/compose_up" ]
   check "data dir created under HOME"   [ -d "$HOME/services/open-webui/data" ]
   check "served on tailscale :3001"     calls_have "tailscale serve --bg --https=3001 http://127.0.0.1:3001"
   check "  and never the old :10000"    no_call "tailscale serve --bg --https=10000"
   check "prints final URL"              out_has "https://test-host.tailfake.ts.net:3001"
-  check "warns about first signup"      out_has "first account registered becomes the admin"
+  check "prints the login"              out_has "admin@test-host.tailfake.ts.net"
+  check "never tells anyone to race"    bash -c '! grep -q "first account registered becomes the admin" <<<"$1"' _ "$OUT"
   teardown
 }
 
@@ -125,6 +140,71 @@ test_idempotent_rerun() {
   check "existing .env untouched" env_has "my-custom-marker"
   check "never invoked sudo"      no_call "^sudo "
   check "compose up re-invoked"   [ -f "$STATE_DIR/compose_up" ]
+  teardown
+}
+
+test_rerun_existing_users() {
+  echo "• re-run with users already there: no signup POST, still verifies the door"
+  setup
+  touch "$STATE_DIR/operator"
+  touch "$STATE_DIR/webui_users"   # the instance has accounts already
+  # An existing install whose .env predates WEBUI_ADMIN_* keeps them absent:
+  # with users already registered, appending creds would only leak a password
+  # that signs into nothing.
+  printf 'LOCAL_PORT=3001\nWEBUI_VOLUME=/tmp/x\nOLLAMA_BASE_URL=http://127.0.0.1:11434\n' > "$SVC/.env"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "no signup POST"          [ ! -f "$STATE_DIR/signup_body" ]
+  check "confirms signup is off"  out_has "Open signup is off"
+  check "no owner creds invented" bash -c '! grep -q "^WEBUI_ADMIN_" "$1"' _ "$SVC/.env"
+  teardown
+}
+
+test_open_signup_warns() {
+  echo "• an existing install with signups still open: warn, do not silently flip it"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/webui_users" "$STATE_DIR/webui_signup_open"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "warns about open signup" out_has "still accepts open signups"
+  check "still published"         calls_have "tailscale serve --bg --https=3001"
+  teardown
+}
+
+test_legacy_env_and_wiped_data() {
+  echo "• old .env + wiped data dir: owner creds are appended, then seeded"
+  setup
+  touch "$STATE_DIR/operator"
+  printf 'WEBUI_IMAGE=ghcr.io/open-webui/open-webui:main\nWEBUI_VOLUME=/tmp/x\nLOCAL_PORT=3001\nOLLAMA_BASE_URL=http://127.0.0.1:11434\n# my-custom-marker\n' > "$SVC/.env"
+  run_deploy
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "creds appended to .env"    env_has "WEBUI_ADMIN_EMAIL=admin@test-host.tailfake.ts.net"
+  check "  password too"            grep -qE '^WEBUI_ADMIN_PASSWORD=[a-f0-9]{32}$' "$SVC/.env"
+  check "marker kept"               env_has "my-custom-marker"
+  check "owner seeded over the API" calls_have "api/v1/auths/signup"
+  check "  says appended"           out_has "Appended owner credentials"
+  teardown
+}
+
+test_signup_post_fails() {
+  echo "• onboarding but the signup POST is refused: die before publishing"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/webui_signup_fails"
+  run_deploy
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "says what failed"        out_has "Could not create the owner account"
+  check "never published"         no_call "tailscale serve --bg"
+  teardown
+}
+
+test_config_unreadable() {
+  echo "• /api/config down after health passed: die before publishing an unverified instance"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/webui_config_down"
+  run_deploy
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "names /api/config"       out_has "api/config"
+  check "never published"         no_call "tailscale serve --bg"
   teardown
 }
 
@@ -593,7 +673,7 @@ test_teardown_purge_unsearchable_parent() {
   unhide_storage
   check "exits zero"                  [ "$CODE" -eq 0 ]
   check "mounted the unsearchable folder" grep -q -- "-v $st:/x" "$STATE_DIR/cleanup_run"
-  check "used the app image"          grep -q "ghcr.io/open-webui/open-webui:main" "$STATE_DIR/cleanup_run"
+  check "used the app image"          grep -q "ghcr.io/open-webui/open-webui:0.13.2" "$STATE_DIR/cleanup_run"
   check "never pulled for it"         grep -q "pull never" "$STATE_DIR/cleanup_run"
   check "no sudo"                     no_call "^sudo"
   check "data gone"                   [ ! -e "$st/data" ]
@@ -677,6 +757,11 @@ test_preflight_tailscale_down
 test_preflight_bad_https_port
 test_fresh_deploy
 test_idempotent_rerun
+test_rerun_existing_users
+test_open_signup_warns
+test_legacy_env_and_wiped_data
+test_signup_post_fails
+test_config_unreadable
 test_https_port_follows_local_port
 test_legacy_10000_mapping_is_withdrawn
 test_operator_escalation

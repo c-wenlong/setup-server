@@ -140,6 +140,11 @@ none is configured.
   you do not fully trust (a friend's machine holding a copy), share the
   folder as **Receive Encrypted** — it stores ciphertext and never sees
   filenames or contents.
+- **Residual exposure — deliberate.** Peer auth gates only the sync port;
+  every tailnet device can still open the GUI, including a half-trusted
+  Receive Encrypted peer. With no GUI password, that peer can reconfigure
+  folders and read the REST API key the GUI page embeds. If any peer is
+  not fully trusted, set a GUI user/password in Settings → GUI.
 - **Files are plain files, owned by you**, at whatever path you chose. There
   is no container, no root, no volume: `ls` shows them, `rsync` backs them up.
 

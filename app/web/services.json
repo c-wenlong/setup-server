@@ -659,10 +659,10 @@
         "kuma": "open-webui"
       },
       "login": [
-        "First visit: register an account — the first signup becomes admin.",
-        "Then optionally disable further signups in Admin Panel → Settings."
+        "Sign in with WEBUI_ADMIN_EMAIL / WEBUI_ADMIN_PASSWORD from services/open-webui/.env — setup.sh seeds that owner account and public signup is off.",
+        "Grant access per user from Admin Panel → Settings."
       ],
-      "description": "ChatGPT-style chat over the ollama models already running on this box, with conversation history, model switching and document upload. Host-network container bound to 127.0.0.1:3001. The first account registered (Kai's) is the admin; nothing leaves the tailnet."
+      "description": "ChatGPT-style chat over the ollama models already running on this box, with conversation history, model switching and document upload. Host-network container bound to 127.0.0.1:3001. The owner account is seeded by setup.sh; signup stays closed. Nothing leaves the tailnet."
     },
     {
       "key": "paperclip",

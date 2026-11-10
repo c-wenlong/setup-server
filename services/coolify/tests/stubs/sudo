@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
-# sudo stub: logs the call, then runs the command (which resolves to other stubs).
+# sudo stub: logs the call, then runs the command (which resolves to other
+# stubs) — except what only root could do for real:
+#   chown     -> modelled: recorded in $STATE_DIR/sudo_chown, exits 0.
+# $STATE_DIR/sudo_fails makes every sudo call fail (exit 1).
 echo "sudo $*" >> "$CALLS_LOG"
+[ -f "$STATE_DIR/sudo_fails" ] && exit 1
+case "$1" in
+  chown) echo "sudo $*" >> "$STATE_DIR/sudo_chown"; exit 0 ;;
+esac
 exec "$@"

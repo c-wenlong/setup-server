@@ -88,25 +88,81 @@ print(u+l+d+s+r)'
   fi
 }
 
+# Values are read from .env the way Docker Compose reads them (an optional
+# `export `, matching single or double quotes, an inline ` #` comment after
+# an unquoted value, $HOME / ${HOME} expanded where Compose expands them)
+# without executing the file — a hand edit must not become a command.
+env_get() {
+  local key="$1" depth="${2:-0}" line value tail quote="" ref_name ref_val
+  [ -f "$ENV_FILE" ] && [ "$depth" -lt 5 ] || return 0
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+    while [ "$depth" -lt 5 ]; do
+      if [[ "$value" =~ ^([^\$]*)\$\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$ ]]; then
+        ref_name="${BASH_REMATCH[2]}"
+        ref_val="$(env_get "$ref_name" "$((depth + 1))")"
+        value="${BASH_REMATCH[1]}${ref_val}${BASH_REMATCH[3]}"
+      elif [[ "$value" =~ ^([^\$]*)\$([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]]; then
+        ref_name="${BASH_REMATCH[2]}"
+        ref_val="$(env_get "$ref_name" "$((depth + 1))")"
+        value="${BASH_REMATCH[1]}${ref_val}${BASH_REMATCH[3]}"
+      else
+        break
+      fi
+      depth=$((depth + 1))
+    done
+  fi
+  printf '%s' "$value"
+}
+
 # Coolify's image runs as uid 9999. A 0700 host-owned bind mount makes
 # SSH-key reads and application-dir writes fail with EACCES. Grant 9999
-# write without sudo, same pattern as services/openhands/setup.sh for uid 10001.
+# write: an ACL where the tool exists, otherwise the directory's ownership
+# itself — never world-writable.
 grant_coolify_write() {
-  local d uid=9999
+  local d uid=9999 mode owner
   for d in "$@"; do
     [ -e "$d" ] || continue
+    if [ -d "$d" ]; then
+      # Clear any legacy group/world-write bits left by the old chmod a+rwx fallback.
+      mode="$(stat -c %a "$d" 2>/dev/null || stat -f %Lp "$d" 2>/dev/null || true)"
+      case "$mode" in
+        *[2367]|*[2367]?)
+          chmod go-w "$d" 2>/dev/null || sudo chmod go-w "$d" \
+            || die "Could not clear group/world-write permissions on $d"
+          ;;
+      esac
+    fi
     if command -v setfacl >/dev/null 2>&1 \
        && setfacl -m "u:${uid}:rwx" "$d" 2>/dev/null \
        && { [ ! -d "$d" ] || setfacl -d -m "u:${uid}:rwx" "$d" 2>/dev/null; }; then
       continue
     fi
     if [ -d "$d" ]; then
-      chmod a+rwx "$d" 2>/dev/null || true
+      # No usable ACL tool (macOS, minimal installs): give the directory to
+      # the container uid. Skip sudo on reruns if already owned by $uid.
+      owner="$(stat -c %u "$d" 2>/dev/null || stat -f %u "$d" 2>/dev/null || true)"
+      if [ "$owner" = "$uid" ]; then
+        continue
+      fi
+      info "setfacl is unavailable or failed on $d — Coolify runs as uid $uid, so the directory itself is chowned (one sudo prompt)"
+      sudo chown "$uid:$uid" "$d" \
+        || die "Could not grant Coolify write access to $d: no usable setfacl and 'sudo chown $uid:$uid $d' failed. Run that chown by hand, then re-run."
     else
-      # Never world-open a private key. Directories above may fall
-      # back to a+rwx; files that Coolify must read (the SSH key)
-      # go through grant_coolify_key instead.
-      warn "setfacl failed for $d; skipped chmod fallback (will not world-open a file)"
+      # Never world-open a private key. Files Coolify must read (the SSH
+      # key) go through grant_coolify_key instead.
+      warn "setfacl failed for $d; skipped (will not world-open a file)"
     fi
   done
 }
@@ -255,22 +311,38 @@ EOF
 fi
 
 # Read back: an existing .env is the source of truth for ports, paths and
-# credentials, so a re-run can never silently move a live deployment.
+# credentials, so a re-run can never silently move a live deployment. It is
+# read the way Compose reads it (env_get above) — never by executing it.
 REQUESTED_PORT="$LOCAL_PORT"
 REQUESTED_SOKETI="$SOKETI_PORT"
-set -a; . "$ENV_FILE"; set +a
-ROOT_USERNAME="${ROOT_USERNAME:?ROOT_USERNAME missing from $ENV_FILE}"
-ROOT_USER_EMAIL="${ROOT_USER_EMAIL:?ROOT_USER_EMAIL missing from $ENV_FILE}"
-ROOT_USER_PASSWORD="${ROOT_USER_PASSWORD:?ROOT_USER_PASSWORD missing from $ENV_FILE}"
-DATA_DIR="${COOLIFY_DATA:?COOLIFY_DATA missing from $ENV_FILE}"
-APP_URL="${APP_URL:?APP_URL missing from $ENV_FILE}"
-COOLIFY_SSH="${COOLIFY_SSH:?COOLIFY_SSH missing from $ENV_FILE}"
-COOLIFY_APPLICATIONS="${COOLIFY_APPLICATIONS:?COOLIFY_APPLICATIONS missing from $ENV_FILE}"
-COOLIFY_DATABASES="${COOLIFY_DATABASES:?COOLIFY_DATABASES missing from $ENV_FILE}"
-COOLIFY_SERVICES="${COOLIFY_SERVICES:?COOLIFY_SERVICES missing from $ENV_FILE}"
-COOLIFY_BACKUPS="${COOLIFY_BACKUPS:?COOLIFY_BACKUPS missing from $ENV_FILE}"
-COOLIFY_IMAGES="${COOLIFY_IMAGES:?COOLIFY_IMAGES missing from $ENV_FILE}"
-SOKETI_PORT="${SOKETI_PORT:-6001}"
+env_port="$(env_get LOCAL_PORT)"
+[ -z "$env_port" ] || LOCAL_PORT="$env_port"
+env_soketi="$(env_get SOKETI_PORT)"
+[ -z "$env_soketi" ] || SOKETI_PORT="$env_soketi"
+ROOT_USERNAME="$(env_get ROOT_USERNAME)"
+[ -n "$ROOT_USERNAME" ] || die "ROOT_USERNAME missing from $ENV_FILE"
+ROOT_USER_EMAIL="$(env_get ROOT_USER_EMAIL)"
+[ -n "$ROOT_USER_EMAIL" ] || die "ROOT_USER_EMAIL missing from $ENV_FILE"
+ROOT_USER_PASSWORD="$(env_get ROOT_USER_PASSWORD)"
+[ -n "$ROOT_USER_PASSWORD" ] || die "ROOT_USER_PASSWORD missing from $ENV_FILE"
+DATA_DIR="$(env_get COOLIFY_DATA)"
+[ -n "$DATA_DIR" ] || die "COOLIFY_DATA missing from $ENV_FILE"
+APP_URL="$(env_get APP_URL)"
+[ -n "$APP_URL" ] || die "APP_URL missing from $ENV_FILE"
+REDIS_PASSWORD="$(env_get REDIS_PASSWORD)"
+[ -n "$REDIS_PASSWORD" ] || die "REDIS_PASSWORD missing from $ENV_FILE"
+COOLIFY_SSH="$(env_get COOLIFY_SSH)"
+[ -n "$COOLIFY_SSH" ] || die "COOLIFY_SSH missing from $ENV_FILE"
+COOLIFY_APPLICATIONS="$(env_get COOLIFY_APPLICATIONS)"
+[ -n "$COOLIFY_APPLICATIONS" ] || die "COOLIFY_APPLICATIONS missing from $ENV_FILE"
+COOLIFY_DATABASES="$(env_get COOLIFY_DATABASES)"
+[ -n "$COOLIFY_DATABASES" ] || die "COOLIFY_DATABASES missing from $ENV_FILE"
+COOLIFY_SERVICES="$(env_get COOLIFY_SERVICES)"
+[ -n "$COOLIFY_SERVICES" ] || die "COOLIFY_SERVICES missing from $ENV_FILE"
+COOLIFY_BACKUPS="$(env_get COOLIFY_BACKUPS)"
+[ -n "$COOLIFY_BACKUPS" ] || die "COOLIFY_BACKUPS missing from $ENV_FILE"
+COOLIFY_IMAGES="$(env_get COOLIFY_IMAGES)"
+[ -n "$COOLIFY_IMAGES" ] || die "COOLIFY_IMAGES missing from $ENV_FILE"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
@@ -289,15 +361,30 @@ fi
 mkdir -p "$DATA_DIR" "$COOLIFY_SSH/keys" \
   "$COOLIFY_APPLICATIONS" "$COOLIFY_DATABASES" "$COOLIFY_SERVICES" \
   "$COOLIFY_BACKUPS" "$COOLIFY_IMAGES"
-grant_coolify_write "$DATA_DIR" "$COOLIFY_SSH" "$COOLIFY_SSH/keys" \
-  "$COOLIFY_APPLICATIONS" "$COOLIFY_DATABASES" "$COOLIFY_SERVICES" \
-  "$COOLIFY_BACKUPS" "$COOLIFY_IMAGES"
 
 avail_kb="$(df -Pk "$DATA_DIR" | awk 'NR==2{print $4}')"
 if [ "${avail_kb:-0}" -lt 10485760 ]; then
   warn "$(( avail_kb / 1048576 )) GB free at $DATA_DIR — Coolify wants ~10 GB plus whatever you later deploy through it."
 else
   ok "$(( avail_kb / 1048576 )) GB free at $DATA_DIR"
+fi
+
+# ------------------------------------------------------------- redis.conf
+# The Redis password must not sit on the container's argv or in its
+# environment — `docker inspect` and host `ps` show both to every local
+# user. It goes into a generated config (mode 600, read-only mount);
+# redis.conf is rewritten from .env each run so a rotated password follows.
+# Gitignored like .env — it is the same class of secret.
+REDIS_CONF="$SERVICE_DIR/redis.conf"
+old_redis_conf="$(cat "$REDIS_CONF" 2>/dev/null || true)"
+{
+  printf '# Generated by setup.sh from REDIS_PASSWORD in .env — do not edit; re-run ./setup.sh.\n'
+  printf 'save 20 1\nloglevel warning\nrequirepass %s\n' "$REDIS_PASSWORD"
+} > "$REDIS_CONF"
+chmod 600 "$REDIS_CONF"
+REDIS_CONF_CHANGED=0
+if [ -n "$old_redis_conf" ] && [ "$old_redis_conf" != "$(cat "$REDIS_CONF")" ]; then
+  REDIS_CONF_CHANGED=1
 fi
 
 # -------------------------------------------------------- localhost SSH key
@@ -348,11 +435,22 @@ if [ -f "$KEY_BASE" ]; then
   fi
 fi
 
+# The grants come AFTER ssh-keygen: the no-ACL fallback chowns the keys
+# directory to uid 9999, and a key written afterwards could not be created
+# there by this user.
+grant_coolify_write "$DATA_DIR" "$COOLIFY_SSH" "$COOLIFY_SSH/keys" \
+  "$COOLIFY_APPLICATIONS" "$COOLIFY_DATABASES" "$COOLIFY_SERVICES" \
+  "$COOLIFY_BACKUPS" "$COOLIFY_IMAGES"
+
 # ---------------------------------------------------------------- deploy
 COMPOSE=(docker compose --project-directory "$SERVICE_DIR")
 
 info "Starting Coolify (docker compose up -d) — first run pulls several hundred MB"
 "${COMPOSE[@]}" up -d
+if [ "$REDIS_CONF_CHANGED" -eq 1 ]; then
+  info "redis.conf changed (REDIS_PASSWORD rotated) — recreating redis container"
+  "${COMPOSE[@]}" up -d --force-recreate redis
+fi
 
 info "Waiting for Coolify on 127.0.0.1:$LOCAL_PORT (first boot runs migrations)"
 wait_http "http://127.0.0.1:$LOCAL_PORT/api/health" 90 3 || die "Coolify did not come up. Logs: docker compose --project-directory $SERVICE_DIR logs coolify"
@@ -365,7 +463,7 @@ serve_https() {
   if ! "$TAILSCALE" serve --bg --https="$https_port" "http://127.0.0.1:$local_port" >/dev/null 2>&1; then
     if [ "$OS" = "Linux" ]; then
       info "Direct serve failed — trying operator grant (needs sudo, one time)"
-      sudo tailscale set --operator="$USER"
+      ts_operator_grant
     fi
     if [ "$required" = "yes" ]; then
       until "$TAILSCALE" serve --bg --https="$https_port" "http://127.0.0.1:$local_port"; do

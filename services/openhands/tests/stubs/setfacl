@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# setfacl stub: logs the call. $STATE_DIR/setfacl_fails makes it fail, which
+# is how a box without ACL support (macOS) is modelled. Otherwise it defers
+# to the real setfacl (the stub's own directory is stripped from PATH so the
+# lookup cannot find the stub again); a host with no setfacl at all just
+# fails, the same as the flag.
+echo "setfacl $*" >> "$CALLS_LOG"
+[ -f "$STATE_DIR/setfacl_fails" ] && exit 1
+STUBS_DIR="$(cd "$(dirname "$0")" && pwd)"
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$STUBS_DIR" | tr '\n' ':')"
+exec setfacl "$@"

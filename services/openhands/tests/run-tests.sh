@@ -74,10 +74,20 @@ no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q "$1" "$SVC/.env"; }
 
 file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+file_owner() { stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null; }
 
 compose_has()      { sed 's/#.*//' "$SVC/docker-compose.yml" | grep -qE -- "$1"; }
 compose_hasF()     { sed 's/#.*//' "$SVC/docker-compose.yml" | grep -qF -- "$1"; }
 no_wildcard_bind() { ! compose_has '0\.0\.0\.0'; }
+
+# uid 10001 can write $1: an ACL entry, a sudo chown recorded by the stub,
+# or real ownership. Never a+rwx — that is the fallback that was removed.
+uid_writable() {
+  getfacl -p "$1" 2>/dev/null | grep -q 'user:10001:rwx' && return 0
+  grep -qF "chown 10001:10001 $1" "$STATE_DIR/sudo_chown" 2>/dev/null && return 0
+  [ "$(file_owner "$1")" = "10001" ]
+}
+not_world_writable() { [ -z "$(find "$1" -maxdepth 0 -perm -0002 2>/dev/null)" ]; }
 
 # ----------------------------------------------------------------- tests
 test_preflight_root() {
@@ -154,10 +164,10 @@ test_fresh_deploy() {
   check "  and not the host root"            ! grep -qE -- '- /:/' "$SVC/docker-compose.yml"
   check "workspaces created"                 [ -f "$HOME/agent-workspaces/openhands-test/README.md" ]
   check "  and not the Paperclip one"        [ ! -f "$HOME/agent-workspaces/paperclip-test/README.md" ]
-  check "OpenHands data dir lets uid 10001 write" \
-    sh -c "getfacl -p '$HOME/services/openhands/data' 2>/dev/null | grep -q 'user:10001:rwx' || python3 -c \"import os,stat,sys; sys.exit(0 if os.stat(sys.argv[1]).st_mode & stat.S_IWOTH else 1)\" '$HOME/services/openhands/data'"
-  check "  workspaces too" \
-    sh -c "getfacl -p '$HOME/agent-workspaces' 2>/dev/null | grep -q 'user:10001:rwx' || python3 -c \"import os,stat,sys; sys.exit(0 if os.stat(sys.argv[1]).st_mode & stat.S_IWOTH else 1)\" '$HOME/agent-workspaces'"
+  check "OpenHands data dir lets uid 10001 write" uid_writable "$HOME/services/openhands/data"
+  check "  and is not world-writable"              not_world_writable "$HOME/services/openhands/data"
+  check "workspaces writable too"                  uid_writable "$HOME/agent-workspaces"
+  check "  and not world-writable"                 not_world_writable "$HOME/agent-workspaces"
   check "did not call paperclipai"           no_call "paperclipai"
   check "did not call npx"                   no_call "^npx "
   check "compose up invoked"                 [ -f "$STATE_DIR/compose_up" ]
@@ -310,6 +320,135 @@ EOF
   teardown
 }
 
+test_grant_fallback_chown() {
+  echo "• no working setfacl: the grant falls back to sudo chown, never a+rwx, and re-runs without sudo"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/setfacl_fails"
+  mkdir -p "$HOME/agent-workspaces"
+  chmod 0777 "$HOME/agent-workspaces"
+  run_deploy
+  check "exits zero"                        [ "$CODE" -eq 0 ]
+  check "explains why sudo is needed"       out_has "chowned"
+  check "chowned data dir to uid 10001"     calls_have "sudo chown 10001:10001 $HOME/services/openhands/data"
+  check "chowned workspaces too"            calls_have "sudo chown 10001:10001 $HOME/agent-workspaces"
+  check "never chmod a+rwx"                 no_call "chmod a+rwx"
+  check "data dir not world-writable"       not_world_writable "$HOME/services/openhands/data"
+  check "workspaces cleared world-writable" not_world_writable "$HOME/agent-workspaces"
+  check "still published"                   calls_have "tailscale serve --bg --https=8000"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "second fallback run exits zero"    [ "$CODE" -eq 0 ]
+  check "second fallback run needs no sudo" no_call "^sudo "
+  teardown
+}
+
+test_grant_fails_hard() {
+  echo "• neither ACL nor chown works: die, do not leave a broken mount"
+  setup
+  touch "$STATE_DIR/operator" "$STATE_DIR/setfacl_fails" "$STATE_DIR/sudo_fails"
+  run_deploy
+  check "exits non-zero"        [ "$CODE" -ne 0 ]
+  check "names the failure"     out_has "Could not grant OpenHands write access"
+  check "never chmod a+rwx"     no_call "chmod a+rwx"
+  check "no container started"  [ ! -f "$STATE_DIR/compose_up" ]
+  check "never published"       no_call "tailscale serve"
+  teardown
+}
+
+test_workspaces_rejects_bad_paths() {
+  echo "• AGENT_WORKSPACES is proven safe before anything is mounted"
+  # Each case must die with its reason and leave no workspace or compose run.
+  bad_ws() {  # bad_ws <label> <value> <expected message fragment>
+    setup
+    touch "$STATE_DIR/operator"
+    export AGENT_WORKSPACES="$2"
+    run_deploy
+    check "$1: exits non-zero"        [ "$CODE" -ne 0 ]
+    check "$1: names the reason"      out_has "$3"
+    check "$1: no container started"  [ ! -f "$STATE_DIR/compose_up" ]
+    check "$1: never published"       no_call "tailscale serve"
+    teardown
+  }
+
+  bad_ws "relative path"      "agent-workspaces"                "not an absolute path"
+  bad_ws "dot-dot segment"    "$HOME/../agent-workspaces"       "'.' or '..' segment"
+  bad_ws "outside HOME"       "/etc/agent-workspaces"           "not inside your home"
+  bad_ws "HOME itself"        "$HOME"                           "not inside your home"
+  bad_ws "claude dir"         "$HOME/.claude"                   ".claude"
+  bad_ws "inside codex"       "$HOME/.codex/work"               ".codex"
+  bad_ws "a service dir"      "$HOME/services/paperclip"        "services"
+  bad_ws "services root"      "$HOME/services"                  "services"
+
+  setup  # the leaf being a symlink is refused rather than followed
+  touch "$STATE_DIR/operator"
+  mkdir -p "$HOME/real"
+  ln -s "$HOME/real" "$HOME/ws-link"
+  export AGENT_WORKSPACES="$HOME/ws-link"
+  run_deploy
+  check "symlink leaf: exits non-zero" [ "$CODE" -ne 0 ]
+  check "symlink leaf: named"          out_has "is a symlink"
+  check "symlink leaf: nothing made"   [ ! -f "$HOME/real/openhands-test/README.md" ]
+  teardown
+
+  setup  # a symlinked PARENT resolving outside HOME is caught by realpath
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/outside"
+  ln -s "$SANDBOX/outside" "$HOME/ws-parent"
+  export AGENT_WORKSPACES="$HOME/ws-parent/ws"
+  run_deploy
+  check "parent symlink out: exits non-zero" [ "$CODE" -ne 0 ]
+  check "parent symlink out: says where"     out_has "not inside your home"
+  teardown
+
+  setup  # a bad value read out of an existing .env is refused the same way
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<EOF
+OPENHANDS_VERSION=latest
+OPENHANDS_PORT=8000
+OPENHANDS_DATA=$HOME/services/openhands/data
+AGENT_WORKSPACES=/etc/evil
+OPENHANDS_API_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+OH_SECRET_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  run_deploy
+  check "bad .env value: exits non-zero" [ "$CODE" -ne 0 ]
+  check "bad .env value: names the path" out_has "/etc/evil"
+  check "bad .env value: nothing made"   [ ! -d /etc/evil ]
+  teardown
+}
+
+test_workspaces_custom_ok() {
+  echo "• a valid custom AGENT_WORKSPACES is honoured"
+  setup
+  touch "$STATE_DIR/operator"
+  export AGENT_WORKSPACES="$HOME/my-projects"
+  run_deploy
+  check "exits zero"                  [ "$CODE" -eq 0 ]
+  check "scratch workspace created"   [ -f "$HOME/my-projects/openhands-test/README.md" ]
+  check "  not at the default"        [ ! -e "$HOME/agent-workspaces" ]
+  check "custom dir writable by uid"  uid_writable "$HOME/my-projects"
+  check "  and not world-writable"    not_world_writable "$HOME/my-projects"
+  check "env records it"              grep -q "AGENT_WORKSPACES=$HOME/my-projects" "$SVC/.env"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<EOF
+OPENHANDS_VERSION=latest
+OPENHANDS_PORT=8000
+OPENHANDS_DATA=\$HOME/services/openhands/data
+PROJECTS_ROOT=\$HOME/ref-projects
+AGENT_WORKSPACES=\${PROJECTS_ROOT}/agents
+OPENHANDS_API_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+OH_SECRET_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  export AGENT_WORKSPACES="$HOME"
+  run_deploy
+  check "same-file .env ref + shell override: exits zero" [ "$CODE" -eq 0 ]
+  check "resolved same-file .env ref created"             [ -f "$HOME/ref-projects/agents/openhands-test/README.md" ]
+  teardown
+}
+
 # ------------------------------------------------------------ live suite
 live_check() {
   local desc="$1"; shift
@@ -390,11 +529,9 @@ run_teardown() {
 
 data_dir() { sed -n 's/^OPENHANDS_DATA=//p' "$SVC/.env"; }
 
-# uid 10001 can still write $1: an ACL entry, or the a+rwx fallback.
-grant_kept() {
-  getfacl -p "$1" 2>/dev/null | grep -q 'user:10001:rwx' \
-    || [ -n "$(find "$1" -maxdepth 0 -perm -0002 2>/dev/null)" ]
-}
+# uid 10001 can still write $1 after teardown: the ACL, chown grant or
+# ownership setup.sh gave it.
+grant_kept() { uid_writable "$1"; }
 
 # A deployed sandbox: setup.sh has run (with ~/.claude, so the creds overlay
 # exists), Serve maps this port to this service, neighbours sit on other
@@ -1100,6 +1237,10 @@ test_operator_escalation
 test_serve_approval_prompt
 test_creds_overlay_not_overwritten
 test_migrates_legacy_env
+test_grant_fallback_chown
+test_grant_fails_hard
+test_workspaces_rejects_bad_paths
+test_workspaces_custom_ok
 test_teardown_safe
 test_teardown_no_overlay
 test_teardown_https_port_override

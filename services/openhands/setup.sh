@@ -47,26 +47,160 @@ randhex() {
   fi
 }
 
+# Values are read from .env the way Docker Compose reads them (an optional
+# `export `, matching single or double quotes, an inline ` #` comment after
+# an unquoted value, $HOME / ${HOME} expanded where Compose expands them)
+# without executing the file — a hand edit must not become a command.
 env_get() {
-  local file="$1" key="$2"
-  [ -f "$file" ] || return 0
-  sed -n "s/^${key}=//p" "$file" | head -1
+  local file="$1" key="$2" depth="${3:-0}" line value tail quote="" ref_name ref_val
+  [ -f "$file" ] && [ "$depth" -lt 5 ] || return 0
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  value="${line#*=}"
+  tail="${value##*[![:space:]]}"; value="${value%"$tail"}"
+  case "$value" in
+    \"*) quote='"'; value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) quote="'"; value="${value#\'}"; value="${value%%\'*}" ;;
+    *) value="${value%%[[:space:]]#*}"
+       tail="${value##*[![:space:]]}"; value="${value%"$tail"}" ;;
+  esac
+  if [ "$quote" != "'" ]; then
+    value="${value//\$\{HOME\}/$HOME}"
+    value="${value//\$HOME/$HOME}"
+    while [ "$depth" -lt 5 ]; do
+      if [[ "$value" =~ ^([^\$]*)\$\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$ ]]; then
+        ref_name="${BASH_REMATCH[2]}"
+        ref_val="$(env_get "$file" "$ref_name" "$((depth + 1))")"
+        value="${BASH_REMATCH[1]}${ref_val}${BASH_REMATCH[3]}"
+      elif [[ "$value" =~ ^([^\$]*)\$([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]]; then
+        ref_name="${BASH_REMATCH[2]}"
+        ref_val="$(env_get "$file" "$ref_name" "$((depth + 1))")"
+        value="${BASH_REMATCH[1]}${ref_val}${BASH_REMATCH[3]}"
+      else
+        break
+      fi
+      depth=$((depth + 1))
+    done
+  fi
+  printf '%s' "$value"
+}
+
+# phys_path and paths_overlap are copied verbatim from teardown.sh: the same
+# proof a --purge asks for is the proof a bind mount deserves before it is
+# composed. Where an absolute path really lands, symlinks and all, whether or
+# not it exists yet, WITHOUT entering it; refuses (non-zero) a relative
+# path, a `.`/`..` component, a newline, a path through a file, or a symlink
+# that points nowhere.
+phys_path() {
+  local p="$1" rest="" dir leaf t hops=0 nl
+  nl='
+'
+  case "$p" in /*) ;; *) return 1 ;; esac
+  case "$p" in *"$nl"*) return 1 ;; esac
+  case "/$p/" in */./*|*/../*) return 1 ;; esac
+  while [ ! -e "$p" ] && [ ! -L "$p" ]; do
+    rest="/$(basename "$p")$rest"
+    p="$(dirname "$p")"
+  done
+  [ -z "$rest" ] || [ -d "$p" ] || return 1
+  if [ "$p" = / ]; then
+    dir=/
+  else
+    dir="$(cd "$(dirname "$p")" && pwd -P)" || return 1
+    leaf="$(basename "$p")"
+    while [ -L "$dir/$leaf" ]; do
+      hops=$((hops + 1)); [ "$hops" -le 40 ] || return 1
+      t="$(readlink "$dir/$leaf")" || return 1
+      case "$t" in /*) ;; *) t="$dir/$t" ;; esac
+      dir="$(cd "$(dirname "$t")" && pwd -P)" || return 1
+      leaf="$(basename "$t")"
+      case "$leaf" in .|..) return 1 ;; esac
+    done
+    [ -e "$dir/$leaf" ] || return 1
+    rest="/$leaf$rest"
+  fi
+  case "$dir$rest" in *"$nl"*) return 1 ;; esac
+  if [ "$dir" = / ]; then printf '%s' "${rest:-/}"; else printf '%s%s' "$dir" "$rest"; fi
+}
+
+# True when one physical path is the other or sits inside it.
+paths_overlap() {
+  [ "$1" = / ] || [ "$2" = / ] && return 0
+  case "$1/" in "$2"/*) return 0 ;; esac
+  case "$2/" in "$1"/*) return 0 ;; esac
+  return 1
+}
+
+# AGENT_WORKSPACES is bind-mounted into the container at /projects and the
+# agent reads and writes it freely, so it has to be a dedicated tree under
+# $HOME: absolute, free of `.`/`..` parts, not a symlinked leaf, and —
+# symlinks resolved — strictly inside $HOME without touching ~/services
+# (service state, including other services' .env secrets), ~/.claude or
+# ~/.codex (host agent credentials, mounted by the creds overlay on their
+# own paths, never through the workspace). Dies before anything is created
+# or mounted; prints the resolved path on success.
+validate_workspaces() {
+  local ws="$1" ws_real home_real services_real p preal
+  case "$ws" in
+    /*) ;;
+    *) die "AGENT_WORKSPACES=$ws is not an absolute path. Point it at a directory under your home (e.g. ~/agent-workspaces), or unset it for the default." ;;
+  esac
+  case "/$ws/" in
+    */./*|*/../*) die "AGENT_WORKSPACES=$ws contains a '.' or '..' segment — give the real path instead." ;;
+  esac
+  [ ! -L "$ws" ] || die "AGENT_WORKSPACES=$ws is a symlink — point it at the real directory instead."
+  ws_real="$(phys_path "$ws")" \
+    || die "AGENT_WORKSPACES=$ws cannot be resolved to a real path (a path through a file, or a broken symlink). Fix it or unset it for the default."
+  home_real="$(phys_path "$HOME")" || die "Cannot resolve HOME=$HOME."
+  case "$ws_real" in
+    "$home_real"/?*) ;;
+    *) die "AGENT_WORKSPACES=$ws resolves to $ws_real, which is not inside your home directory ($home_real). The workspace tree must live under \$HOME." ;;
+  esac
+  services_real="$(phys_path "$HOME/services" 2>/dev/null || true)"
+  if [ -n "$services_real" ] && paths_overlap "$ws_real" "$services_real"; then
+    die "AGENT_WORKSPACES=$ws resolves to $ws_real, overlapping $HOME/services — the tree every service keeps its state (and .env secrets) in. Pick a separate one like ~/agent-workspaces."
+  fi
+  for p in "$HOME/.claude" "$HOME/.codex"; do
+    preal="$(phys_path "$p" 2>/dev/null || true)"
+    [ -n "$preal" ] || continue
+    if paths_overlap "$ws_real" "$preal"; then
+      die "AGENT_WORKSPACES=$ws resolves to $ws_real, overlapping $p — host agent credentials the creds overlay mounts separately. Pick a separate tree like ~/agent-workspaces."
+    fi
+  done
+  printf '%s' "$ws_real"
 }
 
 # Canvas runs as uid 10001 (`openhands` in ghcr.io/openhands/agent-canvas).
 # A 0700 host-owned bind mount makes the agent server die on
 # conversations/ (EACCES); the ingress stays up on :8000 and 502s
-# `ECONNREFUSED 127.0.0.1:18000`. Grant 10001 write without sudo.
+# `ECONNREFUSED 127.0.0.1:18000`. Grant 10001 write: an ACL where the tool
+# exists, otherwise the directory's ownership itself — never world-writable.
 grant_openhands_write() {
-  local d uid=10001
+  local d uid=10001 mode owner
   for d in "$@"; do
     [ -d "$d" ] || continue
+    # Clear any legacy group/world-write bits left by the old chmod a+rwx fallback.
+    mode="$(stat -c %a "$d" 2>/dev/null || stat -f %Lp "$d" 2>/dev/null || true)"
+    case "$mode" in
+      *[2367]|*[2367]?)
+        chmod go-w "$d" 2>/dev/null || sudo chmod go-w "$d" \
+          || die "Could not clear group/world-write permissions on $d"
+        ;;
+    esac
     if command -v setfacl >/dev/null 2>&1 \
        && setfacl -m "u:${uid}:rwx" "$d" 2>/dev/null \
        && setfacl -d -m "u:${uid}:rwx" "$d" 2>/dev/null; then
       continue
     fi
-    chmod a+rwx "$d" 2>/dev/null || true
+    # No usable ACL tool (macOS, minimal installs): give the directory to
+    # the container uid. Skip sudo on reruns if already owned by $uid.
+    owner="$(stat -c %u "$d" 2>/dev/null || stat -f %u "$d" 2>/dev/null || true)"
+    if [ "$owner" = "$uid" ]; then
+      continue
+    fi
+    info "setfacl is unavailable or failed on $d — the container runs as uid $uid, so the directory itself is chowned (one sudo prompt)"
+    sudo chown "$uid:$uid" "$d" \
+      || die "Could not grant OpenHands write access to $d: no usable setfacl and 'sudo chown $uid:$uid $d' failed. Run that chown by hand, then re-run."
   done
 }
 
@@ -186,19 +320,33 @@ EOF
 fi
 
 REQUESTED_OH_PORT="$OPENHANDS_PORT"
-set -a; . "$ENV_FILE"; set +a
-WORKSPACES="${AGENT_WORKSPACES:?AGENT_WORKSPACES missing from $ENV_FILE}"
-OPENHANDS_DATA="${OPENHANDS_DATA:?OPENHANDS_DATA missing from $ENV_FILE}"
+# .env is the authority for ports and paths, read the way Compose reads
+# them — never by executing it (env_get above; a hand edit is not code).
+env_port="$(env_get "$ENV_FILE" OPENHANDS_PORT)"
+[ -z "$env_port" ] || OPENHANDS_PORT="$env_port"
+WORKSPACES="$(env_get "$ENV_FILE" AGENT_WORKSPACES)"
+[ -n "$WORKSPACES" ] || die "AGENT_WORKSPACES missing from $ENV_FILE"
+OPENHANDS_DATA="$(env_get "$ENV_FILE" OPENHANDS_DATA)"
+[ -n "$OPENHANDS_DATA" ] || die "OPENHANDS_DATA missing from $ENV_FILE"
 if [ "$OPENHANDS_PORT" != "$REQUESTED_OH_PORT" ]; then
   warn "OPENHANDS_PORT=$REQUESTED_OH_PORT ignored — the existing $ENV_FILE says $OPENHANDS_PORT. Edit .env and re-run to move the port."
 fi
 [ -n "$OPENHANDS_HTTPS_EXPLICIT" ] || OPENHANDS_HTTPS_PORT="$OPENHANDS_PORT"
 
+# The workspace becomes the agent's /projects. Prove it is a dedicated tree
+# under $HOME before anything is created, granted or bind-mounted. Export the
+# validated values so Docker Compose cannot inherit an unvalidated shell
+# AGENT_WORKSPACES override over what .env and validate_workspaces settled on.
+WORKSPACES="$(validate_workspaces "$WORKSPACES")"
+AGENT_WORKSPACES="$WORKSPACES"
+export AGENT_WORKSPACES OPENHANDS_DATA OPENHANDS_PORT
+
 mkdir -p "$MARKER" "$OPENHANDS_DATA" "$WORKSPACES/openhands-test"
 chmod 700 "$MARKER" "$OPENHANDS_DATA" 2>/dev/null || true
-grant_openhands_write "$OPENHANDS_DATA" "$WORKSPACES" "$WORKSPACES/openhands-test"
-ok "OpenHands data + workspaces writable by container uid 10001"
 
+# Seed README.md BEFORE grant_openhands_write: when setfacl is unavailable,
+# the fallback chowns openhands-test to uid 10001, after which this user
+# could no longer create a file inside a 0755 directory.
 if [ ! -f "$WORKSPACES/openhands-test/README.md" ]; then
   cat > "$WORKSPACES/openhands-test/README.md" <<'EOF'
 # openhands-test
@@ -207,6 +355,9 @@ Scratch workspace mounted into Agent Canvas as `/projects/openhands-test`.
 Safe to edit. Created by services/openhands/setup.sh.
 EOF
 fi
+
+grant_openhands_write "$OPENHANDS_DATA" "$WORKSPACES" "$WORKSPACES/openhands-test"
+ok "OpenHands data + workspaces writable by container uid 10001"
 ok "Workspace: $WORKSPACES/openhands-test"
 
 # --------------------------------------------- optional Claude/Codex mounts

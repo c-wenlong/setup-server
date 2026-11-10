@@ -5,6 +5,8 @@ services/*/.env*
 # Host-specific Claude/Codex bind-mount overlays (paths into $HOME)
 services/openhands/docker-compose.creds.yml
 services/openclaw/docker-compose.creds.yml
+# Generated Redis config carrying REDIS_PASSWORD (same secret class as .env)
+services/coolify/redis.conf
 # Per-machine manual-redeploy overlays (host-gateway reachability), same class
 # of local-only file as .env
 services/*/docker-compose.override.yml

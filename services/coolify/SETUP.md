@@ -49,6 +49,7 @@ State lives under `~/services/coolify`:
   backups/
   images/
 services/coolify/.env           # secrets + ports (gitignored, 600)
+services/coolify/redis.conf     # requirepass, generated from .env (gitignored, 600)
 ```
 
 Postgres and Redis data live in Docker named volumes `coolify-db` and
@@ -75,6 +76,20 @@ Coolify's upstream default is 8000; this deploy uses **8101**.
   ed25519 key under `~/services/coolify/ssh/keys/` and appends the
   pubkey to `~/.ssh/authorized_keys`. The Coolify container talks to
   `host.docker.internal`. You still need to be in the `docker` group.
+- **Redis password lives in `redis.conf`, never on argv or in env.**
+  `docker inspect` and host `ps` show a container's command and
+  environment to every local account, so `requirepass` sits in the
+  generated config (mode 600, mounted read-only); `setup.sh` rewrites it
+  from `.env` on each run, so a rotated password follows.
+- **Residual exposure — deliberate.** The `authorized_keys` line gives
+  the Coolify container passwordless SSH into this box *as you*. That is
+  the standard Coolify localhost workflow (it needs to run `docker`
+  remotely); it is also why being in the `docker` group is effectively
+  host-root here. Accept it or remove the line and deploy apps elsewhere.
+- **Directory grants are never world-writable.** State dirs get a uid
+  9999 ACL, or a `sudo chown 9999:9999` where `setfacl` is unavailable
+  (the key is generated first, before the keys dir changes owner). The
+  private key itself is ACL'd read-only for 9999 and never chmod'd.
 
 ⚠️ Password-sync rule: a password changed in the UI is not mirrored back
 into `.env`.
@@ -114,13 +129,16 @@ Step by step:
    baked in at creation time.
 3. **`.env`** — written only if absent, mode 600.
 4. **`APP_URL` drift check** — warns, does not rewrite `.env`.
-5. **Dirs + ACL for uid 9999** (Coolify's container user), then an
-   ed25519 key and `authorized_keys` line.
-6. **`docker compose up -d`**, wait for `/api/health` (up to ~4.5 min;
+5. **`redis.conf`** — generated from `.env` (mode 600), so `requirepass`
+   never reaches the container's argv or environment.
+6. **ed25519 key + `authorized_keys` line**, then the uid 9999 grants —
+   ACL, or `sudo chown` where `setfacl` is missing (the key exists first,
+   so the chown cannot strand it).
+7. **`docker compose up -d`**, wait for `/api/health` (up to ~4.5 min;
    first boot runs migrations).
-7. **`tailscale serve`** for the dashboard (required) and Soketi
+8. **`tailscale serve`** for the dashboard (required) and Soketi
    (best-effort).
-8. **Verify** HTTPS `/api/health`, then a `/register` check so an
+9. **Verify** HTTPS `/api/health`, then a `/register` check so an
    unseeded first-run form cannot look like a successful deploy.
 
 ## Client side

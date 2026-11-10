@@ -36,17 +36,26 @@ docker compose --project-directory ~/dev/setup-server/services/openhands \
 - **`variable is not set`** — `.env` is incomplete. Compose guards
   `OPENHANDS_API_KEY`, `OH_SECRET_KEY`, `OPENHANDS_DATA`,
   `AGENT_WORKSPACES`.
+- **`AGENT_WORKSPACES=... resolves to ...` / `not inside your home` /
+  `is a symlink`** — setup refuses workspace paths it cannot prove safe:
+  the agent gets read-write over everything under it. It must be an
+  absolute path under `$HOME` (symlinks resolved), not a symlinked leaf,
+  and must not overlap `~/services`, `~/.claude` or `~/.codex`. Point it
+  at a dedicated tree like `~/agent-workspaces` or unset it for the
+  default.
 - **Permission on the data dir / 502 `ECONNREFUSED 127.0.0.1:18000`** —
   the UI on `:8000` is the ingress; `/api` is proxied to the agent
   server on `:18000` *inside* the container. That process runs as uid
   `10001`. If `~/services/openhands/data` is `0700` and host-owned, it
   cannot mkdir `conversations/`, exits, and every Canvas API call 502s.
-  `setup.sh` grants `u:10001:rwx` via ACL (or `0777` if `setfacl` is
-  missing). Repair in place:
+  `setup.sh` grants `u:10001:rwx` via ACL, or `sudo chown 10001:10001`
+  on the directories when `setfacl` is missing (it never chmods
+  world-writable). Repair in place:
 
   ```bash
   setfacl -m u:10001:rwx -d -m u:10001:rwx ~/services/openhands/data
   setfacl -m u:10001:rwx -d -m u:10001:rwx ~/agent-workspaces
+  # no setfacl? sudo chown 10001:10001 on the same two directories
   sg docker -c 'docker compose --project-directory ~/dev/setup-server/services/openhands restart'
   ```
 

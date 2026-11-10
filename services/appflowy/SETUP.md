@@ -126,6 +126,11 @@ Admin console: `/console`.
 Desktop and mobile apps: set the self-hosted cloud URL to the same
 HTTPS origin (port included). GoTrue's `GOTRUE_SITE_URL` stays
 `appflowy-flutter://` so the apps can complete the OAuth bounce.
+`GOTRUE_URI_ALLOW_LIST` is narrowed to that deep-link scheme plus the
+box's own web origin (its `/auth/callback`) — not upstream's `**`, which
+would let GoTrue redirect a session token anywhere. If a client still
+cannot finish signing in, check the GoTrue logs for a refused redirect
+before widening the list in `docker-compose.yml`.
 
 ## Ops
 
