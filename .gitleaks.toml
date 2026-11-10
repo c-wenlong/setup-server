@@ -31,20 +31,26 @@ useDefault = true
 #   3. scripts/tests/test-migrate-sources-to-app.sh plants a fake old
 #      SITE_PASSPHRASE ("passphrase-TOPSECRET-123") so the suite can prove
 #      the migration never prints or copies it. A sandbox-only literal.
+#   4. Jellyfin's enable-nvenc.sh pins NVIDIA's public apt signing-key
+#      fingerprint (C95B321B61E88C1809C4F759DDCAE044F796ECB0); a 40-hex
+#      literal trips generic-api-key, but it is a published GPG fingerprint,
+#      not a secret.
 # ---------------------------------------------------------------------------
 [allowlist]
-description = "Scoped false positives: HA stub JWT, hermes' fake wrong-password curl credential and the sources migration test's planted passphrase (see comments above)."
+description = "Scoped false positives: HA stub JWT, hermes' fake wrong-password curl credential, the sources migration test's planted passphrase, and NVIDIA's public GPG key fingerprint (see comments above)."
 targetRules = ["curl-auth-user", "generic-api-key", "jwt", "jwt-base64"]
 condition = "AND"
 paths = [
   '''^services/home-assistant/tests/stubs/curl$''',
   '''^services/hermes-agent/tests/run-tests\.sh$''',
   '''^scripts/tests/test-migrate-sources-to-app\.sh$''',
+  '''^services/jellyfin/enable-nvenc\.sh$''',
 ]
 regexes = [
   '''eyJhbGciOiJIUzI1NiJ9\.stub''',
   '''\$user:wrong-password''',
   '''passphrase-TOPSECRET-123''',
+  '''C95B321B61E88C1809C4F759DDCAE044F796ECB0''',
 ]
 
 # ---------------------------------------------------------------------------

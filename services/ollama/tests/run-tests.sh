@@ -94,12 +94,14 @@ test_preflight_refuses_root() {
 }
 
 test_fresh_install_downloads() {
-  echo "• fresh install: official tarball -> ~/.local, user unit, loopback"
+  echo "• fresh install: pinned+verified release -> ~/.local, user unit, loopback"
   setup
   run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
   if [ "$(eff_os)" = "Linux" ]; then
-    check "downloaded the tarball"  calls_have "curl.*ollama-linux-amd64.tgz\|curl.*ollama-linux-arm64.tgz"
+    check "downloaded the pinned asset" calls_have "curl.*releases/download/v0.40.15/ollama-linux-amd64.tar.zst\|curl.*releases/download/v0.40.15/ollama-linux-arm64.tar.zst"
+    check "fetched the checksum list"   calls_have "curl.*releases/download/v0.40.15/sha256sum.txt"
+    check "verified before extracting"  out_has "sha256 verified"
     check "binary landed"           [ -x "$HOME/.local/bin/ollama" ]
   else
     check "brew installed it"       calls_have "brew install"
@@ -212,6 +214,19 @@ test_idempotent_rerun() {
   check "no re-migration"       no_call "disable --now"
   check "no download"           no_call "ollama-linux"
   check "unit still restarted"  calls_have "systemctl --user restart ollama"
+  teardown
+}
+
+test_checksum_mismatch_refuses() {
+  echo "• a checksum mismatch dies before any byte lands in ~/.local"
+  setup
+  [ "$(eff_os)" = "Linux" ] || { teardown; return; }
+  touch "$STATE_DIR/bad_checksum"
+  run_deploy
+  check "exits non-zero"        [ "$CODE" -ne 0 ]
+  check "names the mismatch"    out_has "Checksum mismatch"
+  check "no binary installed"   [ ! -e "$HOME/.local/bin/ollama" ]
+  check "no unit written"       [ ! -e "$HOME/.config/systemd/user/ollama.service" ]
   teardown
 }
 

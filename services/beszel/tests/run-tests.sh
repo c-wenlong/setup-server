@@ -69,6 +69,12 @@ check "sudo only for lingering + tailscale operator" \
 check "hub bound to loopback" grep -q 'serve --http "127.0.0.1' "$COMPOSE"
 check "hub uses host networking (reaches agent loopback)" \
       grep -q 'network_mode: host' "$COMPOSE"
+check "hub image is pinned (no floating :latest)" \
+      bash -c "grep -q 'henrygd/beszel:\${BESZEL_VERSION:-[0-9]' '$COMPOSE' && ! grep -q 'beszel:latest' '$COMPOSE'"
+check "agent tarball is pinned to BESZEL_VERSION (no releases/latest)" \
+      bash -c "grep -q 'releases/download/v\${BESZEL_VERSION}/beszel-agent_' '$SETUP' && ! grep -q 'releases/latest' '$SETUP'"
+check "first boot gets superuser from .env, not argv" \
+      bash -c "grep -q 'USER_EMAIL' '$COMPOSE' && grep -q 'USER_PASSWORD' '$COMPOSE'"
 check "agent listens loopback only" grep -q 'LISTEN=127.0.0.1' "$SETUP"
 check "agent KEY env is quoted (contains a space)" \
       grep -q 'Environment="KEY=' "$SETUP"
@@ -83,6 +89,19 @@ check "tailscale serve published via the resolved CLI" \
 check "GPU stats enabled" grep -q 'GPU=true' "$SETUP"
 check "Kuma monitor row exists" \
       grep -q 'beszel' "$SERVICE_DIR/../monitoring/seed_kuma.py"
+
+# Issue #182: the admin password never rides a host-visible argv. The hub
+# creates the superuser from compose env on first boot; a re-run probes
+# auth first (JSON built via json.dumps on stdin) so `superuser upsert`
+# only fires on a repair.
+check "superuser upsert gated behind an auth probe" \
+      bash -c "grep -q 'if admin_auths' '$SETUP' && grep -q 'docker exec beszel /beszel superuser upsert' '$SETUP'"
+check "auth probe builds JSON via json.dumps and posts on stdin" \
+      bash -c "grep -q 'json.dumps.*BESZEL_SU_PASSWORD' '$SETUP' && grep -q -- '--data-binary @-' '$SETUP'"
+check "python wiring reads creds from env, not argv" \
+      bash -c "grep -q 'os.environ\[\"BESZEL_SU_PASSWORD\"\]' '$SETUP' && ! grep -v '^[[:space:]]*#' '$SETUP' | grep -q 'sys\.argv' && ! grep -qE 'python3 - .*BESZEL_ADMIN_PASSWORD' '$SETUP'"
+check "compose bootstraps the admin via env, not exec argv" \
+      grep -qF 'USER_PASSWORD: ${BESZEL_ADMIN_PASSWORD:?}' "$COMPOSE"
 
 # ------------------------------------------------------------- teardown
 # teardown.sh, unlike setup.sh, never talks to the hub's API, so it CAN run
@@ -248,7 +267,7 @@ from_setup() {
     | sed -e "s#\\\$BIN#$HOME/.local/bin/beszel-agent#g" \
           -e "s#\\\$STATE#$HOME/services/beszel#g" \
           -e "s#\\\$HOME#$HOME#g" \
-          -e 's#\$PORT#8092#g; s#\$AGENT_PORT#45876#g; s#\$KEY#ssh-ed25519 AAAAtestkey#g' \
+          -e 's#\$PORT#8092#g; s#\$BESZEL_VERSION#0.21.1#g; s#\$AGENT_PORT#45876#g; s#\$KEY#ssh-ed25519 AAAAtestkey#g' \
           -e 's#\$ADMIN_EMAIL#me@example.com#g; s#\$(randhex)#0123456789abcdef0123456789abcdef#g' \
           -e 's#\$DOCKER_HOST_LINE##g'
 }

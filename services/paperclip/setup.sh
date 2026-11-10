@@ -64,10 +64,17 @@ append_kv() {
   printf '%s=%s\n' "$key" "$value" >> "$file"
 }
 
-# Login fields for the launcher / later wiring. Placeholders until you
-# set real values (Settings → Profile, then mirror them here).
-PAPERCLIP_EMAIL="${PAPERCLIP_EMAIL:-changeme@example.com}"
-PAPERCLIP_PASSWORD="${PAPERCLIP_PASSWORD:-changeme}"
+# Login fields for the launcher / later wiring — written to .env only when
+# the operator supplies them (PAPERCLIP_EMAIL=… PAPERCLIP_PASSWORD=…
+# ./setup.sh, or edited in by hand). setup.sh never invents credentials:
+# the real pair is created at Settings → Profile after the CEO invite.
+PAPERCLIP_EMAIL="${PAPERCLIP_EMAIL:-}"
+PAPERCLIP_PASSWORD="${PAPERCLIP_PASSWORD:-}"
+
+# Pinned installer (issue #179). The managed CLI self-updates after
+# installation, so this pin only fixes which bootstrapper runs — it does
+# not freeze the running Paperclip version.
+PAPERCLIPAI_VERSION="${PAPERCLIPAI_VERSION:-2026.1106.0}"
 
 # Compare dotted versions: node_at_least 24.11.0
 node_at_least() {
@@ -194,9 +201,8 @@ elif [ -f "$LEGACY_DIR/.env" ]; then
     echo "TS_HOST=$migrated_host"
     echo "PAPERCLIP_PUBLIC_URL=$migrated_url"
     echo
-    echo "# Placeholders — not applied to the instance yet. Edit in place."
-    echo "PAPERCLIP_EMAIL=${PAPERCLIP_EMAIL}"
-    echo "PAPERCLIP_PASSWORD=${PAPERCLIP_PASSWORD}"
+    echo "# Login fields — not applied to the instance. Add PAPERCLIP_EMAIL /"
+    echo "# PAPERCLIP_PASSWORD here after creating them at Settings → Profile."
     company="$(env_get "$LEGACY_DIR/.env" PAPERCLIP_COMPANY_ID)"
     apikey="$(env_get "$LEGACY_DIR/.env" PAPERCLIP_API_KEY)"
     if [ -n "$company" ]; then
@@ -228,17 +234,21 @@ PAPERCLIP_DATA=$PAPERCLIP_DATA
 TS_HOST=$TS_HOST
 PAPERCLIP_PUBLIC_URL=https://$TS_HOST:$PAPERCLIP_HTTPS_PORT
 
-# Placeholders — not applied to the instance yet. Edit in place.
-PAPERCLIP_EMAIL=$PAPERCLIP_EMAIL
-PAPERCLIP_PASSWORD=$PAPERCLIP_PASSWORD
+# Login fields — not applied to the instance. Add PAPERCLIP_EMAIL /
+# PAPERCLIP_PASSWORD here after creating them at Settings → Profile.
 EOF
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
 fi
 
-# Existing .env is never overwritten; missing login keys are appended.
-append_kv "$ENV_FILE" "PAPERCLIP_EMAIL" "$PAPERCLIP_EMAIL"
-append_kv "$ENV_FILE" "PAPERCLIP_PASSWORD" "$PAPERCLIP_PASSWORD"
+# Existing .env is never overwritten; operator-supplied login keys are
+# appended when missing. Unset means none are written — no placeholders.
+if [ -n "$PAPERCLIP_EMAIL" ]; then
+  append_kv "$ENV_FILE" "PAPERCLIP_EMAIL" "$PAPERCLIP_EMAIL"
+fi
+if [ -n "$PAPERCLIP_PASSWORD" ]; then
+  append_kv "$ENV_FILE" "PAPERCLIP_PASSWORD" "$PAPERCLIP_PASSWORD"
+fi
 
 REQUESTED_PC_PORT="$PAPERCLIP_PORT"
 set -a; . "$ENV_FILE"; set +a
@@ -283,7 +293,7 @@ elif command -v paperclipai >/dev/null; then
   ok "Paperclip CLI already on PATH: $PAPERCLIPAI"
 else
   info "Installing Paperclip managed CLI (official, user-local, no sudo)"
-  npx paperclipai install --yes
+  npx "paperclipai@$PAPERCLIPAI_VERSION" install --yes
   PAPERCLIPAI="$HOME/.local/bin/paperclipai"
   [ -x "$PAPERCLIPAI" ] || die "paperclipai install did not produce $PAPERCLIPAI"
   ok "Installed $PAPERCLIPAI"

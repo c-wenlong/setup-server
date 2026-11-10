@@ -5,10 +5,19 @@
 # for nvidia-smi + hwmon + docker-socket access.
 services:
   beszel:
-    image: henrygd/beszel:latest
+    # Pinned: `latest` would silently pull whatever upstream ships next.
+    # Keep in step with the agent BESZEL_VERSION in .env (setup.sh).
+    image: henrygd/beszel:${BESZEL_VERSION:-0.21.1}
     container_name: beszel
     restart: unless-stopped
     network_mode: host
     command: serve --http "127.0.0.1:${BESZEL_PORT:-8092}"
+    environment:
+      # First boot creates the superuser + admin user from these, so
+      # setup.sh never passes the admin password on a `docker exec` argv.
+      # Ignored once the data dir has users; the password still comes from
+      # .env (mode 600), readable as env only to the docker group.
+      USER_EMAIL: ${BESZEL_ADMIN_EMAIL:?}
+      USER_PASSWORD: ${BESZEL_ADMIN_PASSWORD:?}
     volumes:
       - ${BESZEL_VOLUME:?}:/beszel_data
