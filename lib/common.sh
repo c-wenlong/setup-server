@@ -241,11 +241,38 @@ env_lint() {
         [[ "$val" =~ ^\"([^\"\\]|\\.)*\"[[:space:]]*(#.*)?$ ]] \
           || die "$env_file: the value of $key is an unbalanced double-quoted string.";;
       *)
-        # Unquoted: shell-inert characters or %q-style backslash escapes,
-        # then optional trailing space and a comment. `A=1; id`, `A=1 id`,
-        # `A=x|y` would all execute.
-        [[ "$val" =~ ^([A-Za-z0-9._/:+,@%^~$=*!?{}-]|\\.)*[[:space:]]*(#.*)?$ ]] \
-          || die "$env_file: the value of $key is not safe to source (metacharacters or spaces; quote it)." ;;
+        # Unquoted: walk left-to-right so %q backslash escapes (`\ `), UTF-8
+        # path characters, and `#` comments (only at start of value or after
+        # an unescaped whitespace) are handled identically to Bash. `A=1; id`,
+        # `A=1 id`, `A=x\ #; id`, and `A=x|y` all fail closed.
+        case "$val" in *'$'"'"*|*'$"'*)
+          die "$env_file: the value of $key is not safe to source (metacharacters or spaces; quote it)." ;;
+        esac
+        local i=0 len="${#val}" ch rest
+        while [ "$i" -lt "$len" ]; do
+          ch="${val:$i:1}"
+          case "$ch" in
+            \\)
+              i=$((i + 1))
+              [ "$i" -lt "$len" ] \
+                || die "$env_file: the value of $key is not safe to source (trailing backslash)."
+              ;;
+            ' '|$'\t')
+              rest="${val:$i}"
+              [[ "$rest" =~ ^[[:space:]]*(#.*)?$ ]] \
+                || die "$env_file: the value of $key is not safe to source (metacharacters or spaces; quote it)."
+              break
+              ;;
+            '#')
+              [ "$i" -eq 0 ] && break
+              ;;
+            ';'|'|'|'&'|'<'|'>'|'('|')'|\"|\'|\`)
+              die "$env_file: the value of $key is not safe to source (metacharacters or spaces; quote it)."
+              ;;
+          esac
+          i=$((i + 1))
+        done
+        ;;
     esac
   done < "$env_file"
 }

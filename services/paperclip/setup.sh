@@ -58,7 +58,7 @@ env_get() {
 
 append_kv() {
   local file="$1" key="$2" value="$3"
-  if grep -q "^${key}=" "$file" 2>/dev/null; then
+  if grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null; then
     return 0
   fi
   printf '%s=%s\n' "$key" "$value" >> "$file"

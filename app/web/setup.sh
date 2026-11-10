@@ -204,7 +204,7 @@ ts_serve() {  # ts_serve <tailscale serve args...>
   fi
   if [ "$OS" = "Linux" ]; then
     info "Direct serve failed — trying operator grant (needs sudo, one time)"
-    ts_operator_grant
+    sudo tailscale set --operator="$USER"
   fi
   until "$TAILSCALE" serve "$@"; do
     echo

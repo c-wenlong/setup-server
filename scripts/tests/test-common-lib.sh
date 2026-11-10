@@ -305,6 +305,7 @@ cat > "$SB/good.env" <<'EOF'
 LOCAL_PORT=8081
 export DATA_DIR=$HOME/services/x
 ESCAPED=/path/with\ space
+UTF8_PATH=/home/café/setup-server
 QUOTED="a b"
 TRAILING=v # a trailing comment
 EOF
@@ -328,6 +329,10 @@ check "a non KEY=value line is fatal"      out_has "not KEY=value"
 printf 'A=1; id\n' > "$SB/semi.env"
 lib "env_lint '$SB/semi.env'"
 check "A=1; id is fatal"                   out_has "not safe to source"
+printf 'A=x\\ #; builtin printf %%s SOURCE_EXECUTED\n' > "$SB/esccomment.env"
+lib "env_lint '$SB/esccomment.env' && . '$SB/esccomment.env'"
+check "escaped space before #; is fatal"   out_has "not safe to source"
+check "  and never executed after lint"    bash -c '! grep -qF SOURCE_EXECUTED <<<"$1"' _ "$OUT"
 printf 'A=1 id\n' > "$SB/space.env"
 lib "env_lint '$SB/space.env'"
 check "A=1 id is fatal"                    out_has "not safe to source"
