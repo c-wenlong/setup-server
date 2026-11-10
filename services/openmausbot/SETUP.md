@@ -157,13 +157,17 @@ key is stale: `devin auth logout && devin auth login` on the box.
 ## Trust model
 
 `OMB_LOOPBACK_TRUST=owner` (the upstream default for self-hosting) means any
-**process on this box** that can reach `127.0.0.1:8799` acts as owner without
+non-browser request that arrives on `127.0.0.1:8799` acts as owner without
 pairing. That is deliberate: it keeps local CLI commands (`pair`, `sessions`,
 `browser install`) working. `service` trust was rejected — upstream refuses
 CLI pairing under it, which would make browser pairing impossible to mint.
-The owner API is still unreachable from anywhere except this box and paired
-tailnet browsers, because the only listener is loopback and the only external
-path is Tailscale Serve.
+**Accepted tailnet boundary (issue #176):** because Tailscale Serve proxies
+`https://<host>.ts.net:8799` to `http://127.0.0.1:8799`, every tailnet
+request arrives loopback-sourced. Browsers send `Origin`/`Sec-Fetch-*`
+headers and are never granted loopback trust (they must still pair), but any
+non-browser HTTP client on the tailnet (e.g. `curl` from another tailnet
+device) reaches the owner API directly — the tailnet itself is the access
+boundary for non-browser callers, just like `code-server` and the launcher.
 
 ## Ops
 
