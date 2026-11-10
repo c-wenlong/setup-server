@@ -176,6 +176,7 @@ fi
 # Read back: an existing .env is the source of truth for ports and
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 ADMIN_EMAIL="${IMMICH_ADMIN_EMAIL:-$ADMIN_EMAIL}"
 ADMIN_PASSWORD="${IMMICH_ADMIN_PASSWORD:?IMMICH_ADMIN_PASSWORD missing from $ENV_FILE}"

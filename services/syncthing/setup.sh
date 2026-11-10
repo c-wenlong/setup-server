@@ -195,6 +195,7 @@ fi
 # Read back: an existing .env is the source of truth, so a re-run with a
 # different env override can never silently move a live deployment.
 REQ_LOCAL="$LOCAL_PORT"; REQ_HTTPS="$HTTPS_PORT"; REQ_SYNC="$SYNC_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 VERSION="${SYNCTHING_VERSION:?SYNCTHING_VERSION missing from $ENV_FILE}"
 CONFIG_DIR="${SYNCTHING_CONFIG:?SYNCTHING_CONFIG missing from $ENV_FILE}"

@@ -184,6 +184,7 @@ fi
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
 REQUESTED_HTTPS="$HTTPS_PORT"   # only meaningful when HTTPS_PORT_EXPLICIT is set
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 SERVICE_HOME="${SERVICE_HOME:?SERVICE_HOME missing from $ENV_FILE}"
 # An .env written before the SQLite cut-over holds a postgres DATABASE_URL

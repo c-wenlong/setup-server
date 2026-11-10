@@ -150,6 +150,7 @@ REQUESTED_HTTPS_PORT="${HTTPS_PORT_EXPLICIT:+$HTTPS_PORT}"
 # every assignment form the shell accepts (export, leading whitespace)
 # counts as recorded, not just a literal `HTTPS_PORT=` at column 0.
 unset HTTPS_PORT
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 DATA_DIR="${HERMES_DATA:?HERMES_DATA missing from $ENV_FILE}"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then

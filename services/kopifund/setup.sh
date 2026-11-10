@@ -78,6 +78,7 @@ if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
   REQUESTED_PORT="$LOCAL_PORT"
   REQUESTED_HTTPS="$HTTPS_PORT"
+  env_lint "$ENV_FILE"
   set -a; . "$ENV_FILE"; set +a
 fi
 
@@ -143,6 +144,7 @@ EOF
   ok "Wrote $ENV_FILE"
   REQUESTED_PORT="$LOCAL_PORT"
   REQUESTED_HTTPS="$HTTPS_PORT"
+  env_lint "$ENV_FILE"
   set -a; . "$ENV_FILE"; set +a
 fi
 

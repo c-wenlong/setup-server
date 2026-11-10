@@ -161,6 +161,7 @@ fi
 # Read back: an existing .env is the source of truth for ports and paths, so a
 # re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 DATA_DIR="${VAULTWARDEN_DATA:?VAULTWARDEN_DATA missing from $ENV_FILE}"
 DOMAIN="${VAULTWARDEN_DOMAIN:?VAULTWARDEN_DOMAIN missing from $ENV_FILE}"

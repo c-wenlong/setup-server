@@ -268,6 +268,7 @@ fi
 # Read back: an existing .env is the source of truth for ports, paths and
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_LOCAL="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 LOCAL_PORT="${LOCAL_PORT:?LOCAL_PORT missing from $ENV_FILE}"
 HTTPS_PORT="${HTTPS_PORT:?HTTPS_PORT missing from $ENV_FILE}"

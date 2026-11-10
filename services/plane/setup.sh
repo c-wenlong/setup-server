@@ -168,6 +168,7 @@ EOF
 fi
 
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 DATA_DIR="${PLANE_DATA:?PLANE_DATA missing from $ENV_FILE}"
 WEB_URL="${WEB_URL:?WEB_URL missing from $ENV_FILE}"

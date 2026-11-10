@@ -225,12 +225,8 @@ env_lint() {
     case "$val" in ''|'#'*) continue;; esac
     case "$val" in 'export '*) val="${val#export }";; esac
     key="${val%%=*}"
-    case "$key" in
-      [A-Za-z_]*|*[!A-Za-z0-9_]*) ;;
-      *) die "$env_file: line $n is not KEY=value. Fix it and re-run — a sourced .env runs as shell.";;
-    esac
-    [ "$val" = "$key" ] \
-      && die "$env_file: line $n is not KEY=value. Fix it and re-run — a sourced .env runs as shell."
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && [ "$val" != "$key" ] \
+      || die "$env_file: line $n is not KEY=value. Fix it and re-run — a sourced .env runs as shell."
     case "$keys" in *$'\n'"$key"$'\n'*)
       die "$env_file: $key is set more than once.";; esac
     keys+="$key"$'\n'
@@ -245,9 +241,10 @@ env_lint() {
         [[ "$val" =~ ^\"([^\"\\]|\\.)*\"[[:space:]]*(#.*)?$ ]] \
           || die "$env_file: the value of $key is an unbalanced double-quoted string.";;
       *)
-        # Unquoted: shell-inert characters only, then optional trailing space
-        # and a comment. `A=1; id`, `A=1 id`, `A=x|y` would all execute.
-        [[ "$val" =~ ^[A-Za-z0-9._/:+,@%^~$={}-]*[[:space:]]*(#.*)?$ ]] \
+        # Unquoted: shell-inert characters or %q-style backslash escapes,
+        # then optional trailing space and a comment. `A=1; id`, `A=1 id`,
+        # `A=x|y` would all execute.
+        [[ "$val" =~ ^([A-Za-z0-9._/:+,@%^~$=*!?{}-]|\\.)*[[:space:]]*(#.*)?$ ]] \
           || die "$env_file: the value of $key is not safe to source (metacharacters or spaces; quote it)." ;;
     esac
   done < "$env_file"

@@ -184,6 +184,7 @@ fi
 # Read back: an existing .env is the source of truth for ports, paths and
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 ADMIN_EMAIL="${ADMIN_EMAIL:?ADMIN_EMAIL missing from $ENV_FILE}"
 DATA_SHARED="${TRIGGER_SHARED:?TRIGGER_SHARED missing from $ENV_FILE}"

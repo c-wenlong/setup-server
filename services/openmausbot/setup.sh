@@ -200,6 +200,7 @@ fi
 # toolchain, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$OMB_PORT"
 REQUESTED_HTTPS="$HTTPS_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 : "${OMB_PORT:?OMB_PORT missing from $ENV_FILE}"
 : "${OMB_DATA_DIR:?OMB_DATA_DIR missing from $ENV_FILE}"

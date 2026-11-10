@@ -138,6 +138,7 @@ fi
 # Read back: an existing .env is the source of truth for ports, paths and
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 DATA_DIR="${METABASE_DATA:?METABASE_DATA missing from $ENV_FILE}"
 MB_SITE_URL="${MB_SITE_URL:?MB_SITE_URL missing from $ENV_FILE}"
