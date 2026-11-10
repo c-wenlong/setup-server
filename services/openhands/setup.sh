@@ -52,8 +52,8 @@ randhex() {
 # an unquoted value, $HOME / ${HOME} expanded where Compose expands them)
 # without executing the file — a hand edit must not become a command.
 env_get() {
-  local file="$1" key="$2" line value tail quote=""
-  [ -f "$file" ] || return 0
+  local file="$1" key="$2" depth="${3:-0}" line value tail quote="" ref_name ref_val
+  [ -f "$file" ] && [ "$depth" -lt 5 ] || return 0
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" | tail -1 || true)"
   [ -n "$line" ] || return 0
   value="${line#*=}"
@@ -67,6 +67,20 @@ env_get() {
   if [ "$quote" != "'" ]; then
     value="${value//\$\{HOME\}/$HOME}"
     value="${value//\$HOME/$HOME}"
+    while [ "$depth" -lt 5 ]; do
+      if [[ "$value" =~ ^([^\$]*)\$\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$ ]]; then
+        ref_name="${BASH_REMATCH[2]}"
+        ref_val="$(env_get "$file" "$ref_name" "$((depth + 1))")"
+        value="${BASH_REMATCH[1]}${ref_val}${BASH_REMATCH[3]}"
+      elif [[ "$value" =~ ^([^\$]*)\$([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]]; then
+        ref_name="${BASH_REMATCH[2]}"
+        ref_val="$(env_get "$file" "$ref_name" "$((depth + 1))")"
+        value="${BASH_REMATCH[1]}${ref_val}${BASH_REMATCH[3]}"
+      else
+        break
+      fi
+      depth=$((depth + 1))
+    done
   fi
   printf '%s' "$value"
 }
@@ -162,18 +176,28 @@ validate_workspaces() {
 # `ECONNREFUSED 127.0.0.1:18000`. Grant 10001 write: an ACL where the tool
 # exists, otherwise the directory's ownership itself — never world-writable.
 grant_openhands_write() {
-  local d uid=10001
+  local d uid=10001 mode owner
   for d in "$@"; do
     [ -d "$d" ] || continue
+    # Clear any legacy group/world-write bits left by the old chmod a+rwx fallback.
+    mode="$(stat -c %a "$d" 2>/dev/null || stat -f %Lp "$d" 2>/dev/null || true)"
+    case "$mode" in
+      *[2367]|*[2367]?)
+        chmod go-w "$d" 2>/dev/null || sudo chmod go-w "$d" \
+          || die "Could not clear group/world-write permissions on $d"
+        ;;
+    esac
     if command -v setfacl >/dev/null 2>&1 \
        && setfacl -m "u:${uid}:rwx" "$d" 2>/dev/null \
        && setfacl -d -m "u:${uid}:rwx" "$d" 2>/dev/null; then
       continue
     fi
     # No usable ACL tool (macOS, minimal installs): give the directory to
-    # the container uid. chmod a+rwx is not an option — it would let every
-    # local user and service account write the workspace and the agent's
-    # data.
+    # the container uid. Skip sudo on reruns if already owned by $uid.
+    owner="$(stat -c %u "$d" 2>/dev/null || stat -f %u "$d" 2>/dev/null || true)"
+    if [ "$owner" = "$uid" ]; then
+      continue
+    fi
     info "setfacl is unavailable or failed on $d — the container runs as uid $uid, so the directory itself is chowned (one sudo prompt)"
     sudo chown "$uid:$uid" "$d" \
       || die "Could not grant OpenHands write access to $d: no usable setfacl and 'sudo chown $uid:$uid $d' failed. Run that chown by hand, then re-run."
@@ -310,14 +334,19 @@ fi
 [ -n "$OPENHANDS_HTTPS_EXPLICIT" ] || OPENHANDS_HTTPS_PORT="$OPENHANDS_PORT"
 
 # The workspace becomes the agent's /projects. Prove it is a dedicated tree
-# under $HOME before anything is created, granted or bind-mounted.
+# under $HOME before anything is created, granted or bind-mounted. Export the
+# validated values so Docker Compose cannot inherit an unvalidated shell
+# AGENT_WORKSPACES override over what .env and validate_workspaces settled on.
 WORKSPACES="$(validate_workspaces "$WORKSPACES")"
+AGENT_WORKSPACES="$WORKSPACES"
+export AGENT_WORKSPACES OPENHANDS_DATA OPENHANDS_PORT
 
 mkdir -p "$MARKER" "$OPENHANDS_DATA" "$WORKSPACES/openhands-test"
 chmod 700 "$MARKER" "$OPENHANDS_DATA" 2>/dev/null || true
-grant_openhands_write "$OPENHANDS_DATA" "$WORKSPACES" "$WORKSPACES/openhands-test"
-ok "OpenHands data + workspaces writable by container uid 10001"
 
+# Seed README.md BEFORE grant_openhands_write: when setfacl is unavailable,
+# the fallback chowns openhands-test to uid 10001, after which this user
+# could no longer create a file inside a 0755 directory.
 if [ ! -f "$WORKSPACES/openhands-test/README.md" ]; then
   cat > "$WORKSPACES/openhands-test/README.md" <<'EOF'
 # openhands-test
@@ -326,6 +355,9 @@ Scratch workspace mounted into Agent Canvas as `/projects/openhands-test`.
 Safe to edit. Created by services/openhands/setup.sh.
 EOF
 fi
+
+grant_openhands_write "$OPENHANDS_DATA" "$WORKSPACES" "$WORKSPACES/openhands-test"
+ok "OpenHands data + workspaces writable by container uid 10001"
 ok "Workspace: $WORKSPACES/openhands-test"
 
 # --------------------------------------------- optional Claude/Codex mounts

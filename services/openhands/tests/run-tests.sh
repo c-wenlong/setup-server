@@ -321,9 +321,11 @@ EOF
 }
 
 test_grant_fallback_chown() {
-  echo "• no working setfacl: the grant falls back to sudo chown, never a+rwx"
+  echo "• no working setfacl: the grant falls back to sudo chown, never a+rwx, and re-runs without sudo"
   setup
   touch "$STATE_DIR/operator" "$STATE_DIR/setfacl_fails"
+  mkdir -p "$HOME/agent-workspaces"
+  chmod 0777 "$HOME/agent-workspaces"
   run_deploy
   check "exits zero"                        [ "$CODE" -eq 0 ]
   check "explains why sudo is needed"       out_has "chowned"
@@ -331,8 +333,12 @@ test_grant_fallback_chown() {
   check "chowned workspaces too"            calls_have "sudo chown 10001:10001 $HOME/agent-workspaces"
   check "never chmod a+rwx"                 no_call "chmod a+rwx"
   check "data dir not world-writable"       not_world_writable "$HOME/services/openhands/data"
-  check "workspaces not world-writable"     not_world_writable "$HOME/agent-workspaces"
+  check "workspaces cleared world-writable" not_world_writable "$HOME/agent-workspaces"
   check "still published"                   calls_have "tailscale serve --bg --https=8000"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "second fallback run exits zero"    [ "$CODE" -eq 0 ]
+  check "second fallback run needs no sudo" no_call "^sudo "
   teardown
 }
 
@@ -423,6 +429,23 @@ test_workspaces_custom_ok() {
   check "custom dir writable by uid"  uid_writable "$HOME/my-projects"
   check "  and not world-writable"    not_world_writable "$HOME/my-projects"
   check "env records it"              grep -q "AGENT_WORKSPACES=$HOME/my-projects" "$SVC/.env"
+  teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  cat > "$SVC/.env" <<EOF
+OPENHANDS_VERSION=latest
+OPENHANDS_PORT=8000
+OPENHANDS_DATA=\$HOME/services/openhands/data
+PROJECTS_ROOT=\$HOME/ref-projects
+AGENT_WORKSPACES=\${PROJECTS_ROOT}/agents
+OPENHANDS_API_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+OH_SECRET_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  export AGENT_WORKSPACES="$HOME"
+  run_deploy
+  check "same-file .env ref + shell override: exits zero" [ "$CODE" -eq 0 ]
+  check "resolved same-file .env ref created"             [ -f "$HOME/ref-projects/agents/openhands-test/README.md" ]
   teardown
 }
 

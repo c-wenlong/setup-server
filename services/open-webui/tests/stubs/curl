@@ -22,7 +22,10 @@ while [ $# -gt 0 ]; do
     -w|--write-out) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
     -d|--data|--data-raw|--data-binary|--data-urlencode)
       piece="$2"
-      case "$piece" in @*) piece="$(cat "${piece#@}" 2>/dev/null)" ;; esac
+      case "$piece" in
+        @-) piece="$(cat)" ;;
+        @*) piece="$(cat "${piece#@}" 2>/dev/null)" ;;
+      esac
       if [ -z "$body" ]; then body="$piece"; else body="$body&$piece"; fi
       shift 2 ;;
     -H|--header|--max-time|--connect-timeout|--retry) shift 2 ;;

@@ -19,8 +19,9 @@ Security model:
   `127.0.0.1:8080` gets a full VS Code with an integrated terminal running
   as you: a tailnet peer, or any local process on this box that can hit
   loopback. On this box that session can run `docker`, which is
-  effectively root. If the tailnet alone is not enough, set `password:` in
-  `~/.config/code-server/config.yaml` — `setup.sh` never overwrites it.
+  effectively root. If the tailnet alone is not enough, set `auth: password`
+  and `password:` in `~/.config/code-server/config.yaml` and restart
+  `code-server` — `setup.sh` never overwrites that file.
 - TLS cert (Let's Encrypt) is provisioned and renewed automatically by
   Tailscale. Real HTTPS means clipboard, service workers, and webviews work.
 

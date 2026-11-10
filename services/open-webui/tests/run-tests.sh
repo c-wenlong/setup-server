@@ -117,6 +117,7 @@ test_fresh_deploy() {
   check "owner password generated"      grep -qE '^WEBUI_ADMIN_PASSWORD=[a-f0-9]{32}$' "$SVC/.env"
   check "owner seeded over the API"     calls_have "api/v1/auths/signup"
   check "  with the recorded email"     grep -q 'admin@test-host.tailfake.ts.net' "$STATE_DIR/signup_body"
+  check "  password sent on stdin, not argv" no_call "$(sed -n 's/^WEBUI_ADMIN_PASSWORD=//p' "$SVC/.env")"
   check "says the account was created"  out_has "Owner account created"
   check "  and that signup is off"      out_has "Open signup is off"
   check "compose up invoked"            [ -f "$STATE_DIR/compose_up" ]
@@ -197,13 +198,13 @@ test_signup_post_fails() {
 }
 
 test_config_unreadable() {
-  echo "• /api/config down after health passed: warn, still publish"
+  echo "• /api/config down after health passed: die before publishing an unverified instance"
   setup
   touch "$STATE_DIR/operator" "$STATE_DIR/webui_config_down"
   run_deploy
-  check "exits zero"              [ "$CODE" -eq 0 ]
-  check "warns it cannot confirm" out_has "Could not confirm the signup setting"
-  check "still published"         calls_have "tailscale serve --bg --https=3001"
+  check "exits non-zero"          [ "$CODE" -ne 0 ]
+  check "names /api/config"       out_has "api/config"
+  check "never published"         no_call "tailscale serve --bg"
   teardown
 }
 

@@ -950,6 +950,17 @@ test_repair_preserves_unrelated_keys() {
   check "hand-set ssl_profile preserved" [ "$(store_field 's.get("ssl_profile")')" = "'intermediate'" ]
   check "hand-set threshold preserved"   [ "$(store_field 's.get("login_attempts_threshold")')" = "3" ]
   teardown
+
+  setup
+  touch "$STATE_DIR/operator"
+  # A store from an older setup.sh had login_attempts_threshold: -1 while all
+  # loopback/proxy fields were already valid; rerun must still migrate -1 -> 5.
+  seed_store '{"login_attempts_threshold": -1}' 'null'
+  run_deploy
+  check "legacy -1 threshold: exits zero"       [ "$CODE" -eq 0 ]
+  check "legacy -1 threshold: migrated to 5"    [ "$(store_field 's.get("login_attempts_threshold")')" = "5" ]
+  check "legacy -1 threshold: ip_ban_enabled"   [ "$(store_field 's.get("ip_ban_enabled")')" = "True" ]
+  teardown
 }
 
 test_missing_store_on_booted_dir() {

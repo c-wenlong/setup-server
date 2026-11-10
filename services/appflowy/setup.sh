@@ -100,8 +100,8 @@ fi
 # without executing the file — a hand edit must not become a command. Same
 # parser teardown.sh uses for its paths.
 env_get() {
-  local key="$1" line value tail quote=""
-  [ -f "$ENV_FILE" ] || return 0
+  local key="$1" depth="${2:-0}" line value tail quote="" ref_name ref_val
+  [ -f "$ENV_FILE" ] && [ "$depth" -lt 5 ] || return 0
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" | tail -1 || true)"
   [ -n "$line" ] || return 0
   value="${line#*=}"
@@ -115,6 +115,20 @@ env_get() {
   if [ "$quote" != "'" ]; then
     value="${value//\$\{HOME\}/$HOME}"
     value="${value//\$HOME/$HOME}"
+    while [ "$depth" -lt 5 ]; do
+      if [[ "$value" =~ ^([^\$]*)\$\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$ ]]; then
+        ref_name="${BASH_REMATCH[2]}"
+        ref_val="$(env_get "$ref_name" "$((depth + 1))")"
+        value="${BASH_REMATCH[1]}${ref_val}${BASH_REMATCH[3]}"
+      elif [[ "$value" =~ ^([^\$]*)\$([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]]; then
+        ref_name="${BASH_REMATCH[2]}"
+        ref_val="$(env_get "$ref_name" "$((depth + 1))")"
+        value="${BASH_REMATCH[1]}${ref_val}${BASH_REMATCH[3]}"
+      else
+        break
+      fi
+      depth=$((depth + 1))
+    done
   fi
   printf '%s' "$value"
 }

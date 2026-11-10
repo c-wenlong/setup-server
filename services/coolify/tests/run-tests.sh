@@ -358,6 +358,8 @@ test_grant_fallback_chown() {
   echo "• no working setfacl: grants fall back to sudo chown, never a+rwx — and the SSH key still lands"
   setup
   touch "$STATE_DIR/operator" "$STATE_DIR/setfacl_fails"
+  mkdir -p "$HOME/services/coolify/ssh"
+  chmod 0777 "$HOME/services/coolify/ssh"
   run_deploy
   check "exits zero"                        [ "$CODE" -eq 0 ]
   check "explains why sudo is needed"       out_has "chowned"
@@ -365,11 +367,15 @@ test_grant_fallback_chown() {
   check "chowned the ssh keys dir"          calls_have "sudo chown 9999:9999 $(data_dir)/ssh/keys"
   check "never chmod a+rwx"                 no_call "chmod a+rwx"
   check "state dir not world-writable"      not_world_writable "$(data_dir)"
-  check "ssh dir not world-writable"        not_world_writable "$(data_dir)/ssh"
+  check "ssh dir cleared world-writable"    not_world_writable "$(data_dir)/ssh"
   check "key generated BEFORE the chown"    [ -f "$(data_dir)/ssh/keys/id.${USER}@host.docker.internal" ]
   check "  so authorized_keys got it"       grep -q coolify "$HOME/.ssh/authorized_keys"
   check "private key not world-open"        not_world_writable "$(data_dir)/ssh/keys/id.${USER}@host.docker.internal"
   check "still published"                   calls_have "tailscale serve --bg --https=8101"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "second fallback run exits zero"    [ "$CODE" -eq 0 ]
+  check "second fallback run needs no sudo" no_call "^sudo "
   teardown
 }
 
@@ -398,6 +404,7 @@ test_redis_conf_rewritten_from_env() {
   check "exits zero"                     [ "$CODE" -eq 0 ]
   check "conf follows the new password"  grep -qx 'requirepass rotatedsecret123' "$SVC/redis.conf"
   check "still mode 600"                 [ "$(file_mode "$SVC/redis.conf")" = "600" ]
+  check "recreated redis on rotation"    calls_have "up -d --force-recreate redis"
   teardown
 }
 

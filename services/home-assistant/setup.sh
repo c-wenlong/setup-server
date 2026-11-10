@@ -412,6 +412,10 @@ if not s.get("trusted_proxies"):
     bad.append("trusted_proxies=%r" % (s.get("trusted_proxies"),))
 if d.get("yaml_migration_done") is not True:
     bad.append("yaml_migration_done=%r" % (d.get("yaml_migration_done"),))
+if not isinstance(s.get("login_attempts_threshold"), int) or s.get("login_attempts_threshold", -1) < 1:
+    bad.append("login_attempts_threshold=%r" % (s.get("login_attempts_threshold"),))
+if s.get("ip_ban_enabled") is not True:
+    bad.append("ip_ban_enabled=%r" % (s.get("ip_ban_enabled"),))
 # ANY staged pending is bad, not just one that has already failed. A pending
 # that has not failed yet is the more dangerous shape: it is a live trial, so
 # right now the listener looks perfect, and in under five minutes HA reverts to
@@ -479,8 +483,9 @@ stable.update({
 })
 stable.setdefault("server_port", port)
 stable.setdefault("cors_allowed_origins", ["https://cast.home-assistant.io"])
-stable.setdefault("login_attempts_threshold", 5)
-stable.setdefault("ip_ban_enabled", True)
+if not isinstance(stable.get("login_attempts_threshold"), int) or stable.get("login_attempts_threshold", -1) < 1:
+    stable["login_attempts_threshold"] = 5
+stable["ip_ban_enabled"] = True
 stable.setdefault("ssl_profile", "modern")
 stable.setdefault("use_x_frame_options", True)
 stable.setdefault("created_at", datetime.datetime.now(datetime.UTC).isoformat())
