@@ -146,7 +146,7 @@ test_fresh_deploy() {
   check "exits zero"                      [ "$CODE" -eq 0 ]
   check ".env generated"                  [ -f "$SVC/.env" ]
   check ".env is mode 600"                [ "$(file_mode "$SVC/.env")" = "600" ]
-  check ".env has a hex admin password"   grep -qE '^FORGEJO_ADMIN_PASSWORD=[a-f0-9]{32}$' "$SVC/.env"
+  check ".env stores the generated password" grep -qx 'FORGEJO_ADMIN_PASSWORD=stub-gen-pw-12345' "$SVC/.env"
   check ".env names the admin user"       grep -qE '^FORGEJO_ADMIN_USERNAME=.+$' "$SVC/.env"
   check ".env has a SECRET_KEY"           grep -qE '^FORGEJO_SECRET_KEY=.{16,}$' "$SVC/.env"
   check ".env records the local port"     grep -qx 'LOCAL_PORT=3000' "$SVC/.env"
@@ -168,14 +168,22 @@ test_fresh_deploy() {
   # Without this flag Forgejo marks the account must-change-password, and the
   # generated password in .env does not work on first login. Load-bearing.
   check "  --must-change-password=false"  admin_arg "--must-change-password=false"
-  check "  passed the .env password"      admin_arg "$(sed -n 's/^FORGEJO_ADMIN_PASSWORD=//p' "$SVC/.env")"
+  # The point of #182: the admin password must never appear in the docker
+  # exec argv — Forgejo generates it inside the container and we read it
+  # back from stdout.
+  check "  --random-password used"         admin_arg "--random-password"
+  check "  no --password flag on argv"     bash -c '! grep -q -- "--password " "$1"' _ "$STATE_DIR/admin_create_args"
+  check "  .env password never in argv"    bash -c '! grep -qF -- "$(sed -n "s/^FORGEJO_ADMIN_PASSWORD=//p" "$2")" "$1"' _ "$STATE_DIR/admin_create_args" "$SVC/.env"
   check "  attempted exactly once"        [ "$(admin_tries)" -eq 1 ]
+  check "generated password never in ANY argv" no_call "stub-gen-pw-12345"
   check "admin marker written"            [ -f "$HOME/services/forgejo/.admin-created" ]
   check "served on tailscale :3000"       calls_have "tailscale serve --bg --https=3000 http://127.0.0.1:3000"
   check "no sudo needed (operator set)"   no_call "^sudo "
   # The end-to-end check is an authenticated call, not just a health ping —
   # it is what proves the generated password actually logs in.
   check "verified the admin login"        calls_have "/api/v1/user"
+  check "  credentials via -K- stdin"     calls_have " -K- "
+  check "  no -u password on curl argv"   bash -c '! grep "^curl " "$1" | grep -q " -u "' _ "$CALLS_LOG"
   check "  confirmed admin rights"        out_has "account is an admin"
   check "  confirmed ROOT_URL"            out_has "ROOT_URL is the tailnet address"
   check "prints final URL"                out_has "https://test-host.tailfake.ts.net:3000"
@@ -323,6 +331,20 @@ test_admin_already_exists() {
   check "did not die on the CLI"     out_lacks "Could not create the admin"
   check "marker written anyway"      [ -f "$HOME/services/forgejo/.admin-created" ]
   check "still published"            calls_have "tailscale serve --bg --https=3000"
+  teardown
+
+  echo "• pre-existing .env without marker: saved password is never overwritten"
+  setup
+  touch "$STATE_DIR/operator"
+  run_deploy
+  rm -f "$HOME/services/forgejo/.admin-created" "$STATE_DIR/user_exists"
+  sed -i.bak 's/^FORGEJO_ADMIN_PASSWORD=.*/FORGEJO_ADMIN_PASSWORD=user-chosen-secret/' "$SVC/.env"
+  rm -f "$SVC/.env.bak"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "pre-existing .env: exits non-zero"       [ "$CODE" -ne 0 ]
+  check "pre-existing .env: password preserved"   grep -qx 'FORGEJO_ADMIN_PASSWORD=user-chosen-secret' "$SVC/.env"
+  check "pre-existing .env: prints recovery hint" out_has "admin user change-password"
   teardown
 }
 

@@ -211,10 +211,26 @@ fi
 mkdir -p "$DATA_SHARED" "$DATA_POSTGRES" "$DATA_REDIS" "$DATA_MINIO" "$DATA_CLICKHOUSE" "$DATA_REGISTRY" "$(dirname "$AUTH_FILE")" "$STATE"
 
 # Bitnami MinIO runs as uid 1001 and will not start as root to chown a
-# bind mount the way the official postgres/redis images do. Without sudo
-# we cannot chown to 1001, so the directory has to be world-writable.
-# Named volumes would hide this; they are also not in ~/services for backup.
-chmod 0777 "$DATA_MINIO"
+# bind mount the way the official postgres/redis images do. Owner 1001 +
+# mode 700 keeps payloads out of every other local account — the chmod
+# 0777 this used to do made them world-writable, and chown alone leaves a
+# pre-existing 777 mode in place (issue #182). Change ownership FIRST so a
+# cancelled/denied sudo on an upgrade leaves the existing permissions
+# intact instead of locking MinIO out with a user-owned 0700 directory.
+if [ "$(stat -c %u "$DATA_MINIO" 2>/dev/null || stat -f %u "$DATA_MINIO" 2>/dev/null)" != "1001" ]; then
+  info "Chowning $DATA_MINIO to uid 1001 (Bitnami MinIO's user) — needs sudo, once"
+  sudo chown 1001:1001 "$DATA_MINIO" \
+    || die "Could not chown $DATA_MINIO to 1001:1001 — Bitnami MinIO will not start."
+fi
+minio_mode="$(stat -c %a "$DATA_MINIO" 2>/dev/null || stat -f %Lp "$DATA_MINIO" 2>/dev/null)"
+if [ "$minio_mode" != "700" ]; then
+  if ! chmod 0700 "$DATA_MINIO" 2>/dev/null; then
+    info "Tightening $DATA_MINIO to mode 700 (not owned by us — needs sudo)"
+    sudo chmod 0700 "$DATA_MINIO" \
+      || die "Could not set $DATA_MINIO to mode 700"
+  fi
+fi
+ok "MinIO data dir owned by uid 1001, mode 700"
 
 avail_kb="$(df -Pk "$STATE" | awk 'NR==2{print $4}')"
 if [ "${avail_kb:-0}" -lt 5242880 ]; then
@@ -226,13 +242,16 @@ fi
 # ---------------------------------------------------------- registry auth
 # bcrypt htpasswd is the only hash the Docker registry accepts. openssl
 # cannot produce it; httpd's htpasswd can, via PATH or a one-shot container.
+# -i feeds the password on stdin: `htpasswd -Bbn user pass` leaves it in
+# argv (host ps, issue #182). The helper image is pinned, never `httpd:2`.
+HTPASSWD_IMAGE="${HTPASSWD_IMAGE:-httpd:2.4.66-alpine}"
 write_htpasswd() {
   local user="$1" pass="$2" dest="$3"
-  if command -v htpasswd >/dev/null 2>&1; then
-    htpasswd -Bbn "$user" "$pass" > "$dest"
+  if command -v htpasswd >/dev/null 2>&1 \
+     && printf '%s' "$pass" | htpasswd -Bni "$user" > "$dest" 2>/dev/null; then
     return
   fi
-  docker run --rm httpd:2 htpasswd -Bbn "$user" "$pass" > "$dest"
+  printf '%s' "$pass" | docker run --rm -i "$HTPASSWD_IMAGE" htpasswd -Bni "$user" > "$dest"
 }
 
 if [ ! -s "$AUTH_FILE" ]; then

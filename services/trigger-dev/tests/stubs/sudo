@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
 # sudo stub: logs the call, then runs the command (which resolves to other stubs).
+# chown is the exception: `chown 1001:1001` needs real root, so it is logged
+# and skipped — the suite asserts the call itself, not the uid change.
 echo "sudo $*" >> "$CALLS_LOG"
+case "$1" in
+  # Model the uid change landing: later `stat -c %u` reads 1001, so a
+  # re-run takes the "already owned" branch and skips sudo.
+  chown) touch "$STATE_DIR/minio_chowned"; exit 0 ;;
+esac
 exec "$@"

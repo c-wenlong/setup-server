@@ -28,7 +28,7 @@ case "$1" in
   exec)
     # The only exec setup.sh makes is the admin bootstrap:
     #   docker exec -u git forgejo forgejo admin user create --admin \
-    #     --username U --password P --email E --must-change-password=false
+    #     --username U --random-password --email E --must-change-password=false
     case "$*" in
       *"admin user create"*)
         printf '%s\n' "$*" >> "$STATE_DIR/admin_create_args"
@@ -43,6 +43,8 @@ case "$1" in
         fi
         touch "$STATE_DIR/user_exists"
         echo "New user 'admin' has been successfully created!"
+        # Same shape Forgejo prints for --random-password.
+        echo "generated random password is 'stub-gen-pw-12345'"
         ;;
       *)
         : ;;

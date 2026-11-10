@@ -60,7 +60,7 @@ State lives under `~/services/trigger-dev`:
   shared/worker_token    # bootstrap worker group token (shown once in logs)
   postgres/              # the instance database
   redis/
-  minio/                 # large payloads / outputs (mode 777: Bitnami uid 1001)
+  minio/                 # large payloads / outputs (mode 700, uid 1001: Bitnami MinIO)
   registry/
     data/                # deployed task images
     auth.htpasswd        # bcrypt for registry-user
@@ -122,8 +122,18 @@ line. Bump the tag in `.env` and the CLI together, then
   `.env`. Nobody else can sign up; that first user is an admin.
 - `TRIGGER_TELEMETRY_DISABLED=1`.
 - Docker socket access is via `tecnativa/docker-socket-proxy` with
-  CONTAINERS/IMAGES/NETWORKS/INFO only — same idea as upstream, not a
-  raw socket mount on the webapp.
+  CONTAINERS/IMAGES/NETWORKS/INFO plus `POST: "1"` — the supervisor must
+  create task containers, so write calls are allowed on those endpoints,
+  but auth/volumes/secrets/exec stay denied. Same idea as upstream, not
+  a raw socket mount on the webapp.
+- `~/services/trigger-dev/minio` is mode 700 and owned by uid 1001
+  (Bitnami MinIO's user) instead of `chmod 0777`: the container writes
+  its bind mount, and no other local account can touch task payloads.
+  `setup.sh` needs sudo for the chown once per fresh data dir; a
+  leftover mode-777 dir gets tightened on the next run.
+- The registry bcrypt is written by `htpasswd -Bni` — the password goes
+  on stdin, never in argv. Host `htpasswd` wins when installed; the
+  fallback is a pinned `httpd:2.4.66-alpine` one-shot container.
 
 Login is **not** a substitute for the tailnet. Anyone on the tailnet
 who can read the webapp logs can grab a magic link. That is the same
@@ -144,17 +154,20 @@ trust boundary as every other service here.
 1. Preflight: OS, not root, curl, Docker daemon, Compose v2, Tailscale
    running, numeric ports, MagicDNS name.
 2. Write `.env` **only if absent** (secrets, origins, paths, whitelist).
-3. Write `~/services/trigger-dev/registry/auth.htpasswd` only if absent
-   (bcrypt via `htpasswd` or a one-shot `httpd:2` container).
-4. `docker compose up -d`, wait on `http://127.0.0.1:LOCAL_PORT/healthcheck`.
-5. Wait for the bootstrap worker token on the shared volume.
-6. `docker login` the host daemon to `localhost:5000`.
-7. Once: POST `/login/magic` for `ADMIN_EMAIL` and scrape the link from
+3. Set `~/services/trigger-dev/minio` to mode 700 owned by uid 1001
+   (Bitnami MinIO's user; sudo once — never mode 777).
+4. Write `~/services/trigger-dev/registry/auth.htpasswd` only if absent
+   (bcrypt via `htpasswd -Bni`, password on stdin; falls back to a
+   pinned `httpd` one-shot container).
+5. `docker compose up -d`, wait on `http://127.0.0.1:LOCAL_PORT/healthcheck`.
+6. Wait for the bootstrap worker token on the shared volume.
+7. `docker login` the host daemon to `localhost:5000` (--password-stdin).
+8. Once: POST `/login/magic` for `ADMIN_EMAIL` and scrape the link from
    webapp logs.
-8. `tailscale serve --bg --https=HTTPS_PORT http://127.0.0.1:LOCAL_PORT`
+9. `tailscale serve --bg --https=HTTPS_PORT http://127.0.0.1:LOCAL_PORT`
    (operator grant + approval-link loop, same as every other service).
-9. HTTPS `/healthcheck`, then print the URL, the magic link, and the
-   CLI commands.
+10. HTTPS `/healthcheck`, then print the URL, the magic link, and the
+    CLI commands.
 
 Re-running upgrades/repairs. It never overwrites `.env` or the
 htpasswd. A `LOCAL_PORT` override after first run is ignored — edit

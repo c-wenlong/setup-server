@@ -88,9 +88,11 @@ TS_HOST="$(tailnet_host)"
 ok "Tailnet name: $TS_HOST"
 
 # ---------------------------------------------------------------- .env
+WROTE_ENV_THIS_RUN=0
 if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
 else
+  WROTE_ENV_THIS_RUN=1
   info "Writing .env (generated admin password + SECRET_KEY)"
   admin_pw="$(randhex)"
   secret_key="$(randhex)"
@@ -196,6 +198,12 @@ ok "Forgejo is answering locally"
 # --must-change-password=false is load-bearing. Without it the CLI flags the
 # account for a forced password change, the generated password in .env stops
 # working at the login form, and the deploy "succeeds" while locking you out.
+#
+# --random-password, not --password $ADMIN_PASSWORD: the Forgejo CLI offers no
+# stdin/password-file hand-off, and a flag value would sit in the exec'd
+# process's argv — visible in the host's process table (issue #182). Forgejo
+# generates the password inside the container and prints it once on stdout;
+# it only ever lands in this variable, then in .env.
 if [ -f "$ADMIN_MARKER" ]; then
   ok "Admin account already provisioned ($ADMIN_USERNAME) — skipping"
 else
@@ -203,12 +211,40 @@ else
   if out="$(docker exec -u git "$CONTAINER" forgejo admin user create \
       --admin \
       --username "$ADMIN_USERNAME" \
-      --password "$ADMIN_PASSWORD" \
+      --random-password \
       --email "$ADMIN_EMAIL" \
       --must-change-password=false 2>&1)"; then
-    ok "Admin account created: $ADMIN_USERNAME"
+    genpw="$(printf '%s\n' "$out" | sed -n "s/.*password is '\(.*\)'.*/\1/p" | tail -1)"
+    [ -n "$genpw" ] \
+      || die "Admin account was created but its generated password could not be read — Forgejo's output shape may have changed (output is not echoed here because it contains the password). Reset it and mirror into $ENV_FILE: docker exec -u git $CONTAINER forgejo admin user change-password --username $ADMIN_USERNAME --password '<new>' --must-change-password=false"
     mkdir -p "$STATE"
     printf '%s\n' "$ADMIN_USERNAME" > "$ADMIN_MARKER"
+    # Replace only the placeholder written by THIS run, using pure-Bash
+    # builtin printf so the password never lands in an external command's
+    # argv (sed/awk would expose it in ps). If .env already existed before
+    # this run, never overwrite the user's saved FORGEJO_ADMIN_PASSWORD.
+    if [ "$WROTE_ENV_THIS_RUN" -eq 1 ]; then
+      tmp_env="$(mktemp "$ENV_FILE.XXXXXX")"
+      chmod 600 "$tmp_env"
+      replaced_pw=0
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          FORGEJO_ADMIN_PASSWORD=*)
+            printf 'FORGEJO_ADMIN_PASSWORD=%s\n' "$genpw"
+            replaced_pw=1
+            ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done < "$ENV_FILE" > "$tmp_env"
+      if [ "$replaced_pw" -eq 0 ]; then
+        printf 'FORGEJO_ADMIN_PASSWORD=%s\n' "$genpw" >> "$tmp_env"
+      fi
+      mv "$tmp_env" "$ENV_FILE"
+      ADMIN_PASSWORD="$genpw"
+      ok "Admin account created: $ADMIN_USERNAME"
+    else
+      die "Admin account $ADMIN_USERNAME was created with a random password because $ENV_FILE already existed (never overwritten). Sync it to FORGEJO_ADMIN_PASSWORD in $ENV_FILE: docker exec -u git $CONTAINER forgejo admin user change-password --username $ADMIN_USERNAME --password '<from .env>' --must-change-password=false"
+    fi
   else
     case "$out" in
       *"already exists"*)
@@ -239,9 +275,13 @@ fi
 # One authenticated request proves three things at once: the generated
 # password actually logs in (the --must-change-password trap), the account is
 # an admin, and ROOT_URL is right — html_url in the response is built from it,
-# so if it says localhost, clone URLs would too.
-code="$(curl -sS -o "$WORK/me.json" -w '%{http_code}' --max-time 60 \
-  -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" "$url/api/v1/user" 2>/dev/null || echo 000)"
+# so if it says localhost, clone URLs would too. -K- reads `user = u:p` from
+# stdin: -u on the command line would put the password in curl's argv (and
+# would break on a ':' in it). " and \ are escaped for the config value.
+pw_cfg="$(printf '%s' "$ADMIN_PASSWORD" | sed 's/["\\]/\\&/g')"
+code="$(printf 'user = "%s:%s"\n' "$ADMIN_USERNAME" "$pw_cfg" \
+  | curl -sS -o "$WORK/me.json" -w '%{http_code}' --max-time 60 \
+      -K- "$url/api/v1/user" 2>/dev/null || echo 000)"
 me="$(cat "$WORK/me.json" 2>/dev/null || true)"
 case "$code" in
   401|403)
@@ -269,9 +309,9 @@ echo "  Login:    $ADMIN_USERNAME  ($ADMIN_EMAIL)"
 echo "  Password: see FORGEJO_ADMIN_PASSWORD in $ENV_FILE"
 echo "  No install wizard: INSTALL_LOCK is set, so /install returns 404 and"
 echo "    every setting comes from docker-compose.yml + .env, not the web UI."
-echo "  Sign-ups are disabled. New account:"
+echo "  Sign-ups are disabled. New account (prints a generated password):"
 echo "    docker exec -u git $CONTAINER forgejo admin user create --username <name> \\"
-echo "      --email <mail> --password '<pw>' --must-change-password=false"
+echo "      --email <mail> --random-password --must-change-password=false"
 echo
 echo "Create a repo in the web UI, then push to it over HTTPS:"
 echo "  git remote add origin $url/$ADMIN_USERNAME/<repo>.git"

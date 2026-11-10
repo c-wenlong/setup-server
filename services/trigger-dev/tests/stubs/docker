@@ -65,10 +65,11 @@ case "$1" in
     ;;
 
   run)
-    # setup.sh: docker run --rm httpd:2 htpasswd -Bbn USER PASS
-    # (not a cleanup that merely names auth.htpasswd)
+    # setup.sh: printf '%s' PASS | docker run --rm -i httpd:PINNED htpasswd -Bni USER
+    # (password on stdin, not a cleanup that merely names auth.htpasswd)
     case " $* " in
-      *" htpasswd -Bbn "*)
+      *" htpasswd -Bni "*)
+        cat > "$STATE_DIR/htpasswd_stdin"   # record the password from stdin, like the real htpasswd
         n=0
         [ -f "$STATE_DIR/htpasswd_count" ] && n="$(cat "$STATE_DIR/htpasswd_count")"
         echo $((n + 1)) > "$STATE_DIR/htpasswd_count"
