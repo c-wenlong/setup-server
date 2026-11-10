@@ -174,16 +174,17 @@ fi
 
 # Keys added after the first ship (v4.6.0 requires CLICKHOUSE_URL at boot
 # even when events stay in Postgres). Append, never rewrite the file.
-if ! grep -q '^CLICKHOUSE_PASSWORD=' "$ENV_FILE"; then
+if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?CLICKHOUSE_PASSWORD=' "$ENV_FILE"; then
   printf 'CLICKHOUSE_PASSWORD=%s\n' "$(randhex)" >> "$ENV_FILE"
 fi
-if ! grep -q '^TRIGGER_CLICKHOUSE=' "$ENV_FILE"; then
+if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?TRIGGER_CLICKHOUSE=' "$ENV_FILE"; then
   printf 'TRIGGER_CLICKHOUSE=%s\n' "$STATE/clickhouse" >> "$ENV_FILE"
 fi
 
 # Read back: an existing .env is the source of truth for ports, paths and
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 ADMIN_EMAIL="${ADMIN_EMAIL:?ADMIN_EMAIL missing from $ENV_FILE}"
 DATA_SHARED="${TRIGGER_SHARED:?TRIGGER_SHARED missing from $ENV_FILE}"

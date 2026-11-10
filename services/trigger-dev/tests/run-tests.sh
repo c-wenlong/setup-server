@@ -255,12 +255,16 @@ test_idempotent_rerun() {
   touch "$STATE_DIR/operator"
   run_deploy
   echo '# my-custom-marker' >> "$SVC/.env"
+  sed -i.bak -e 's/^CLICKHOUSE_PASSWORD=/export CLICKHOUSE_PASSWORD=/' \
+             -e 's/^TRIGGER_CLICKHOUSE=/  TRIGGER_CLICKHOUSE=/' "$SVC/.env"
+  rm -f "$SVC/.env.bak"
   pw="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$SVC/.env")"
   : > "$CALLS_LOG"
   rm -f "$STATE_DIR/magic_posts"
   run_deploy
   check "exits zero"                   [ "$CODE" -eq 0 ]
   check "existing .env untouched"      env_has "my-custom-marker"
+  check "no duplicate CLICKHOUSE keys" [ "$(grep -c 'CLICKHOUSE_PASSWORD=' "$SVC/.env")" -eq 1 ]
   check "password unchanged"           [ "$(sed -n 's/^POSTGRES_PASSWORD=//p' "$SVC/.env")" = "$pw" ]
   check "never invoked sudo"           no_call "^sudo "
   check "compose up re-invoked"        [ -f "$STATE_DIR/compose_up" ]

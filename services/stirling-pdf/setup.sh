@@ -113,6 +113,7 @@ fi
 # Read back: an existing .env is the source of truth for ports, paths and
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 DATA_DIR="${STIRLING_DATA:?STIRLING_DATA missing from $ENV_FILE}"
 SYSTEM_FRONTENDURL="${SYSTEM_FRONTENDURL:?SYSTEM_FRONTENDURL missing from $ENV_FILE}"

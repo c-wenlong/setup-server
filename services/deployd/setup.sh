@@ -117,6 +117,7 @@ fi
 # back for the units. Source it (values are %q-escaped shell, so they come
 # back unescaped — the same format every service's .env uses). SERVICE_HOME
 # may have been edited to a custom path; re-derive before installing.
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 SERVICE_HOME="${SERVICE_HOME:-$HOME/services/$NAME}"
 BIN_DIR="$SERVICE_HOME/bin"

@@ -169,11 +169,12 @@ OMB_DATA_DIR=$HOME/services/openmausbot/data
 # published, so OMB_WEBHOOK_PUBLIC_URL stays unset.
 OMB_PUBLIC_URL=https://$host:$HTTPS_PORT
 
-# Loopback trust governs local non-browser callers only — a browser never
-# gets it on any trust level (upstream: "a browser never gets loopback
-# trust"), so tailnet users still pair. owner is the documented default
-# for a self-hosted single-user box; service is for shared hosted
-# workspaces and would refuse the pair command from this machine.
+# Loopback trust governs non-browser callers that arrive on 127.0.0.1 — a
+# browser never gets it on any trust level (upstream: "a browser never gets
+# loopback trust"), so tailnet browsers still pair. Because Tailscale Serve
+# proxies to 127.0.0.1, non-browser tailnet clients also arrive loopback-
+# sourced and receive owner access (accepted tailnet boundary, issue #176);
+# service is for shared hosted workspaces and would refuse the pair command.
 OMB_LOOPBACK_TRUST=owner
 
 # Deploy bookkeeping (not read by upstream).
@@ -200,6 +201,7 @@ fi
 # toolchain, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$OMB_PORT"
 REQUESTED_HTTPS="$HTTPS_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 : "${OMB_PORT:?OMB_PORT missing from $ENV_FILE}"
 : "${OMB_DATA_DIR:?OMB_DATA_DIR missing from $ENV_FILE}"

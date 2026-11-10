@@ -212,6 +212,16 @@ test_setup_idempotent() {
   check "env left untouched"   env_has "# my-custom-marker"
   check "poller reinstalled"   [ -x "$BIN_DIR/deployd" ]
   teardown
+
+  echo "• setup accepts a checkout path containing non-ASCII UTF-8 characters"
+  setup
+  UTF8_REPO="$SANDBOX/café-repo"
+  cp -R "$REPO" "$UTF8_REPO"
+  REPO="$UTF8_REPO"
+  run_setup
+  check "utf-8 repo path succeeds" [ "$CODE" -eq 0 ]
+  check "utf-8 .env written"       env_has "SETUP_REPO=$UTF8_REPO"
+  teardown
 }
 
 test_setup_poll_override() {

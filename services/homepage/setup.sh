@@ -171,6 +171,7 @@ fi
 # Read back: an existing .env is the source of truth, so a re-run can never
 # silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 CONFIG_DIR="${HOMEPAGE_CONFIG:?HOMEPAGE_CONFIG missing from $ENV_FILE}"
 ALLOWED="${HOMEPAGE_ALLOWED_HOSTS:?HOMEPAGE_ALLOWED_HOSTS missing from $ENV_FILE}"

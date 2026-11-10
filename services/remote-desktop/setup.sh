@@ -238,6 +238,7 @@ REQUESTED_PORT="$GUAC_PORT"
 # test suite and to any automation. An existing .env still wins on a re-run,
 # because that is the source of truth for a live deployment.
 REQUESTED_RDP_PASSWORD="${RDP_PASSWORD:-}"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 GUAC_PORT="${GUAC_PORT:?GUAC_PORT missing from $ENV_FILE}"
 GUAC_STATE="${GUAC_STATE:?GUAC_STATE missing from $ENV_FILE}"

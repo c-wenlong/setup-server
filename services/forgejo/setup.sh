@@ -149,6 +149,7 @@ fi
 # Read back: an existing .env is the source of truth for ports, paths and
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 ADMIN_USERNAME="${FORGEJO_ADMIN_USERNAME:?FORGEJO_ADMIN_USERNAME missing from $ENV_FILE}"
 ADMIN_EMAIL="${FORGEJO_ADMIN_EMAIL:?FORGEJO_ADMIN_EMAIL missing from $ENV_FILE}"

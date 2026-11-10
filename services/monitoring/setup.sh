@@ -146,6 +146,7 @@ chmod 600 "$ENV_FILE"
 # Read back: the existing .env is the source of truth for ports, paths and
 # credentials, so a re-run can never silently move a live deployment —
 # everything below uses these values, not whatever the shell passed.
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 # env_get KEY: KEY's value in .env, read the way Docker Compose (and the
 # seeding step's `set -a; . .env`) sees it — an optional `export ` prefix,

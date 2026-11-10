@@ -127,6 +127,7 @@ fi
 # silently move a live deployment. An explicit QUIVER_REF wins for this run.
 REQUESTED_PORT="$LOCAL_PORT"
 REQUESTED_HTTPS="$HTTPS_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 LOCAL_PORT="${LOCAL_PORT:?LOCAL_PORT missing from $ENV_FILE}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"

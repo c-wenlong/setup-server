@@ -81,8 +81,18 @@ SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 It provides `info`/`ok`/`warn`/`die`, `detect_os` (sets `OS`),
 `refuse_root [msg]`, `resolve_tailscale` (sets `TAILSCALE`),
 `require_tailscale_up`, `tailnet_host`, `require_docker_compose`,
-`require_numeric VAR...`, `wait_http URL TRIES SLEEP` and
-`ts_serve_publish HTTPS_PORT TARGET`. Rules:
+`require_numeric VAR...`, `wait_http URL TRIES SLEEP`,
+`ts_operator_grant`, `ts_serve_publish HTTPS_PORT TARGET` and
+`env_lint FILE`. Rules:
+
+- **`.env` discipline (setup vs. teardown):** A `setup.sh` that reads `.env`
+  back by sourcing it (`set -a; . "$ENV_FILE"; set +a`, for full shell/Compose
+  interpolation parity) must call `env_lint "$ENV_FILE"` immediately before
+  sourcing so a malformed line, duplicate key, or command substitution dies
+  before executing as shell. Services that parse `.env` with `env_get` instead
+  of sourcing need not call `env_lint` in `setup.sh`. Every `teardown.sh`
+  never sources `.env` at all — its deletion targets come from `.env`, so it
+  uses its own strict Compose-parity `env_lint` + `env_get` + `real_dir`.
 
 - Something goes into the lib only when at least ~5 scripts share it
   unchanged. A service's own quirk (a tailnet-IP listener, a native

@@ -284,6 +284,7 @@ fi
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
 REQUESTED_HTTPS_PORT="$HTTPS_PORT"
+env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 ADMIN_USER="${HA_ADMIN_USER:?HA_ADMIN_USER missing from $ENV_FILE}"
 ADMIN_PASSWORD="${HA_ADMIN_PASSWORD:?HA_ADMIN_PASSWORD missing from $ENV_FILE}"
