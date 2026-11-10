@@ -247,8 +247,8 @@ fi
 HTPASSWD_IMAGE="${HTPASSWD_IMAGE:-httpd:2.4.66-alpine}"
 write_htpasswd() {
   local user="$1" pass="$2" dest="$3"
-  if command -v htpasswd >/dev/null 2>&1; then
-    printf '%s' "$pass" | htpasswd -Bni "$user" > "$dest"
+  if command -v htpasswd >/dev/null 2>&1 \
+     && printf '%s' "$pass" | htpasswd -Bni "$user" > "$dest" 2>/dev/null; then
     return
   fi
   printf '%s' "$pass" | docker run --rm -i "$HTPASSWD_IMAGE" htpasswd -Bni "$user" > "$dest"
