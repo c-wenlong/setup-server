@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# curl stub. Three jobs:
+#   1. `releases/latest` redirect probe (-w '%{url_effective}') prints
+#      https://github.com/pingdotgg/t3code/releases/tag/v$VER where VER is
+#      $STATE_DIR/t3_version (default 0.0.0-fake) — this is how "latest"
+#      resolution and upgrades are simulated.
+#   2. `releases/download/v<ver>/t3-<ver>-<target>.tar.gz` writes a REAL
+#      tar.gz into the -o path: dir t3-<ver>-<target>/ with an executable
+#      `t3` plus the bundle's sibling dirs. $STATE_DIR/t3_download_fails
+#      => exit 22; $STATE_DIR/t3_no_binary => tarball without `t3`;
+#      $STATE_DIR/t3_bad_tarball => not a tarball at all.
+#   3. http(s) health probes (127.0.0.1 or the tailnet host) succeed unless
+#      $STATE_DIR/t3_down exists.
+echo "curl $*" >> "$CALLS_LOG"
+
+url=""; out=""
+prev=""
+for a in "$@"; do
+  case "$prev" in -o) out="$a" ;; esac
+  case "$a" in http://*|https://*) url="$a" ;; esac
+  prev="$a"
+done
+
+case "$url" in
+  *releases/latest*)
+    ver="0.0.0-fake"
+    [ -f "$STATE_DIR/t3_version" ] && ver="$(cat "$STATE_DIR/t3_version")"
+    printf 'https://github.com/pingdotgg/t3code/releases/tag/v%s\n' "$ver"
+    ;;
+  *releases/download*)
+    [ -f "$STATE_DIR/t3_download_fails" ] && { echo "curl: (22) 404" >&2; exit 22; }
+    base="$(basename "$url")"
+    [ "$base" = "t3.tar.gz" ] || base="$(basename "$url" .tar.gz)"
+    rest="${base#t3-}"
+    target=""
+    for t in linux-x64 linux-arm64 darwin-arm64; do
+      case "$rest" in *-"$t") target="$t"; ver="${rest%-"$t"}" ;; esac
+    done
+    [ -n "$target" ] || { echo "curl: cannot parse asset name $base" >&2; exit 22; }
+    dir="t3-$ver-$target"
+    tmpd="$(mktemp -d)"
+    if [ -f "$STATE_DIR/t3_bad_tarball" ]; then
+      echo "this is not a tarball" > "$out"
+    else
+      mkdir -p "$tmpd/$dir"/{client,lib,node_modules,resource-monitor}
+      [ -f "$STATE_DIR/t3_no_binary" ] || {
+        printf '#!/bin/sh\necho "t3 v%s-fake"\n' "$ver" > "$tmpd/$dir/t3"
+        chmod +x "$tmpd/$dir/t3"
+      }
+      tar -czf "$out" -C "$tmpd" "$dir"
+    fi
+    rm -rf "$tmpd"
+    ;;
+  http://127.0.0.1*|https://test-host.tailfake.ts.net*)
+    [ -f "$STATE_DIR/t3_down" ] && exit 7
+    ;;
+  *)
+    ;;
+esac
+exit 0

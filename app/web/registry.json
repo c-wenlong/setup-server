@@ -5,7 +5,7 @@
     "so the file stays tailnet-agnostic and survives a re-tailnet.",
     "{NAME|NAME2:default} in url/health is substituted from the service's",
     ".env: the first NAME present wins, else the default. That lets a tile",
-    "follow a port the deploy moved — e.g. {HTTPS_PORT|LOCAL_PORT:9119}.",
+    "follow a port the deploy moved \u2014 e.g. {HTTPS_PORT|LOCAL_PORT:9119}.",
     "marker  - a path that exists only after that service is deployed. Drives",
     "          'installed' without touching the docker CLI (a systemd user unit",
     "          does not reliably inherit the docker group; status must not",
@@ -54,7 +54,7 @@
     "                      back a service stopped on purpose (containers get",
     "                      the same persistence free from unless-stopped). Add",
     "                      \"optional\": true to a part that may legitimately",
-    "                      not exist (a compose profile that is off) — its",
+    "                      not exist (a compose profile that is off) \u2014 its",
     "                      failure is logged and skipped.",
     "            primary - which part's state ntfy-control reports as the",
     "                      service's state (the phone panel's up/down line).",
@@ -149,6 +149,7 @@
     "openclaw",
     "hermes-agent",
     "openmausbot",
+    "t3code",
     "ollama",
     "code-server",
     "forgejo",
@@ -187,7 +188,7 @@
         "kuma": "manimkc"
       },
       "login": [
-        "No sign-in — the tile opens its `/docs` API page."
+        "No sign-in \u2014 the tile opens its `/docs` API page."
       ],
       "description": "Video-gen job server: POST a JSON brief and it renders a narrated ManimGL video, then uploads it to the Seafile `manimkc` library. A systemd user unit on 127.0.0.1:8090; the tile opens its /docs API page, since that is the whole UI. Code lives in its own repo at ~/dev/manimkc, not in this one, and narration runs through ElevenLabs, Sarvam or local Kokoro TTS."
     },
