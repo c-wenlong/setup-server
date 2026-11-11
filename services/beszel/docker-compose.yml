@@ -11,6 +11,7 @@ services:
     container_name: beszel
     restart: unless-stopped
     mem_limit: ${BESZEL_MEM_LIMIT:-256m}
+    memswap_limit: ${BESZEL_MEMSWAP_LIMIT:-256m}
     network_mode: host
     command: serve --http "127.0.0.1:${BESZEL_PORT:-8092}"
     environment:

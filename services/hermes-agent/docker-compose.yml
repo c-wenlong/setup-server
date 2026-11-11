@@ -27,6 +27,7 @@ services:
     image: nousresearch/hermes-agent:${HERMES_VERSION:-v0.22.5}
     restart: unless-stopped
     mem_limit: ${HERMES_MEM_LIMIT:-2g}
+    memswap_limit: ${HERMES_MEMSWAP_LIMIT:-2g}
     # /init (s6-overlay) must stay first in the entrypoint chain — it runs the
     # uid/gid remap and supervision tree. `gateway run` under it is a
     # heartbeat; s6 restarts the real gateway process on crash.

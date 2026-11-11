@@ -58,6 +58,7 @@ services:
     # not a fault.
     restart: unless-stopped
     mem_limit: ${ADGUARD_MEM_LIMIT:-512m}
+    memswap_limit: ${ADGUARD_MEMSWAP_LIMIT:-512m}
 
     environment:
       # Only affects log timestamps and the query-log / statistics day

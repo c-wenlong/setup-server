@@ -26,6 +26,7 @@ services:
     image: kopifund-local:latest
     restart: unless-stopped
     mem_limit: ${KOPIFUND_MEM_LIMIT:-512m}
+    memswap_limit: ${KOPIFUND_MEMSWAP_LIMIT:-512m}
     environment:
       # Upstream reads KOPIFUND_DATA as its data root (server/finance/paths.py).
       KOPIFUND_DATA: /data

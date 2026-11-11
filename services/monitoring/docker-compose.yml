@@ -18,6 +18,7 @@ services:
     container_name: uptime-kuma
     restart: unless-stopped
     mem_limit: ${KUMA_MEM_LIMIT:-512m}
+    memswap_limit: ${KUMA_MEMSWAP_LIMIT:-512m}
     network_mode: host
     environment:
       - UPTIME_KUMA_HOST=127.0.0.1
@@ -30,6 +31,7 @@ services:
     container_name: ntfy
     restart: unless-stopped
     mem_limit: ${NTFY_MEM_LIMIT:-256m}
+    memswap_limit: ${NTFY_MEMSWAP_LIMIT:-256m}
     network_mode: host
     command: serve
     environment:
