@@ -365,6 +365,24 @@ class DeployTest(Sandbox):
         self.assertFalse(os.path.exists(os.path.join(ghapp.app_dir("hello-app"),
                                                      "deployed.json")))
 
+    def test_rollback_restores_the_recorded_mem_limit(self):
+        self.make_src("hello-app")
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"),
+                  "w") as fh:
+            json.dump({"sha": "b" * 40, "method": "dockerfile",
+                       "definition": good(mem_limit="1g")}, fh)
+        self.write_def(good(mem_limit="128m"))
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "a" * 64 + "\n")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        runs = self.argv_with("docker", "run")
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[0][runs[0].index("--memory") + 1], "128m")
+        rollback = runs[-1]
+        self.assertEqual(rollback[rollback.index("--memory") + 1], "1g")
+        self.assertEqual(rollback[rollback.index("--memory-swap") + 1], "1g")
+
     def test_unhealthy_first_deploy_has_nothing_to_roll_back_to(self):
         self.make_src("hello-app")
         ghapp.healthy = lambda d, t: False
