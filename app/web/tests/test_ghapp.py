@@ -168,6 +168,13 @@ class ValidateTest(unittest.TestCase):
             with self.assertRaises(ghapp.AppError, msg=over):
                 ghapp.validate(good(**over))
 
+    def test_mem_limit_shape(self):
+        for ok in ("512m", "2g", "1G", "1073741824"):
+            ghapp.validate(good(mem_limit=ok))
+        for bad in ("-1g", "512x", "m", "1.5g", "", " 512m", "512 m", 512):
+            with self.assertRaises(ghapp.AppError, msg=bad):
+                ghapp.validate(good(mem_limit=bad))
+
 
 class MethodValidateTest(unittest.TestCase):
     """The `method` field selects which fields validate() requires; an
@@ -287,6 +294,14 @@ class ArgvTest(Sandbox):
         self.assertIn("--env-file", argv)
         vol = argv[argv.index("--volume") + 1]
         self.assertTrue(vol.endswith("/apps/hello-app/data:/data"), vol)
+
+    def test_mem_limit_bounds_memory_and_swap(self):
+        argv = ghapp.run_argv(good(mem_limit="512m"), "img:1")
+        self.assertEqual(argv[argv.index("--memory") + 1], "512m")
+        self.assertEqual(argv[argv.index("--memory-swap") + 1], "512m")
+        argv = ghapp.run_argv(good(), "img:1")
+        self.assertNotIn("--memory", argv)
+        self.assertNotIn("--memory-swap", argv)
 
     def test_build_tags_by_sha_and_stays_inside_src(self):
         argv = ghapp.build_argv(good(dockerfile="web/Dockerfile", context="web"),

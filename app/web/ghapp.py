@@ -99,6 +99,13 @@ Methods, and the fields each adds to the definition:
                 "port"+"health_path" when both are set, and both are the only
                 fields a script definition may omit.
 
+Every method that runs a container (all but `script`, which runs no
+container, and `compose`, whose file owns its own limits) accepts an
+optional "mem_limit" in docker memory syntax ("512m", "2g", or a byte
+count): the container gets --memory and --memory-swap both set to it,
+so it can neither exceed the cap nor swap — a runaway app OOMs inside
+its own cgroup instead of pushing the host into swap death.
+
 A definition's shell words (build/start/cmd) run via `sh -c` inside src/;
 every other word still reaches an argv only after validate() shape-checks it.
 
@@ -210,6 +217,7 @@ IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{1,255}$")
 # service names.
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+MEM_LIMIT_RE = re.compile(r"^[0-9]+[bkmgBKMG]?$")
 
 # Where the generated Dockerfile lands inside the checkout for node/python
 # (untracked on purpose: `git clean` drops it, every deploy rewrites it),
@@ -424,6 +432,10 @@ def validate(d):
                            for n in kuma) \
                 or len(set(kuma)) != len(kuma):
             raise AppError("bad kuma %r" % (d.get("kuma"),))
+    mem = d.get("mem_limit")
+    if mem is not None and (not isinstance(mem, str)
+                            or not MEM_LIMIT_RE.fullmatch(mem)):
+        raise AppError("bad mem_limit %r" % (mem,))
     return d
 
 
@@ -548,6 +560,9 @@ def run_argv(d, image, container_port=None, mounts=(), env_file=True,
         argv += ["--volume", spec]
     if add_host:
         argv += ["--add-host", PROXY_ADD_HOST]
+    mem = d.get("mem_limit")
+    if mem:
+        argv += ["--memory", mem, "--memory-swap", mem]
     return argv + [image]
 
 
