@@ -57,6 +57,7 @@ services:
     # every device on it. A restart or two right after a reboot is expected,
     # not a fault.
     restart: unless-stopped
+    mem_limit: ${ADGUARD_MEM_LIMIT:-512m}
 
     environment:
       # Only affects log timestamps and the query-log / statistics day

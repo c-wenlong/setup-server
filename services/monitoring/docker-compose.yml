@@ -17,6 +17,7 @@ services:
     image: ${KUMA_IMAGE:-louislam/uptime-kuma:1.23.16}
     container_name: uptime-kuma
     restart: unless-stopped
+    mem_limit: ${KUMA_MEM_LIMIT:-512m}
     network_mode: host
     environment:
       - UPTIME_KUMA_HOST=127.0.0.1
@@ -28,6 +29,7 @@ services:
     image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.14.0}
     container_name: ntfy
     restart: unless-stopped
+    mem_limit: ${NTFY_MEM_LIMIT:-256m}
     network_mode: host
     command: serve
     environment:
