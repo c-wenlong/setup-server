@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — pull c-wenlong/self-learn (the gnosia repo) from GitHub and
+# deploy.sh — pull promethevs-labs/hermes-studio (the gnosia repo) from GitHub and
 # redeploy if it changed.
 #
 # The server is tailnet-only, so GitHub webhooks can't reach it; instead

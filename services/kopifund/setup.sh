@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# setup.sh — one-shot deploy of Kopifund (the private c-wenlong/kopifund-finance
+# setup.sh — one-shot deploy of Kopifund (the private lagom-studio/kopifund-finance
 # repo) behind Tailscale. Linux + macOS.
 #
 # End state:
@@ -40,7 +40,7 @@ LOCAL_PORT="${LOCAL_PORT:-8300}"
 # convention), so overriding only LOCAL_PORT cannot split the two.
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-REPO_URL="${KOPIFUND_REPO_URL:-https://github.com/c-wenlong/kopifund-finance.git}"
+REPO_URL="${KOPIFUND_REPO_URL:-https://github.com/lagom-studio/kopifund-finance.git}"
 HUB_URL="${KOPIFUND_HUB_URL:-https://github.com/c-wenlong/kopifund-hub.git}"
 REF="${KOPIFUND_REF:-main}"
 CONTAINER="kopifund"
