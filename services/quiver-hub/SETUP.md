@@ -1,6 +1,6 @@
 # quiver-hub: Quiver's remote-control hub, tailnet-only
 
-Runs `swe remote serve` from [swe](https://github.com/c-wenlong/swe) on
+Runs `swe remote serve` from [swe](https://github.com/starship-terminal/swe) on
 an always-on box, so a phone on the tailnet can watch and steer coding-agent
 sessions (sessions, inbox, Usage tab) and laptops can join as satellites.
 Reachable only from your Tailscale devices at
@@ -85,7 +85,7 @@ its own uv tool dir and bin dir (`UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` under
   targets plain Linux and macOS boxes, and quiver's core is stdlib-only, so
   a wheel install is all it needs.
 
-The Nix flake (`github:c-wenlong/swe`) was the other option. It would tie
+The Nix flake (`github:starship-terminal/swe`) was the other option. It would tie
 the deploy to Nix being present and to a `nix build` (which runs quiver's
 whole test suite) on every upgrade.
 

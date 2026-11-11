@@ -4,7 +4,7 @@
 # behind Tailscale (Linux + macOS).
 #
 # End state:
-#   - swe installed from github.com/c-wenlong/swe at a pinned commit, in
+#   - swe installed from github.com/starship-terminal/swe at a pinned commit, in
 #     its own uv tool dir (~/.local/share/quiver-hub), apart from the `swe` on
 #     your PATH so the two can't upgrade each other
 #   - `swe remote serve` listening on 127.0.0.1:LOCAL_PORT only, told its
@@ -48,7 +48,7 @@ QUIVER_REF="${QUIVER_REF:-main}"
 # run through deployd would pin .env to that SHA, and a later plain re-run
 # would read it back and downgrade the hub.
 QUIVER_TRACK="${QUIVER_TRACK:-$QUIVER_REF}"
-QUIVER_REPO="${QUIVER_REPO:-https://github.com/c-wenlong/swe.git}"
+QUIVER_REPO="${QUIVER_REPO:-https://github.com/starship-terminal/swe.git}"
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
@@ -114,7 +114,7 @@ else
 LOCAL_PORT=$LOCAL_PORT
 HTTPS_PORT=$HTTPS_PORT
 
-# Which commit of c-wenlong/swe the hub runs: a branch, tag or full SHA.
+# Which commit of starship-terminal/swe the hub runs: a branch, tag or full SHA.
 # A branch means "move to its current tip on every setup.sh run"; a SHA pins.
 # (Written from QUIVER_TRACK, which defaults to QUIVER_REF — deploy tooling
 # can pin this run's SHA while the file keeps following the branch.)

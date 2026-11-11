@@ -26,9 +26,9 @@
   "login": [
     "Sign in at `/sign-in` with `OWNER_PASSWORD` from `.env`."
   ],
-  "description": "Gnosia study hub: the private c-wenlong/self-learn repo's Next.js roadmap and Claude tutoring loop over a catalog that is one SQLite file under the data root — courses, concept notes, spaced-repetition reviews, indexed videos and diagrams. Native `next start` under a systemd user unit on 127.0.0.1:8107 behind Serve; no database server runs. deployd polls the remote every minute and re-runs setup.sh when main moves (stop app, npm ci, migrate, next build, start), and a nightly 03:00 timer exports the catalog to the data root's archive/ (~/.gnosia by default, ~/.self-learn on installs that predate the rename). Sign-in is the app's own OWNER_PASSWORD from .env — the tailnet is still the perimeter, the password just gates one owner from another tailnet device.",
+  "description": "Gnosia study hub: the private promethevs-labs/hermes-studio repo's Next.js roadmap and Claude tutoring loop over a catalog that is one SQLite file under the data root — courses, concept notes, spaced-repetition reviews, indexed videos and diagrams. Native `next start` under a systemd user unit on 127.0.0.1:8107 behind Serve; no database server runs. deployd polls the remote every minute and re-runs setup.sh when main moves (stop app, npm ci, migrate, next build, start), and a nightly 03:00 timer exports the catalog to the data root's archive/ (~/.gnosia by default, ~/.self-learn on installs that predate the rename). Sign-in is the app's own OWNER_PASSWORD from .env — the tailnet is still the perimeter, the password just gates one owner from another tailnet device.",
   "deploy": {
-    "repo": "https://github.com/c-wenlong/self-learn",
+    "repo": "https://github.com/promethevs-labs/hermes-studio",
     "ref": "main",
     "cmd": "services/gnosia-learn/setup.sh"
   }

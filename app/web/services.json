@@ -151,7 +151,7 @@
         "kuma": "quiver-hub"
       },
       "deploy": {
-        "repo": "https://github.com/c-wenlong/swe.git",
+        "repo": "https://github.com/starship-terminal/swe.git",
         "ref": "main",
         "cmd": "QUIVER_REPO=$DEPLOY_REPO QUIVER_REF=$DEPLOY_SHA QUIVER_TRACK=$DEPLOY_REF services/quiver-hub/setup.sh"
       },
@@ -191,9 +191,9 @@
       "login": [
         "Sign in at `/sign-in` with `OWNER_PASSWORD` from `.env`."
       ],
-      "description": "Gnosia study hub: the private c-wenlong/self-learn repo's Next.js roadmap and Claude tutoring loop over a catalog that is one SQLite file under the data root — courses, concept notes, spaced-repetition reviews, indexed videos and diagrams. Native `next start` under a systemd user unit on 127.0.0.1:8107 behind Serve; no database server runs. deployd polls the remote every minute and re-runs setup.sh when main moves (stop app, npm ci, migrate, next build, start), and a nightly 03:00 timer exports the catalog to the data root's archive/ (~/.gnosia by default, ~/.self-learn on installs that predate the rename). Sign-in is the app's own OWNER_PASSWORD from .env — the tailnet is still the perimeter, the password just gates one owner from another tailnet device.",
+      "description": "Gnosia study hub: the private promethevs-labs/hermes-studio repo's Next.js roadmap and Claude tutoring loop over a catalog that is one SQLite file under the data root — courses, concept notes, spaced-repetition reviews, indexed videos and diagrams. Native `next start` under a systemd user unit on 127.0.0.1:8107 behind Serve; no database server runs. deployd polls the remote every minute and re-runs setup.sh when main moves (stop app, npm ci, migrate, next build, start), and a nightly 03:00 timer exports the catalog to the data root's archive/ (~/.gnosia by default, ~/.self-learn on installs that predate the rename). Sign-in is the app's own OWNER_PASSWORD from .env — the tailnet is still the perimeter, the password just gates one owner from another tailnet device.",
       "deploy": {
-        "repo": "https://github.com/c-wenlong/self-learn",
+        "repo": "https://github.com/promethevs-labs/hermes-studio",
         "ref": "main",
         "cmd": "services/gnosia-learn/setup.sh"
       }
@@ -222,9 +222,9 @@
       "login": [
         "No sign-in: loopback and the tailnet are the boundary. Phones pair once from Settings -> Link a phone (QR), then read over the tailnet with a device bearer."
       ],
-      "description": "Kopifund personal finance tracker (private c-wenlong/kopifund-finance repo): bank/wallet/brokerage/CPF PDF statements parsed into one categorised ledger, from a Singapore user's own accounts. Built from a machine-managed clone at ~/services/kopifund/repo, hard-reset per deploy; the container it makes mounts the data folder at ~/.kopifund — upstream's own data root — which is an unlocked git-crypt clone of the private kopifund-hub repo: the versioned, Mac-shared state. A systemd user timer / LaunchAgent snapshots it back to the hub every SYNC_SECONDS and merges the other machines' snapshots (newer tip wins a raced file; the loser is kept as <name>.loser-<sha>); a second rebuilds the per-machine stats cache every ANALYSE_SECONDS. Replaces the launcher's From-GitHub deployment of the same app.",
+      "description": "Kopifund personal finance tracker (private lagom-studio/kopifund-finance repo): bank/wallet/brokerage/CPF PDF statements parsed into one categorised ledger, from a Singapore user's own accounts. Built from a machine-managed clone at ~/services/kopifund/repo, hard-reset per deploy; the container it makes mounts the data folder at ~/.kopifund — upstream's own data root — which is an unlocked git-crypt clone of the private kopifund-hub repo: the versioned, Mac-shared state. A systemd user timer / LaunchAgent snapshots it back to the hub every SYNC_SECONDS and merges the other machines' snapshots (newer tip wins a raced file; the loser is kept as <name>.loser-<sha>); a second rebuilds the per-machine stats cache every ANALYSE_SECONDS. Replaces the launcher's From-GitHub deployment of the same app.",
       "deploy": {
-        "repo": "https://github.com/c-wenlong/kopifund-finance",
+        "repo": "https://github.com/lagom-studio/kopifund-finance",
         "ref": "main",
         "cmd": "services/kopifund/setup.sh"
       }

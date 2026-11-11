@@ -1,7 +1,7 @@
 # gnosia-learn — Gnosia study hub, auto-deployed from GitHub
 
 A production build of the private
-[c-wenlong/self-learn](https://github.com/c-wenlong/self-learn) repo: a
+[promethevs-labs/hermes-studio](https://github.com/promethevs-labs/hermes-studio) repo: a
 Next.js 16 app over a SQLite catalog, served natively and published
 tailnet-only. Push to `main` and deployd picks it up on its next tick —
 or immediately with `~/services/gnosia-learn/bin/deploy.sh --force`.
