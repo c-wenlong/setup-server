@@ -12,6 +12,8 @@ services:
     image: ${SEAFILE_DB_IMAGE:-mariadb:10.11}
     container_name: seafile-mysql
     restart: unless-stopped
+    mem_limit: ${SEAFILE_DB_MEM_LIMIT:-512m}
+    memswap_limit: ${SEAFILE_DB_MEMSWAP_LIMIT:-512m}
     environment:
       - MYSQL_ROOT_PASSWORD=${INIT_SEAFILE_MYSQL_ROOT_PASSWORD:-}
       - MYSQL_LOG_CONSOLE=true
@@ -38,6 +40,8 @@ services:
     image: ${SEAFILE_REDIS_IMAGE:-redis:7-alpine}
     container_name: seafile-redis
     restart: unless-stopped
+    mem_limit: ${SEAFILE_REDIS_MEM_LIMIT:-256m}
+    memswap_limit: ${SEAFILE_REDIS_MEMSWAP_LIMIT:-256m}
     command:
       - /bin/sh
       - -c
@@ -51,6 +55,8 @@ services:
     image: ${SEAFILE_IMAGE:-seafileltd/seafile-mc:13.0-latest}
     container_name: seafile
     restart: unless-stopped
+    mem_limit: ${SEAFILE_MEM_LIMIT:-1g}
+    memswap_limit: ${SEAFILE_MEMSWAP_LIMIT:-1g}
     ports:
       - "127.0.0.1:${LOCAL_PORT:-8081}:80"
     volumes:
