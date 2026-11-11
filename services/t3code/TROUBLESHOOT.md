@@ -55,7 +55,11 @@ tailscale serve status
   node is off. `tailscale status` on the client.
 - **Paired before, now asked again / token rejected**: state was purged or
   the server was reinstalled fresh. Re-pair: `t3 pair --base-dir
-  ~/services/t3code` on the box.
+  ~/services/t3code --tailscale --tailscale-serve-port <HTTPS_PORT>` on
+  the box.
+- **Pairing link is `http://127.0.0.1:...` and won't open on another
+  device**: re-run `t3 pair` with `--tailscale` (and
+  `--tailscale-serve-port` matching `HTTPS_PORT` in `.env`).
 - **`t3 pair` says it can't reach the server**: it needs `--base-dir`
   pointing at the same `~/services/t3code` the unit uses (or
   `T3CODE_HOME`), and the server must be running.
