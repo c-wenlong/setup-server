@@ -168,6 +168,13 @@ class ValidateTest(unittest.TestCase):
             with self.assertRaises(ghapp.AppError, msg=over):
                 ghapp.validate(good(**over))
 
+    def test_mem_limit_shape(self):
+        for ok in ("512m", "2g", "1G", "1073741824"):
+            ghapp.validate(good(mem_limit=ok))
+        for bad in ("-1g", "512x", "m", "1.5g", "", " 512m", "512 m", 512):
+            with self.assertRaises(ghapp.AppError, msg=bad):
+                ghapp.validate(good(mem_limit=bad))
+
 
 class MethodValidateTest(unittest.TestCase):
     """The `method` field selects which fields validate() requires; an
@@ -288,6 +295,14 @@ class ArgvTest(Sandbox):
         vol = argv[argv.index("--volume") + 1]
         self.assertTrue(vol.endswith("/apps/hello-app/data:/data"), vol)
 
+    def test_mem_limit_bounds_memory_and_swap(self):
+        argv = ghapp.run_argv(good(mem_limit="512m"), "img:1")
+        self.assertEqual(argv[argv.index("--memory") + 1], "512m")
+        self.assertEqual(argv[argv.index("--memory-swap") + 1], "512m")
+        argv = ghapp.run_argv(good(), "img:1")
+        self.assertNotIn("--memory", argv)
+        self.assertNotIn("--memory-swap", argv)
+
     def test_build_tags_by_sha_and_stays_inside_src(self):
         argv = ghapp.build_argv(good(dockerfile="web/Dockerfile", context="web"),
                                 SHA, "/x/src")
@@ -349,6 +364,24 @@ class DeployTest(Sandbox):
         self.assertEqual(runs[-1][-1], "sha256:" + "a" * 64)
         self.assertFalse(os.path.exists(os.path.join(ghapp.app_dir("hello-app"),
                                                      "deployed.json")))
+
+    def test_rollback_restores_the_recorded_mem_limit(self):
+        self.make_src("hello-app")
+        with open(os.path.join(ghapp.app_dir("hello-app"), "deployed.json"),
+                  "w") as fh:
+            json.dump({"sha": "b" * 40, "method": "dockerfile",
+                       "definition": good(mem_limit="1g")}, fh)
+        self.write_def(good(mem_limit="128m"))
+        self.quiet_out["docker inspect"] = (0, "sha256:" + "a" * 64 + "\n")
+        ghapp.healthy = lambda d, t: False
+        with self.assertRaises(ghapp.AppError):
+            ghapp.deploy("hello-app")
+        runs = self.argv_with("docker", "run")
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[0][runs[0].index("--memory") + 1], "128m")
+        rollback = runs[-1]
+        self.assertEqual(rollback[rollback.index("--memory") + 1], "1g")
+        self.assertEqual(rollback[rollback.index("--memory-swap") + 1], "1g")
 
     def test_unhealthy_first_deploy_has_nothing_to_roll_back_to(self):
         self.make_src("hello-app")

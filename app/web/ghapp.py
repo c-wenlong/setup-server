@@ -99,6 +99,13 @@ Methods, and the fields each adds to the definition:
                 "port"+"health_path" when both are set, and both are the only
                 fields a script definition may omit.
 
+Every method that runs a container (all but `script`, which runs no
+container, and `compose`, whose file owns its own limits) accepts an
+optional "mem_limit" in docker memory syntax ("512m", "2g", or a byte
+count): the container gets --memory and --memory-swap both set to it,
+so it can neither exceed the cap nor swap — a runaway app OOMs inside
+its own cgroup instead of pushing the host into swap death.
+
 A definition's shell words (build/start/cmd) run via `sh -c` inside src/;
 every other word still reaches an argv only after validate() shape-checks it.
 
@@ -210,6 +217,7 @@ IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{1,255}$")
 # service names.
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+MEM_LIMIT_RE = re.compile(r"^[0-9]+[bkmgBKMG]?$")
 
 # Where the generated Dockerfile lands inside the checkout for node/python
 # (untracked on purpose: `git clean` drops it, every deploy rewrites it),
@@ -424,6 +432,10 @@ def validate(d):
                            for n in kuma) \
                 or len(set(kuma)) != len(kuma):
             raise AppError("bad kuma %r" % (d.get("kuma"),))
+    mem = d.get("mem_limit")
+    if mem is not None and (not isinstance(mem, str)
+                            or not MEM_LIMIT_RE.fullmatch(mem)):
+        raise AppError("bad mem_limit %r" % (mem,))
     return d
 
 
@@ -548,6 +560,9 @@ def run_argv(d, image, container_port=None, mounts=(), env_file=True,
         argv += ["--volume", spec]
     if add_host:
         argv += ["--add-host", PROXY_ADD_HOST]
+    mem = d.get("mem_limit")
+    if mem:
+        argv += ["--memory", mem, "--memory-swap", mem]
     return argv + [image]
 
 
@@ -929,12 +944,14 @@ class Lock(object):
 
 # ------------------------------------------------------------------ verbs
 
-def swap(d, image, previous, previous_run_kw=None, **run_kw):
+def swap(d, image, previous, previous_run_kw=None, prev_d=None, **run_kw):
     """Replace the running container with `image`. If the new one cannot
     start or does not answer in time, put `previous` (an image ID) back and
     fail: the box is never left without the version that was working.
     `previous_run_kw` overrides run_kw for the rollback run, for methods
-    whose mounts differ per release (static)."""
+    whose mounts differ per release (static). `prev_d` is the recorded
+    definition of what was running: the rollback restores ITS mem_limit,
+    so a deploy that lowers the cap cannot push the old image over it."""
     key = d["key"]
     quiet(["docker", "rm", "--force", container_name(key)])
     say("starting %s on 127.0.0.1:%d" % (container_name(key), d["port"]))
@@ -949,7 +966,12 @@ def swap(d, image, previous, previous_run_kw=None, **run_kw):
         if previous:
             say("rolling back to the image that was running (%s)" % previous[:19])
             kw = run_kw if previous_run_kw is None else previous_run_kw
-            run(run_argv(d, previous, **kw), check=False)
+            rd = dict(d)
+            if prev_d is not None and prev_d.get("mem_limit"):
+                rd["mem_limit"] = prev_d["mem_limit"]
+            else:
+                rd.pop("mem_limit", None)
+            run(run_argv(rd, previous, **kw), check=False)
         raise
 
 
@@ -1148,7 +1170,7 @@ def static_run_kw(key, name):
     return kw
 
 
-def deploy_static(d, src, sha, previous, prev_release):
+def deploy_static(d, src, sha, previous, prev_release, prev_d=None):
     """Run the def's build in the checkout, copy its output to a fresh
     release dir outside it, then serve that read-only from the small nginx
     image. Returns the release name. The live release is never touched: a
@@ -1186,7 +1208,7 @@ def deploy_static(d, src, sha, previous, prev_release):
         else:
             previous = None
         swap(d, STATIC_IMAGE, previous, previous_run_kw=prev_kw,
-             **static_run_kw(key, name))
+             prev_d=prev_d, **static_run_kw(key, name))
     except (AppError, OSError):
         shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(release, ignore_errors=True)
@@ -1385,6 +1407,10 @@ def deploy_method(d, m, sha, src, prev):
             prev_kw = static_run_kw(key, prev_release)
         else:
             previous = None
+    # What swap() puts back when this deploy fails: the recorded definition
+    # of the container that was running, so its mem_limit survives the
+    # rollback even when this deploy changed it.
+    prev_d = recorded_definition(key, prev) if prev is not None else None
     if m == "script":
         run_sh(d["cmd"], src, key)
         if d.get("port") and d.get("health_path") \
@@ -1401,9 +1427,9 @@ def deploy_method(d, m, sha, src, prev):
         image = d["image"]
         say("pulling %s" % image)
         run(["docker", "pull", image])
-        swap(d, image, previous, previous_run_kw=prev_kw)
+        swap(d, image, previous, previous_run_kw=prev_kw, prev_d=prev_d)
     elif m == "static":
-        release = deploy_static(d, src, sha, previous, prev_release)
+        release = deploy_static(d, src, sha, previous, prev_release, prev_d)
         image = STATIC_IMAGE
     elif m in ("node", "python"):
         generated_dockerfile(d, src)
@@ -1411,7 +1437,7 @@ def deploy_method(d, m, sha, src, prev):
         say("building %s (generated %s)" % (image, GENERATED_DOCKERFILE))
         run(build_argv(d, sha, src, dockerfile=GENERATED_DOCKERFILE,
                        context="."))
-        swap(d, image, previous, previous_run_kw=prev_kw)
+        swap(d, image, previous, previous_run_kw=prev_kw, prev_d=prev_d)
     else:
         df_path = inside_checkout(d, src, "dockerfile")
         if not os.path.isfile(df_path):
@@ -1420,7 +1446,7 @@ def deploy_method(d, m, sha, src, prev):
         image = "%s:%s" % (image_repo(key), sha[:12])
         say("building %s" % image)
         run(build_argv(d, sha, src))
-        swap(d, image, previous, previous_run_kw=prev_kw)
+        swap(d, image, previous, previous_run_kw=prev_kw, prev_d=prev_d)
     return image, release, prev_release
 
 
