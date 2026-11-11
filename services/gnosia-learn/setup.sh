@@ -4,7 +4,7 @@
 # Tailscale. Linux + macOS.
 #
 # End state:
-#   - machine-managed clone of github.com/c-wenlong/self-learn (the gnosia
+#   - machine-managed clone of github.com/promethevs-labs/hermes-studio (the gnosia
 #     repo) at
 #     ~/services/gnosia-learn/repo (hard-reset on every deploy — not a
 #     working copy; write app config via this service's .env)
@@ -46,7 +46,7 @@ set -euo pipefail
 LOCAL_PORT="${LOCAL_PORT:-8107}"
 HTTPS_PORT_EXPLICIT="${HTTPS_PORT:+yes}"
 HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
-REPO_URL="${REPO_URL:-https://github.com/c-wenlong/self-learn.git}"
+REPO_URL="${REPO_URL:-https://github.com/promethevs-labs/hermes-studio.git}"
 BRANCH="${BRANCH:-main}"
 SKIP_SEED="${SKIP_SEED:-0}"
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"

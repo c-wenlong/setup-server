@@ -29,7 +29,7 @@ red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 
 MAIN_SHA="1111111111111111111111111111111111111111"
-REPO="https://github.com/c-wenlong/swe.git"
+REPO="https://github.com/starship-terminal/swe.git"
 
 # --------------------------------------------------------------- harness
 setup() {

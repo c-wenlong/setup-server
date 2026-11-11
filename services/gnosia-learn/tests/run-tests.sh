@@ -224,7 +224,7 @@ test_fresh_deploy() {
   touch "$STATE_DIR/operator"
   run_deploy
   check "exits zero"                    [ "$CODE" -eq 0 ]
-  check ".env has repo URL"             env_has "REPO_URL=https://github.com/c-wenlong/self-learn.git"
+  check ".env has repo URL"             env_has "REPO_URL=https://github.com/promethevs-labs/hermes-studio.git"
   check ".env has data root"            env_has "GNOSIA_HOME=$HOME/.gnosia"
   check ".env has catalog file"         env_has "CATALOG_DB=$HOME/.gnosia/catalog.db"
   check ".env drops the old var"        sh -c "! grep -q '^SELF_LEARN_HOME=' '$SVC/.env'"

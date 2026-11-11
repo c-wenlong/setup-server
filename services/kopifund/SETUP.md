@@ -1,7 +1,7 @@
 # Kopifund
 
 Personal finance tracker from the private
-[c-wenlong/kopifund-finance](https://github.com/c-wenlong/kopifund-finance)
+[lagom-studio/kopifund-finance](https://github.com/lagom-studio/kopifund-finance)
 repo: bank, wallet, brokerage and CPF PDF statements parsed into one
 categorised ledger, with a web UI and an iOS phone link.
 
@@ -38,7 +38,7 @@ Two repos, two jobs:
 
 | Repo | Role on this box |
 |---|---|
-| `c-wenlong/kopifund-finance` | App source. Machine-managed clone at `~/services/kopifund/repo`, hard-reset every run; deployd polls `main` and re-runs setup.sh, which rebuilds the image. |
+| `lagom-studio/kopifund-finance` | App source. Machine-managed clone at `~/services/kopifund/repo`, hard-reset every run; deployd polls `main` and re-runs setup.sh, which rebuilds the image. |
 | `c-wenlong/kopifund-hub` | Data remote. `~/.kopifund` is a clone of it; git-crypt encrypts every file except `.gitattributes`, `.gitignore`, `README.md` before it leaves the machine, so GitHub stores ciphertext. Version history = rollback; push/pull = Mac sync. |
 
 ## Security model
