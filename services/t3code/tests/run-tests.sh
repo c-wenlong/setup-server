@@ -163,6 +163,7 @@ test_fresh_deploy() {
   check "prints the tailnet URL"                out_has "https://test-host.tailfake.ts.net:8109"
   check "end-to-end check passed"               out_has "End-to-end check passed"
   check "prints pair instructions"              out_has "t3 pair --base-dir"
+  check "pair hint uses --tailscale"            out_has "--tailscale --tailscale-serve-port 8109"
   teardown
 }
 
@@ -283,6 +284,18 @@ test_port_override() {
     check "plist uses the override"      plist_has "<string>--port=8200</string>"
   fi
   check "published on :8200"            calls_have "tailscale serve --bg --https=8200 http://127.0.0.1:8200"
+  teardown
+}
+
+test_pair_hint_uses_https_port() {
+  echo "• pair hint uses HTTPS_PORT when it differs from LOCAL_PORT"
+  setup
+  export LOCAL_PORT=8200 HTTPS_PORT=8300
+  run_deploy
+  check "exits zero"                       [ "$CODE" -eq 0 ]
+  check "published :8300 -> :8200"         calls_have "tailscale serve --bg --https=8300 http://127.0.0.1:8200"
+  check "hint passes the https port"       out_has "--tailscale --tailscale-serve-port 8300"
+  check "hint does not use the local port" out_lacks "--tailscale-serve-port 8200"
   teardown
 }
 
@@ -792,6 +805,7 @@ test_tarball_without_t3
 test_pin_by_version
 test_explicit_version_beats_env
 test_port_override
+test_pair_hint_uses_https_port
 test_env_wins_over_port
 test_local_port_change_cleans_stale_mapping
 test_refuses_443

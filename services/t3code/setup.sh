@@ -349,8 +349,8 @@ echo
 printf '\033[1;32mDone.\033[0m T3 Code is at \033[1m%s\033[0m (tailnet only).\n' "$PUBLIC_URL"
 echo
 echo "It orchestrates the agent CLIs on this box (claude, codex, cursor-agent,"
-echo "devin). First visit pairs this browser; other devices run 't3 pair'."
-echo "  $T3_BIN pair --base-dir $DATA_DIR   # mint a pairing link for another device"
+echo "devin). First visit pairs this browser; other devices run 't3 pair --tailscale'."
+echo "  $T3_BIN pair --base-dir $DATA_DIR --tailscale --tailscale-serve-port $HTTPS_PORT   # tailnet-reachable pairing link (5 min TTL)"
 echo
 echo "Manage it with:"
 if [ "$OS" = "Linux" ]; then

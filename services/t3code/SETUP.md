@@ -79,9 +79,13 @@ Upstream ships **no Intel-Mac build** — `Darwin/x86_64` is refused.
 - Open `https://<host>.<tailnet>.ts.net:8109/` in a tailnet browser. The
   first visit pairs it.
 - Another device: on the box run
-  `t3 pair --base-dir ~/services/t3code` — it prints a QR code / link
-  (5-minute TTL). The `--base-dir` must match the unit's or it will not
-  find the running server.
+  `~/.local/share/t3code/bin/t3 pair --base-dir ~/services/t3code
+  --tailscale --tailscale-serve-port 8109` — it prints a QR code / link
+  (5-minute TTL) whose URL is the tailnet HTTPS address, reachable from
+  any tailnet device. Without `--tailscale` the link points at
+  `127.0.0.1` and only works on the box itself. `--tailscale-serve-port`
+  must equal `HTTPS_PORT` in `.env` (default 8109). The `--base-dir` must
+  match the unit's or it will not find the running server.
 
 ## Ops
 
