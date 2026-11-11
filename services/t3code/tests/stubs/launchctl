@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# launchctl stub (used when the mocked suite runs on macOS, or under FAKE_OS):
+# logs every call and succeeds. $STATE_DIR/loaded.<label> exists while a
+# label is loaded: `bootstrap` creates it (label = the plist's basename),
+# `bootout` removes it, and `print` succeeds only while it exists.
+echo "launchctl $*" >> "$CALLS_LOG"
+[ -n "${STATE_DIR:-}" ] && [ -d "$STATE_DIR" ] || exit 0
+case "${1:-}" in
+  bootstrap) l="$(basename "${3:-}" .plist)"; [ -z "$l" ] || touch "$STATE_DIR/loaded.$l" ;;
+  bootout)   rm -f "$STATE_DIR/loaded.${2##*/}" ;;
+  print)     [ -f "$STATE_DIR/loaded.${2##*/}" ] || { echo "Could not find service" >&2; exit 113; } ;;
+esac
+exit 0

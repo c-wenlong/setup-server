@@ -114,6 +114,10 @@ PUBLISHED = [
     # /v1/status ({"ok": true}) is the hub's one unauthenticated route; "/"
     # is the static PWA, which would stay green with the API down.
     ("quiver-hub", 8477, "/v1/status"),
+    # "/" is the SPA shell (200): t3 has no unauthenticated health route
+    # (its /api/* sits behind pairing), so this proves the server answers,
+    # nothing more.
+    ("t3code", 8109, "/"),
     # /healthz ({"ok":true,"status":"live"}), not / — the gateway's own
     # unauthenticated health route. / would 403 whenever trustedProxies
     # changes, and everything deeper sits behind the gateway token.

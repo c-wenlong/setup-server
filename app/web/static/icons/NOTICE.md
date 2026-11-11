@@ -123,6 +123,12 @@ are used here only to identify the services. `hermes-agent.svg` ships the
 white app-icon plate for the light tile and upstream's own `#0d1117` plate for
 the dark tile.
 
+T3 Code has no mark in dashboard-icons or selfhst/icons either, so
+`t3code.png` is vendored from upstream itself: `client/icon-512x512.png` from
+the [pingdotgg/t3code](https://github.com/pingdotgg/t3code) `v0.1.8`
+`linux-x64` release bundle, used unmodified on both tile themes. Raster
+because upstream ships no vector original.
+
 ## Modifications
 
 1. **Light minification.** XML declarations, comments, `<metadata>`,

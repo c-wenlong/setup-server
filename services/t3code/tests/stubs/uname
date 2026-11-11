@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# uname stub: FAKE_OS overrides -s (Linux/Darwin branch tests on any host),
+# FAKE_ARCH overrides -m (e.g. arm64 for the Darwin/apple-silicon path).
+echo "uname $*" >> "$CALLS_LOG"
+case "${1:-}" in
+  -s) echo "${FAKE_OS:-$(/usr/bin/uname -s)}" ;;
+  -m) echo "${FAKE_ARCH:-$(/usr/bin/uname -m)}" ;;
+  *)  /usr/bin/uname "$@" ;;
+esac

@@ -104,7 +104,10 @@
     /* Kopifund's own sticker-set mark (app-icons/sticker/logo-square.svg in
        kopifund-finance): kopi bag + coin on a yellow plate, reads on both
        tile themes, so no -dark pair. */
-    'kopifund':      { file: 'kopifund' }
+    'kopifund':      { file: 'kopifund' },
+    /* T3 Code's own web-app icon (client/icon-512x512.png in the upstream
+       release bundle). Raster, no vector original; reads on both themes. */
+    't3code':        { file: 't3code',       ext: 'png' }
   };
 
   /* Spellings the registry might plausibly use for the same service. */
@@ -123,6 +126,8 @@
     'paperclip-ai': 'paperclip',
     'open-hands': 'openhands',
     'agent-canvas': 'openhands',
+    't3': 't3code',
+    't3-code': 't3code',
     'triggerdev': 'trigger-dev',
     'trigger.dev': 'trigger-dev',
     'open-maus-bot': 'openmausbot',
