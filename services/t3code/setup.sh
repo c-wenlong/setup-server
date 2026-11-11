@@ -128,6 +128,43 @@ require_numeric LOCAL_PORT HTTPS_PORT
 # Serve is one mapping per port: publishing over another service's HTTPS port
 # would silently take it down. Our own mapping (a re-run) is fine.
 SERVE_TARGET="http://127.0.0.1:$LOCAL_PORT"
+SERVE_STATUS="$("$TAILSCALE" serve status 2>/dev/null || true)"
+
+# A port change orphans the previous mapping: .env is write-once, so the
+# HTTPS/local pair we published last time is remembered in serve-map. When
+# it differs from the current pair, unpublish the old HTTPS port — but only
+# while every handler on it still proxies to the old loopback port (a
+# shared or repointed port is left alone, like teardown's rule).
+SERVE_MAP="$INSTALL_DIR/serve-map"
+if [ -f "$SERVE_MAP" ]; then
+  OLD_HTTPS=""; OLD_LOCAL=""
+  read -r OLD_HTTPS OLD_LOCAL < "$SERVE_MAP" || true
+  case "$OLD_HTTPS$OLD_LOCAL" in
+    ''|*[!0-9]*) OLD_HTTPS=""; OLD_LOCAL="" ;;
+  esac
+  if [ -n "$OLD_HTTPS" ] && [ -n "$OLD_LOCAL" ] \
+     && { [ "$OLD_HTTPS" != "$HTTPS_PORT" ] || [ "$OLD_LOCAL" != "$LOCAL_PORT" ]; }; then
+    OLD_TARGET="http://127.0.0.1:$OLD_LOCAL"
+    old_block="$(printf '%s\n' "$SERVE_STATUS" | awk -v hdr="https://$TS_HOST:$OLD_HTTPS " '
+      index($0, hdr) == 1 { inblk = 1; next }
+      /^https?:\/\// { inblk = 0 }
+      inblk')"
+    old_counts="$(printf '%s\n' "$old_block" | awk -v t="$OLD_TARGET" '
+      /\|-- / { n++; if ($NF == t) mine++ } END { print n+0, mine+0 }')"
+    old_n="${old_counts%% *}"; old_mine="${old_counts##* }"
+    if [ "$old_n" -gt 0 ] && [ "$old_mine" -eq "$old_n" ]; then
+      if "$TAILSCALE" serve --https="$OLD_HTTPS" off >/dev/null; then
+        ok "Removed the stale Serve mapping :$OLD_HTTPS -> $OLD_TARGET (ports moved)"
+      else
+        warn "Could not unpublish stale HTTPS :$OLD_HTTPS — run: tailscale serve --https=$OLD_HTTPS off"
+      fi
+    elif [ "$old_n" -gt 0 ]; then
+      warn "HTTPS :$OLD_HTTPS no longer points only at $OLD_TARGET — left alone (check tailscale serve status)."
+    fi
+  fi
+fi
+
+# Fresh read: the cleanup above may have just unpublished the stale mapping.
 existing="$("$TAILSCALE" serve status 2>/dev/null | awk -v hdr="https://$TS_HOST:$HTTPS_PORT " '
   index($0, hdr) == 1 { inblk = 1; next }
   /^https?:\/\// { inblk = 0 }
@@ -221,8 +258,8 @@ After=network.target
 
 [Service]
 Type=exec
-ExecStart=$T3_BIN serve --host=127.0.0.1 --port=$LOCAL_PORT --base-dir=$DATA_DIR
-Environment=PATH=$SVC_PATH
+ExecStart="$T3_BIN" serve "--host=127.0.0.1" "--port=$LOCAL_PORT" "--base-dir=$DATA_DIR"
+Environment="PATH=$SVC_PATH"
 Restart=always
 RestartSec=5
 
@@ -296,6 +333,9 @@ fi
 
 # ------------------------------------------------------- tailscale serve
 ts_serve_publish "$HTTPS_PORT" "$SERVE_TARGET"
+# Remember the pair we publish so a later port change can find and remove
+# the stale mapping (see the serve-map check above).
+printf '%s %s\n' "$HTTPS_PORT" "$LOCAL_PORT" > "$SERVE_MAP"
 
 # ------------------------------------------------------------ final check
 info "Verifying $PUBLIC_URL (the first request on a new port can take ~60s while the cert is minted)"

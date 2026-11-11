@@ -145,9 +145,9 @@ test_fresh_deploy() {
   check "data dir created"                      [ -d "$DATA" ]
   if [ "$OS" = "Linux" ]; then
     check "wrote systemd unit"                  [ -f "$UNIT" ]
-    check "unit runs t3 serve loopback-only"    unit_has "ExecStart=$INSTALL/bin/t3 serve --host=127.0.0.1 --port=8109 --base-dir=$DATA"
+    check "unit runs t3 serve loopback-only"    unit_has "ExecStart=\"$INSTALL/bin/t3\" serve \"--host=127.0.0.1\" \"--port=8109\" \"--base-dir=$DATA\""
     check "unit restarts always"                unit_has "Restart=always"
-    check "unit PATH puts install dirs first"   unit_has "Environment=PATH=$INSTALL/bin:"
+    check "unit PATH puts install dirs first"   unit_has "PATH=$INSTALL/bin:"
     check "enabled the unit"                    calls_have "systemctl --user enable t3code.service"
     check "restarted the unit"                  calls_have "systemctl --user restart t3code.service"
     check "enabled lingering via sudo"          calls_have "sudo loginctl enable-linger"
@@ -299,6 +299,21 @@ test_env_wins_over_port() {
   fi
   check "published :8109 not :9998"  calls_have "tailscale serve --bg --https=8109"
   check "never touched :9998"        no_call "https=9998"
+  teardown
+}
+
+test_local_port_change_cleans_stale_mapping() {
+  echo "• LOCAL_PORT change: the stale Serve mapping is removed, not treated as foreign"
+  setup
+  touch "$STATE_DIR/linger" "$STATE_DIR/operator"
+  run_deploy
+  sed -i 's/^LOCAL_PORT=8109/LOCAL_PORT=8200/' "$SVC/.env"
+  : > "$CALLS_LOG"
+  run_deploy
+  check "exits zero"                     [ "$CODE" -eq 0 ]
+  check "stale :8109 mapping removed"    calls_have "tailscale serve --https=8109 off"
+  check "republished :8109 -> :8200"     calls_have "tailscale serve --bg --https=8109 http://127.0.0.1:8200"
+  check "serve-map records the new pair" [ "$(cat "$INSTALL/serve-map" 2>/dev/null)" = "8109 8200" ]
   teardown
 }
 
@@ -470,6 +485,19 @@ test_teardown_safe() {
   check "re-run: nothing left to unpublish" out_has "already off"
   run_deploy
   check "./setup.sh brings it back"   [ "$CODE" -eq 0 ]
+  teardown
+}
+
+test_teardown_unpublishes_previous_port() {
+  echo "• teardown: a stale mapping on the previous local port also goes off"
+  deployed
+  sed -i 's/^LOCAL_PORT=8109/LOCAL_PORT=8200/' "$SVC/.env"
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"                [ "$CODE" -eq 0 ]
+  check "stale :8109 unpublished"   calls_have "tailscale serve --https=8109 off"
+  check "neighbour :2283 untouched" no_call "https=2283"
+  check "lookalike :18109 untouched" no_call "https=18109"
   teardown
 }
 
@@ -682,8 +710,10 @@ no_external_listener() {
 
   if command -v ss >/dev/null; then
     addrs="$(ss -ltnH "sport = :$port" 2>/dev/null | awk '{print $4}')"
-  else
+  elif command -v lsof >/dev/null; then
     addrs="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}')"
+  else
+    return 1   # cannot inspect listeners — fail loudly, not vacuously
   fi
   [ -n "$addrs" ] || return 0
 
@@ -736,8 +766,9 @@ test_live() {
     live_check "systemd service is active"        systemctl --user is-active t3code.service
     live_check "service is enabled at boot"       systemctl --user is-enabled t3code.service
     live_check "lingering is on (boot persist)"   sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
-    live_check "unit binds 127.0.0.1"             grep -q -- "--host=127.0.0.1 --port=$local_port" "$HOME/.config/systemd/user/t3code.service"
-    live_check "unit passes --base-dir"           grep -q -- "--base-dir=$HOME/services/t3code" "$HOME/.config/systemd/user/t3code.service"
+    live_check "unit binds 127.0.0.1"             grep -q -- '"--host=127.0.0.1"' "$HOME/.config/systemd/user/t3code.service"
+    live_check "unit uses the local port"         grep -q -- "\"--port=$local_port\"" "$HOME/.config/systemd/user/t3code.service"
+    live_check "unit passes --base-dir"           grep -q -- "\"--base-dir=$HOME/services/t3code\"" "$HOME/.config/systemd/user/t3code.service"
   else
     live_check "LaunchAgent is loaded"            launchctl print "gui/$(id -u)/com.setup-server.t3code"
   fi
@@ -762,6 +793,7 @@ test_pin_by_version
 test_explicit_version_beats_env
 test_port_override
 test_env_wins_over_port
+test_local_port_change_cleans_stale_mapping
 test_refuses_443
 test_serve_port_taken
 test_never_healthy
@@ -771,6 +803,7 @@ test_darwin_arm64
 test_fake_darwin_arm64
 test_fake_darwin_x86_64_refused
 test_teardown_safe
+test_teardown_unpublishes_previous_port
 test_teardown_custom_https_port
 test_teardown_not_published
 test_teardown_port_owned_by_someone_else

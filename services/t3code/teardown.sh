@@ -149,6 +149,20 @@ env_lint
 LOCAL_PORT="$(env_get LOCAL_PORT)"
 case "$LOCAL_PORT" in ''|*[!0-9]*) die "LOCAL_PORT in $ENV_FILE is missing or not numeric (got: $LOCAL_PORT)";; esac
 TARGET="http://127.0.0.1:$LOCAL_PORT"
+
+# setup.sh records the HTTPS/local pair it last published in serve-map. A
+# LOCAL_PORT change since then leaves a stale mapping proxying to the OLD
+# loopback port — which .env no longer names — so that target counts as
+# ours below too. Only used when it actually differs.
+OLD_TARGET=""
+if [ -f "$INSTALL_DIR/serve-map" ]; then
+  old_https=""; old_local=""
+  read -r old_https old_local < "$INSTALL_DIR/serve-map" || true
+  case "$old_local" in
+    ''|*[!0-9]*) ;;
+    *) [ "$old_local" != "$LOCAL_PORT" ] && OLD_TARGET="http://127.0.0.1:$old_local" ;;
+  esac
+fi
 ok "$NAME: local :$LOCAL_PORT"
 
 # The service is not a Compose stack, but the same guard runs in every
@@ -228,8 +242,8 @@ fi
 # what .env says was published (a re-run can publish a second port). A port
 # shared with another handler (e.g. :443 with the launcher's /home) is left
 # alone with a warning. Never `serve reset`.
-info "Unpublishing Tailscale Serve ports that point at $TARGET"
-SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
+info "Unpublishing Tailscale Serve ports that point at $TARGET${OLD_TARGET:+ or its previous $OLD_TARGET}"
+SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" -v t2="$OLD_TARGET" '
   function flush() {
     if (port != "") {
       if (n > 0 && mine == n) print "off " port
@@ -243,7 +257,7 @@ SERVE_PLAN="$(printf '%s\n' "$SERVE_STATUS" | awk -v t="$TARGET" '
     port = match(u, /:[0-9]+$/) ? substr(u, RSTART + 1) : "443"
     next
   }
-  port != "" && /\|-- / { n++; if (/ proxy / && $NF == t) mine++ }
+  port != "" && /\|-- / { n++; if (/ proxy / && ($NF == t || $NF == t2)) mine++ }
   END { flush() }')"
 unpublished=0
 kept=0

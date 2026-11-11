@@ -800,8 +800,8 @@
       "group": "ai",
       "icon": "terminal",
       "author": "pingdotgg",
-      "url": "https://HOST:8109/",
-      "health": "http://127.0.0.1:8109/",
+      "url": "https://HOST:{HTTPS_PORT|LOCAL_PORT:8109}/",
+      "health": "http://127.0.0.1:{LOCAL_PORT:8109}/",
       "marker": "~/services/t3code",
       "setup": "services/t3code/setup.sh",
       "env": "services/t3code/.env",
@@ -815,7 +815,7 @@
       },
       "login": [
         "No account sign-in — the tailnet is the boundary. Open the URL in a browser on the tailnet; the first visit pairs that browser.",
-        "To reach it from another device, mint a pair token on the box: `t3 pair --base-dir ~/services/t3code` prints a QR/link good for 5 minutes."
+        "To reach it from another device, mint a pair token on the box: `~/.local/share/t3code/bin/t3 pair --base-dir ~/services/t3code` prints a QR/link good for 5 minutes."
       ],
       "description": "T3 Code (t3.codes): the web control surface for coding agents — steer Claude Code, Codex, Cursor and friends running on this box from any tailnet browser. Upstream's self-contained `t3 serve` bundle under ~/.local/share/t3code, loopback-only behind Serve on :8109, state in ~/services/t3code. setup.sh tracks the newest GitHub release by default (T3_VERSION pins one)."
     },
