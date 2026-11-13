@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# tailscale stub. State lives in $STATE_DIR:
+#   backend_state       — override BackendState (default Running)
+#   operator            — exists => serve allowed without sudo
+#   serve_fails_left    — countdown of forced serve failures (approval-link flow)
+#   serve_status        — text `tailscale serve status` prints (teardown tests)
+#   serve_status_fails  — exists => `serve status` fails like a stopped daemon
+echo "tailscale $*" >> "$CALLS_LOG"
+
+if [ "$1" = "serve" ] && [ "${2:-}" = "status" ]; then
+  if [ -f "$STATE_DIR/serve_status_fails" ]; then
+    echo "failed to connect to local tailscaled" >&2
+    exit 1
+  fi
+  [ -f "$STATE_DIR/serve_status" ] && cat "$STATE_DIR/serve_status"
+  exit 0
+fi
+case " $* " in *" off "*) [ "$1" = "serve" ] && exit 0 ;; esac
+
+case "$1" in
+  status)
+    state="Running"
+    [ -f "$STATE_DIR/backend_state" ] && state="$(cat "$STATE_DIR/backend_state")"
+    cat <<EOF
+{
+  "BackendState": "$state",
+  "Self": {
+    "DNSName": "test-host.tailfake.ts.net."
+  }
+}
+EOF
+    ;;
+  serve)
+    if [ -f "$STATE_DIR/serve_fails_left" ]; then
+      left="$(cat "$STATE_DIR/serve_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/serve_fails_left"
+        echo "Serve is not enabled on your tailnet." >&2
+        echo "To enable, visit: https://login.tailscale.com/f/serve?node=FAKE" >&2
+        exit 1
+      fi
+    fi
+    # Operator gating is a Linux tailscaled concept; macOS has no operator.
+    if [ "$(uname -s)" != "Darwin" ] && [ ! -f "$STATE_DIR/operator" ]; then
+      echo "sending serve config: Access denied: serve config denied" >&2
+      exit 1
+    fi
+    echo "Serve started and running in the background."
+    ;;
+  set)
+    case "$2" in
+      --operator=*) touch "$STATE_DIR/operator" ;;
+    esac
+    ;;
+  *)
+    exit 0
+    ;;
+esac
