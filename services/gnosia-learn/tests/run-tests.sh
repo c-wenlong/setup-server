@@ -262,7 +262,7 @@ test_fresh_deploy() {
     check "no deploy timer (deployd)"   [ ! -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
     check "export timer written"        [ -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
     check "studio unit written"         [ -f "$HOME/.config/systemd/user/gnosia-learn-studio.service" ]
-    check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
+    check "studio runs node --import tsx" grep -q "node --import tsx services/studio/src/index.ts" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
     check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
     check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/gnosia-learn/studio" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
     check "app restarted"               calls_have "systemctl --user restart gnosia-learn"
@@ -274,6 +274,7 @@ test_fresh_deploy() {
   else
     check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist" ]
     check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist" ]
+    check "studio agent runs node tsx"  grep -q "services/studio/src/index.ts" "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
     check "no deploy agent (deployd)"   [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
     check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist" ]
     check "web agent gets GNOSIA_HOME"  grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
