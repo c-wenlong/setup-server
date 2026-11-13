@@ -450,6 +450,42 @@ EOF
   teardown
 }
 
+test_upgrade_rewrites_quoted_service_home() {
+  echo "• upgrade: a quoted SERVICE_HOME is rewritten, and the move follows it"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/gnosia-learn"
+  cat > "$SANDBOX/repo/services/gnosia-learn/.env" <<EOF
+SERVICE_HOME="$HOME/services/gnosia-learn"
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
+OWNER_PASSWORD=kept-password
+AUTH_SECRET=kept-secret-kept-secret-kept-secret
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+PUBLIC_URL=https://test-host.tailfake.ts.net:8107
+REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
+BRANCH=main
+STUDIO_ENABLED=0
+ASSET_FILES_ENABLED=1
+EOF
+  chmod 600 "$SANDBOX/repo/services/gnosia-learn/.env"
+  mkdir -p "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" \
+    "$HOME/services/gnosia-learn/studio" "$HOME/.gnosia"
+  echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
+  printf 'STUDIO_ENABLED=0 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
+    "$HOME/.gnosia" "$HOME/.gnosia/catalog.db" \
+    > "$HOME/services/gnosia-learn/state/env-sig"
+  run_deploy
+  check "service home unquoted"   env_has "SERVICE_HOME=$HOME/services/hermes-studio"
+  check "old path gone"           sh -c "! grep -q gnosia-learn '$SVC/.env'"
+  check "bootstrap moved"         [ -f "$HOME/services/hermes-studio/state/db-bootstrapped" ]
+  check "no re-seed"              no_call "npm run catalog -- import seed"
+  teardown
+}
+
 test_upgrade_lock_held_keeps_env() {
   echo "• upgrade: a live old lock refuses before SERVICE_HOME is rewritten"
   setup
@@ -546,6 +582,56 @@ test_upgrade_stops_old_units() {
     check "old studio plist gone" [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist" ]
     check "old export plist gone" [ ! -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
     check "old web booted out"    calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+  fi
+  teardown
+}
+
+test_upgrade_keeps_a_stopped_old_app() {
+  echo "• upgrade: a stopped old app is not started under the new name"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/gnosia-learn" \
+    "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" "$HOME/.gnosia" \
+    "$HOME/.config/systemd/user"
+  cat > "$SANDBOX/repo/services/gnosia-learn/.env" <<EOF
+SERVICE_HOME=$HOME/services/gnosia-learn
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
+OWNER_PASSWORD=kept-password
+AUTH_SECRET=kept-secret-kept-secret-kept-secret
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+PUBLIC_URL=https://test-host.tailfake.ts.net:8107
+REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
+BRANCH=main
+STUDIO_ENABLED=1
+ASSET_FILES_ENABLED=1
+EOF
+  chmod 600 "$SANDBOX/repo/services/gnosia-learn/.env"
+  echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
+  printf 'STUDIO_ENABLED=1 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
+    "$HOME/.gnosia" "$HOME/.gnosia/catalog.db" \
+    > "$HOME/services/gnosia-learn/state/env-sig"
+  if [ "$OS" = "Linux" ]; then
+    echo x > "$HOME/.config/systemd/user/gnosia-learn.service"
+    echo x > "$HOME/.config/systemd/user/gnosia-learn-studio.service"
+    # Unit files exist and the active markers do not: a clean stop.
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
+  fi
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "says it left it stopped" out_has "leaving it stopped"
+  if [ "$OS" = "Linux" ]; then
+    check "app not restarted"      no_call "systemctl --user restart hermes-studio$"
+    check "runner not restarted"   no_call "systemctl --user restart hermes-studio-runner"
+  else
+    check "agent not loaded"       no_call "launchctl bootstrap .*com.hermes-studio.web.plist"
+    check "runner not loaded"      no_call "launchctl bootstrap .*com.hermes-studio.studio.plist"
   fi
   teardown
 }
@@ -1282,6 +1368,8 @@ EOF
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
   check "agent bootstrapped"    calls_have "launchctl bootstrap"
+  check "old mac agent booted out" calls_have "com.gnosia-learn.seafile"
+  check "old mac plist removed"  calls_have "rm -f \"\$HOME/Library/LaunchAgents/\$label.plist\""
   teardown
 }
 
@@ -2536,9 +2624,11 @@ test_preflight_root
 test_fresh_deploy
 test_idempotent_rerun
 test_upgrade_imports_old_env
+test_upgrade_rewrites_quoted_service_home
 test_upgrade_lock_held_keeps_env
 test_upgrade_retries_move_after_rewrite
 test_upgrade_stops_old_units
+test_upgrade_keeps_a_stopped_old_app
 test_upgrade_carries_disabled_flag
 test_manual_setup_clears_disabled_flag
 test_migrate_removes_legacy_poller

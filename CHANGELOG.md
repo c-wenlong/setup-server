@@ -30,7 +30,12 @@ first, dated by merge.
   `state/`, `repo/`, `studio/` and `seafile/`. It takes the old deploy
   lock before it rewrites `SERVICE_HOME`, and a later run still moves
   those directories when `.env` already names the new home. A live pid
-  in the old lock refuses the run. deployd carries a
+  in the old lock refuses the run. A quoted `SERVICE_HOME` is rewritten
+  too. A stopped old app or runner stays stopped under the new unit
+  name. `sync.sh mac-setup` unloads the old Mac blob-sync agent before
+  loading the new one. The launcher's Remove accepts an install that
+  still lives at the old home, and teardown reads that home's `.env`
+  when the new file does not exist yet. deployd carries a
   pre-rename skip flag and poller tombstone onto the new key before it
   decides to deploy, so an app the owner removed stays removed. A carried
   override whose command is the old `setup.sh` is rewritten to the new

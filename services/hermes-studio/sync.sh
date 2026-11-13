@@ -705,7 +705,12 @@ EOF
 </dict>
 </plist>
 EOF
-    $SSH "$MAC_SSH" "launchctl bootout gui/\$(id -u)/com.hermes-studio.seafile 2>/dev/null; launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.hermes-studio.seafile.plist" \
+    # The previous pairing loaded com.gnosia-learn.seafile or
+    # com.self-learn.seafile against this same ccnet dir. Both agents
+    # use KeepAlive, so leaving the old one loaded makes the new daemon
+    # fail while seaf-cli list still answers through the old one.
+    # One remote command: unload the old labels, then load the new one.
+    $SSH "$MAC_SSH" "uid=\$(id -u); for label in com.self-learn.seafile com.gnosia-learn.seafile; do launchctl bootout \"gui/\$uid/\$label\" 2>/dev/null || true; launchctl disable \"gui/\$uid/\$label\" 2>/dev/null || true; rm -f \"\$HOME/Library/LaunchAgents/\$label.plist\"; done; launchctl bootout \"gui/\$uid/com.hermes-studio.seafile\" 2>/dev/null || true; launchctl bootstrap \"gui/\$uid\" \"\$HOME/Library/LaunchAgents/com.hermes-studio.seafile.plist\"" \
       || warn "LaunchAgent load failed — start the daemon by hand: $SEAF_DAEMON_MAC -c $MAC_HERMES_HOME/.seafile/ccnet -d $MAC_HERMES_HOME/.seafile/seafile-data -w $MAC_HERMES_HOME/.seafile/seafile"
     # The agent owns the daemon — no `seaf-cli start` here, or two daemons
     # fight over the same ccnet dir and KeepAlive retries forever. Pairing

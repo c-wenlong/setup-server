@@ -54,6 +54,20 @@ esac
 detect_os
 info "Preflight checks ($OS)"
 refuse_root
+# Git leaves an ignored .env in the old service directory when the
+# folder is renamed. setup.sh imports it, but Remove can run first, and
+# the launcher already treats that old home as installed. Read the old
+# file so teardown has a port and a SERVICE_HOME to trust.
+if [ ! -f "$ENV_FILE" ]; then
+  for old_env in "$SERVICE_DIR/../gnosia-learn/.env" \
+                 "$SERVICE_DIR/../self-learn/.env"; do
+    if [ -f "$old_env" ]; then
+      ENV_FILE="$old_env"
+      ok "Reading the existing config from $old_env"
+      break
+    fi
+  done
+fi
 [ -f "$ENV_FILE" ] || die "No $ENV_FILE — nothing here was deployed by setup.sh, so there is nothing to tear down (and no paths to trust)."
 [ "$OS" = "Linux" ] && { command -v systemctl >/dev/null || die "systemd is required on Linux."; }
 resolve_tailscale

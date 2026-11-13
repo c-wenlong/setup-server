@@ -195,18 +195,25 @@ if [ -f "$ENV_FILE" ] && python3 - "$ENV_FILE" "$HOME" <<'PY'
 import pathlib, sys
 path, home = sys.argv[1], sys.argv[2]
 text = pathlib.Path(path).read_text()
-old = ("SERVICE_HOME=%s/services/gnosia-learn" % home,
-       "SERVICE_HOME=%s/services/self-learn" % home)
+# Quotes are valid dotenv. SERVICE_HOME="/home/user/services/gnosia-learn"
+# is the same path as the bare form. Matching only the bare form leaves
+# the quoted line in place while the move below still takes state/.
+old_paths = ("%s/services/gnosia-learn" % home,
+             "%s/services/self-learn" % home)
 new = "SERVICE_HOME=%s/services/hermes-studio" % home
 out = []
 moved = False
 for line in text.splitlines(keepends=True):
     bare = line[:-1] if line.endswith("\n") else line
-    if bare in old:
-        out.append(new + ("\n" if line.endswith("\n") else ""))
-        moved = True
-    else:
-        out.append(line)
+    if bare.startswith("SERVICE_HOME="):
+        value = bare[len("SERVICE_HOME="):]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if value in old_paths:
+            out.append(new + ("\n" if line.endswith("\n") else ""))
+            moved = True
+            continue
+    out.append(line)
 if moved:
     pathlib.Path(path).write_text("".join(out))
 sys.exit(0 if moved else 1)
@@ -377,8 +384,31 @@ mkdir -p "$SERVICE_HOME/bin" "$SERVICE_HOME/state" "$HERMES_HOME/blobs" \
 APP_SHOULD_RUN=1
 STUDIO_SHOULD_RUN=1
 TORN_DOWN="$SERVICE_HOME/state/torn-down"
+# An upgrade has no hermes-studio unit yet. The owner's stop lives on the
+# unit this run is about to delete. Read that before stop_legacy_units.
+# A missing old unit is not a stop: the new name may already be the one
+# in use, and the check below still reads it.
 if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
   if [ "$OS" = "Linux" ]; then
+    for old_unit in gnosia-learn self-learn; do
+      if [ -f "$UNIT_DIR/$old_unit.service" ] \
+         && ! systemctl --user is-active --quiet "$old_unit" \
+         && ! systemctl --user is-failed --quiet "$old_unit"; then
+        APP_SHOULD_RUN=0
+      fi
+    done
+    # studio-flag-off still lives under the old home. The move has not
+    # run yet, so $SERVICE_HOME/state does not have it.
+    for old_unit in gnosia-learn-studio self-learn-studio; do
+      old_name="${old_unit%-studio}"
+      if [ -f "$UNIT_DIR/$old_unit.service" ] \
+         && ! systemctl --user is-active --quiet "$old_unit" \
+         && ! systemctl --user is-failed --quiet "$old_unit" \
+         && [ ! -f "$HOME/services/$old_name/state/studio-flag-off" ] \
+         && [ ! -f "$SERVICE_HOME/state/studio-flag-off" ]; then
+        STUDIO_SHOULD_RUN=0
+      fi
+    done
     if [ -f "$UNIT_DIR/hermes-studio.service" ] \
        && ! systemctl --user is-active --quiet hermes-studio \
        && ! systemctl --user is-failed --quiet hermes-studio; then
@@ -398,6 +428,23 @@ if [ -f "$SERVICE_HOME/state/built-sha" ] && [ ! -f "$TORN_DOWN" ]; then
       STUDIO_SHOULD_RUN=0
     fi
   else
+    # Same rule as Linux: the owner's stop is on the agent this run is
+    # about to boot out. A missing old plist is not a stop.
+    for old_label in com.gnosia-learn.web com.self-learn.web; do
+      if [ -f "$HOME/Library/LaunchAgents/$old_label.plist" ] \
+         && ! launchctl print "gui/$(id -u)/$old_label" >/dev/null 2>&1; then
+        APP_SHOULD_RUN=0
+      fi
+    done
+    for old_label in com.gnosia-learn.studio com.self-learn.studio; do
+      old_name="${old_label#com.}"; old_name="${old_name%.studio}"
+      if [ -f "$HOME/Library/LaunchAgents/$old_label.plist" ] \
+         && ! launchctl print "gui/$(id -u)/$old_label" >/dev/null 2>&1 \
+         && [ ! -f "$HOME/services/$old_name/state/studio-flag-off" ] \
+         && [ ! -f "$SERVICE_HOME/state/studio-flag-off" ]; then
+        STUDIO_SHOULD_RUN=0
+      fi
+    done
     if [ -f "$WEB_PLIST" ] \
        && ! launchctl print "gui/$(id -u)/com.hermes-studio.web" >/dev/null 2>&1; then
       APP_SHOULD_RUN=0

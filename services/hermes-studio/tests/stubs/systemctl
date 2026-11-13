@@ -3,6 +3,8 @@
 #   web_active / web_failed  — hermes-studio.service (is-active / is-failed)
 #   seaf_active              — hermes-studio-seafile.service
 #   studio_active            — hermes-studio-runner.service
+#   gnosia_web_active / self_web_active — the pre-rename app units
+#   gnosia_studio_active / self_studio_active — the pre-rename runners
 #   web_enabled / studio_enabled / seaf_enabled — enable/disable state
 # enable --now also marks the unit active; disable --now clears it.
 echo "systemctl $*" >> "$CALLS_LOG"
@@ -15,6 +17,10 @@ case "$unit" in
   hermes-studio)         marker=web_active;    failed_marker=web_failed ;;
   hermes-studio-seafile) marker=seaf_active;   failed_marker=seaf_failed ;;
   hermes-studio-runner)  marker=studio_active; failed_marker=studio_failed ;;
+  gnosia-learn)          marker=gnosia_web_active;    failed_marker=gnosia_web_failed ;;
+  self-learn)            marker=self_web_active;      failed_marker=self_web_failed ;;
+  gnosia-learn-studio)   marker=gnosia_studio_active; failed_marker=gnosia_studio_failed ;;
+  self-learn-studio)     marker=self_studio_active;   failed_marker=self_studio_failed ;;
 esac
 enabled_marker="${marker%_active}_enabled"
 

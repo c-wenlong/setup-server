@@ -5704,7 +5704,10 @@ def start_action(key, action):
                                    "TROUBLESHOOT.md)")
         health = resolve_health(svc)
         active = bool(health) and probe_all([health]).get(health, False)
-        if not ((active or marker_exists(svc.get("marker")))
+        # Same check the tile uses. A rename leaves the install at the
+        # old home, and installed_marker counts that. Checking only the
+        # new marker rejects Remove on a tile that already reads installed.
+        if not ((active or installed_marker(svc))
                 and not is_removed(load_receipt(key), active)):
             raise DeployError(409, "this service is not installed")
 

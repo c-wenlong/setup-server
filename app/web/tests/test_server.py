@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+from unittest.mock import patch
 import shutil
 import signal
 import subprocess
@@ -5919,6 +5920,31 @@ class DeployedAtTest(SandboxTest):
              "marker": "~/services/hermes-studio", "setup": None}]})
         tiles = server.services_payload()["services"]
         self.assertTrue(tiles[0]["installed"])
+
+    def test_remove_accepts_a_renamed_service_at_its_old_home(self):
+        # The tile counts the old home. Remove used to check only the new
+        # marker and answer 409 on a service the grid already calls installed.
+        old = os.path.expanduser("~/services/gnosia-learn")
+        os.makedirs(old)
+        self.addCleanup(shutil.rmtree, old, ignore_errors=True)
+        setup = os.path.join(self.repo, "services", "hermes-studio", "setup.sh")
+        os.makedirs(os.path.dirname(setup))
+        open(setup, "w").close()
+        open(os.path.join(os.path.dirname(setup), "teardown.sh"), "w").close()
+        self.write_registry({"services": [
+            {"key": "hermes-studio", "name": "Hermes", "tagline": "t",
+             "icon": "book", "url": None, "health": None,
+             "marker": "~/services/hermes-studio",
+             "setup": "services/hermes-studio/setup.sh",
+             "control": {"parts": [{"container": "hermes-studio"}]}}]})
+        # Queue, do not run. The action thread would exec the empty
+        # teardown.sh, and the sandbox treats an unstubbed subprocess as
+        # a leak. start_action raises before that when Remove rejects
+        # the old home.
+        with patch.object(server.threading, "Thread") as thread:
+            thread.return_value.start = lambda: None
+            job_id = server.start_action("hermes-studio", "remove")
+        self.assertTrue(job_id)
 
     def test_a_bad_marker_still_renders_the_grid(self):
         # The claim that actually matters, asserted end to end rather than on
