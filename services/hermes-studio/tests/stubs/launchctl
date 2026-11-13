@@ -13,8 +13,9 @@ echo "launchctl $*" >> "$CALLS_LOG"
 
 marker=web_active
 # The web label is com.hermes-studio.web, so "studio" alone is not the runner.
+# The word is space-padded, so each pattern needs that leading space too.
 case " ${*: -1} " in
-  *hermes-studio.studio*|*.studio.plist|*gnosia-learn.studio*|*self-learn.studio*) marker=studio_active ;;
+  *hermes-studio.studio*|*gnosia-learn.studio*|*self-learn.studio*) marker=studio_active ;;
 esac
 if [ -d "$STATE_DIR/launchd" ]; then
   last="${*: -1}"; last="${last##*/}"
