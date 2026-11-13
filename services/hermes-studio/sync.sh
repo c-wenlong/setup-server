@@ -538,6 +538,11 @@ cmd_install() {
   # Persist only once — the generated block is owned by install.
   if ! grep -q '^SEAFILE_SYNC_USER=' "$ENV_FILE" 2>/dev/null; then
     info "Persisting sync settings into .env"
+    # MAC_HERMES_HOME too. A later command treats a file that names
+    # MAC_SSH and no home as a pre-rename link and falls back to
+    # ~/.gnosia. Writing the home this install just chose keeps a fresh
+    # link on ~/.hermes. The value is written with quotes so a later
+    # source of this file does not expand the tilde on the server.
     ( umask 077
       cat >> "$ENV_FILE" <<EOF
 
@@ -548,6 +553,8 @@ SEAFILE_SYNC_PASSWORD=$SEAFILE_SYNC_PASSWORD
 SEAFILE_SYNC_REPO=$SEAFILE_SYNC_REPO
 MAC_SSH=$MAC_SSH
 EOF
+      # shellcheck disable=SC2088
+      printf "MAC_HERMES_HOME='%s'\n" "$MAC_HERMES_HOME" >> "$ENV_FILE"
     )
     chmod 600 "$ENV_FILE"
   fi

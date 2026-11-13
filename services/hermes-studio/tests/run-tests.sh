@@ -49,7 +49,7 @@ SERVICE_HOME=$HOME/services/gnosia-learn
 GNOSIA_HOME=$HOME/.gnosia
 CATALOG_DB=$HOME/.gnosia/catalog.db
 MAC_SSH=tester@mac.invalid
-NODE_BIN=/usr/bin
+NODE_BIN=$STUBS
 LOCAL_PORT=8107
 EOF
   chmod 600 "$SVC/.env"
@@ -65,7 +65,7 @@ SERVICE_HOME=$HOME/services/hermes-studio
 HERMES_HOME=$HOME/.hermes
 CATALOG_DB=$HOME/.hermes/catalog.db
 MAC_SSH=tester@mac.invalid
-NODE_BIN=/usr/bin
+NODE_BIN=$STUBS
 LOCAL_PORT=8107
 EOF
   chmod 600 "$SVC/.env"
@@ -81,7 +81,7 @@ mk_env_old() {
 SERVICE_HOME=$HOME/services/self-learn
 SELF_LEARN_HOME=$HOME/.self-learn
 MAC_SSH=tester@mac.invalid
-NODE_BIN=/usr/bin
+NODE_BIN=$STUBS
 LOCAL_PORT=8107
 EOF
   chmod 600 "$SVC/.env"
@@ -144,6 +144,8 @@ run_deploy_no_stdin() {
 }
 
 # Run the installed poller script directly (as the timer would).
+# deploy.sh puts NODE_BIN first. The baked value is $STUBS, so the stubs
+# stay ahead of the real git and npm.
 run_poll() {
   OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/hermes-studio/bin/deploy.sh" "$@" 2>&1)"
   CODE=$?
@@ -407,7 +409,7 @@ GNOSIA_HOME=$HOME/.gnosia
 CATALOG_DB=$HOME/.gnosia/catalog.db
 OWNER_PASSWORD=kept-password
 AUTH_SECRET=kept-secret-kept-secret-kept-secret
-NODE_BIN=/usr/bin
+NODE_BIN=$STUBS
 LOCAL_PORT=8107
 PUBLIC_URL=https://test-host.tailfake.ts.net:8107
 REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
@@ -420,7 +422,10 @@ EOF
   # the new directory, so this deploy is a first build of the imported
   # config, and it must not mint a second password or a second data root.
   mkdir -p "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
-    "$HOME/services/gnosia-learn/repo/apps/web/.next" "$HOME/.gnosia"
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" \
+    "$HOME/services/gnosia-learn/studio" "$HOME/services/gnosia-learn/seafile/ccnet" \
+    "$HOME/.gnosia"
+  echo '{"id":"job-1"}' > "$HOME/services/gnosia-learn/studio/job.json"
   echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
   echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
   printf 'STUDIO_ENABLED=0 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
@@ -437,6 +442,9 @@ EOF
   check "data root kept"          env_has "GNOSIA_HOME=$HOME/.gnosia"
   check "no fresh hermes root"    sh -c "! grep -q '^HERMES_HOME=' '$SVC/.env'"
   check "old data root kept"      [ -d "$HOME/.gnosia" ]
+  check "studio jobs moved"       [ -f "$HOME/services/hermes-studio/studio/job.json" ]
+  check "seafile dir moved"       [ -d "$HOME/services/hermes-studio/seafile/ccnet" ]
+  check "old studio left behind"  [ ! -e "$HOME/services/gnosia-learn/studio" ]
   check "no re-seed"              no_call "npm run catalog -- import seed"
   check "reports up to date"      out_has "up to date"
   teardown
@@ -465,7 +473,7 @@ test_upgrade_stops_old_units() {
     check "old app unit gone"     [ ! -f "$HOME/.config/systemd/user/gnosia-learn.service" ]
     check "old runner gone"       [ ! -f "$HOME/.config/systemd/user/gnosia-learn-studio.service" ]
     check "old export gone"       [ ! -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
-    check "old seafile gone"      [ ! -f "$HOME/.config/systemd/user/gnosia-learn-seafile.service" ]
+    check "old seafile kept"      [ -f "$HOME/.config/systemd/user/gnosia-learn-seafile.service" ]
     check "self-learn app gone"   [ ! -f "$HOME/.config/systemd/user/self-learn.service" ]
     check "old app disabled"      calls_have "systemctl --user disable --now gnosia-learn"
     check "stopped before start"  before "disable --now gnosia-learn" "systemctl --user restart hermes-studio"

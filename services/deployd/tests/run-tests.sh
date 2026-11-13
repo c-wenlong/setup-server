@@ -618,6 +618,25 @@ EOF
   teardown
 }
 
+test_poll_rewrites_renamed_cmd() {
+  echo "• poll: a carried override whose cmd is the old setup.sh gets the new path"
+  setup
+  rm -f "$REPO/services/svc-a/app.json"
+  mkdir -p "$REPO/services/hermes-studio"
+  cat > "$REPO/services/hermes-studio/app.json" <<EOF
+{"key":"hermes-studio","deploy":{"repo":"https://a.invalid/repo.git","ref":"main","cmd":"services/hermes-studio/setup.sh"}}
+EOF
+  mkdir -p "$DSTATE"
+  printf '%s\n' '{"pollers":{"gnosia-learn":{"repo":"https://a.invalid/repo.git","ref":"beta","cmd":"services/gnosia-learn/setup.sh"}}}' \
+    > "$DSTATE/pollers.json"
+  run_poll --status
+  check "status clean"            [ "$CODE" -eq 0 ]
+  check "cmd rewritten"           grep -q 'services/hermes-studio/setup.sh' "$DSTATE/pollers.json"
+  check "old cmd gone"            sh -c "! grep -q gnosia-learn '$DSTATE/pollers.json'"
+  check "ref kept"                grep -q '"beta"' "$DSTATE/pollers.json"
+  teardown
+}
+
 test_poll_disabled() {
   echo "• poll: a .disabled flag skips the service, blocks --force, shows in --status"
   setup
@@ -919,6 +938,7 @@ for t in \
   test_poll_force_and_status \
   test_poll_carries_renamed_skip \
   test_poll_carries_renamed_tombstone \
+  test_poll_rewrites_renamed_cmd \
   test_poll_disabled \
   test_poll_overrides \
   test_teardown \

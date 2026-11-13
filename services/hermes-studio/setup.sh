@@ -75,7 +75,12 @@ fi
 # would reinstall an app the owner already removed. A manual ./setup.sh
 # is the opt-in. deployd sets DEPLOY_SHA; a hand run does not.
 if [ -z "${DEPLOY_SHA:-}" ]; then
-  rm -f "$DEPLOYD_HOME/state/hermes-studio.disabled"
+  # All three names. A hand run that clears only the new flag leaves the
+  # old one for deployd's next carry, which then moves it back onto
+  # hermes-studio and disables the app this run just opted into.
+  rm -f "$DEPLOYD_HOME/state/hermes-studio.disabled" \
+        "$DEPLOYD_HOME/state/gnosia-learn.disabled" \
+        "$DEPLOYD_HOME/state/self-learn.disabled"
 fi
 
 # A re-run (e.g. under deployd, whose PATH is minimal) finds node where the
@@ -186,12 +191,36 @@ then
   for old_home in "$HOME/services/gnosia-learn" "$HOME/services/self-learn"; do
     [ -d "$old_home" ] || continue
     mkdir -p "$HOME/services/hermes-studio"
-    if [ -d "$old_home/state" ] && [ ! -d "$HOME/services/hermes-studio/state" ]; then
-      mv "$old_home/state" "$HOME/services/hermes-studio/state"
+    # Hold the old deploy lock for the move. deploy.sh and sync.sh take
+    # $SERVICE_HOME/.deploy.lock, and an old process still holds the one
+    # under this directory. Moving the checkout out from under it lets
+    # both commands write the same catalog.
+    old_lock="$old_home/.deploy.lock"
+    if [ -d "$old_lock" ]; then
+      old_owner="$(cat "$old_lock/pid" 2>/dev/null || true)"
+      if [ -n "$old_owner" ] && kill -0 "$old_owner" 2>/dev/null; then
+        die "A deploy is still running under $old_home (pid $old_owner). Wait for it, then re-run setup.sh."
+      fi
+      # A leftover dir with no live pid is a crash, not a holder.
+      # deploy.sh reclaims the same case. Leaving it would make mkdir
+      # fail and the move would never start.
+      rm -rf "$old_lock"
     fi
-    if [ -d "$old_home/repo" ] && [ ! -d "$HOME/services/hermes-studio/repo" ]; then
-      mv "$old_home/repo" "$HOME/services/hermes-studio/repo"
+    if ! mkdir "$old_lock" 2>/dev/null; then
+      die "Could not take the deploy lock under $old_home. Wait, then re-run setup.sh."
     fi
+    echo $$ > "$old_lock/pid"
+    # studio/ holds saved job workspaces. The new runner reads
+    # $SERVICE_HOME/studio, so leaving it behind hides those jobs.
+    # seafile/ is the blob-sync daemon's ccnet dir. setup.sh stops the
+    # old unit and does not start the new one (sync.sh install does),
+    # so the directory moves with the rest and the next install finds it.
+    for part in state repo studio seafile; do
+      if [ -d "$old_home/$part" ] && [ ! -e "$HOME/services/hermes-studio/$part" ]; then
+        mv "$old_home/$part" "$HOME/services/hermes-studio/$part"
+      fi
+    done
+    rm -rf "$old_lock"
     ok "Moved deploy state from $old_home"
   done
 fi
@@ -525,17 +554,21 @@ EOF
 fi
 
 # ------------------------------------------------- legacy unit retirement
-# The renamed units bind the same ports and, on an upgraded .env, the same
-# Seafile config directory. Stop the old app, runner, export and blob-sync
-# units before the new ones start, or the old process keeps the port and
-# the health check while the new unit fails to bind. The deploy poller is
-# the exception: it stays until deployd is installed to take over.
+# The renamed units bind the same ports. Stop the old app, runner and
+# export before the new ones start, or the old process keeps the port
+# and the health check while the new unit fails to bind. The blob-sync
+# unit is the other exception: sync.sh install is what replaces it, and
+# it stops the old daemon itself. The deploy poller stays until deployd
+# is installed to take over.
 stop_legacy_units() {
   if [ "$OS" = "Linux" ]; then
     local n stopped=0
     for n in self-learn gnosia-learn; do
+      # The blob-sync unit stays. setup.sh does not install its
+      # replacement (sync.sh install does), so disabling it here would
+      # leave an existing link off until someone runs that by hand.
       for u in "$n.service" "$n-studio.service" "$n-export.service" \
-               "$n-export.timer" "$n-seafile.service"; do
+               "$n-export.timer"; do
         if [ -f "$UNIT_DIR/$u" ] || systemctl --user is-active --quiet "${u%.service}" 2>/dev/null; then
           systemctl --user disable --now "${u%.service}" >/dev/null 2>&1 || true
           rm -f "$UNIT_DIR/$u"
@@ -547,13 +580,12 @@ stop_legacy_units() {
     # would be this function's status. set -e would then exit before deploy.
     if [ "$stopped" = "1" ]; then
       systemctl --user daemon-reload
-      ok "Stopped the pre-rename app, runner, export and blob-sync units"
+      ok "Stopped the pre-rename app, runner and export units"
     fi
   else
     local label
     for label in com.self-learn.web com.self-learn.studio com.self-learn.export \
-                 com.gnosia-learn.web com.gnosia-learn.studio com.gnosia-learn.export \
-                 com.gnosia-learn.seafile com.self-learn.seafile; do
+                 com.gnosia-learn.web com.gnosia-learn.studio com.gnosia-learn.export; do
       launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
       launchctl disable "gui/$(id -u)/$label" 2>/dev/null || true
       if [ -f "$HOME/Library/LaunchAgents/$label.plist" ]; then

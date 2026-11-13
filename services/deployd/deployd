@@ -53,6 +53,7 @@
 import json
 import os
 import re
+import tempfile
 import shlex
 import signal
 import subprocess
@@ -333,6 +334,15 @@ RENAMED_KEYS = {
     "hermes-studio": ("gnosia-learn", "self-learn"),
 }
 
+# A launcher override that only changed the ref still stores the cmd the
+# manifest had at the time. After the service directory moved, that cmd
+# names a script that no longer exists. Rewrite only that known path.
+# Any other cmd was typed by hand and stays.
+RENAMED_CMDS = {
+    "services/gnosia-learn/setup.sh": "services/hermes-studio/setup.sh",
+    "services/self-learn/setup.sh": "services/hermes-studio/setup.sh",
+}
+
 
 def carry_renamed_state(state_dir):
     """Move a previous key's skip flag and poller tombstone onto the new key.
@@ -381,19 +391,39 @@ def carry_renamed_state(state_dir):
             if old not in pollers:
                 continue
             if new not in pollers:
-                pollers[new] = pollers.pop(old)
+                spec = pollers.pop(old)
+                cmd = spec.get("cmd") if isinstance(spec, dict) else None
+                if cmd in RENAMED_CMDS:
+                    spec = dict(spec)
+                    spec["cmd"] = RENAMED_CMDS[cmd]
+                pollers[new] = spec
                 log("carried %s poller choice onto %s" % (old, new))
             else:
                 pollers.pop(old, None)
             changed = True
     if not changed:
         return
+    # Replace, do not truncate. A reader that opens the file mid-write
+    # would see a partial document and ignore every saved removal.
+    directory = os.path.dirname(path) or "."
+    tmp = None
     try:
-        with open(path, "w") as fh:
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".pollers.", suffix=".tmp")
+        with os.fdopen(fd, "w") as fh:
             json.dump(data, fh)
             fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        tmp = None
     except OSError as e:
         warn("cannot rewrite %s: %s" % (path, e))
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def read_sha(path):

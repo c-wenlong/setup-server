@@ -45,13 +45,10 @@ HERMES_HOME="${HERMES_HOME:-${GNOSIA_HOME:-${SELF_LEARN_HOME:-}}}"
 [ -n "$HERMES_HOME" ] || { echo "HERMES_HOME missing from $ENV_FILE (an older .env names the data root GNOSIA_HOME or SELF_LEARN_HOME)" >&2; exit 1; }
 CATALOG_DB="${CATALOG_DB:-$HERMES_HOME/catalog.db}"
 
-# systemd/launchd PATH won't include a nix/nvm/brew node — use the baked path.
-# Keep a directory the caller already put first: setup.sh's own tests prepend
-# a stub bin, and dropping it makes this script call the real git.
-case ":$PATH:" in
-  *":$NODE_BIN:"*) ;;
-  *) PATH="$NODE_BIN:$PATH" ;;
-esac
+# systemd/launchd PATH won't include a nix/nvm/brew node — use the baked path,
+# and put it first. A caller that already has an older node earlier on PATH
+# would otherwise run bare `npm` against that one.
+PATH="$NODE_BIN:$PATH"
 export PATH
 export GIT_TERMINAL_PROMPT=0   # fail loudly instead of hanging on a prompt
 
