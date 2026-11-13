@@ -46,7 +46,13 @@ HERMES_HOME="${HERMES_HOME:-${GNOSIA_HOME:-${SELF_LEARN_HOME:-}}}"
 CATALOG_DB="${CATALOG_DB:-$HERMES_HOME/catalog.db}"
 
 # systemd/launchd PATH won't include a nix/nvm/brew node — use the baked path.
-export PATH="$NODE_BIN:$PATH"
+# Keep a directory the caller already put first: setup.sh's own tests prepend
+# a stub bin, and dropping it makes this script call the real git.
+case ":$PATH:" in
+  *":$NODE_BIN:"*) ;;
+  *) PATH="$NODE_BIN:$PATH" ;;
+esac
+export PATH
 export GIT_TERMINAL_PROMPT=0   # fail loudly instead of hanging on a prompt
 
 OS="$(uname -s)"

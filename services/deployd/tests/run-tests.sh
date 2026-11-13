@@ -575,6 +575,49 @@ test_poll_force_and_status() {
   teardown
 }
 
+test_poll_carries_renamed_skip() {
+  echo "• poll: a skip flag under a previous key stays a skip under the new key"
+  setup
+  # The fixture's svc-a stands in for the renamed service: deployd's map
+  # only knows hermes-studio, so give the fixture that key for this one test.
+  # Rename the directory too. scan_entries falls back to the directory
+  # name when it wants a key, and a leftover svc-a manifest would deploy
+  # under that name and never see the flag this test just carried.
+  rm -f "$REPO/services/svc-a/app.json"
+  mkdir -p "$REPO/services/hermes-studio"
+  cat > "$REPO/services/hermes-studio/app.json" <<EOF
+{"key":"hermes-studio","deploy":{"repo":"https://a.invalid/repo.git","ref":"main","cmd":"services/svc-a/deploy.sh"}}
+EOF
+  mkdir -p "$DSTATE"
+  touch "$DSTATE/gnosia-learn.disabled"
+  run_poll
+  check "tick clean"              [ "$CODE" -eq 0 ]
+  check "skip explained"          out_has "hermes-studio: disabled"
+  check "old flag moved"          [ -f "$DSTATE/hermes-studio.disabled" ]
+  check "old flag gone"           [ ! -f "$DSTATE/gnosia-learn.disabled" ]
+  check "no deploy ran"           no_call "DEPLOY svc-a"
+  teardown
+}
+
+test_poll_carries_renamed_tombstone() {
+  echo "• poll: a poller tombstone under a previous key suppresses the new key"
+  setup
+  rm -f "$REPO/services/svc-a/app.json"
+  mkdir -p "$REPO/services/hermes-studio"
+  cat > "$REPO/services/hermes-studio/app.json" <<EOF
+{"key":"hermes-studio","deploy":{"repo":"https://a.invalid/repo.git","ref":"main","cmd":"services/svc-a/deploy.sh"}}
+EOF
+  mkdir -p "$DSTATE"
+  printf '%s\n' '{"pollers":{"gnosia-learn":{"enabled":false}}}' \
+    > "$DSTATE/pollers.json"
+  run_poll
+  check "tick clean"              [ "$CODE" -eq 0 ]
+  check "no deploy ran"           no_call "DEPLOY svc-a"
+  check "poller key moved"        grep -q '"hermes-studio"' "$DSTATE/pollers.json"
+  check "old poller key gone"     sh -c "! grep -q gnosia-learn '$DSTATE/pollers.json'"
+  teardown
+}
+
 test_poll_disabled() {
   echo "• poll: a .disabled flag skips the service, blocks --force, shows in --status"
   setup
@@ -874,6 +917,8 @@ for t in \
   test_poll_pull_failure_keeps_going \
   test_poll_lock \
   test_poll_force_and_status \
+  test_poll_carries_renamed_skip \
+  test_poll_carries_renamed_tombstone \
   test_poll_disabled \
   test_poll_overrides \
   test_teardown \

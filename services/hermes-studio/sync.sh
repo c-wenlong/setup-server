@@ -124,7 +124,28 @@ MAC_USER="${MAC_SSH%%@*}"
 # The Mac's data root: catalog.db, blobs/ and the checkout all live under
 # it. `~/.hermes` expands on the Mac side, resolved over ssh (see
 # resolve_mac_paths) so scp and remote commands always see absolute paths.
-MAC_HERMES_HOME="${MAC_HERMES_HOME:-~/.hermes}"
+# An .env written before the rename saved MAC_GNOSIA_HOME or
+# MAC_SELF_LEARN_HOME, or saved only MAC_SSH and left the path derived
+# as ~/.gnosia. Keep that path. ~/.hermes is the default only when this
+# file has never named a Mac at all.
+MAC_GNOSIA_HOME="${MAC_GNOSIA_HOME:-}"
+MAC_SELF_LEARN_HOME="${MAC_SELF_LEARN_HOME:-}"
+if [ -z "${MAC_HERMES_HOME:-}" ]; then
+  # An explicit old key wins, even when MAC_SSH is also set. A key that
+  # is present but empty was written by an install that derived the path,
+  # so it keeps the pre-rename default too. MAC_SSH alone, with no home
+  # key at all, is the same derived link. No Mac key of any kind is a
+  # fresh link and takes ~/.hermes.
+  if [ -n "$MAC_GNOSIA_HOME" ] || [ -n "$MAC_SELF_LEARN_HOME" ]; then
+    MAC_HERMES_HOME="${MAC_GNOSIA_HOME:-$MAC_SELF_LEARN_HOME}"
+  elif grep -qE '^MAC_(GNOSIA_HOME|SELF_LEARN_HOME)=' "$ENV_FILE"; then
+    MAC_HERMES_HOME="~/.gnosia"
+  elif grep -qE '^MAC_(SSH|REPO|DB_FILE)=' "$ENV_FILE"; then
+    MAC_HERMES_HOME="~/.gnosia"
+  else
+    MAC_HERMES_HOME="~/.hermes"
+  fi
+fi
 MAC_REPO="${MAC_REPO:-}"                  # default: $MAC_HERMES_HOME/checkout
 MAC_DB_FILE="${MAC_DB_FILE:-}"            # default: $MAC_HERMES_HOME/catalog.db
 # nix-installed node/npm are not on a bare ssh PATH
@@ -558,6 +579,18 @@ RestartSec=10
 [Install]
 WantedBy=default.target
 EOF
+  systemctl --user daemon-reload
+  # The renamed unit may share ccnet with the unit it replaces. Stop that
+  # one first, or two daemons own the same directory and `seaf-cli list`
+  # can succeed against the old one while the new unit restarts.
+  for old in self-learn-seafile gnosia-learn-seafile; do
+    if [ -f "$HOME/.config/systemd/user/$old.service" ] \
+       || systemctl --user is-active --quiet "$old" 2>/dev/null; then
+      systemctl --user disable --now "$old" >/dev/null 2>&1 || true
+      rm -f "$HOME/.config/systemd/user/$old.service"
+      ok "Stopped the pre-rename blob-sync unit $old"
+    fi
+  done
   systemctl --user daemon-reload
   # restart, not enable --now: an older unit left active (the oneshot shape
   # that predates this daemon) would survive enable --now untouched.

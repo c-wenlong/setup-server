@@ -209,7 +209,7 @@ docker start self-learn-db   # no-op if it is already running
 set -a; . services/hermes-studio/.env; set +a   # POSTGRES_USER, _PASSWORD, _DB, PG_PORT
 # a pre-rename .env names only SELF_LEARN_HOME — derive the catalog path
 # the way setup.sh does so the port lands where the app actually reads it
-HERMES_HOME="${HERMES_HOME:-$SELF_LEARN_HOME}"
+HERMES_HOME="${HERMES_HOME:-${GNOSIA_HOME:-${SELF_LEARN_HOME:-}}}"
 CATALOG_DB="${CATALOG_DB:-$HERMES_HOME/catalog.db}"
 cd ~/services/hermes-studio/repo
 node services/catalog/scripts/pg-to-sqlite.mjs \

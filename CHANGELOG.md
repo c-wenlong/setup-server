@@ -24,6 +24,17 @@ first, dated by merge.
   Old deploy pollers (`self-learn`, `gnosia-learn`, `hermes-studio`) are
   removed once deployd is installed. Kuma re-keys `self-learn*`,
   `gnosia-learn` and `gnosia-learn-studio` onto the new monitor names.
+  An upgrade also imports the ignored `.env` from the old service
+  directory and points `SERVICE_HOME` at `~/services/hermes-studio`,
+  leaving the data root where that file already named it. deployd carries
+  a pre-rename skip flag and poller tombstone onto the new key before it
+  decides to deploy, so an app the owner removed stays removed. A manual
+  `./setup.sh` is what clears that flag. Setup also stops the old app,
+  runner, export and blob-sync units before the new ones start. Sync
+  keeps an existing Mac path (`MAC_GNOSIA_HOME`, `MAC_SELF_LEARN_HOME`,
+  or the `~/.gnosia` default an older link derived from `MAC_SSH` alone). Teardown accepts those old service
+  homes, and a launcher stop pauses the old Kuma monitor until monitoring
+  setup re-keys it.
 
 ### Added
 

@@ -65,10 +65,14 @@ if [ -f "$SERVICE_DIR/../deployd/.env" ]; then
   [ -n "$d" ] && DEPLOYD_HOME="$d"
 fi
 
-# A manual ./setup.sh re-installs the service: clear deployd's disabled
-# flag (written by teardown.sh) so auto-deploy resumes. deployd itself
-# never invokes this while the flag is set, so clearing is always manual.
-rm -f "$DEPLOYD_HOME/state/hermes-studio.disabled"
+# deployd carries a pre-rename skip flag onto hermes-studio before it
+# decides to deploy (services/deployd/deployd, carry_renamed_state). This
+# script does not repeat that: a deployd-driven run that cleared the flag
+# would reinstall an app the owner already removed. A manual ./setup.sh
+# is the opt-in. deployd sets DEPLOY_SHA; a hand run does not.
+if [ -z "${DEPLOY_SHA:-}" ]; then
+  rm -f "$DEPLOYD_HOME/state/hermes-studio.disabled"
+fi
 
 # A re-run (e.g. under deployd, whose PATH is minimal) finds node where the
 # first install recorded it in .env — put that dir on PATH ahead of any
@@ -132,6 +136,61 @@ host="$(tailnet_host)"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 
 # ---------------------------------------------------------------- .env
+# Git does not move an ignored .env when the service directory is renamed,
+# so an ordinary upgrade still has the old file beside this checkout.
+# Import it before the fresh-install branch, or this run would mint a new
+# password and a new catalog under ~/.hermes and never see the live one.
+for old_env in "$SERVICE_DIR/../gnosia-learn/.env" \
+               "$SERVICE_DIR/../self-learn/.env"; do
+  if [ ! -f "$ENV_FILE" ] && [ -f "$old_env" ]; then
+    cp -p "$old_env" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    ok "Imported the existing config from $old_env"
+  fi
+done
+# The imported file still names the old service directory. setup.sh now
+# lives in services/hermes-studio, so SERVICE_HOME has to follow or the
+# deploy looks for build state under the directory git left behind.
+# Python, not sed: $HOME in the test harness contains a newline, and a
+# sed replacement that includes it dies under pipefail.
+if [ -f "$ENV_FILE" ] && python3 - "$ENV_FILE" "$HOME" <<'PY'
+import pathlib, sys
+path, home = sys.argv[1], sys.argv[2]
+text = pathlib.Path(path).read_text()
+old = ("SERVICE_HOME=%s/services/gnosia-learn" % home,
+       "SERVICE_HOME=%s/services/self-learn" % home)
+new = "SERVICE_HOME=%s/services/hermes-studio" % home
+out = []
+moved = False
+for line in text.splitlines(keepends=True):
+    bare = line[:-1] if line.endswith("\n") else line
+    if bare in old:
+        out.append(new + ("\n" if line.endswith("\n") else ""))
+        moved = True
+    else:
+        out.append(line)
+if moved:
+    pathlib.Path(path).write_text("".join(out))
+sys.exit(0 if moved else 1)
+PY
+then
+  chmod 600 "$ENV_FILE"
+  ok "Pointed SERVICE_HOME at $HOME/services/hermes-studio"
+  # The imported file's old directory still holds the bootstrap marker and
+  # the built checkout. Leave them behind and the new home looks like a
+  # first install: setup reseeds the catalog and rebuilds from scratch.
+  for old_home in "$HOME/services/gnosia-learn" "$HOME/services/self-learn"; do
+    [ -d "$old_home" ] || continue
+    mkdir -p "$HOME/services/hermes-studio"
+    if [ -d "$old_home/state" ] && [ ! -d "$HOME/services/hermes-studio/state" ]; then
+      mv "$old_home/state" "$HOME/services/hermes-studio/state"
+    fi
+    if [ -d "$old_home/repo" ] && [ ! -d "$HOME/services/hermes-studio/repo" ]; then
+      mv "$old_home/repo" "$HOME/services/hermes-studio/repo"
+    fi
+    ok "Moved deploy state from $old_home"
+  done
+fi
 if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
 else
@@ -461,7 +520,43 @@ EOF
   chmod 600 "$HOME/Library/LaunchAgents/com.hermes-studio.export.plist"  # names .env-derived paths
 fi
 
-# ------------------------------------------------- legacy poller removal
+# ------------------------------------------------- legacy unit retirement
+# The renamed units bind the same ports and, on an upgraded .env, the same
+# Seafile config directory. Stop the old app, runner, export and blob-sync
+# units before the new ones start, or the old process keeps the port and
+# the health check while the new unit fails to bind. The deploy poller is
+# the exception: it stays until deployd is installed to take over.
+stop_legacy_units() {
+  if [ "$OS" = "Linux" ]; then
+    local n stopped=0
+    for n in self-learn gnosia-learn; do
+      for u in "$n.service" "$n-studio.service" "$n-export.service" \
+               "$n-export.timer" "$n-seafile.service"; do
+        if [ -f "$UNIT_DIR/$u" ] || systemctl --user is-active --quiet "${u%.service}" 2>/dev/null; then
+          systemctl --user disable --now "${u%.service}" >/dev/null 2>&1 || true
+          rm -f "$UNIT_DIR/$u"
+          stopped=1
+        fi
+      done
+    done
+    [ "$stopped" = "1" ] && systemctl --user daemon-reload
+    [ "$stopped" = "1" ] && ok "Stopped the pre-rename app, runner, export and blob-sync units"
+  else
+    local label
+    for label in com.self-learn.web com.self-learn.studio com.self-learn.export \
+                 com.gnosia-learn.web com.gnosia-learn.studio com.gnosia-learn.export \
+                 com.gnosia-learn.seafile com.self-learn.seafile; do
+      launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+      launchctl disable "gui/$(id -u)/$label" 2>/dev/null || true
+      if [ -f "$HOME/Library/LaunchAgents/$label.plist" ]; then
+        rm -f "$HOME/Library/LaunchAgents/$label.plist"
+        ok "Removed the $label LaunchAgent"
+      fi
+    done
+  fi
+}
+stop_legacy_units
+
 # deployd (services/deployd) polls the remote and re-runs this script now;
 # a host installed before the migration still has the per-service deploy
 # timer or LaunchAgent — under either name (the service was self-learn

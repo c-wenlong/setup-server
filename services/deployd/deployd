@@ -325,6 +325,77 @@ def disabled_path(state_dir, key):
     return os.path.join(state_dir, safe + ".disabled")
 
 
+# A renamed service keeps its skip flag and poller tombstone under the
+# previous key until something moves them. setup.sh cannot do it: deployd
+# has already decided to run that script by the time it starts, and the
+# script's own clear would undo the skip. Carry before the disabled check.
+RENAMED_KEYS = {
+    "hermes-studio": ("gnosia-learn", "self-learn"),
+}
+
+
+def carry_renamed_state(state_dir):
+    """Move a previous key's skip flag and poller tombstone onto the new key.
+
+    A flag that already exists on the new key wins. A poller entry that
+    already exists on the new key wins, and the old key is dropped. A
+    missing state dir, or a pollers.json this function cannot parse, is
+    left alone: the tick warns on a bad file later rather than rewriting it.
+    """
+    if not os.path.isdir(state_dir):
+        return
+    for new, olds in RENAMED_KEYS.items():
+        new_flag = disabled_path(state_dir, new)
+        if not os.path.exists(new_flag):
+            for old in olds:
+                old_flag = disabled_path(state_dir, old)
+                if os.path.exists(old_flag):
+                    try:
+                        os.rename(old_flag, new_flag)
+                        log("carried %s skip flag onto %s" % (old, new))
+                    except OSError as e:
+                        warn("cannot carry %s skip flag: %s" % (old, e))
+                    break
+        else:
+            for old in olds:
+                old_flag = disabled_path(state_dir, old)
+                if os.path.exists(old_flag):
+                    try:
+                        os.remove(old_flag)
+                    except OSError as e:
+                        warn("cannot drop old %s skip flag: %s" % (old, e))
+    path = os.path.join(state_dir, "pollers.json")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return
+    pollers = data.get("pollers") if isinstance(data, dict) else None
+    if not isinstance(pollers, dict):
+        return
+    changed = False
+    for new, olds in RENAMED_KEYS.items():
+        for old in olds:
+            if old not in pollers:
+                continue
+            if new not in pollers:
+                pollers[new] = pollers.pop(old)
+                log("carried %s poller choice onto %s" % (old, new))
+            else:
+                pollers.pop(old, None)
+            changed = True
+    if not changed:
+        return
+    try:
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+            fh.write("\n")
+    except OSError as e:
+        warn("cannot rewrite %s: %s" % (path, e))
+
+
 def read_sha(path):
     try:
         return open(path).read().strip() or None
@@ -412,8 +483,12 @@ def launcher_code_path(path):
 def launcher_code_mtime(setup_repo):
     """Newest mtime across the files launcher_code_path() names — the code
     set a restart exists to reload. 0 when the checkout has no app/web/ at
-    all (a fixture, a tools-only clone)."""
+    all (a fixture, a tools-only clone). A fixture that only has
+    services/<name>/app.json must not count: walking it would treat the
+    file this tick just rewrote as launcher code and restart forever."""
     root = os.path.join(setup_repo, "app", "web")
+    if not os.path.isdir(root):
+        return 0.0
     newest = 0.0
     for base, _dirs, files in os.walk(root):
         for name in files:
@@ -674,6 +749,10 @@ def tick(env):
     write_tick(state_dir, t0)
     rc = 1
     try:
+        # Carry before the checkout pull. A pull that fails returns, and
+        # the next line would never run; the skip flag still has to move
+        # before this tick decides who to deploy.
+        carry_renamed_state(state_dir)
         refresh_checkout(setup_repo, state_dir)
         entries, _ = scan_entries(setup_repo, state_dir)
         if not entries:
@@ -747,6 +826,7 @@ def force(key, env):
         warn("a poll is running — retry --force when it finishes")
         return 1
     try:
+        carry_renamed_state(state_dir)
         for entry in scan_entries(setup_repo, state_dir)[0]:
             if entry["key"] == key:
                 if os.path.exists(disabled_path(state_dir, key)):
@@ -775,6 +855,7 @@ def status(env):
     service_home = env.get("SERVICE_HOME") or os.path.expanduser(
         "~/services/deployd")
     state_dir = os.path.join(service_home, "state")
+    carry_renamed_state(state_dir)
     entries, suppressed = scan_entries(setup_repo, state_dir)
     if not entries and not suppressed:
         print("no deploy entries in %s/services/*/app.json" % setup_repo)

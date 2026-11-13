@@ -394,6 +394,114 @@ test_migrate_keeps_poller_without_deployd() {
   teardown
 }
 
+test_upgrade_imports_old_env() {
+  echo "• upgrade: ignored .env in the old service dir is imported, not replaced"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/gnosia-learn"
+  cat > "$SANDBOX/repo/services/gnosia-learn/.env" <<EOF
+SERVICE_HOME=$HOME/services/gnosia-learn
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
+OWNER_PASSWORD=kept-password
+AUTH_SECRET=kept-secret-kept-secret-kept-secret
+NODE_BIN=/usr/bin
+LOCAL_PORT=8107
+PUBLIC_URL=https://test-host.tailfake.ts.net:8107
+REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
+BRANCH=main
+STUDIO_ENABLED=0
+ASSET_FILES_ENABLED=1
+EOF
+  chmod 600 "$SANDBOX/repo/services/gnosia-learn/.env"
+  # Build state stays under the old home. setup.sh points SERVICE_HOME at
+  # the new directory, so this deploy is a first build of the imported
+  # config, and it must not mint a second password or a second data root.
+  mkdir -p "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" "$HOME/.gnosia"
+  echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
+  printf 'STUDIO_ENABLED=0 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
+    "$HOME/.gnosia" "$HOME/.gnosia/catalog.db" \
+    > "$HOME/services/gnosia-learn/state/env-sig"
+  run_deploy
+  # An upgraded checkout is already built, so deploy.sh exits 0 with
+  # "up to date" and setup.sh dies on the missing health check after that.
+  # The import is what this test owns; the health probe is covered elsewhere.
+  check "imported the old config" out_has "Imported the existing config"
+  check "service home moved"      env_has "SERVICE_HOME=$HOME/services/hermes-studio"
+  check "password kept"           env_has "OWNER_PASSWORD=kept-password"
+  check "secret kept"             env_has "AUTH_SECRET=kept-secret-kept-secret-kept-secret"
+  check "data root kept"          env_has "GNOSIA_HOME=$HOME/.gnosia"
+  check "no fresh hermes root"    sh -c "! grep -q '^HERMES_HOME=' '$SVC/.env'"
+  check "old data root kept"      [ -d "$HOME/.gnosia" ]
+  check "no re-seed"              no_call "npm run catalog -- import seed"
+  check "reports up to date"      out_has "up to date"
+  teardown
+}
+
+test_upgrade_stops_old_units() {
+  echo "• upgrade: old app, runner and export units are stopped before the new ones start"
+  setup
+  touch "$STATE_DIR/operator"
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    for u in gnosia-learn.service gnosia-learn-studio.service \
+             gnosia-learn-export.timer gnosia-learn-seafile.service \
+             self-learn.service; do
+      echo x > "$HOME/.config/systemd/user/$u"
+    done
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.self-learn.export.plist"
+  fi
+  run_deploy
+  check "exits zero" [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "old app unit gone"     [ ! -f "$HOME/.config/systemd/user/gnosia-learn.service" ]
+    check "old runner gone"       [ ! -f "$HOME/.config/systemd/user/gnosia-learn-studio.service" ]
+    check "old export gone"       [ ! -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
+    check "old seafile gone"      [ ! -f "$HOME/.config/systemd/user/gnosia-learn-seafile.service" ]
+    check "self-learn app gone"   [ ! -f "$HOME/.config/systemd/user/self-learn.service" ]
+    check "old app disabled"      calls_have "systemctl --user disable --now gnosia-learn"
+    check "stopped before start"  before "disable --now gnosia-learn" "systemctl --user restart hermes-studio"
+  else
+    check "old web plist gone"    [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist" ]
+    check "old studio plist gone" [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist" ]
+    check "old export plist gone" [ ! -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
+    check "old web booted out"    calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+  fi
+  teardown
+}
+
+test_upgrade_carries_disabled_flag() {
+  echo "• upgrade: a deployd-driven setup leaves a carried skip flag set"
+  setup
+  touch "$STATE_DIR/operator"
+  mk_deployd
+  # deployd carries the old flag before it invokes setup.sh. A run that
+  # arrives with DEPLOY_SHA set must not clear what deployd just carried.
+  touch "$HOME/services/deployd/state/hermes-studio.disabled"
+  DEPLOY_SHA=aaa1111 run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "carried flag kept"       [ -f "$HOME/services/deployd/state/hermes-studio.disabled" ]
+  teardown
+}
+
+test_manual_setup_clears_disabled_flag() {
+  echo "• a manual setup clears the skip flag a teardown left behind"
+  setup
+  touch "$STATE_DIR/operator"
+  mk_deployd
+  touch "$HOME/services/deployd/state/hermes-studio.disabled"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "flag cleared"            [ ! -f "$HOME/services/deployd/state/hermes-studio.disabled" ]
+  teardown
+}
+
 test_teardown_marks_disabled() {
   echo "• teardown marks deployd disabled; a manual setup clears the flag"
   deployed
@@ -1093,8 +1201,9 @@ EOF
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
   # MAC_HOME derives from MAC_SSH (tester@mac.invalid), proving the account,
-  # not a hardcoded user, owns the paths. The Mac's data root is ~/.hermes.
-  check "remote links blobs/local" calls_have "-d '/Users/tester/.hermes/blobs/local'"
+  # not a hardcoded user, owns the paths. mk_env is a Gnosia-era .env, so
+  # the Mac path stays ~/.gnosia rather than jumping to ~/.hermes.
+  check "remote links blobs/local" calls_have "-d '/Users/tester/.gnosia/blobs/local'"
   check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.hermes-studio.seafile.plist"
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
@@ -1114,12 +1223,12 @@ test_sync_push() {
   check "Mac app probed over ssh" calls_have "pgrep -f 'next"
   check "Mac app killed"          calls_have "kill 1234"
   check "staged dir scp'd"        calls_have "scp .*-pr .*\.sync-stage"
-  check "old wal/shm dropped"     calls_have "rm -f '/Users/tester/.hermes/catalog.db-wal'"
-  check "staged file moved in"    calls_have "mv '/Users/tester/.hermes/.sync-stage/catalog.db' '/Users/tester/.hermes/catalog.db'"
+  check "old wal/shm dropped"     calls_have "rm -f '/Users/tester/.gnosia/catalog.db-wal'"
+  check "staged file moved in"    calls_have "mv '/Users/tester/.gnosia/.sync-stage/catalog.db' '/Users/tester/.gnosia/catalog.db'"
   check "stop before ship"        before "kill 1234" "scp .*-pr"
   check "Mac audit ran"           calls_have "npm run catalog -- blob audit"
-  check "  with its CATALOG_DB"   calls_have "CATALOG_DB='/Users/tester/.hermes/catalog.db'"
-  check "  with its HERMES_HOME"  calls_have "HERMES_HOME='/Users/tester/.hermes'"
+  check "  with its CATALOG_DB"   calls_have "CATALOG_DB='/Users/tester/.gnosia/catalog.db'"
+  check "  with its HERMES_HOME"  calls_have "HERMES_HOME='/Users/tester/.gnosia'"
   check "restart hint printed"    out_has "npm run dev"
   check "vault warned"            out_has "vault"
   check "staging cleaned"         test ! -e "$HOME/.gnosia/.sync-stage"
@@ -1135,7 +1244,7 @@ test_sync_push_quiet_mac() {
   check "snapshot taken"          calls_have "sqlite3 .*\.backup"
   check "nothing killed"          no_call " kill "
   check "no restart hint"         out_lacks "npm run dev"
-  check "file placed remotely"    calls_have "mv '/Users/tester/.hermes/.sync-stage/catalog.db'"
+  check "file placed remotely"    calls_have "mv '/Users/tester/.gnosia/.sync-stage/catalog.db'"
   teardown
 }
 
@@ -1178,7 +1287,7 @@ test_sync_pull() {
   touch "$STATE_DIR/web_active"
   run_sync pull
   check "exits zero"              [ "$CODE" -eq 0 ]
-  check "remote db checked"       calls_have "ssh .*-f '/Users/tester/.hermes/catalog.db'"
+  check "remote db checked"       calls_have "ssh .*-f '/Users/tester/.gnosia/catalog.db'"
   check "remote .backup"          calls_have "sqlite3 .*\.backup"
   check "staged dir scp'd back"   calls_have "scp .*-pr"
   if [ "$OS" = "Linux" ]; then
@@ -1218,6 +1327,21 @@ test_sync_pull_old_env() {
   check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
   check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.self-learn/catalog.db" "$STATE_DIR/catalog_env.log"
   check "audit got HERMES_HOME"   grep -qx "HERMES_HOME=$HOME/.self-learn" "$STATE_DIR/catalog_env.log"
+  teardown
+}
+
+test_sync_keeps_explicit_mac_home() {
+  echo "• sync: an explicit MAC_GNOSIA_HOME is the Mac path, even on a fresh .env"
+  setup; mk_env_new
+  printf 'MAC_GNOSIA_HOME=~/.gnosia\n' >> "$SVC/.env"
+  mkdir -p "$HOME/services/hermes-studio/repo" "$HOME/.hermes"
+  echo "LOCAL-DB-BYTES" > "$HOME/.hermes/catalog.db"
+  run_sync status
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  # The SERVER section prints the local catalog, which a fresh .env keeps
+  # under ~/.hermes. The Mac section is the path this test owns.
+  check "uses the saved Mac home" grep -A20 '=== MAC' <<<"$OUT" | grep -q "/Users/tester/.gnosia/catalog.db"
+  check "mac path is not ~/.hermes" sh -c "! grep -A20 '=== MAC' <<<\"\$OUT\" | grep -q '/Users/tester/.hermes'"
   teardown
 }
 
@@ -1382,7 +1506,7 @@ test_sync_status() {
   check "mac section"         out_has "MAC"
   check "server db file"      out_has "$HOME/.gnosia/catalog.db"
   check "server rows"         out_has "asset.*42"
-  check "mac db file"         out_has "/Users/tester/.hermes/catalog.db"
+  check "mac db file"         out_has "/Users/tester/.gnosia/catalog.db"
   check "mac rows"            out_has "asset.*40"
   check "mac client noted"    out_has "seaf"
   teardown
@@ -2334,6 +2458,10 @@ test_preflight_git_auth
 test_preflight_root
 test_fresh_deploy
 test_idempotent_rerun
+test_upgrade_imports_old_env
+test_upgrade_stops_old_units
+test_upgrade_carries_disabled_flag
+test_manual_setup_clears_disabled_flag
 test_migrate_removes_legacy_poller
 test_migrate_keeps_poller_without_deployd
 test_teardown_marks_disabled
@@ -2366,6 +2494,7 @@ test_sync_install
 test_sync_install_idempotent
 test_sync_install_old_layout
 test_sync_install_already_linked
+test_sync_keeps_explicit_mac_home
 test_sync_mac_setup_gui
 test_sync_mac_setup_legacy_lib_name
 test_sync_mac_setup_daemon_down

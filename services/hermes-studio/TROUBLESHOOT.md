@@ -283,7 +283,7 @@ setup.sh does so this works on either layout:
 
 ```sh
 set -a; . ~/dev/setup-server/services/hermes-studio/.env; set +a
-HERMES_HOME="${HERMES_HOME:-$SELF_LEARN_HOME}"
+HERMES_HOME="${HERMES_HOME:-${GNOSIA_HOME:-${SELF_LEARN_HOME:-}}}"
 CATALOG_DB="${CATALOG_DB:-$HERMES_HOME/catalog.db}"
 systemctl --user start hermes-studio-export.service       # fresh export into $HERMES_HOME/archive
 sqlite3 "$CATALOG_DB" ".backup '$HOME/catalog-$(date +%F).db'"  # consistent while the app runs — never a bare cp of a live WAL-mode db (no sqlite3? stop hermes-studio + hermes-studio-runner first, then cp)

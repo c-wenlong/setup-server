@@ -5909,6 +5909,17 @@ class DeployedAtTest(SandboxTest):
         self.assertIsNone(server.deployed_at(["~/services"]))
         self.assertIsNone(server.deployed_at("~/serv\x00ices"))
 
+    def test_a_renamed_service_is_installed_at_its_old_home(self):
+        old = os.path.expanduser("~/services/gnosia-learn")
+        os.makedirs(old)
+        self.addCleanup(shutil.rmtree, old, ignore_errors=True)
+        self.write_registry({"services": [
+            {"key": "hermes-studio", "name": "Hermes", "tagline": "t",
+             "icon": "book", "url": None, "health": None,
+             "marker": "~/services/hermes-studio", "setup": None}]})
+        tiles = server.services_payload()["services"]
+        self.assertTrue(tiles[0]["installed"])
+
     def test_a_bad_marker_still_renders_the_grid(self):
         # The claim that actually matters, asserted end to end rather than on
         # the helper: `installed` reads the same field through marker_exists.

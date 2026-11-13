@@ -24,7 +24,7 @@ mac_user=""
 for a in "$@"; do case "$a" in *@*) mac_user="${a%%@*}" ;; esac; done
 
 case "$remote" in
-  *'$HOME'*)
+  'printf %s "$HOME"')
     # resolve_mac_paths: printf %s "$HOME"
     echo "/Users${mac_user:+/$mac_user}" ;;
 

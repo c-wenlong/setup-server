@@ -106,7 +106,16 @@ real_dir() {
   services="$(cd "$HOME/services" && pwd -P)" || return 1
   case "$services" in "$home"/?*) ;; *) return 1 ;; esac
   [ ! -L "$HOME/services/$NAME" ] || return 1
+  # An upgraded .env keeps SERVICE_HOME under a previous directory name.
+  # Those homes are this service's too: refusing them skips the torn-down
+  # marker and makes --purge refuse a directory setup.sh still uses.
   own="$services/$NAME"
+  local legacy
+  for legacy in "$NAME" gnosia-learn self-learn; do
+    case "$parent/$leaf" in
+      "$services/$legacy"|"$services/$legacy"/*) own="$services/$legacy"; break ;;
+    esac
+  done
   case "$parent/$leaf" in "$own"|"$own"/*) ;; *) return 1 ;; esac
   # Never a directory that holds this checkout (and so every other service's
   # .env): a repo cloned inside ~/services/<name> must survive a purge.
@@ -328,7 +337,7 @@ purge_targets() {
   if [ -e "$DATA_DIR" ]; then
     [ -d "$DATA_DIR" ] || die "SERVICE_HOME=$DATA_DIR is not a directory — refusing."
     root="$(cd "$HOME/services" && pwd -P)" || die "Cannot resolve $HOME/services."
-    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "SERVICE_HOME=$DATA_DIR is not a real directory inside $HOME/services/$NAME, or it holds this checkout — refusing."
+    PURGE_DIR="$(real_dir "$DATA_DIR")" || die "SERVICE_HOME=$DATA_DIR is not a real directory inside $HOME/services/$NAME (or a pre-rename home, gnosia-learn or self-learn), or it holds this checkout — refusing."
     case "$PURGE_DIR" in
       "$root"/?*) ;;
       *) die "SERVICE_HOME=$DATA_DIR resolves to $PURGE_DIR, which is not a folder inside $root — refusing." ;;
@@ -458,7 +467,7 @@ agent_off() {
 # from .env, so a marker path outside it is skipped, not written.
 if [ "$PURGE" -eq 0 ] && { [ -e "$SERVICE_HOME/state" ] || [ -L "$SERVICE_HOME/state" ]; }; then
   if ! state_real="$(real_dir "$SERVICE_HOME/state")" || [ ! -d "$state_real" ]; then
-    warn "$SERVICE_HOME/state is not a real directory inside $HOME/services/$NAME — not writing the torn-down marker. After ./setup.sh, start the app by hand if it stays stopped."
+    warn "$SERVICE_HOME/state is not a real directory inside $HOME/services/$NAME (or a pre-rename home) — not writing the torn-down marker. After ./setup.sh, start the app by hand if it stays stopped."
   elif MARKER="$state_real/torn-down"; [ -L "$MARKER" ] || { [ -e "$MARKER" ] && [ ! -f "$MARKER" ]; }; then
     warn "$MARKER is a symlink or not a regular file — not writing the torn-down marker. After ./setup.sh, start the app by hand if it stays stopped."
   else
