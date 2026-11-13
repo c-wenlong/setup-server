@@ -49,6 +49,10 @@ HTTPS_PORT="${HTTPS_PORT:-$LOCAL_PORT}"
 REPO_URL="${REPO_URL:-https://github.com/promethevs-labs/hermes-studio.git}"
 BRANCH="${BRANCH:-main}"
 SKIP_SEED="${SKIP_SEED:-0}"
+# Set before any function runs. stop_legacy_units is a function, and a
+# `local` inside it shadows these names for the rest of the script. Under
+# set -u the later assignments then die before the deploy starts.
+removed=0
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SERVICE_DIR/.env"
 
@@ -539,8 +543,12 @@ stop_legacy_units() {
         fi
       done
     done
-    [ "$stopped" = "1" ] && systemctl --user daemon-reload
-    [ "$stopped" = "1" ] && ok "Stopped the pre-rename app, runner, export and blob-sync units"
+    # An if, not `&&`: the function is called bare, and a failing test
+    # would be this function's status. set -e would then exit before deploy.
+    if [ "$stopped" = "1" ]; then
+      systemctl --user daemon-reload
+      ok "Stopped the pre-rename app, runner, export and blob-sync units"
+    fi
   else
     local label
     for label in com.self-learn.web com.self-learn.studio com.self-learn.export \
@@ -566,6 +574,8 @@ stop_legacy_units
 if [ ! -x "$DEPLOYD_HOME/bin/deployd" ]; then
   warn "deployd is not installed — keeping any old deploy poller; auto-deploy is off until services/deployd/setup.sh runs"
 elif [ "$OS" = "Linux" ]; then
+  # `removed` is declared above. A `local` here is a syntax error: this
+  # branch is not inside a function.
   removed=0
   for n in self-learn gnosia-learn hermes-studio; do
     if [ -f "$UNIT_DIR/$n-deploy.timer" ]; then

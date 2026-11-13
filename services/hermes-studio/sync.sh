@@ -139,11 +139,17 @@ if [ -z "${MAC_HERMES_HOME:-}" ]; then
   if [ -n "$MAC_GNOSIA_HOME" ] || [ -n "$MAC_SELF_LEARN_HOME" ]; then
     MAC_HERMES_HOME="${MAC_GNOSIA_HOME:-$MAC_SELF_LEARN_HOME}"
   elif grep -qE '^MAC_(GNOSIA_HOME|SELF_LEARN_HOME)=' "$ENV_FILE"; then
-    MAC_HERMES_HOME="~/.gnosia"
+    # Single quotes on purpose. resolve_mac_paths expands the tilde over
+    # ssh on the Mac. A double-quoted tilde would not expand here, and
+    # $HOME would expand on the server.
+    # shellcheck disable=SC2088
+    MAC_HERMES_HOME='~/.gnosia'
   elif grep -qE '^MAC_(SSH|REPO|DB_FILE)=' "$ENV_FILE"; then
-    MAC_HERMES_HOME="~/.gnosia"
+    # shellcheck disable=SC2088
+    MAC_HERMES_HOME='~/.gnosia'
   else
-    MAC_HERMES_HOME="~/.hermes"
+    # shellcheck disable=SC2088
+    MAC_HERMES_HOME='~/.hermes'
   fi
 fi
 MAC_REPO="${MAC_REPO:-}"                  # default: $MAC_HERMES_HOME/checkout
@@ -215,7 +221,8 @@ seafile_api() {
 # kept only while its pid lives, with the old 60-min bound as the backstop.
 pid_start() {  # the start identity of pid $1; empty when it is gone
   if [ "$OS" = "Linux" ]; then
-    sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+    # Same as deploy.sh: a missing /proc must return empty under pipefail.
+    { sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null || true; } | awk '{print $20}'
   else
     # lstart honours the caller's TZ, so pin both or a launchd-run
     # deploy and a manual one would not recognise the same process.

@@ -164,8 +164,10 @@ check() {
   fi
 }
 
-out_has()    { grep -q -- "$1" <<<"$OUT"; }
-out_lacks()  { ! grep -q -- "$1" <<<"$OUT"; }
+# printf, not a here-string: CI runs these checks under dash (`sh -c`),
+# and dash has no <<<.
+out_has()    { printf '%s\n' "$OUT" | grep -q -- "$1"; }
+out_lacks()  { ! printf '%s\n' "$OUT" | grep -q -- "$1"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q -- "$1" "$SVC/.env"; }
@@ -1340,8 +1342,11 @@ test_sync_keeps_explicit_mac_home() {
   check "exits zero"          [ "$CODE" -eq 0 ]
   # The SERVER section prints the local catalog, which a fresh .env keeps
   # under ~/.hermes. The Mac section is the path this test owns.
-  check "uses the saved Mac home" grep -A20 '=== MAC' <<<"$OUT" | grep -q "/Users/tester/.gnosia/catalog.db"
-  check "mac path is not ~/.hermes" sh -c "! grep -A20 '=== MAC' <<<\"\$OUT\" | grep -q '/Users/tester/.hermes'"
+  # resolve_mac_paths prefixes the remote $HOME. The stub answers
+  # /Users/$user plus this sandbox, so the catalog ends in
+  # /.gnosia/catalog.db. A here-string dies under dash on CI.
+  check "uses the saved Mac home" bash -c 'printf "%s\n" "$1" | awk "/=== MAC/,0" | grep -q "/.gnosia/catalog.db"' _ "$OUT"
+  check "mac path is not ~/.hermes" bash -c '! printf "%s\n" "$1" | awk "/=== MAC/,0" | grep -q "/.hermes/"' _ "$OUT"
   teardown
 }
 
@@ -1618,7 +1623,7 @@ SVC_HOME() { printf '%s' "$HOME/services/hermes-studio"; }
 UNIT_DIR() { printf '%s' "$HOME/.config/systemd/user"; }
 # The identity deploy.sh records in .deploy.lock/started for a live pid.
 start_of() {
-  if [ "$OS" = "Linux" ]; then sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; else TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"; fi
+  if [ "$OS" = "Linux" ]; then { sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null || true; } | awk '{print $20}'; else TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"; fi
 }
 # Point SERVICE_HOME in .env somewhere else (odd-path tests).
 set_service_home() { sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME=$1#" "$SVC/.env"; }

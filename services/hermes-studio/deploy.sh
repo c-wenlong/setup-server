@@ -78,7 +78,10 @@ STUDIO_LABEL="com.hermes-studio.studio"
 # lives, with the old 60-min bound as the backstop.
 pid_start() {  # the start identity of pid $1; empty when it is gone
   if [ "$OS" = "Linux" ]; then
-    sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+    # A missing /proc (or a pid that just exited) must return empty, not
+    # trip set -o pipefail. An empty identity is the "cannot prove it"
+    # case the lock already handles.
+    { sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null || true; } | awk '{print $20}'
   else
     # lstart honours the caller's TZ, so pin both or a launchd-run
     # deploy and a manual one would not recognise the same process.

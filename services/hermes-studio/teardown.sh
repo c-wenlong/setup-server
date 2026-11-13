@@ -245,7 +245,8 @@ LOCK_STALE=0
 owner=""
 pid_start() {  # the start identity of pid $1; empty when it is gone
   if [ "$OS" = "Linux" ]; then
-    sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+    # Same as deploy.sh: a missing /proc must return empty under pipefail.
+    { sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null || true; } | awk '{print $20}'
   else
     # lstart honours the caller's TZ, so pin both or a launchd-run
     # deploy and a manual one would not recognise the same process.
