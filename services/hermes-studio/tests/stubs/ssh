@@ -61,6 +61,7 @@ case "$remote" in
   *"cat > "*"seafile-ignore.txt"*) cat > "$STATE_DIR/mac_ignore.txt" ;;
   *"cat > "*"/blobs/.owner"*)      cat > "$STATE_DIR/mac_owner.txt" ;;
   *"cat > "*"LaunchAgents"*)       cat > "$STATE_DIR/mac_plist.xml" ;;
+  *com.gnosia-learn.seafile*) ;;
   *for\ pid\ in*pgrep*)
     # mac_app_pids: emits bare pids when the dev server is "running".
     [ -f "$STATE_DIR/mac_devserver" ] || exit 0
