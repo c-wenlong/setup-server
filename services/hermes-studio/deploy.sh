@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — pull promethevs-labs/hermes-studio (the gnosia repo) from GitHub and
+# deploy.sh — pull promethevs-labs/hermes-studio (the hermes repo) from GitHub and
 # redeploy if it changed.
 #
 # The server is tailnet-only, so GitHub webhooks can't reach it; instead
@@ -21,7 +21,7 @@
 # install time — edit the copy in the setup-server repo, then re-run
 # setup.sh).
 #
-# Update order follows docs/HOMESERVER.md step 14 in the gnosia repo:
+# Update order follows docs/HOMESERVER.md step 14 in the hermes repo:
 # stop the app, pull, npm ci when the lockfile moved, catalog migrate, build,
 # start again. Stopping first matters: `npm ci` replaces node_modules under a
 # running `next start`, and `next build` rewrites .next/ while it is served.
@@ -38,15 +38,18 @@ set -a; . "$ENV_FILE"; set +a
 
 # An .env written before the SQLite cut-over lacks the two catalog paths
 # (and its postgres DATABASE_URL is simply unused now). Derive them the way
-# upstream resolves them — CATALOG_DB under GNOSIA_HOME, which falls back to
+# upstream resolves them — CATALOG_DB under HERMES_HOME, which falls back to
 # the SELF_LEARN_HOME data root an older .env may still name — so the
 # stamped checkout env files below always carry real paths.
-GNOSIA_HOME="${GNOSIA_HOME:-${SELF_LEARN_HOME:-}}"
-[ -n "$GNOSIA_HOME" ] || { echo "GNOSIA_HOME missing from $ENV_FILE (an older .env names the data root SELF_LEARN_HOME)" >&2; exit 1; }
-CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
+HERMES_HOME="${HERMES_HOME:-${GNOSIA_HOME:-${SELF_LEARN_HOME:-}}}"
+[ -n "$HERMES_HOME" ] || { echo "HERMES_HOME missing from $ENV_FILE (an older .env names the data root GNOSIA_HOME or SELF_LEARN_HOME)" >&2; exit 1; }
+CATALOG_DB="${CATALOG_DB:-$HERMES_HOME/catalog.db}"
 
-# systemd/launchd PATH won't include a nix/nvm/brew node — use the baked path.
-export PATH="$NODE_BIN:$PATH"
+# systemd/launchd PATH won't include a nix/nvm/brew node — use the baked path,
+# and put it first. A caller that already has an older node earlier on PATH
+# would otherwise run bare `npm` against that one.
+PATH="$NODE_BIN:$PATH"
+export PATH
 export GIT_TERMINAL_PROMPT=0   # fail loudly instead of hanging on a prompt
 
 OS="$(uname -s)"
@@ -57,10 +60,10 @@ NEXT_DIR="$REPO_DIR/apps/web/.next"
 SNAP="$BUILD_STATE/rollback"
 TL_DIR="$REPO_DIR/tools/tldrawkc"
 TL_SNAP="$BUILD_STATE/rollback-tldrawkc"
-WEB_UNIT="gnosia-learn.service"
-WEB_LABEL="com.gnosia-learn.web"
-STUDIO_UNIT="gnosia-learn-studio.service"
-STUDIO_LABEL="com.gnosia-learn.studio"
+WEB_UNIT="hermes-studio.service"
+WEB_LABEL="com.hermes-studio.web"
+STUDIO_UNIT="hermes-studio-runner.service"
+STUDIO_LABEL="com.hermes-studio.studio"
 
 # --------------------------------------------------------------------- lock
 # mkdir is the portable atomic lock (macOS has no flock). The holder writes
@@ -72,7 +75,10 @@ STUDIO_LABEL="com.gnosia-learn.studio"
 # lives, with the old 60-min bound as the backstop.
 pid_start() {  # the start identity of pid $1; empty when it is gone
   if [ "$OS" = "Linux" ]; then
-    sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+    # A missing /proc (or a pid that just exited) must return empty, not
+    # trip set -o pipefail. An empty identity is the "cannot prove it"
+    # case the lock already handles.
+    { sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null || true; } | awk '{print $20}'
   else
     # lstart honours the caller's TZ, so pin both or a launchd-run
     # deploy and a manual one would not recognise the same process.
@@ -226,7 +232,7 @@ fi
 # something to deploy even when origin has not moved. Without this a setup.sh
 # re-run after flipping STUDIO_ENABLED exits "up to date" here, and the web
 # app keeps hiding (or exposing) Studio against the runner's new state.
-env_sig="STUDIO_ENABLED=${STUDIO_ENABLED:-0} ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-0} GNOSIA_HOME=$GNOSIA_HOME CATALOG_DB=$CATALOG_DB"
+env_sig="STUDIO_ENABLED=${STUDIO_ENABLED:-0} ASSET_FILES_ENABLED=${ASSET_FILES_ENABLED:-0} HERMES_HOME=$HERMES_HOME CATALOG_DB=$CATALOG_DB"
 built_env_sig="$(cat "$BUILD_STATE/env-sig" 2>/dev/null || echo none)"
 
 if [ "$target_sha" = "$built_sha" ] && [ "$env_sig" = "$built_env_sig" ] \
@@ -269,7 +275,7 @@ EOF
 
 cat > "$REPO_DIR/services/catalog/.env" <<EOF
 # Written by deploy.sh from $ENV_FILE. Do not edit here — edit that file.
-GNOSIA_HOME=$GNOSIA_HOME
+HERMES_HOME=$HERMES_HOME
 CATALOG_DB=$CATALOG_DB
 EOF
 )

@@ -1,26 +1,32 @@
 #!/usr/bin/env bash
 # systemctl stub: logs and succeeds. Tracks per-unit state in $STATE_DIR:
-#   web_active / web_failed  — gnosia-learn.service (is-active / is-failed)
-#   seaf_active              — gnosia-learn-seafile.service
-#   studio_active            — gnosia-learn-studio.service
+#   web_active / web_failed  — hermes-studio.service (is-active / is-failed)
+#   seaf_active              — hermes-studio-seafile.service
+#   studio_active            — hermes-studio-runner.service
+#   gnosia_web_active / self_web_active — the pre-rename app units
+#   gnosia_studio_active / self_studio_active — the pre-rename runners
 #   web_enabled / studio_enabled / seaf_enabled — enable/disable state
 # enable --now also marks the unit active; disable --now clears it.
 echo "systemctl $*" >> "$CALLS_LOG"
 
-# setup.sh addresses units bare (`gnosia-learn`), deploy.sh with the suffix
-# (`gnosia-learn.service`) — normalise so both hit the same marker.
+# setup.sh addresses units bare (`hermes-studio`), deploy.sh with the suffix
+# (`hermes-studio.service`) — normalise so both hit the same marker.
 unit="${*: -1}"; unit="${unit%.service}"
 marker=""; failed_marker="x_$unit"
 case "$unit" in
-  gnosia-learn)         marker=web_active;    failed_marker=web_failed ;;
-  gnosia-learn-seafile) marker=seaf_active;   failed_marker=seaf_failed ;;
-  gnosia-learn-studio)  marker=studio_active; failed_marker=studio_failed ;;
+  hermes-studio)         marker=web_active;    failed_marker=web_failed ;;
+  hermes-studio-seafile) marker=seaf_active;   failed_marker=seaf_failed ;;
+  hermes-studio-runner)  marker=studio_active; failed_marker=studio_failed ;;
+  gnosia-learn)          marker=gnosia_web_active;    failed_marker=gnosia_web_failed ;;
+  self-learn)            marker=self_web_active;      failed_marker=self_web_failed ;;
+  gnosia-learn-studio)   marker=gnosia_studio_active; failed_marker=gnosia_studio_failed ;;
+  self-learn-studio)     marker=self_studio_active;   failed_marker=self_studio_failed ;;
 esac
 enabled_marker="${marker%_active}_enabled"
 
 # Real systemd runs the unit's ExecStartPre= lines before every start
 # ('-' prefix means a failure is ignored; otherwise a failed pre-hook stops
-# the start). gnosia-learn.service uses one to clear teardown's torn-down
+# the start). hermes-studio.service uses one to clear teardown's torn-down
 # marker — running it here keeps a stubbed `start` faithful.
 run_pre() {
   local f="$HOME/.config/systemd/user/$1.service" line cmd

@@ -54,9 +54,9 @@
        artwork in the kaichenpedia repo, so it needs no plate on either theme.
        Raster because no vector original exists. */
     'kaichenpedia':  { file: 'kaichenpedia', ext: 'png' },
-    /* The Gnosia mark from the gnosia repo's own brand set
+    /* The Hermes mark from the hermes repo's own brand set
        (apps/web/public/brand/mark.png). Raster, no vector original. */
-    'gnosia-learn':  { file: 'gnosia-learn',  ext: 'png' },
+    'hermes-studio':  { file: 'hermes-studio',  ext: 'png' },
     /* Vendored copy of the site's own favicon (site/favicon.svg in the
        sources repo), the fallback behind the tile's live-favicon rung.
        The cream plate reads on both tile themes, so no -dark pair. */

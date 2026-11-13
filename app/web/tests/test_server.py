@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+from unittest.mock import patch
 import shutil
 import signal
 import subprocess
@@ -5317,24 +5318,24 @@ class SharedControlRegistryTest(unittest.TestCase):
         self.assertEqual(self.control("manimkc")["parts"],
                          [{"unit": "manimkc.service"}])
 
-    def test_gnosia_learn_stops_the_studio_runner_first_and_starts_it_last(self):
+    def test_hermes_learn_stops_the_studio_runner_first_and_starts_it_last(self):
         # The runner's unit exists only while STUDIO_ENABLED=1, so it is an
         # optional part; it is listed first so stop takes it down before the
         # app (and the catalog file it talks to), and start (the reverse)
         # brings it back up after both.
-        self.assertEqual(self.names("gnosia-learn"),
-                         ["gnosia-learn-studio.service", "gnosia-learn.service"])
-        optional = [p for p in self.control("gnosia-learn")["parts"]
+        self.assertEqual(self.names("hermes-studio"),
+                         ["hermes-studio-runner.service", "hermes-studio.service"])
+        optional = [p for p in self.control("hermes-studio")["parts"]
                     if p.get("optional")]
         self.assertEqual([p["unit"] for p in optional],
-                         ["gnosia-learn-studio.service"])
+                         ["hermes-studio-runner.service"])
 
-    def test_gnosia_learn_reports_the_web_app_not_the_optional_runner(self):
+    def test_hermes_learn_reports_the_web_app_not_the_optional_runner(self):
         # ntfy-control reports the first part's state unless `primary` names
         # another. With Studio off or stopped the runner is never active, so
         # without this a running app would show as stopped on the phone.
-        self.assertEqual(self.control("gnosia-learn")["primary"],
-                         "gnosia-learn.service")
+        self.assertEqual(self.control("hermes-studio")["primary"],
+                         "hermes-studio.service")
 
     def test_every_primary_names_one_of_its_own_parts(self):
         for key in self.services:
@@ -5908,6 +5909,42 @@ class DeployedAtTest(SandboxTest):
         self.assertIsNone(server.deployed_at(1757550470))
         self.assertIsNone(server.deployed_at(["~/services"]))
         self.assertIsNone(server.deployed_at("~/serv\x00ices"))
+
+    def test_a_renamed_service_is_installed_at_its_old_home(self):
+        old = os.path.expanduser("~/services/gnosia-learn")
+        os.makedirs(old)
+        self.addCleanup(shutil.rmtree, old, ignore_errors=True)
+        self.write_registry({"services": [
+            {"key": "hermes-studio", "name": "Hermes", "tagline": "t",
+             "icon": "book", "url": None, "health": None,
+             "marker": "~/services/hermes-studio", "setup": None}]})
+        tiles = server.services_payload()["services"]
+        self.assertTrue(tiles[0]["installed"])
+
+    def test_remove_accepts_a_renamed_service_at_its_old_home(self):
+        # The tile counts the old home. Remove used to check only the new
+        # marker and answer 409 on a service the grid already calls installed.
+        old = os.path.expanduser("~/services/gnosia-learn")
+        os.makedirs(old)
+        self.addCleanup(shutil.rmtree, old, ignore_errors=True)
+        setup = os.path.join(self.repo, "services", "hermes-studio", "setup.sh")
+        os.makedirs(os.path.dirname(setup))
+        open(setup, "w").close()
+        open(os.path.join(os.path.dirname(setup), "teardown.sh"), "w").close()
+        self.write_registry({"services": [
+            {"key": "hermes-studio", "name": "Hermes", "tagline": "t",
+             "icon": "book", "url": None, "health": None,
+             "marker": "~/services/hermes-studio",
+             "setup": "services/hermes-studio/setup.sh",
+             "control": {"parts": [{"container": "hermes-studio"}]}}]})
+        # Queue, do not run. The action thread would exec the empty
+        # teardown.sh, and the sandbox treats an unstubbed subprocess as
+        # a leak. start_action raises before that when Remove rejects
+        # the old home.
+        with patch.object(server.threading, "Thread") as thread:
+            thread.return_value.start = lambda: None
+            job_id = server.start_action("hermes-studio", "remove")
+        self.assertTrue(job_id)
 
     def test_a_bad_marker_still_renders_the_grid(self):
         # The claim that actually matters, asserted end to end rather than on

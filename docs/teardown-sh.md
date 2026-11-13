@@ -10,7 +10,7 @@ the reference and the launcher's Remove action running it without
 `--purge`. Since then: firefly-iii, home-assistant, homepage, jellyfin,
 metabase, n8n, open-webui, umami; then vaultwarden, immich, paperless-ngx,
 seafile, appflowy, plane; then kaichenpedia and sources (both now launcher
-apps, no folder), gnosia-learn; then beszel, quiver-hub,
+apps, no folder), hermes-studio; then beszel, quiver-hub,
 syncthing, trigger-dev, coolify;
 then code-server, forgejo, openhands, adguard, remote-desktop, paperclip.
 monitoring, ntfy-control and the launcher itself get none: they are the
