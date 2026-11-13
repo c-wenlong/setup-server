@@ -274,7 +274,7 @@ test_fresh_deploy() {
     check "no deploy timer (deployd)"   [ ! -f "$HOME/.config/systemd/user/hermes-studio-deploy.timer" ]
     check "export timer written"        [ -f "$HOME/.config/systemd/user/hermes-studio-export.timer" ]
     check "studio unit written"         [ -f "$HOME/.config/systemd/user/hermes-studio-runner.service" ]
-    check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/hermes-studio-runner.service"
+    check "studio runs node --import tsx" grep -q "^ExecStart=$STUBS/node --import tsx services/studio/src/index.ts$" "$HOME/.config/systemd/user/hermes-studio-runner.service"
     check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/hermes-studio-runner.service"
     check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/hermes-studio/studio" "$HOME/.config/systemd/user/hermes-studio-runner.service"
     check "app restarted"               calls_have "systemctl --user restart hermes-studio"
@@ -286,6 +286,7 @@ test_fresh_deploy() {
   else
     check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.hermes-studio.web.plist" ]
     check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.hermes-studio.studio.plist" ]
+    check "studio agent runs node tsx"  sh -c "tr -d '\n' < '$HOME/Library/LaunchAgents/com.hermes-studio.studio.plist' | grep -q '<key>ProgramArguments</key>[[:space:]]*<array>[[:space:]]*<string>$STUBS/node</string>[[:space:]]*<string>--import</string>[[:space:]]*<string>tsx</string>[[:space:]]*<string>services/studio/src/index.ts</string>[[:space:]]*</array>'"
     check "no deploy agent (deployd)"   [ ! -f "$HOME/Library/LaunchAgents/com.hermes-studio.deploy.plist" ]
     check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.hermes-studio.export.plist" ]
     check "web agent gets HERMES_HOME"  grep -q "<key>HERMES_HOME</key>" "$HOME/Library/LaunchAgents/com.hermes-studio.web.plist"

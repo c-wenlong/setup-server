@@ -535,7 +535,7 @@ Environment=PATH=$NODE_BIN:${CLAUDE_PATH}/usr/local/bin:/usr/bin:/bin
 Environment=STUDIO_HOME=$SERVICE_HOME/studio
 Environment=STUDIO_CLAUDE_BIN=${CLAUDE_BIN:-claude}
 Environment=STUDIO_DAILY_USD=${STUDIO_DAILY_USD:-}
-ExecStart=$NODE_BIN/npm run studio
+ExecStart=$NODE_BIN/node --import tsx services/studio/src/index.ts
 Restart=always
 RestartSec=5
 
@@ -587,8 +587,9 @@ EOF
   <key>Label</key><string>com.hermes-studio.studio</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE_BIN/npm</string>
-    <string>run</string><string>studio</string>
+    <string>$NODE_BIN/node</string>
+    <string>--import</string><string>tsx</string>
+    <string>services/studio/src/index.ts</string>
   </array>
   <key>WorkingDirectory</key><string>$REPO_DIR</string>
   <key>EnvironmentVariables</key>

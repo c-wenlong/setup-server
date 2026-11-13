@@ -45,7 +45,7 @@ deployd ──► setup.sh ──► bin/deploy.sh               hermes-studio-e
                      │  https://homeserver.tail-name.ts.net:8107
                      │                            (tailnet only)
                      │  /studio/api/* proxied to ──► hermes-studio-runner.service
-                     ▼          (npm run studio — diagram job runner, spawns
+                     ▼          (node --import tsx services/studio/src/index.ts — diagram job runner, spawns
         the catalog: one SQLite  the claude CLI per job, loopback-only on
         file the app, catalog    127.0.0.1:7250 — never Serve-published.
         CLI and studio all open  Runs only while STUDIO_ENABLED=1 in .env;
@@ -329,7 +329,7 @@ this `catalog.db`.
 ## The studio runner
 
 `STUDIO_ENABLED=1` (the server's `.env` has it on) runs a third service:
-`hermes-studio-runner` (`npm run studio` — `tsx services/studio/src/index.ts`),
+`hermes-studio-runner` (`node --import tsx services/studio/src/index.ts`),
 the diagram job runner behind the app's `/studio/api/*` proxy. It binds
 `127.0.0.1:7250`, is never published through Serve (the app proxies to it
 and stamps the signed-in owner itself), and reaches the catalog the way
