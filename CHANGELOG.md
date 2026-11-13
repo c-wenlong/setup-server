@@ -8,6 +8,50 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Changed
+
+- **gnosia-learn renamed to hermes-studio**, matching upstream's rename of
+  the app to Hermes: the service dir, launcher key and icon, systemd units
+  and LaunchAgents (`gnosia-learn*` → `hermes-studio*`, the studio unit
+  `hermes-studio-runner` so it does not collide with the web unit,
+  `com.gnosia-learn.*` → `com.hermes-studio.*`), Kuma monitors, the Seafile
+  sync account and library defaults (`hermes-studio-sync@`,
+  `hermes-studio-blobs`) and the `--purge` confirmation name all follow,
+  and the launcher tile now reads "Hermes". `HERMES_HOME` becomes the
+  canonical data root (default `~/.hermes` on a fresh install). An existing
+  `.env` is still the source of truth: `GNOSIA_HOME` and `SELF_LEARN_HOME`
+  are still read, and a re-run does not move `~/.gnosia` or `~/.self-learn`.
+  Old deploy pollers (`self-learn`, `gnosia-learn`, `hermes-studio`) are
+  removed once deployd is installed. Kuma re-keys `self-learn*`,
+  `gnosia-learn` and `gnosia-learn-studio` onto the new monitor names.
+  An upgrade also imports the ignored `.env` from the old service
+  directory and points `SERVICE_HOME` at `~/services/hermes-studio`,
+  leaving the data root where that file already named it. The move takes
+  `state/`, `repo/`, `studio/` and `seafile/`. It takes the old deploy
+  lock before it rewrites `SERVICE_HOME`, and a later run still moves
+  those directories when `.env` already names the new home. A live pid
+  in the old lock refuses the run. A quoted `SERVICE_HOME` is rewritten
+  too. A stopped old app or runner stays stopped under the new unit
+  name. `sync.sh mac-setup` unloads the old Mac blob-sync agent before
+  loading the new one. The launcher's Remove accepts an install that
+  still lives at the old home, and teardown reads that home's `.env`
+  when the new file does not exist yet. It also stops the old app,
+  runner and export timer, and leaves the blob-sync unit alone. deployd carries a
+  pre-rename skip flag and poller tombstone onto the new key before it
+  decides to deploy, so an app the owner removed stays removed. A carried
+  override whose command is the old `setup.sh` is rewritten to the new
+  path. A manual `./setup.sh` clears the skip flag under all three names.
+  Setup stops the old app, runner and export units before the new ones
+  start, and leaves the blob-sync unit for `sync.sh install` to replace.
+  A host with none of those units still continues into the deploy. Sync
+  keeps an existing Mac path (`MAC_GNOSIA_HOME`, `MAC_SELF_LEARN_HOME`,
+  or the `~/.gnosia` default an older link derived from `MAC_SSH` alone),
+  and a fresh install writes `MAC_HERMES_HOME` so the next command does
+  not treat that link as an old one.
+  That path stays a literal tilde so it expands on the Mac, not on the
+  server. Teardown accepts those old service homes, and a launcher stop
+  pauses the old Kuma monitor until monitoring setup re-keys it.
+
 ### Added
 
 - **App tiles regain Kuma pausing and phone control.** A launcher app

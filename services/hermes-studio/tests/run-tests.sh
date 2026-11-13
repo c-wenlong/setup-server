@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for services/gnosia-learn/setup.sh + deploy.sh.
+# Tests for services/hermes-studio/setup.sh + deploy.sh.
 #
 #   ./tests/run-tests.sh          # mocked suite (sandboxed, no side effects)
 #   ./tests/run-tests.sh --live   # also verify the real deployment
@@ -29,7 +29,7 @@ setup() {
   export HOME="$SANDBOX/home"
   export STATE_DIR="$SANDBOX/state"
   export CALLS_LOG="$SANDBOX/calls.log"
-  SVC="$SANDBOX/repo/services/gnosia-learn"
+  SVC="$SANDBOX/repo/services/hermes-studio"
   mkdir -p "$HOME" "$STATE_DIR" "$SVC"
   copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
@@ -38,27 +38,10 @@ setup() {
     "$SERVICE_DIR/sync.sh" "$SVC/"
 }
 
-# A .env as a pre-rename setup.sh left it — SERVICE_HOME and the data root
-# still under their old names, both data-root vars present. That is the
-# shape every existing install has, so it is what most sync tests exercise.
+# A .env as the Gnosia-era setup.sh left it — SERVICE_HOME and the data root
+# still under those names. That is the shape every existing install has, so
+# it is what most sync tests exercise.
 mk_env() {
-  mkdir -p "$HOME/services/self-learn/bin" "$HOME/services/self-learn/state" \
-    "$HOME/.self-learn/blobs/local"
-  cat > "$SVC/.env" <<EOF
-SERVICE_HOME=$HOME/services/self-learn
-SELF_LEARN_HOME=$HOME/.self-learn
-GNOSIA_HOME=$HOME/.self-learn
-CATALOG_DB=$HOME/.self-learn/catalog.db
-MAC_SSH=tester@mac.invalid
-NODE_BIN=/usr/bin
-LOCAL_PORT=8107
-EOF
-  chmod 600 "$SVC/.env"
-}
-
-# The same .env as a fresh (post-rename) setup.sh writes it: GNOSIA_HOME
-# only at upstream's default root — no SELF_LEARN_HOME at all.
-mk_env_new() {
   mkdir -p "$HOME/services/gnosia-learn/bin" "$HOME/services/gnosia-learn/state" \
     "$HOME/.gnosia/blobs/local"
   cat > "$SVC/.env" <<EOF
@@ -66,18 +49,43 @@ SERVICE_HOME=$HOME/services/gnosia-learn
 GNOSIA_HOME=$HOME/.gnosia
 CATALOG_DB=$HOME/.gnosia/catalog.db
 MAC_SSH=tester@mac.invalid
-NODE_BIN=/usr/bin
+NODE_BIN=$STUBS
 LOCAL_PORT=8107
 EOF
   chmod 600 "$SVC/.env"
 }
 
-# The same .env as the Postgres era left it: no GNOSIA_HOME/CATALOG_DB, the
-# old DATABASE_URL/POSTGRES_* keys still present. sync.sh must derive the
-# new names and ignore the leftovers.
+# The same .env as a fresh (post-rename) setup.sh writes it: HERMES_HOME
+# only at upstream's default root — no SELF_LEARN_HOME at all.
+mk_env_new() {
+  mkdir -p "$HOME/services/hermes-studio/bin" "$HOME/services/hermes-studio/state" \
+    "$HOME/.hermes/blobs/local"
+  cat > "$SVC/.env" <<EOF
+SERVICE_HOME=$HOME/services/hermes-studio
+HERMES_HOME=$HOME/.hermes
+CATALOG_DB=$HOME/.hermes/catalog.db
+MAC_SSH=tester@mac.invalid
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+EOF
+  chmod 600 "$SVC/.env"
+}
+
+# The same .env as the Postgres era left it: no HERMES_HOME/GNOSIA_HOME/
+# CATALOG_DB, the old DATABASE_URL/POSTGRES_* keys still present. sync.sh
+# must derive the new names and ignore the leftovers.
 mk_env_old() {
-  mk_env
-  sed -i.bak '/^GNOSIA_HOME=/d;/^CATALOG_DB=/d' "$SVC/.env" && rm -f "$SVC/.env.bak"
+  mkdir -p "$HOME/services/self-learn/bin" "$HOME/services/self-learn/state" \
+    "$HOME/.self-learn/blobs/local"
+  cat > "$SVC/.env" <<EOF
+SERVICE_HOME=$HOME/services/self-learn
+SELF_LEARN_HOME=$HOME/.self-learn
+MAC_SSH=tester@mac.invalid
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+EOF
+  chmod 600 "$SVC/.env"
+  sed -i.bak '/^CATALOG_DB=/d' "$SVC/.env" && rm -f "$SVC/.env.bak"
   cat >> "$SVC/.env" <<EOF
 PG_PORT=5432
 POSTGRES_USER=catalog
@@ -103,9 +111,9 @@ EOF
 # A local catalog.db to snapshot (push) or be replaced (pull), with a stale
 # -wal a replace must drop. The Mac's side is canned inside the stubs.
 mk_db_files() {
-  mkdir -p "$HOME/.self-learn"
-  echo "LOCAL-DB-BYTES" > "$HOME/.self-learn/catalog.db"
-  echo "LOCAL-STALE-WAL" > "$HOME/.self-learn/catalog.db-wal"
+  mkdir -p "$HOME/.gnosia"
+  echo "LOCAL-DB-BYTES" > "$HOME/.gnosia/catalog.db"
+  echo "LOCAL-STALE-WAL" > "$HOME/.gnosia/catalog.db-wal"
   echo "42" > "$STATE_DIR/db_count"
   echo "40" > "$STATE_DIR/mac_db_count"
 }
@@ -116,7 +124,7 @@ teardown() {
   unset FAKE_UID FAKE_UNAME LOCAL_PORT HTTPS_PORT REPO_URL BRANCH POLL_SECONDS \
     SKIP_SEED OWNER_PASSWORD AUTH_SECRET STATE_DIR CALLS_LOG \
     STUDIO_ENABLED ASSET_FILES_ENABLED SQLITE3 \
-    SEAFILE_ENV MAC_SSH MAC_GNOSIA_HOME MAC_REPO MAC_DB_FILE \
+    SEAFILE_ENV MAC_SSH MAC_HERMES_HOME MAC_REPO MAC_DB_FILE \
     MAC_SEAFILE_URL SEAFILE_URL SEAFILE_SYNC_USER \
     SEAFILE_SYNC_PASSWORD SEAFILE_SYNC_REPO
 }
@@ -136,8 +144,10 @@ run_deploy_no_stdin() {
 }
 
 # Run the installed poller script directly (as the timer would).
+# deploy.sh puts NODE_BIN first. The baked value is $STUBS, so the stubs
+# stay ahead of the real git and npm.
 run_poll() {
-  OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/gnosia-learn/bin/deploy.sh" "$@" 2>&1)"
+  OUT="$(PATH="$STUBS:$PATH" bash "$HOME/services/hermes-studio/bin/deploy.sh" "$@" 2>&1)"
   CODE=$?
 }
 
@@ -156,12 +166,14 @@ check() {
   fi
 }
 
-out_has()    { grep -q -- "$1" <<<"$OUT"; }
-out_lacks()  { ! grep -q -- "$1" <<<"$OUT"; }
+# printf, not a here-string: CI runs these checks under dash (`sh -c`),
+# and dash has no <<<.
+out_has()    { printf '%s\n' "$OUT" | grep -q -- "$1"; }
+out_lacks()  { ! printf '%s\n' "$OUT" | grep -q -- "$1"; }
 calls_have() { grep -q -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -q -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -q -- "$1" "$SVC/.env"; }
-REPO_DIR()   { printf '%s' "$HOME/services/gnosia-learn/repo"; }
+REPO_DIR()   { printf '%s' "$HOME/services/hermes-studio/repo"; }
 TL_DIR()     { printf '%s' "$(REPO_DIR)/tools/tldrawkc"; }
 # Line of the first logged call matching $1 (empty when none), to assert order.
 call_line()  { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1; }
@@ -169,10 +181,10 @@ call_line()  { grep -n -- "$1" "$CALLS_LOG" | head -1 | cut -d: -f1; }
 mk_studio_unit() {
   if [ "$OS" = "Linux" ]; then
     mkdir -p "$HOME/.config/systemd/user"
-    touch "$HOME/.config/systemd/user/gnosia-learn-studio.service"
+    touch "$HOME/.config/systemd/user/hermes-studio-runner.service"
   else
     mkdir -p "$HOME/Library/LaunchAgents"
-    touch "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
+    touch "$HOME/Library/LaunchAgents/com.hermes-studio.studio.plist"
   fi
 }
 
@@ -225,19 +237,19 @@ test_fresh_deploy() {
   run_deploy
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check ".env has repo URL"             env_has "REPO_URL=https://github.com/promethevs-labs/hermes-studio.git"
-  check ".env has data root"            env_has "GNOSIA_HOME=$HOME/.gnosia"
-  check ".env has catalog file"         env_has "CATALOG_DB=$HOME/.gnosia/catalog.db"
+  check ".env has data root"            env_has "HERMES_HOME=$HOME/.hermes"
+  check ".env has catalog file"         env_has "CATALOG_DB=$HOME/.hermes/catalog.db"
   check ".env drops the old var"        sh -c "! grep -q '^SELF_LEARN_HOME=' '$SVC/.env'"
   check ".env has no postgres url"      sh -c "! grep -q '^DATABASE_URL=postgres://' '$SVC/.env'"
   check ".env has owner password"       grep -qE '^OWNER_PASSWORD=.+$' "$SVC/.env"
   check ".env has auth secret"          grep -qE '^AUTH_SECRET=.{32,}$' "$SVC/.env"
   check ".env mode is 600"              sh -c "[ \"$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")\" = 600 ]"
-  check "deploy script installed"       [ -x "$HOME/services/gnosia-learn/bin/deploy.sh" ]
-  check "env path baked into script"    grep -q "$SVC/.env" "$HOME/services/gnosia-learn/bin/deploy.sh"
+  check "deploy script installed"       [ -x "$HOME/services/hermes-studio/bin/deploy.sh" ]
+  check "env path baked into script"    grep -q "$SVC/.env" "$HOME/services/hermes-studio/bin/deploy.sh"
   check "cloned the repo"               calls_have "git clone --branch main"
   check "installed deps (npm ci)"       calls_have "npm ci"
   check "web env has no DATABASE_URL"   sh -c "! grep -q '^DATABASE_URL=' '$(REPO_DIR)/apps/web/.env.local'"
-  check "catalog env has GNOSIA_HOME"   grep -q "^GNOSIA_HOME=" "$(REPO_DIR)/services/catalog/.env"
+  check "catalog env has HERMES_HOME"   grep -q "^HERMES_HOME=" "$(REPO_DIR)/services/catalog/.env"
   check "catalog env has CATALOG_DB"    grep -q "^CATALOG_DB=" "$(REPO_DIR)/services/catalog/.env"
   check "catalog env has no pg url"     sh -c "! grep -q 'postgres://' '$(REPO_DIR)/services/catalog/.env'"
   check "web env mode is 600"           sh -c "[ \"$(stat -c %a "$(REPO_DIR)/apps/web/.env.local" 2>/dev/null || stat -f %Lp "$(REPO_DIR)/apps/web/.env.local")\" = 600 ]"
@@ -247,46 +259,46 @@ test_fresh_deploy() {
   check "seed imported"                 calls_have "npm run catalog -- import seed"
   check "six flips run"                 sh -c '[ "$(grep -c "npm run catalog -- flip" "$CALLS_LOG")" -eq 6 ]'
   check "blob root claimed"             calls_have "npm run catalog -- blob audit --fix"
-  check "bootstrap marker written"      [ -f "$HOME/services/gnosia-learn/state/db-bootstrapped" ]
+  check "bootstrap marker written"      [ -f "$HOME/services/hermes-studio/state/db-bootstrapped" ]
   check "built (next build)"            calls_have "npm run build"
-  check "built sha recorded"            grep -qx aaa1111 "$HOME/services/gnosia-learn/state/built-sha"
+  check "built sha recorded"            grep -qx aaa1111 "$HOME/services/hermes-studio/state/built-sha"
   check "tldrawkc not fetched"          no_call "submodule update"
   if [ "$OS" = "Linux" ]; then
-    check "app unit written"            [ -f "$HOME/.config/systemd/user/gnosia-learn.service" ]
-    check "app binds loopback+port"     grep -q -- "-p 8107 -H 127.0.0.1" "$HOME/.config/systemd/user/gnosia-learn.service"
-    check "app unit gets GNOSIA_HOME"   grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/gnosia-learn.service"
-    check "app unit gets CATALOG_DB"    grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/gnosia-learn.service"
-    check "app unit has no postgres"    sh -c "! grep -q 'postgres\|DATABASE_URL' '$HOME/.config/systemd/user/gnosia-learn.service'"
-    check "export unit gets GNOSIA_HOME" grep -q "^Environment=GNOSIA_HOME=" "$HOME/.config/systemd/user/gnosia-learn-export.service"
-    check "export unit gets CATALOG_DB" grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/gnosia-learn-export.service"
-    check "no deploy timer (deployd)"   [ ! -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
-    check "export timer written"        [ -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
-    check "studio unit written"         [ -f "$HOME/.config/systemd/user/gnosia-learn-studio.service" ]
-    check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
-    check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
-    check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/gnosia-learn/studio" "$HOME/.config/systemd/user/gnosia-learn-studio.service"
-    check "app restarted"               calls_have "systemctl --user restart gnosia-learn"
-    check "deploy timer not enabled"    no_call "enable --now gnosia-learn-deploy.timer"
-    check "export timer enabled"        calls_have "systemctl --user enable --now gnosia-learn-export.timer"
-    check "studio off by default"       calls_have "systemctl --user disable --now gnosia-learn-studio"
-    check "export unit mode is 600"     sh -c "[ \"$(stat -c %a "$HOME/.config/systemd/user/gnosia-learn-export.service" 2>/dev/null || stat -f %Lp "$HOME/.config/systemd/user/gnosia-learn-export.service")\" = 600 ]"
+    check "app unit written"            [ -f "$HOME/.config/systemd/user/hermes-studio.service" ]
+    check "app binds loopback+port"     grep -q -- "-p 8107 -H 127.0.0.1" "$HOME/.config/systemd/user/hermes-studio.service"
+    check "app unit gets HERMES_HOME"   grep -q "^Environment=HERMES_HOME=" "$HOME/.config/systemd/user/hermes-studio.service"
+    check "app unit gets CATALOG_DB"    grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/hermes-studio.service"
+    check "app unit has no postgres"    sh -c "! grep -q 'postgres\|DATABASE_URL' '$HOME/.config/systemd/user/hermes-studio.service'"
+    check "export unit gets HERMES_HOME" grep -q "^Environment=HERMES_HOME=" "$HOME/.config/systemd/user/hermes-studio-export.service"
+    check "export unit gets CATALOG_DB" grep -q "^Environment=CATALOG_DB=" "$HOME/.config/systemd/user/hermes-studio-export.service"
+    check "no deploy timer (deployd)"   [ ! -f "$HOME/.config/systemd/user/hermes-studio-deploy.timer" ]
+    check "export timer written"        [ -f "$HOME/.config/systemd/user/hermes-studio-export.timer" ]
+    check "studio unit written"         [ -f "$HOME/.config/systemd/user/hermes-studio-runner.service" ]
+    check "studio runs npm studio"      grep -q "npm run studio" "$HOME/.config/systemd/user/hermes-studio-runner.service"
+    check "studio claude bin baked"     grep -q "STUDIO_CLAUDE_BIN=$STUBS/claude" "$HOME/.config/systemd/user/hermes-studio-runner.service"
+    check "studio home outside repo"    grep -q "STUDIO_HOME=$HOME/services/hermes-studio/studio" "$HOME/.config/systemd/user/hermes-studio-runner.service"
+    check "app restarted"               calls_have "systemctl --user restart hermes-studio"
+    check "deploy timer not enabled"    no_call "enable --now hermes-studio-deploy.timer"
+    check "export timer enabled"        calls_have "systemctl --user enable --now hermes-studio-export.timer"
+    check "studio off by default"       calls_have "systemctl --user disable --now hermes-studio-runner"
+    check "export unit mode is 600"     sh -c "[ \"$(stat -c %a "$HOME/.config/systemd/user/hermes-studio-export.service" 2>/dev/null || stat -f %Lp "$HOME/.config/systemd/user/hermes-studio-export.service")\" = 600 ]"
     check "lingering enabled"           calls_have "loginctl enable-linger"
   else
-    check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist" ]
-    check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist" ]
-    check "no deploy agent (deployd)"   [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
-    check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist" ]
-    check "web agent gets GNOSIA_HOME"  grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
-    check "web agent gets CATALOG_DB"   grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
-    check "export agent gets GNOSIA_HOME" grep -q "<key>GNOSIA_HOME</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
-    check "export agent gets CATALOG_DB" grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
-    check "deploy agent not loaded"     no_call "launchctl bootstrap .*com.gnosia-learn.deploy"
-    check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.gnosia-learn.web"
-    check "studio agent not loaded"     no_call "launchctl bootstrap .*com.gnosia-learn.studio"
+    check "web agent written"           [ -f "$HOME/Library/LaunchAgents/com.hermes-studio.web.plist" ]
+    check "studio agent written"        [ -f "$HOME/Library/LaunchAgents/com.hermes-studio.studio.plist" ]
+    check "no deploy agent (deployd)"   [ ! -f "$HOME/Library/LaunchAgents/com.hermes-studio.deploy.plist" ]
+    check "export agent written"        [ -f "$HOME/Library/LaunchAgents/com.hermes-studio.export.plist" ]
+    check "web agent gets HERMES_HOME"  grep -q "<key>HERMES_HOME</key>" "$HOME/Library/LaunchAgents/com.hermes-studio.web.plist"
+    check "web agent gets CATALOG_DB"   grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.hermes-studio.web.plist"
+    check "export agent gets HERMES_HOME" grep -q "<key>HERMES_HOME</key>" "$HOME/Library/LaunchAgents/com.hermes-studio.export.plist"
+    check "export agent gets CATALOG_DB" grep -q "<key>CATALOG_DB</key>" "$HOME/Library/LaunchAgents/com.hermes-studio.export.plist"
+    check "deploy agent not loaded"     no_call "launchctl bootstrap .*com.hermes-studio.deploy"
+    check "web agent loaded"            calls_have "launchctl bootstrap gui/.*/com.hermes-studio.web"
+    check "studio agent not loaded"     no_call "launchctl bootstrap .*com.hermes-studio.studio"
     local a
     for a in web export; do
       check "$a label enabled before bootstrap (undoes teardown's disable)" \
-        before "launchctl enable gui/.*/com.gnosia-learn.$a" "launchctl bootstrap .*com.gnosia-learn.$a"
+        before "launchctl enable gui/.*/com.hermes-studio.$a" "launchctl bootstrap .*com.hermes-studio.$a"
     done
   fi
   check "served on tailscale :8107"     calls_have "tailscale serve --bg --https=8107 http://127.0.0.1:8107"
@@ -316,8 +328,8 @@ test_idempotent_rerun() {
   teardown
 }
 
-# The pre-migration poller under either name (the service was self-learn
-# before the rename): setup.sh removes it once deployd is installed.
+# The pre-migration poller under each past name (the service was self-learn,
+# then gnosia-learn): setup.sh removes it once deployd is installed.
 mk_deployd() {
   mkdir -p "$HOME/services/deployd/bin" "$HOME/services/deployd/state"
   printf '#!/bin/sh\nexit 0\n' > "$HOME/services/deployd/bin/deployd"
@@ -326,7 +338,7 @@ mk_deployd() {
 seed_legacy_poller() {
   if [ "$OS" = "Linux" ]; then
     mkdir -p "$HOME/.config/systemd/user"
-    for n in self-learn gnosia-learn; do
+    for n in self-learn gnosia-learn hermes-studio; do
       echo x > "$HOME/.config/systemd/user/$n-deploy.timer"
       echo x > "$HOME/.config/systemd/user/$n-deploy.service"
     done
@@ -334,6 +346,7 @@ seed_legacy_poller() {
     mkdir -p "$HOME/Library/LaunchAgents"
     echo x > "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist"
     echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.hermes-studio.deploy.plist"
   fi
 }
 
@@ -348,13 +361,17 @@ test_migrate_removes_legacy_poller() {
   if [ "$OS" = "Linux" ]; then
     check "self-learn timer gone"   [ ! -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ]
     check "gnosia timer gone"       [ ! -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
+    check "hermes timer gone"       [ ! -f "$HOME/.config/systemd/user/hermes-studio-deploy.timer" ]
     check "timer disabled first"    calls_have "systemctl --user disable --now self-learn-deploy.timer"
-    check "export timer kept"       [ -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
+    check "gnosia timer disabled"   calls_have "systemctl --user disable --now gnosia-learn-deploy.timer"
+    check "export timer kept"       [ -f "$HOME/.config/systemd/user/hermes-studio-export.timer" ]
   else
     check "self-learn plist gone" [ ! -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ]
     check "gnosia plist gone"     [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
+    check "hermes plist gone"     [ ! -f "$HOME/Library/LaunchAgents/com.hermes-studio.deploy.plist" ]
     check "agents booted out"     calls_have "launchctl bootout gui/.*/com.self-learn.deploy"
-    check "export plist kept"     [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist" ]
+    check "gnosia agent booted"   calls_have "launchctl bootout gui/.*/com.gnosia-learn.deploy"
+    check "export plist kept"     [ -f "$HOME/Library/LaunchAgents/com.hermes-studio.export.plist" ]
   fi
   teardown
 }
@@ -369,13 +386,279 @@ test_migrate_keeps_poller_without_deployd() {
   check "warns about deployd"     out_has "deployd is not installed"
   if [ "$OS" = "Linux" ]; then
     check "timers kept"           [ -f "$HOME/.config/systemd/user/self-learn-deploy.timer" ] \
-                               && [ -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ]
+                               && [ -f "$HOME/.config/systemd/user/gnosia-learn-deploy.timer" ] \
+                               && [ -f "$HOME/.config/systemd/user/hermes-studio-deploy.timer" ]
     check "never disabled"        no_call "disable --now self-learn-deploy.timer"
   else
     check "plists kept"           [ -f "$HOME/Library/LaunchAgents/com.self-learn.deploy.plist" ] \
-                               && [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ]
+                               && [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist" ] \
+                               && [ -f "$HOME/Library/LaunchAgents/com.hermes-studio.deploy.plist" ]
     check "never booted out"      no_call "launchctl bootout gui/.*/com.self-learn.deploy"
   fi
+  teardown
+}
+
+test_upgrade_imports_old_env() {
+  echo "• upgrade: ignored .env in the old service dir is imported, not replaced"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/gnosia-learn"
+  cat > "$SANDBOX/repo/services/gnosia-learn/.env" <<EOF
+SERVICE_HOME=$HOME/services/gnosia-learn
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
+OWNER_PASSWORD=kept-password
+AUTH_SECRET=kept-secret-kept-secret-kept-secret
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+PUBLIC_URL=https://test-host.tailfake.ts.net:8107
+REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
+BRANCH=main
+STUDIO_ENABLED=0
+ASSET_FILES_ENABLED=1
+EOF
+  chmod 600 "$SANDBOX/repo/services/gnosia-learn/.env"
+  # Build state stays under the old home. setup.sh points SERVICE_HOME at
+  # the new directory, so this deploy is a first build of the imported
+  # config, and it must not mint a second password or a second data root.
+  mkdir -p "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" \
+    "$HOME/services/gnosia-learn/studio" "$HOME/services/gnosia-learn/seafile/ccnet" \
+    "$HOME/.gnosia"
+  echo '{"id":"job-1"}' > "$HOME/services/gnosia-learn/studio/job.json"
+  echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
+  printf 'STUDIO_ENABLED=0 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
+    "$HOME/.gnosia" "$HOME/.gnosia/catalog.db" \
+    > "$HOME/services/gnosia-learn/state/env-sig"
+  run_deploy
+  # An upgraded checkout is already built, so deploy.sh exits 0 with
+  # "up to date" and setup.sh dies on the missing health check after that.
+  # The import is what this test owns; the health probe is covered elsewhere.
+  check "imported the old config" out_has "Imported the existing config"
+  check "service home moved"      env_has "SERVICE_HOME=$HOME/services/hermes-studio"
+  check "password kept"           env_has "OWNER_PASSWORD=kept-password"
+  check "secret kept"             env_has "AUTH_SECRET=kept-secret-kept-secret-kept-secret"
+  check "data root kept"          env_has "GNOSIA_HOME=$HOME/.gnosia"
+  check "no fresh hermes root"    sh -c "! grep -q '^HERMES_HOME=' '$SVC/.env'"
+  check "old data root kept"      [ -d "$HOME/.gnosia" ]
+  check "studio jobs moved"       [ -f "$HOME/services/hermes-studio/studio/job.json" ]
+  check "seafile dir moved"       [ -d "$HOME/services/hermes-studio/seafile/ccnet" ]
+  check "old studio left behind"  [ ! -e "$HOME/services/gnosia-learn/studio" ]
+  check "no re-seed"              no_call "npm run catalog -- import seed"
+  check "reports up to date"      out_has "up to date"
+  teardown
+}
+
+test_upgrade_rewrites_quoted_service_home() {
+  echo "• upgrade: a quoted SERVICE_HOME is rewritten, and the move follows it"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/gnosia-learn"
+  cat > "$SANDBOX/repo/services/gnosia-learn/.env" <<EOF
+SERVICE_HOME="$HOME/services/gnosia-learn"
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
+OWNER_PASSWORD=kept-password
+AUTH_SECRET=kept-secret-kept-secret-kept-secret
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+PUBLIC_URL=https://test-host.tailfake.ts.net:8107
+REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
+BRANCH=main
+STUDIO_ENABLED=0
+ASSET_FILES_ENABLED=1
+EOF
+  chmod 600 "$SANDBOX/repo/services/gnosia-learn/.env"
+  mkdir -p "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" \
+    "$HOME/services/gnosia-learn/studio" "$HOME/.gnosia"
+  echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
+  printf 'STUDIO_ENABLED=0 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
+    "$HOME/.gnosia" "$HOME/.gnosia/catalog.db" \
+    > "$HOME/services/gnosia-learn/state/env-sig"
+  run_deploy
+  check "service home unquoted"   env_has "SERVICE_HOME=$HOME/services/hermes-studio"
+  check "old path gone"           sh -c "! grep -q gnosia-learn '$SVC/.env'"
+  check "bootstrap moved"         [ -f "$HOME/services/hermes-studio/state/db-bootstrapped" ]
+  check "no re-seed"              no_call "npm run catalog -- import seed"
+  teardown
+}
+
+test_upgrade_lock_held_keeps_env() {
+  echo "• upgrade: a live old lock refuses before SERVICE_HOME is rewritten"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/gnosia-learn"
+  cat > "$SANDBOX/repo/services/gnosia-learn/.env" <<EOF
+SERVICE_HOME=$HOME/services/gnosia-learn
+GNOSIA_HOME=$HOME/.gnosia
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+EOF
+  chmod 600 "$SANDBOX/repo/services/gnosia-learn/.env"
+  mkdir -p "$HOME/services/gnosia-learn/.deploy.lock" \
+    "$HOME/services/gnosia-learn/studio"
+  echo '{"id":"job-1"}' > "$HOME/services/gnosia-learn/studio/job.json"
+  echo $$ > "$HOME/services/gnosia-learn/.deploy.lock/pid"
+  run_deploy
+  check "exits non-zero"           [ "$CODE" -ne 0 ]
+  check "says why"                 out_has "still running under"
+  check "env not imported yet"     [ ! -f "$SVC/.env" ]
+  check "old env still there"     [ -f "$SANDBOX/repo/services/gnosia-learn/.env" ]
+  check "jobs stay put"           [ -f "$HOME/services/gnosia-learn/studio/job.json" ]
+  check "lock left to its owner"  [ "$(cat "$HOME/services/gnosia-learn/.deploy.lock/pid")" = "$$" ]
+  teardown
+}
+
+test_upgrade_retries_move_after_rewrite() {
+  echo "• upgrade: a retry moves jobs after SERVICE_HOME already names the new home"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SVC"
+  cat > "$SVC/.env" <<EOF
+SERVICE_HOME=$HOME/services/hermes-studio
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
+OWNER_PASSWORD=kept-password
+AUTH_SECRET=kept-secret-kept-secret-kept-secret
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+PUBLIC_URL=https://test-host.tailfake.ts.net:8107
+REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
+BRANCH=main
+STUDIO_ENABLED=0
+ASSET_FILES_ENABLED=1
+EOF
+  chmod 600 "$SVC/.env"
+  mkdir -p "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" \
+    "$HOME/services/gnosia-learn/studio" "$HOME/.gnosia"
+  echo '{"id":"job-1"}' > "$HOME/services/gnosia-learn/studio/job.json"
+  echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
+  printf 'STUDIO_ENABLED=0 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
+    "$HOME/.gnosia" "$HOME/.gnosia/catalog.db" \
+    > "$HOME/services/gnosia-learn/state/env-sig"
+  run_deploy
+  check "studio jobs moved"       [ -f "$HOME/services/hermes-studio/studio/job.json" ]
+  check "bootstrap moved"         [ -f "$HOME/services/hermes-studio/state/db-bootstrapped" ]
+  check "old studio left behind"  [ ! -e "$HOME/services/gnosia-learn/studio" ]
+  check "password kept"           env_has "OWNER_PASSWORD=kept-password"
+  check "no re-seed"              no_call "npm run catalog -- import seed"
+  teardown
+}
+
+test_upgrade_stops_old_units() {
+  echo "• upgrade: old app, runner and export units are stopped before the new ones start"
+  setup
+  touch "$STATE_DIR/operator"
+  if [ "$OS" = "Linux" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    for u in gnosia-learn.service gnosia-learn-studio.service \
+             gnosia-learn-export.timer gnosia-learn-seafile.service \
+             self-learn.service; do
+      echo x > "$HOME/.config/systemd/user/$u"
+    done
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.self-learn.export.plist"
+  fi
+  run_deploy
+  check "exits zero" [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "old app unit gone"     [ ! -f "$HOME/.config/systemd/user/gnosia-learn.service" ]
+    check "old runner gone"       [ ! -f "$HOME/.config/systemd/user/gnosia-learn-studio.service" ]
+    check "old export gone"       [ ! -f "$HOME/.config/systemd/user/gnosia-learn-export.timer" ]
+    check "old seafile kept"      [ -f "$HOME/.config/systemd/user/gnosia-learn-seafile.service" ]
+    check "self-learn app gone"   [ ! -f "$HOME/.config/systemd/user/self-learn.service" ]
+    check "old app disabled"      calls_have "systemctl --user disable --now gnosia-learn"
+    check "stopped before start"  before "disable --now gnosia-learn" "systemctl --user restart hermes-studio"
+  else
+    check "old web plist gone"    [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist" ]
+    check "old studio plist gone" [ ! -f "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist" ]
+    check "old export plist gone" [ ! -f "$HOME/Library/LaunchAgents/com.self-learn.export.plist" ]
+    check "old web booted out"    calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+  fi
+  teardown
+}
+
+test_upgrade_keeps_a_stopped_old_app() {
+  echo "• upgrade: a stopped old app is not started under the new name"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/gnosia-learn" \
+    "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" "$HOME/.gnosia" \
+    "$HOME/.config/systemd/user"
+  cat > "$SANDBOX/repo/services/gnosia-learn/.env" <<EOF
+SERVICE_HOME=$HOME/services/gnosia-learn
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
+OWNER_PASSWORD=kept-password
+AUTH_SECRET=kept-secret-kept-secret-kept-secret
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+PUBLIC_URL=https://test-host.tailfake.ts.net:8107
+REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
+BRANCH=main
+STUDIO_ENABLED=1
+ASSET_FILES_ENABLED=1
+EOF
+  chmod 600 "$SANDBOX/repo/services/gnosia-learn/.env"
+  echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
+  printf 'STUDIO_ENABLED=1 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
+    "$HOME/.gnosia" "$HOME/.gnosia/catalog.db" \
+    > "$HOME/services/gnosia-learn/state/env-sig"
+  if [ "$OS" = "Linux" ]; then
+    echo x > "$HOME/.config/systemd/user/gnosia-learn.service"
+    echo x > "$HOME/.config/systemd/user/gnosia-learn-studio.service"
+    # Unit files exist and the active markers do not: a clean stop.
+  else
+    mkdir -p "$HOME/Library/LaunchAgents"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
+  fi
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "says it left it stopped" out_has "leaving it stopped"
+  if [ "$OS" = "Linux" ]; then
+    check "app not restarted"      no_call "systemctl --user restart hermes-studio$"
+    check "runner not restarted"   no_call "systemctl --user restart hermes-studio-runner"
+  else
+    check "agent not loaded"       no_call "launchctl bootstrap .*com.hermes-studio.web.plist"
+    check "runner not loaded"      no_call "launchctl bootstrap .*com.hermes-studio.studio.plist"
+  fi
+  teardown
+}
+
+test_upgrade_carries_disabled_flag() {
+  echo "• upgrade: a deployd-driven setup leaves a carried skip flag set"
+  setup
+  touch "$STATE_DIR/operator"
+  mk_deployd
+  # deployd carries the old flag before it invokes setup.sh. A run that
+  # arrives with DEPLOY_SHA set must not clear what deployd just carried.
+  touch "$HOME/services/deployd/state/hermes-studio.disabled"
+  DEPLOY_SHA=aaa1111 run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "carried flag kept"       [ -f "$HOME/services/deployd/state/hermes-studio.disabled" ]
+  teardown
+}
+
+test_manual_setup_clears_disabled_flag() {
+  echo "• a manual setup clears the skip flag a teardown left behind"
+  setup
+  touch "$STATE_DIR/operator"
+  mk_deployd
+  touch "$HOME/services/deployd/state/hermes-studio.disabled"
+  run_deploy
+  check "exits zero"              [ "$CODE" -eq 0 ]
+  check "flag cleared"            [ ! -f "$HOME/services/deployd/state/hermes-studio.disabled" ]
   teardown
 }
 
@@ -384,10 +667,10 @@ test_teardown_marks_disabled() {
   deployed
   run_teardown
   check "teardown exits zero"     [ "$CODE" -eq 0 ]
-  check "disabled flag written"   [ -f "$HOME/services/deployd/state/gnosia-learn.disabled" ]
+  check "disabled flag written"   [ -f "$HOME/services/deployd/state/hermes-studio.disabled" ]
   run_deploy
   check "re-setup exits zero"     [ "$CODE" -eq 0 ]
-  check "disabled flag cleared"   [ ! -f "$HOME/services/deployd/state/gnosia-learn.disabled" ]
+  check "disabled flag cleared"   [ ! -f "$HOME/services/deployd/state/hermes-studio.disabled" ]
   teardown
 }
 
@@ -398,7 +681,7 @@ test_deploy_sha_pin() {
   DEPLOY_SHA=ddd4444 run_deploy
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "resets to the pin"       calls_have "reset --hard --quiet ddd4444"
-  check "built sha is the pin"    grep -qx ddd4444 "$HOME/services/gnosia-learn/state/built-sha"
+  check "built sha is the pin"    grep -qx ddd4444 "$HOME/services/hermes-studio/state/built-sha"
   : > "$CALLS_LOG"
   DEPLOY_SHA=eee5555 run_poll
   check "poll: exits zero"        [ "$CODE" -eq 0 ]
@@ -445,16 +728,16 @@ test_push_triggers_redeploy() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the new sha"     out_has "deploying bbb2222"
   if [ "$OS" = "Linux" ]; then
-    check "app stopped first"     calls_have "systemctl --user stop gnosia-learn.service"
-    check "app started again"     calls_have "systemctl --user start gnosia-learn.service"
+    check "app stopped first"     calls_have "systemctl --user stop hermes-studio.service"
+    check "app started again"     calls_have "systemctl --user start hermes-studio.service"
   else
-    check "app stopped first"     calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
-    check "app started again"     calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "app stopped first"     calls_have "launchctl bootout gui/.*/com.hermes-studio.web"
+    check "app started again"     calls_have "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.web"
   fi
   check "rebuilt"                 calls_have "npm run build"
   check "catalog migrated"        calls_have "npm run catalog -- migrate"
   check "npm ci skipped"          no_call "npm ci"
-  check "built sha updated"       grep -qx bbb2222 "$HOME/services/gnosia-learn/state/built-sha"
+  check "built sha updated"       grep -qx bbb2222 "$HOME/services/hermes-studio/state/built-sha"
   teardown
 }
 
@@ -489,11 +772,11 @@ test_stopped_app_stays_stopped() {
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "rebuilt"             calls_have "npm run build"
   if [ "$OS" = "Linux" ]; then
-    check "no stop attempted" no_call "systemctl --user stop gnosia-learn"
-    check "not restarted"     no_call "systemctl --user start gnosia-learn"
+    check "no stop attempted" no_call "systemctl --user stop hermes-studio"
+    check "not restarted"     no_call "systemctl --user start hermes-studio"
   else
     check "no stop attempted" no_call "launchctl bootout"
-    check "not restarted"     no_call "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "not restarted"     no_call "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.web"
   fi
   check "no docker touched"   no_call "^docker "
   check "says it was left"    out_has "left stopped"
@@ -514,11 +797,11 @@ test_stopped_stack_stays_stopped() {
   check "rebuilt"                  calls_have "npm run build"
   check "catalog migrated"         calls_have "npm run catalog -- migrate"
   if [ "$OS" = "Linux" ]; then
-    check "app not restarted"      no_call "systemctl --user start gnosia-learn.service"
-    check "studio not started"     no_call "systemctl --user start gnosia-learn-studio"
+    check "app not restarted"      no_call "systemctl --user start hermes-studio.service"
+    check "studio not started"     no_call "systemctl --user start hermes-studio-runner"
   else
-    check "app not restarted"      no_call "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
-    check "studio not started"     no_call "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.studio"
+    check "app not restarted"      no_call "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.web"
+    check "studio not started"     no_call "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.studio"
   fi
   teardown
 }
@@ -528,17 +811,17 @@ test_poll_lock() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  mkdir "$HOME/services/gnosia-learn/.deploy.lock"
-  echo $$ > "$HOME/services/gnosia-learn/.deploy.lock/pid"
+  mkdir "$HOME/services/hermes-studio/.deploy.lock"
+  echo $$ > "$HOME/services/hermes-studio/.deploy.lock/pid"
   : > "$CALLS_LOG"
   run_poll
   check "exits non-zero"         [ "$CODE" -ne 0 ]
   check "reports the skip"       out_has "another deploy is running"
   check "touched no git"         no_call "fetch --quiet"
-  rm -rf "$HOME/services/gnosia-learn/.deploy.lock"
-  mkdir "$HOME/services/gnosia-learn/.deploy.lock"
+  rm -rf "$HOME/services/hermes-studio/.deploy.lock"
+  mkdir "$HOME/services/hermes-studio/.deploy.lock"
   ( exit 0 ) & dead=$!; wait "$dead" 2>/dev/null || true
-  echo "$dead" > "$HOME/services/gnosia-learn/.deploy.lock/pid"
+  echo "$dead" > "$HOME/services/hermes-studio/.deploy.lock/pid"
   : > "$CALLS_LOG"
   run_poll
   check "reclaims a dead lock"   out_has "owner pid $dead is gone"
@@ -551,7 +834,7 @@ test_poll_lock_identity() {
   setup
   touch "$STATE_DIR/operator"
   run_deploy
-  lock="$HOME/services/gnosia-learn/.deploy.lock"
+  lock="$HOME/services/hermes-studio/.deploy.lock"
   # A recorded holder is pid + start identity: however old the lock, it is
   # not raced (the 60-min bound only guards locks whose owner cannot be
   # verified).
@@ -596,7 +879,7 @@ test_skip_seed() {
   check "no seed import"          no_call "npm run catalog -- import"
   check "no flips"                no_call "npm run catalog -- flip"
   check "still migrated"          calls_have "npm run catalog -- migrate"
-  check "marker says skipped"     grep -qx skipped "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  check "marker says skipped"     grep -qx skipped "$HOME/services/hermes-studio/state/db-bootstrapped"
   check "warns about restore"     out_has "laptop"
   teardown
 }
@@ -610,7 +893,7 @@ test_port_override() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "served on :9999 -> 9999" calls_have "tailscale serve --bg --https=9999 http://127.0.0.1:9999"
   if [ "$OS" = "Linux" ]; then
-    check "unit uses :9999"       grep -q -- "-p 9999" "$HOME/.config/systemd/user/gnosia-learn.service"
+    check "unit uses :9999"       grep -q -- "-p 9999" "$HOME/.config/systemd/user/hermes-studio.service"
   fi
   teardown
 }
@@ -646,10 +929,10 @@ test_setup_leaves_stopped() {
   check "serve still configured"  calls_have "tailscale serve --bg --https=8107"
   check "no health checks"        no_call "^curl "
   if [ "$OS" = "Linux" ]; then
-    check "app not restarted"     no_call "systemctl --user restart gnosia-learn"
-    check "app not enabled"       no_call "systemctl --user enable gnosia-learn$"
+    check "app not restarted"     no_call "systemctl --user restart hermes-studio"
+    check "app not enabled"       no_call "systemctl --user enable hermes-studio$"
   else
-    check "agent not loaded"      no_call "launchctl bootstrap .*com.gnosia-learn.web.plist"
+    check "agent not loaded"      no_call "launchctl bootstrap .*com.hermes-studio.web.plist"
   fi
   teardown
 }
@@ -664,14 +947,14 @@ test_studio_enabled() {
   check ".env keeps the flag"     env_has "STUDIO_ENABLED=1"
   check "web env has the flag"    grep -qx "STUDIO_ENABLED=1" "$(REPO_DIR)/apps/web/.env.local"
   check "tldrawkc fetched"        calls_have "submodule update --init tools/tldrawkc"
-  check "tldrawkc built+stamped"  [ -f "$HOME/services/gnosia-learn/state/tldrawkc-sha" ]
+  check "tldrawkc built+stamped"  [ -f "$HOME/services/hermes-studio/state/tldrawkc-sha" ]
   if [ "$OS" = "Linux" ]; then
-    check "studio enabled"        calls_have "systemctl --user enable gnosia-learn-studio"
-    check "studio restarted"      calls_have "systemctl --user restart gnosia-learn-studio"
-    check "no disable call"       no_call "systemctl --user disable --now gnosia-learn-studio"
+    check "studio enabled"        calls_have "systemctl --user enable hermes-studio-runner"
+    check "studio restarted"      calls_have "systemctl --user restart hermes-studio-runner"
+    check "no disable call"       no_call "systemctl --user disable --now hermes-studio-runner"
   else
-    check "studio agent loaded"   calls_have "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
-    check "plist has claude bin"  grep -q "STUDIO_CLAUDE_BIN" "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
+    check "studio agent loaded"   calls_have "launchctl bootstrap gui/.*/com.hermes-studio.studio"
+    check "plist has claude bin"  grep -q "STUDIO_CLAUDE_BIN" "$HOME/Library/LaunchAgents/com.hermes-studio.studio.plist"
   fi
   check "studio health probed"  calls_have "curl .*127.0.0.1:7250/api/health"
 
@@ -680,9 +963,9 @@ test_studio_enabled() {
   run_deploy
   check "re-run exits zero"       [ "$CODE" -eq 0 ]
   if [ "$OS" = "Linux" ]; then
-    check "studio disabled+stopped" calls_have "systemctl --user disable --now gnosia-learn-studio"
+    check "studio disabled+stopped" calls_have "systemctl --user disable --now hermes-studio-runner"
   else
-    check "studio agent booted out" calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
+    check "studio agent booted out" calls_have "launchctl bootout gui/.*/com.hermes-studio.studio"
     check "flag-off marker written" [ -f "$(SVC_HOME)/state/studio-flag-off" ]
   fi
 
@@ -693,10 +976,10 @@ test_studio_enabled() {
   run_deploy
   check "re-enable exits zero"    [ "$CODE" -eq 0 ]
   if [ "$OS" = "Linux" ]; then
-    check "studio re-enabled"     calls_have "systemctl --user enable gnosia-learn-studio"
-    check "studio restarted"      calls_have "systemctl --user restart gnosia-learn-studio"
+    check "studio re-enabled"     calls_have "systemctl --user enable hermes-studio-runner"
+    check "studio restarted"      calls_have "systemctl --user restart hermes-studio-runner"
   else
-    check "studio reloaded"       calls_have "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
+    check "studio reloaded"       calls_have "launchctl bootstrap gui/.*/com.hermes-studio.studio"
     check "flag-off marker gone"  [ ! -f "$(SVC_HOME)/state/studio-flag-off" ]
   fi
   teardown
@@ -711,16 +994,16 @@ test_studio_stop_survives_rerun() {
   check "first run ok"            [ "$CODE" -eq 0 ]
   # The owner stops just the runner — enabled but inactive on systemd,
   # unloaded with no flag-off marker on launchd. The app keeps running.
-  rm -f "$STATE_DIR/studio_active" "$STATE_DIR/launchd/com.gnosia-learn.studio"
+  rm -f "$STATE_DIR/studio_active" "$STATE_DIR/launchd/com.hermes-studio.studio"
   : > "$CALLS_LOG"
   run_deploy
   check "re-run exits zero"       [ "$CODE" -eq 0 ]
   if [ "$OS" = "Linux" ]; then
     check "studio still enabled"  [ -f "$STATE_DIR/studio_enabled" ]
-    check "studio not restarted"  no_call "systemctl --user restart gnosia-learn-studio"
+    check "studio not restarted"  no_call "systemctl --user restart hermes-studio-runner"
   else
-    check "studio still enabled"  calls_have "launchctl enable gui/.*/com.gnosia-learn.studio"
-    check "studio not reloaded"   no_call "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
+    check "studio still enabled"  calls_have "launchctl enable gui/.*/com.hermes-studio.studio"
+    check "studio not reloaded"   no_call "launchctl bootstrap gui/.*/com.hermes-studio.studio"
   fi
   check "says it stays stopped"   out_has "leaving it stopped"
   teardown
@@ -739,15 +1022,15 @@ test_panel_stopped_studio_survives_rerun() {
   # on purpose", so the check reads is-active instead. On launchd the same
   # state is just the unloaded label (no enabled bit exists there).
   rm -f "$STATE_DIR/studio_active" "$STATE_DIR/studio_enabled" \
-        "$STATE_DIR/launchd/com.gnosia-learn.studio"
+        "$STATE_DIR/launchd/com.hermes-studio.studio"
   : > "$CALLS_LOG"
   run_deploy
   check "re-run exits zero"       [ "$CODE" -eq 0 ]
   if [ "$OS" = "Linux" ]; then
-    check "studio not re-enabled" no_call "systemctl --user enable gnosia-learn-studio"
-    check "studio not restarted"  no_call "systemctl --user restart gnosia-learn-studio"
+    check "studio not re-enabled" no_call "systemctl --user enable hermes-studio-runner"
+    check "studio not restarted"  no_call "systemctl --user restart hermes-studio-runner"
   else
-    check "studio not reloaded"   no_call "launchctl bootstrap gui/.*/com.gnosia-learn.studio"
+    check "studio not reloaded"   no_call "launchctl bootstrap gui/.*/com.hermes-studio.studio"
   fi
   check "says it stays stopped"   out_has "leaving it stopped"
   teardown
@@ -766,11 +1049,11 @@ test_deploy_bounces_studio() {
   run_poll
   check "exits zero"              [ "$CODE" -eq 0 ]
   if [ "$OS" = "Linux" ]; then
-    check "studio stopped"        calls_have "systemctl --user stop gnosia-learn-studio.service"
-    check "studio started again"  calls_have "systemctl --user start gnosia-learn-studio.service"
+    check "studio stopped"        calls_have "systemctl --user stop hermes-studio-runner.service"
+    check "studio started again"  calls_have "systemctl --user start hermes-studio-runner.service"
   else
-    check "studio stopped"        calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
-    check "studio started again"  calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.studio"
+    check "studio stopped"        calls_have "launchctl bootout gui/.*/com.hermes-studio.studio"
+    check "studio started again"  calls_have "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.studio"
   fi
   teardown
 }
@@ -814,12 +1097,12 @@ test_tldrawkc_failed_build_restores() {
   check "previous dist/ is back"      grep -qx old "$(TL_DIR)/dist/marker"
   check "no half-written dist/"       test ! -e "$(TL_DIR)/dist/partial"
   check "node_modules is back"        [ -d "$(TL_DIR)/node_modules" ]
-  check "stamp still the old build"   grep -qx aaa1111 "$HOME/services/gnosia-learn/state/tldrawkc-sha"
-  check "snapshot cleaned up"         test ! -e "$HOME/services/gnosia-learn/state/rollback-tldrawkc"
+  check "stamp still the old build"   grep -qx aaa1111 "$HOME/services/hermes-studio/state/tldrawkc-sha"
+  check "snapshot cleaned up"         test ! -e "$HOME/services/hermes-studio/state/rollback-tldrawkc"
   if [ "$OS" = "Linux" ]; then
-    check "studio restarted"          calls_have "systemctl --user start gnosia-learn-studio.service"
+    check "studio restarted"          calls_have "systemctl --user start hermes-studio-runner.service"
   else
-    check "studio restarted"          calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.studio"
+    check "studio restarted"          calls_have "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.studio"
   fi
   teardown
 }
@@ -830,7 +1113,7 @@ test_tldrawkc_rebuilt_when_output_is_gone() {
   touch "$STATE_DIR/operator"
   export STUDIO_ENABLED=1
   run_deploy
-  check "stamped after the first build" grep -qx aaa1111 "$HOME/services/gnosia-learn/state/tldrawkc-sha"
+  check "stamped after the first build" grep -qx aaa1111 "$HOME/services/hermes-studio/state/tldrawkc-sha"
   rm -rf "$(TL_DIR)/dist" "$(TL_DIR)/node_modules"
   : > "$CALLS_LOG"
   run_poll --force
@@ -851,10 +1134,10 @@ test_deploy_leaves_stopped_studio() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "rebuilt"                 calls_have "npm run build"
   if [ "$OS" = "Linux" ]; then
-    check "studio not stopped"    no_call "stop gnosia-learn-studio"
-    check "studio not started"    no_call "start gnosia-learn-studio"
+    check "studio not stopped"    no_call "stop hermes-studio-runner"
+    check "studio not started"    no_call "start hermes-studio-runner"
   else
-    check "studio untouched"      no_call "launchctl \(bootout\|bootstrap\|kickstart\).*com.gnosia-learn.studio"
+    check "studio untouched"      no_call "launchctl \(bootout\|bootstrap\|kickstart\).*com.hermes-studio.studio"
   fi
   teardown
 }
@@ -869,7 +1152,7 @@ test_deploy_pinned_sha() {
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "deploys the pinned sha"  out_has "deploying ccc0000"
   check "resets to the pin"       calls_have "reset --hard --quiet ccc0000"
-  check "built sha is the pin"    grep -qx ccc0000 "$HOME/services/gnosia-learn/state/built-sha"
+  check "built sha is the pin"    grep -qx ccc0000 "$HOME/services/hermes-studio/state/built-sha"
   teardown
 }
 
@@ -885,11 +1168,11 @@ test_failed_build_restores() {
   check "exits non-zero"          [ "$CODE" -ne 0 ]
   check "says it restored"        out_has "restoring the pre-deploy snapshot"
   check ".next put back"          [ -d "$(REPO_DIR)/apps/web/.next" ]
-  check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/gnosia-learn/state/built-sha"
+  check "built sha unchanged"     grep -qx aaa1111 "$HOME/services/hermes-studio/state/built-sha"
   if [ "$OS" = "Linux" ]; then
-    check "old build restarted"   calls_have "systemctl --user start gnosia-learn.service"
+    check "old build restarted"   calls_have "systemctl --user start hermes-studio.service"
   else
-    check "old build restarted"   calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "old build restarted"   calls_have "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.web"
   fi
   teardown
 }
@@ -941,16 +1224,16 @@ test_sync_install() {
   check "created the account"   calls_have "api/v2.1/admin/users"
   check "created the library"   calls_have "api2/repos"
   check "linked library"        calls_have "seaf-cli sync -l stub-repo-777"
-  check "links blobs/local"     calls_have " -d $HOME/.self-learn/blobs/local"
-  check "ignore has .owner"     grep -q '^/.owner$' "$HOME/.self-learn/blobs/local/seafile-ignore.txt"
-  check "ignore has .tmp"       grep -q '^/.tmp$' "$HOME/.self-learn/blobs/local/seafile-ignore.txt"
+  check "links blobs/local"     calls_have " -d $HOME/.gnosia/blobs/local"
+  check "ignore has .owner"     grep -q '^/.owner$' "$HOME/.gnosia/blobs/local/seafile-ignore.txt"
+  check "ignore has .tmp"       grep -q '^/.tmp$' "$HOME/.gnosia/blobs/local/seafile-ignore.txt"
   check "creds persisted"       env_has "SEAFILE_SYNC_REPO=stub-repo-777"
   check "env stays 600"         test "$(stat -c %a "$SVC/.env" 2>/dev/null || stat -f %Lp "$SVC/.env")" = 600
-  check "unit written"          test -f "$HOME/.config/systemd/user/gnosia-learn-seafile.service"
-  check "unit enabled"          calls_have "systemctl --user enable gnosia-learn-seafile.service"
-  check "unit restarted"        calls_have "systemctl --user restart gnosia-learn-seafile.service"
-  check "daemon is the process" grep -q "ExecStart=.*seaf-daemon" "$HOME/.config/systemd/user/gnosia-learn-seafile.service"
-  check "unit restarts"         grep -q "Restart=always" "$HOME/.config/systemd/user/gnosia-learn-seafile.service"
+  check "unit written"          test -f "$HOME/.config/systemd/user/hermes-studio-seafile.service"
+  check "unit enabled"          calls_have "systemctl --user enable hermes-studio-seafile.service"
+  check "unit restarted"        calls_have "systemctl --user restart hermes-studio-seafile.service"
+  check "daemon is the process" grep -q "ExecStart=.*seaf-daemon" "$HOME/.config/systemd/user/hermes-studio-seafile.service"
+  check "unit restarts"         grep -q "Restart=always" "$HOME/.config/systemd/user/hermes-studio-seafile.service"
   check "admin pw not in argv"  no_call "adminpw"
   check "sync pw not in argv"   no_call " -p "
   teardown
@@ -962,7 +1245,7 @@ test_sync_install_idempotent() {
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
 SEAFILE_URL=http://127.0.0.1:8081
-SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_USER=hermes-studio-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -980,12 +1263,12 @@ test_sync_install_old_layout() {
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
 SEAFILE_URL=http://127.0.0.1:8081
-SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_USER=hermes-studio-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
   touch "$STATE_DIR/seaf_synced_stub-repo-777"
-  echo "$HOME/.self-learn/blobs" > "$STATE_DIR/seaf_path_stub-repo-777"
+  echo "$HOME/.gnosia/blobs" > "$STATE_DIR/seaf_path_stub-repo-777"
   run_sync install
   check "exits non-zero"      [ "$CODE" -ne 0 ]
   check "says desync"         out_has "desync"
@@ -999,12 +1282,12 @@ test_sync_install_already_linked() {
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
 SEAFILE_URL=http://127.0.0.1:8081
-SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_USER=hermes-studio-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
   touch "$STATE_DIR/seaf_synced_stub-repo-777"
-  echo "$HOME/.self-learn/blobs/local" > "$STATE_DIR/seaf_path_stub-repo-777"
+  echo "$HOME/.gnosia/blobs/local" > "$STATE_DIR/seaf_path_stub-repo-777"
   run_sync install
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "no relink"           no_call "seaf-cli sync -l stub-repo-777"
@@ -1015,7 +1298,7 @@ test_sync_mac_setup_gui() {
   echo "• sync mac-setup: ignore file lands first, GUI steps printed"
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
-SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_USER=hermes-studio-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -1024,9 +1307,9 @@ EOF
   check "remote ignore written"   grep -q '^/.owner$' "$STATE_DIR/mac_ignore.txt"
   check "ignore covers .tmp"      grep -q '^/.tmp$' "$STATE_DIR/mac_ignore.txt"
   check "prints GUI steps"        out_has "Seafile Client"
-  check "prints the account"      out_has "gnosia-learn-sync@test"
+  check "prints the account"      out_has "hermes-studio-sync@test"
   check "prints tailnet URL"      out_has "https://test-host.tailfake.ts.net:8443"
-  check "names the library"       out_has '"gnosia-learn-blobs"'
+  check "names the library"       out_has '"hermes-studio-blobs"'
   teardown
 }
 
@@ -1034,7 +1317,7 @@ test_sync_mac_setup_legacy_lib_name() {
   echo "• sync mac-setup: a pre-rename library keeps its self-learn-blobs name in the steps"
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
-SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_USER=hermes-studio-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -1045,7 +1328,7 @@ EOF
   run_sync mac-setup
   check "exits zero"                [ "$CODE" -eq 0 ]
   check "names the saved library"   out_has '"self-learn-blobs"'
-  check "not the fresh name"        out_lacks '"gnosia-learn-blobs"'
+  check "not the fresh name"        out_lacks '"hermes-studio-blobs"'
   teardown
 }
 
@@ -1053,14 +1336,14 @@ test_sync_mac_setup_daemon_down() {
   echo "• sync mac-setup: a dead local daemon falls back to the fresh library name"
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
-SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_USER=hermes-studio-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
   touch "$STATE_DIR/seaf_down"
   run_sync mac-setup
   check "exits zero"                [ "$CODE" -eq 0 ]
-  check "falls back to fresh name"  out_has '"gnosia-learn-blobs"'
+  check "falls back to fresh name"  out_has '"hermes-studio-blobs"'
   check "steps still printed"       out_has "Seafile Client"
   teardown
 }
@@ -1069,7 +1352,7 @@ test_sync_mac_setup_headless() {
   echo "• sync mac-setup: seaf-cli on the Mac pairs headless + LaunchAgent"
   setup; mk_env; mk_seafile_env
   cat >> "$SVC/.env" <<EOF
-SEAFILE_SYNC_USER=gnosia-learn-sync@test
+SEAFILE_SYNC_USER=hermes-studio-sync@test
 SEAFILE_SYNC_PASSWORD=pw
 SEAFILE_SYNC_REPO=stub-repo-777
 EOF
@@ -1078,24 +1361,27 @@ EOF
   check "exits zero"            [ "$CODE" -eq 0 ]
   check "remote seaf-cli sync"  calls_have "seaf-cli' sync -l 'stub-repo-777'"
   # MAC_HOME derives from MAC_SSH (tester@mac.invalid), proving the account,
-  # not a hardcoded user, owns the paths. The Mac's data root is ~/.gnosia.
+  # not a hardcoded user, owns the paths. mk_env is a Gnosia-era .env, so
+  # the Mac path stays ~/.gnosia rather than jumping to ~/.hermes.
   check "remote links blobs/local" calls_have "-d '/Users/tester/.gnosia/blobs/local'"
-  check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.gnosia-learn.seafile.plist"
+  check "creates LaunchAgents first" calls_have "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.hermes-studio.seafile.plist"
   check "plist runs daemon"     grep -q "seaf-daemon" "$STATE_DIR/mac_plist.xml"
   check "agent keeps it alive"  grep -q "KeepAlive" "$STATE_DIR/mac_plist.xml"
   check "agent bootstrapped"    calls_have "launchctl bootstrap"
+  check "old mac agent booted out" calls_have "com.gnosia-learn.seafile"
+  check "old mac plist removed"  calls_have "rm -f \"\$HOME/Library/LaunchAgents/\$label.plist\""
   teardown
 }
 
 test_sync_push() {
   echo "• sync push: .backup snapshot -> scp -> replace the Mac's catalog.db, audit after"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   touch "$STATE_DIR/mac_devserver"
   run_sync push
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "snapshot via .backup"    calls_have "sqlite3 .*\.backup"
-  check "sender app never stopped" no_call "systemctl --user stop gnosia-learn.service"
+  check "sender app never stopped" no_call "systemctl --user stop hermes-studio.service"
   check "Mac app probed over ssh" calls_have "pgrep -f 'next"
   check "Mac app killed"          calls_have "kill 1234"
   check "staged dir scp'd"        calls_have "scp .*-pr .*\.sync-stage"
@@ -1104,17 +1390,17 @@ test_sync_push() {
   check "stop before ship"        before "kill 1234" "scp .*-pr"
   check "Mac audit ran"           calls_have "npm run catalog -- blob audit"
   check "  with its CATALOG_DB"   calls_have "CATALOG_DB='/Users/tester/.gnosia/catalog.db'"
-  check "  with its GNOSIA_HOME"  calls_have "GNOSIA_HOME='/Users/tester/.gnosia'"
+  check "  with its HERMES_HOME"  calls_have "HERMES_HOME='/Users/tester/.gnosia'"
   check "restart hint printed"    out_has "npm run dev"
   check "vault warned"            out_has "vault"
-  check "staging cleaned"         test ! -e "$HOME/.self-learn/.sync-stage"
+  check "staging cleaned"         test ! -e "$HOME/.gnosia/.sync-stage"
   teardown
 }
 
 test_sync_push_quiet_mac() {
   echo "• sync push: no app running on the Mac -> snapshot still ships, no pkill"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   run_sync push
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "snapshot taken"          calls_have "sqlite3 .*\.backup"
@@ -1127,18 +1413,18 @@ test_sync_push_quiet_mac() {
 test_sync_push_no_sqlite3() {
   echo "• sync push with no sqlite3: sender's app stops for the copy, restarts after"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   export SQLITE3=
   touch "$STATE_DIR/web_active"
   run_sync push
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "no .backup attempted"    no_call "sqlite3 .*\.backup"
   if [ "$OS" = "Linux" ]; then
-    check "sender stopped for copy" calls_have "systemctl --user stop gnosia-learn.service"
-    check "sender restarted"        calls_have "systemctl --user start gnosia-learn.service"
+    check "sender stopped for copy" calls_have "systemctl --user stop hermes-studio.service"
+    check "sender restarted"        calls_have "systemctl --user start hermes-studio.service"
   else
-    check "sender stopped for copy" calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
-    check "sender restarted"        calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "sender stopped for copy" calls_have "launchctl bootout gui/.*/com.hermes-studio.web"
+    check "sender restarted"        calls_have "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.web"
   fi
   check "staged set shipped"      calls_have "scp .*-pr"
   check "wal moves in too"        calls_have "catalog.db-wal"
@@ -1159,7 +1445,7 @@ test_sync_push_no_local_db() {
 test_sync_pull() {
   echo "• sync pull: Mac .backup snapshot -> scp back -> replace catalog.db, app restarted"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   touch "$STATE_DIR/web_active"
   run_sync pull
   check "exits zero"              [ "$CODE" -eq 0 ]
@@ -1167,115 +1453,137 @@ test_sync_pull() {
   check "remote .backup"          calls_have "sqlite3 .*\.backup"
   check "staged dir scp'd back"   calls_have "scp .*-pr"
   if [ "$OS" = "Linux" ]; then
-    check "app stopped"           calls_have "systemctl --user stop gnosia-learn.service"
+    check "app stopped"           calls_have "systemctl --user stop hermes-studio.service"
   else
-    check "app stopped"           calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+    check "app stopped"           calls_have "launchctl bootout gui/.*/com.hermes-studio.web"
   fi
-  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
-  check "stale wal dropped"       test ! -e "$HOME/.self-learn/catalog.db-wal"
+  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.gnosia/catalog.db"
+  check "stale wal dropped"       test ! -e "$HOME/.gnosia/catalog.db-wal"
   check "audit ran"               calls_have "npm run catalog -- blob audit"
-  check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.self-learn/catalog.db" "$STATE_DIR/catalog_env.log"
-  check "audit got GNOSIA_HOME"   grep -qx "GNOSIA_HOME=$HOME/.self-learn" "$STATE_DIR/catalog_env.log"
+  check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.gnosia/catalog.db" "$STATE_DIR/catalog_env.log"
+  check "audit got HERMES_HOME"   grep -qx "HERMES_HOME=$HOME/.gnosia" "$STATE_DIR/catalog_env.log"
   check "no DATABASE_URL passed"  grep -qx "DATABASE_URL=" "$STATE_DIR/catalog_env.log"
   if [ "$OS" = "Linux" ]; then
-    check "app restarted"         calls_have "systemctl --user start gnosia-learn.service"
-    check "stop before start"     before "stop gnosia-learn.service" "start gnosia-learn.service"
+    check "app restarted"         calls_have "systemctl --user start hermes-studio.service"
+    check "stop before start"     before "stop hermes-studio.service" "start hermes-studio.service"
   else
-    check "app restarted"         calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
-    check "stop before start"     before "bootout gui/.*/com.gnosia-learn.web" "\(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "app restarted"         calls_have "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.web"
+    check "stop before start"     before "bootout gui/.*/com.hermes-studio.web" "\(bootstrap\|kickstart\).*com.hermes-studio.web"
   fi
-  check "staging cleaned"         test ! -e "$HOME/.self-learn/.sync-stage"
+  check "staging cleaned"         test ! -e "$HOME/.gnosia/.sync-stage"
   check "vault warned"            out_has "vault"
   teardown
 }
 
 test_sync_pull_old_env() {
   echo "• sync pull on a Postgres-era .env: paths derived, DATABASE_URL ignored"
-  setup; mk_env_old; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  setup; mk_env_old
+  mkdir -p "$HOME/services/self-learn/repo" "$HOME/.self-learn"
+  echo "LOCAL-DB-BYTES" > "$HOME/.self-learn/catalog.db"
+  echo "LOCAL-STALE-WAL" > "$HOME/.self-learn/catalog.db-wal"
+  echo "42" > "$STATE_DIR/db_count"
+  echo "40" > "$STATE_DIR/mac_db_count"
   touch "$STATE_DIR/web_active"
   run_sync pull
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
   check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.self-learn/catalog.db" "$STATE_DIR/catalog_env.log"
-  check "audit got GNOSIA_HOME"   grep -qx "GNOSIA_HOME=$HOME/.self-learn" "$STATE_DIR/catalog_env.log"
+  check "audit got HERMES_HOME"   grep -qx "HERMES_HOME=$HOME/.self-learn" "$STATE_DIR/catalog_env.log"
+  teardown
+}
+
+test_sync_keeps_explicit_mac_home() {
+  echo "• sync: an explicit MAC_GNOSIA_HOME is the Mac path, even on a fresh .env"
+  setup; mk_env_new
+  printf 'MAC_GNOSIA_HOME=~/.gnosia\n' >> "$SVC/.env"
+  mkdir -p "$HOME/services/hermes-studio/repo" "$HOME/.hermes"
+  echo "LOCAL-DB-BYTES" > "$HOME/.hermes/catalog.db"
+  run_sync status
+  check "exits zero"          [ "$CODE" -eq 0 ]
+  # The SERVER section prints the local catalog, which a fresh .env keeps
+  # under ~/.hermes. The Mac section is the path this test owns.
+  # resolve_mac_paths prefixes the remote $HOME. The stub answers
+  # /Users/$user plus this sandbox, so the catalog ends in
+  # /.gnosia/catalog.db. A here-string dies under dash on CI.
+  check "uses the saved Mac home" bash -c 'printf "%s\n" "$1" | awk "/=== MAC/,0" | grep -q "/.gnosia/catalog.db"' _ "$OUT"
+  check "mac path is not ~/.hermes" bash -c '! printf "%s\n" "$1" | awk "/=== MAC/,0" | grep -q "/.hermes/"' _ "$OUT"
   teardown
 }
 
 test_sync_pull_new_env() {
-  echo "• sync pull on a post-rename .env: GNOSIA_HOME only, no SELF_LEARN_HOME"
+  echo "• sync pull on a post-rename .env: HERMES_HOME only, no SELF_LEARN_HOME"
   setup; mk_env_new
-  mkdir -p "$HOME/services/gnosia-learn/repo" "$HOME/.gnosia"
-  echo "LOCAL-DB-BYTES" > "$HOME/.gnosia/catalog.db"
+  mkdir -p "$HOME/services/hermes-studio/repo" "$HOME/.hermes"
+  echo "LOCAL-DB-BYTES" > "$HOME/.hermes/catalog.db"
   touch "$STATE_DIR/web_active"
   run_sync pull
   check "exits zero"              [ "$CODE" -eq 0 ]
-  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.gnosia/catalog.db"
-  check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.gnosia/catalog.db" "$STATE_DIR/catalog_env.log"
-  check "audit got GNOSIA_HOME"   grep -qx "GNOSIA_HOME=$HOME/.gnosia" "$STATE_DIR/catalog_env.log"
-  check "staging cleaned"         test ! -e "$HOME/services/gnosia-learn/state/.sync-stage"
+  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.hermes/catalog.db"
+  check "audit got CATALOG_DB"    grep -qx "CATALOG_DB=$HOME/.hermes/catalog.db" "$STATE_DIR/catalog_env.log"
+  check "audit got HERMES_HOME"   grep -qx "HERMES_HOME=$HOME/.hermes" "$STATE_DIR/catalog_env.log"
+  check "staging cleaned"         test ! -e "$HOME/services/hermes-studio/state/.sync-stage"
   teardown
 }
 
 test_sync_pull_no_remote_db() {
   echo "• sync pull: no catalog.db on the Mac refuses before anything ships"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   touch "$STATE_DIR/mac_db_missing"
   run_sync pull
   check "exits non-zero"          [ "$CODE" -ne 0 ]
   check "says why"                out_has "nothing to pull"
   check "nothing shipped"         no_call "scp"
-  check "local db untouched"      grep -qx LOCAL-DB-BYTES "$HOME/.self-learn/catalog.db"
-  check "app never stopped"       no_call "systemctl --user stop gnosia-learn.service"
+  check "local db untouched"      grep -qx LOCAL-DB-BYTES "$HOME/.gnosia/catalog.db"
+  check "app never stopped"       no_call "systemctl --user stop hermes-studio.service"
   teardown
 }
 
 test_sync_pull_no_mac_sqlite3() {
   echo "• sync pull, no sqlite3 on the Mac: stopped-sender file copy, wal set included"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   touch "$STATE_DIR/mac_no_sqlite3" "$STATE_DIR/mac_db_wal" "$STATE_DIR/web_active"
   run_sync pull
   check "exits zero"              [ "$CODE" -eq 0 ]
   check "no .backup attempted"    no_call "sqlite3 .*\.backup"
-  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
-  check "wal landed"              grep -qx STUB-MAC-WAL "$HOME/.self-learn/catalog.db-wal"
-  check "shm landed"              grep -qx STUB-MAC-SHM "$HOME/.self-learn/catalog.db-shm"
+  check "db replaced"             grep -qx STUB-MAC-DB "$HOME/.gnosia/catalog.db"
+  check "wal landed"              grep -qx STUB-MAC-WAL "$HOME/.gnosia/catalog.db-wal"
+  check "shm landed"              grep -qx STUB-MAC-SHM "$HOME/.gnosia/catalog.db-shm"
   teardown
 }
 
 test_sync_pull_no_mac_sqlite3_app_running() {
   echo "• sync pull, no sqlite3 on the Mac + its app up: refuses rather than kill the dev session"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   touch "$STATE_DIR/mac_no_sqlite3" "$STATE_DIR/mac_devserver"
   run_sync pull
   check "exits non-zero"          [ "$CODE" -ne 0 ]
   check "says to stop the app"    out_has "app is running"
   check "nothing shipped"         no_call "scp"
-  check "local db untouched"      grep -qx LOCAL-DB-BYTES "$HOME/.self-learn/catalog.db"
+  check "local db untouched"      grep -qx LOCAL-DB-BYTES "$HOME/.gnosia/catalog.db"
   teardown
 }
 
 test_sync_pull_studio() {
   echo "• sync pull: a running studio runner is stopped before the replace and restarted after"
   setup; mk_env; mk_db_files; mk_studio_unit
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   touch "$STATE_DIR/web_active" "$STATE_DIR/studio_active"
   run_sync pull
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check "db replaced"                 grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
+  check "db replaced"                 grep -qx STUB-MAC-DB "$HOME/.gnosia/catalog.db"
   if [ "$OS" = "Linux" ]; then
-    check "studio stopped"            calls_have "systemctl --user stop gnosia-learn-studio.service"
-    check "studio started again"      calls_have "systemctl --user start gnosia-learn-studio.service"
+    check "studio stopped"            calls_have "systemctl --user stop hermes-studio-runner.service"
+    check "studio started again"      calls_have "systemctl --user start hermes-studio-runner.service"
     check "studio stops before the app" \
-      [ "$(call_line 'stop gnosia-learn-studio.service')" -lt "$(call_line 'stop gnosia-learn.service')" ]
+      [ "$(call_line 'stop hermes-studio-runner.service')" -lt "$(call_line 'stop hermes-studio.service')" ]
     check "studio starts after the app" \
-      [ "$(call_line 'start gnosia-learn.service')" -lt "$(call_line 'start gnosia-learn-studio.service')" ]
+      [ "$(call_line 'start hermes-studio.service')" -lt "$(call_line 'start hermes-studio-runner.service')" ]
   else
-    check "studio stopped"            calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
-    check "studio started again"      calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.studio"
+    check "studio stopped"            calls_have "launchctl bootout gui/.*/com.hermes-studio.studio"
+    check "studio started again"      calls_have "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.studio"
   fi
   check "studio is up at the end"     test -f "$STATE_DIR/studio_active"
   teardown
@@ -1284,29 +1592,29 @@ test_sync_pull_studio() {
 test_sync_pull_stopped_studio() {
   echo "• sync pull: a stopped studio runner is left stopped"
   setup; mk_env; mk_db_files; mk_studio_unit
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   touch "$STATE_DIR/web_active"
   run_sync pull
   check "exits zero"                  [ "$CODE" -eq 0 ]
-  check "db replaced"                 grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
-  check "studio never stopped"        no_call "stop gnosia-learn-studio"
-  check "studio never started"        no_call "start gnosia-learn-studio"
+  check "db replaced"                 grep -qx STUB-MAC-DB "$HOME/.gnosia/catalog.db"
+  check "studio never stopped"        no_call "stop hermes-studio-runner"
+  check "studio never started"        no_call "start hermes-studio-runner"
   teardown
 }
 
 test_sync_pull_stopped_app() {
   echo "• sync pull: a stopped app stays stopped across the replace"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   run_sync pull
   check "exits zero"          [ "$CODE" -eq 0 ]
-  check "db replaced"         grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
+  check "db replaced"         grep -qx STUB-MAC-DB "$HOME/.gnosia/catalog.db"
   if [ "$OS" = "Linux" ]; then
-    check "no stop call"      no_call "systemctl --user stop gnosia-learn.service"
-    check "no start call"     no_call "systemctl --user start gnosia-learn.service"
+    check "no stop call"      no_call "systemctl --user stop hermes-studio.service"
+    check "no start call"     no_call "systemctl --user start hermes-studio.service"
   else
     check "no bootout"        no_call "launchctl bootout"
-    check "no bootstrap"      no_call "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "no bootstrap"      no_call "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.web"
   fi
   check "audit still ran"     calls_have "npm run catalog -- blob audit"
   check "no docker touched"   no_call "^docker "
@@ -1316,8 +1624,8 @@ test_sync_pull_stopped_app() {
 test_sync_push_locked() {
   echo "• sync push: a live deploy/sync lock refuses to run"
   setup; mk_env; mk_db_files
-  mkdir "$HOME/services/self-learn/.deploy.lock"
-  echo $$ > "$HOME/services/self-learn/.deploy.lock/pid"
+  mkdir "$HOME/services/gnosia-learn/.deploy.lock"
+  echo $$ > "$HOME/services/gnosia-learn/.deploy.lock/pid"
   run_sync push
   check "exits non-zero"      [ "$CODE" -ne 0 ]
   check "says why"            out_has "deploy or sync is running"
@@ -1340,16 +1648,16 @@ test_sync_push_snapshot_fails() {
 test_sync_pull_audit_fails() {
   echo "• sync pull: a failing blob audit warns but does not roll back"
   setup; mk_env; mk_db_files
-  mkdir -p "$HOME/services/self-learn/repo"
+  mkdir -p "$HOME/services/gnosia-learn/repo"
   touch "$STATE_DIR/web_active" "$STATE_DIR/audit_fails"
   run_sync pull
   check "exits zero (informational)" [ "$CODE" -eq 0 ]
   check "warns about gaps"           out_has "audit reported gaps"
-  check "db still replaced"          grep -qx STUB-MAC-DB "$HOME/.self-learn/catalog.db"
+  check "db still replaced"          grep -qx STUB-MAC-DB "$HOME/.gnosia/catalog.db"
   if [ "$OS" = "Linux" ]; then
-    check "app still restarted"      calls_have "systemctl --user start gnosia-learn.service"
+    check "app still restarted"      calls_have "systemctl --user start hermes-studio.service"
   else
-    check "app still restarted"      calls_have "launchctl \(bootstrap\|kickstart\).*com.gnosia-learn.web"
+    check "app still restarted"      calls_have "launchctl \(bootstrap\|kickstart\).*com.hermes-studio.web"
   fi
   teardown
 }
@@ -1361,7 +1669,7 @@ test_sync_status() {
   check "exits zero"          [ "$CODE" -eq 0 ]
   check "server section"      out_has "SERVER"
   check "mac section"         out_has "MAC"
-  check "server db file"      out_has "$HOME/.self-learn/catalog.db"
+  check "server db file"      out_has "$HOME/.gnosia/catalog.db"
   check "server rows"         out_has "asset.*42"
   check "mac db file"         out_has "/Users/tester/.gnosia/catalog.db"
   check "mac rows"            out_has "asset.*40"
@@ -1375,7 +1683,7 @@ test_sync_status_no_sqlite3() {
   export SQLITE3=
   run_sync status
   check "exits zero"          [ "$CODE" -eq 0 ]
-  check "server db file"      out_has "$HOME/.self-learn/catalog.db"
+  check "server db file"      out_has "$HOME/.gnosia/catalog.db"
   check "counts skipped"      out_has "no sqlite3"
   teardown
 }
@@ -1412,17 +1720,18 @@ no_external_listener() {
 
 test_live() {
   echo "• live: verify the real deployment on this machine"
-  local ts port url svc_home gnosia_home catalog_db
+  local ts port url svc_home hermes_home catalog_db
   ts="tailscale"
   command -v tailscale >/dev/null || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   port="$(sed -n 's/^LOCAL_PORT=\([0-9]*\)$/\1/p' "$SERVICE_DIR/.env")"
   url="$(sed -n 's|^PUBLIC_URL=\(.*\)$|\1|p' "$SERVICE_DIR/.env")"
   svc_home="$(sed -n 's/^SERVICE_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   # Postgres-era .env files lack both names; derive them like the scripts do.
-  gnosia_home="$(sed -n 's/^GNOSIA_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
-  [ -n "$gnosia_home" ] || gnosia_home="$(sed -n 's/^SELF_LEARN_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  hermes_home="$(sed -n 's/^HERMES_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  [ -n "$hermes_home" ] || hermes_home="$(sed -n 's/^GNOSIA_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
+  [ -n "$hermes_home" ] || hermes_home="$(sed -n 's/^SELF_LEARN_HOME=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
   catalog_db="$(sed -n 's/^CATALOG_DB=\(.*\)$/\1/p' "$SERVICE_DIR/.env")"
-  [ -n "$catalog_db" ] || catalog_db="$gnosia_home/catalog.db"
+  [ -n "$catalog_db" ] || catalog_db="$hermes_home/catalog.db"
   live_check "catalog.db exists"           test -s "$catalog_db"
   live_check "no postgres container"       sh -c "! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx self-learn-db"
   live_check "app responds locally"        curl -fsS "http://127.0.0.1:$port/"
@@ -1443,21 +1752,21 @@ test_live() {
     live_check "studio health answers"     curl -fsS "http://127.0.0.1:7250/api/health"
     live_check "no wildcard studio listener" no_external_listener 7250
     if [ "$OS" = "Linux" ]; then
-      live_check "studio unit active"      sh -c "systemctl --user is-active gnosia-learn-studio.service | grep -qx active"
-      live_check "studio unit enabled"     sh -c "systemctl --user is-enabled gnosia-learn-studio.service | grep -qx enabled"
+      live_check "studio unit active"      sh -c "systemctl --user is-active hermes-studio-runner.service | grep -qx active"
+      live_check "studio unit enabled"     sh -c "systemctl --user is-enabled hermes-studio-runner.service | grep -qx enabled"
     else
-      live_check "studio agent loaded"     sh -c "launchctl print gui/$(id -u)/com.gnosia-learn.studio"
+      live_check "studio agent loaded"     sh -c "launchctl print gui/$(id -u)/com.hermes-studio.studio"
     fi
   fi
   if [ "$OS" = "Linux" ]; then
-    live_check "app unit active"           sh -c "systemctl --user is-active gnosia-learn.service | grep -qx active"
-    live_check "app unit enabled"          sh -c "systemctl --user is-enabled gnosia-learn.service | grep -qx enabled"
+    live_check "app unit active"           sh -c "systemctl --user is-active hermes-studio.service | grep -qx active"
+    live_check "app unit enabled"          sh -c "systemctl --user is-enabled hermes-studio.service | grep -qx enabled"
     live_check "deployd timer active"      sh -c "systemctl --user is-active deployd.timer | grep -qx active"
-    live_check "deployd tracks this repo"  sh -c "$HOME/services/deployd/bin/deployd --status 2>/dev/null | grep -q gnosia-learn"
-    live_check "export timer active"       sh -c "systemctl --user is-active gnosia-learn-export.timer | grep -qx active"
+    live_check "deployd tracks this repo"  sh -c "$HOME/services/deployd/bin/deployd --status 2>/dev/null | grep -q hermes-studio"
+    live_check "export timer active"       sh -c "systemctl --user is-active hermes-studio-export.timer | grep -qx active"
     live_check "lingering enabled"         sh -c "loginctl show-user $USER -p Linger --value | grep -qx yes"
   else
-    live_check "web agent loaded"          sh -c "launchctl print gui/$(id -u)/com.gnosia-learn.web"
+    live_check "web agent loaded"          sh -c "launchctl print gui/$(id -u)/com.hermes-studio.web"
     live_check "deployd agent loaded"      sh -c "launchctl print gui/$(id -u)/com.setup-server.deployd"
   fi
   live_check "serve maps :$port"           sh -c "'$ts' serve status | grep -A2 ':$port' | grep -q 'proxy http://127.0.0.1:$port'"
@@ -1470,11 +1779,11 @@ run_teardown() {
   CODE=$?
 }
 
-SVC_HOME() { printf '%s' "$HOME/services/gnosia-learn"; }
+SVC_HOME() { printf '%s' "$HOME/services/hermes-studio"; }
 UNIT_DIR() { printf '%s' "$HOME/.config/systemd/user"; }
 # The identity deploy.sh records in .deploy.lock/started for a live pid.
 start_of() {
-  if [ "$OS" = "Linux" ]; then sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; else TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"; fi
+  if [ "$OS" = "Linux" ]; then { sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null || true; } | awk '{print $20}'; else TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1"; fi
 }
 # Point SERVICE_HOME in .env somewhere else (odd-path tests).
 set_service_home() { sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME=$1#" "$SVC/.env"; }
@@ -1506,21 +1815,21 @@ deployed() {
   chmod +x "$HOME/services/deployd/bin/deployd"
   if [ "$OS" = "Linux" ]; then
     mkdir -p "$HOME/.config/systemd/user"
-    echo x > "$HOME/.config/systemd/user/gnosia-learn-deploy.timer"
-    echo x > "$HOME/.config/systemd/user/gnosia-learn-deploy.service"
+    echo x > "$HOME/.config/systemd/user/hermes-studio-deploy.timer"
+    echo x > "$HOME/.config/systemd/user/hermes-studio-deploy.service"
   else
     mkdir -p "$HOME/Library/LaunchAgents" "$STATE_DIR/launchd"
-    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.deploy.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.hermes-studio.deploy.plist"
     # Per-label loaded markers, as a real deployed box has them (the studio
     # runner stays unmarked — it is disabled by default).
     local a
-    for a in deploy export web; do touch "$STATE_DIR/launchd/com.gnosia-learn.$a"; done
+    for a in deploy export web; do touch "$STATE_DIR/launchd/com.hermes-studio.$a"; done
   fi
-  mkdir -p "$(SVC_HOME)/studio/jobs" "$HOME/.gnosia/archive/latest" "$HOME/.gnosia/vault"
+  mkdir -p "$(SVC_HOME)/studio/jobs" "$HOME/.hermes/archive/latest" "$HOME/.hermes/vault"
   echo wal > "$(SVC_HOME)/studio/jobs/wal"
-  echo export > "$HOME/.gnosia/archive/latest/catalog.json"
-  echo blob > "$HOME/.gnosia/blobs/b1"
-  echo db > "$HOME/.gnosia/catalog.db"
+  echo export > "$HOME/.hermes/archive/latest/catalog.json"
+  echo blob > "$HOME/.hermes/blobs/b1"
+  echo db > "$HOME/.hermes/catalog.db"
   cat > "$STATE_DIR/serve_status" <<EOF
 https://test-host.tailfake.ts.net:2283 (tailnet only)
 |-- / proxy http://127.0.0.1:2283
@@ -1534,6 +1843,44 @@ EOF
   : > "$CALLS_LOG"
 }
 
+test_teardown_stops_legacy_units() {
+  echo "• teardown: a pre-rename app, runner and export timer are stopped; blob sync is not"
+  deployed
+  if [ "$OS" = "Linux" ]; then
+    echo x > "$(UNIT_DIR)/gnosia-learn.service"
+    echo x > "$(UNIT_DIR)/gnosia-learn-studio.service"
+    echo x > "$(UNIT_DIR)/gnosia-learn-export.timer"
+    echo x > "$(UNIT_DIR)/gnosia-learn-export.service"
+    echo x > "$(UNIT_DIR)/gnosia-learn-seafile.service"
+    touch "$STATE_DIR/gnosia_web_active" "$STATE_DIR/gnosia_studio_active"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents" "$STATE_DIR/launchd"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.seafile.plist"
+    touch "$STATE_DIR/launchd/com.gnosia-learn.web" \
+          "$STATE_DIR/launchd/com.gnosia-learn.studio" \
+          "$STATE_DIR/launchd/com.gnosia-learn.export"
+  fi
+  run_teardown
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "old app stopped"          calls_have "systemctl --user disable --now gnosia-learn.service"
+    check "old runner stopped"       calls_have "systemctl --user disable --now gnosia-learn-studio.service"
+    check "old export stopped"       calls_have "systemctl --user disable --now gnosia-learn-export.timer"
+    check "old blob sync untouched"  no_call "gnosia-learn-seafile"
+    check "old seafile kept"         [ -f "$(UNIT_DIR)/gnosia-learn-seafile.service" ]
+  else
+    check "old web booted out"       calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+    check "old studio booted out"    calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
+    check "old export booted out"    calls_have "launchctl bootout gui/.*/com.gnosia-learn.export"
+    check "old blob sync untouched"  no_call "com.gnosia-learn.seafile"
+    check "old seafile plist kept"   [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.seafile.plist" ]
+  fi
+  teardown
+}
+
 test_teardown_safe() {
   echo "• teardown: safe remove stops timers, studio, app (no Postgres anymore); keeps data"
   deployed
@@ -1545,30 +1892,30 @@ test_teardown_safe() {
   check "never serve reset"             no_call "serve reset"
   check "no docker touched"             no_call "^docker "
   if [ "$OS" = "Linux" ]; then
-    check "deploy timer disabled"       calls_have "systemctl --user disable --now gnosia-learn-deploy.timer"
-    check "export timer disabled"       calls_have "systemctl --user disable --now gnosia-learn-export.timer"
-    check "in-flight deploy stopped"    calls_have "systemctl --user stop gnosia-learn-deploy.service"
-    check "in-flight export stopped"    calls_have "systemctl --user stop gnosia-learn-export.service"
-    check "studio disabled"             calls_have "systemctl --user disable --now gnosia-learn-studio.service"
-    check "app disabled"                calls_have "systemctl --user disable --now gnosia-learn.service"
-    check "timers before studio"        before "disable --now gnosia-learn-export.timer" "disable --now gnosia-learn-studio.service"
-    check "studio before app"           before "disable --now gnosia-learn-studio.service" "disable --now gnosia-learn.service"
-    check "serve off before stops"      before "tailscale serve --https=8107 off" "disable --now gnosia-learn.service"
+    check "deploy timer disabled"       calls_have "systemctl --user disable --now hermes-studio-deploy.timer"
+    check "export timer disabled"       calls_have "systemctl --user disable --now hermes-studio-export.timer"
+    check "in-flight deploy stopped"    calls_have "systemctl --user stop hermes-studio-deploy.service"
+    check "in-flight export stopped"    calls_have "systemctl --user stop hermes-studio-export.service"
+    check "studio disabled"             calls_have "systemctl --user disable --now hermes-studio-runner.service"
+    check "app disabled"                calls_have "systemctl --user disable --now hermes-studio.service"
+    check "timers before studio"        before "disable --now hermes-studio-export.timer" "disable --now hermes-studio-runner.service"
+    check "studio before app"           before "disable --now hermes-studio-runner.service" "disable --now hermes-studio.service"
+    check "serve off before stops"      before "tailscale serve --https=8107 off" "disable --now hermes-studio.service"
     check "app inactive"                [ ! -f "$STATE_DIR/web_active" ]
-    check "unit files kept"             [ -f "$(UNIT_DIR)/gnosia-learn.service" ] && [ -f "$(UNIT_DIR)/gnosia-learn-deploy.timer" ]
+    check "unit files kept"             [ -f "$(UNIT_DIR)/hermes-studio.service" ] && [ -f "$(UNIT_DIR)/hermes-studio-deploy.timer" ]
     check "no daemon-reload"            no_call "daemon-reload"
   else
-    check "web agent unloaded"          calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
-    check "deploy before web"           before "bootout gui/.*/com.gnosia-learn.deploy" "bootout gui/.*/com.gnosia-learn.web"
+    check "web agent unloaded"          calls_have "launchctl bootout gui/.*/com.hermes-studio.web"
+    check "deploy before web"           before "bootout gui/.*/com.hermes-studio.deploy" "bootout gui/.*/com.hermes-studio.web"
     local a
     for a in deploy export studio web; do
-      check "$a agent disabled (no reload at login)" calls_have "launchctl disable gui/.*/com.gnosia-learn.$a"
+      check "$a agent disabled (no reload at login)" calls_have "launchctl disable gui/.*/com.hermes-studio.$a"
     done
   fi
   check "clone kept"                    [ -d "$(REPO_DIR)/.git" ]
   check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
   check "studio state kept"             [ -f "$(SVC_HOME)/studio/jobs/wal" ]
-  check "exports kept"                  [ -f "$HOME/.gnosia/archive/latest/catalog.json" ]
+  check "exports kept"                  [ -f "$HOME/.hermes/archive/latest/catalog.json" ]
   check ".env kept"                     [ -f "$SVC/.env" ]
   check "torn-down marker written"      [ -f "$(SVC_HOME)/state/torn-down" ]
   check "says how to bring it back"     out_has "./setup.sh brings it back"
@@ -1588,14 +1935,14 @@ test_teardown_then_setup_restores() {
   check "marker consumed"               [ ! -f "$(SVC_HOME)/state/torn-down" ]
   if [ "$OS" = "Linux" ]; then
     check "app marked active again"     [ -f "$STATE_DIR/web_active" ]
-    check "app restarted"               calls_have "systemctl --user restart gnosia-learn"
-    check "deploy timer stays gone"     no_call "enable --now gnosia-learn-deploy.timer"
+    check "app restarted"               calls_have "systemctl --user restart hermes-studio"
+    check "deploy timer stays gone"     no_call "enable --now hermes-studio-deploy.timer"
   else
-    check "app marked active again"     [ -f "$STATE_DIR/launchd/com.gnosia-learn.web" ]
+    check "app marked active again"     [ -f "$STATE_DIR/launchd/com.hermes-studio.web" ]
   fi
   check "serve republished"             calls_have "tailscale serve --bg --https=8107"
   # A later plain stop is the owner's again.
-  rm -f "$STATE_DIR/web_active" "$STATE_DIR/launchd/com.gnosia-learn.web"
+  rm -f "$STATE_DIR/web_active" "$STATE_DIR/launchd/com.hermes-studio.web"
   : > "$CALLS_LOG"
   run_deploy
   check "next stop respected again"     out_has "leaving it stopped"
@@ -1610,16 +1957,16 @@ test_teardown_then_start_and_stop() {
   # What the launcher's Start button does: the stubs run the unit's
   # ExecStartPre / the agent's ProgramArguments, which clear the marker.
   if [ "$OS" = "Linux" ]; then
-    check "unit clears marker on start" grep -q '^ExecStartPre=-/bin/rm -f .*/state/torn-down' "$(UNIT_DIR)/gnosia-learn.service"
-    PATH="$STUBS:$PATH" systemctl --user start gnosia-learn.service >/dev/null
+    check "unit clears marker on start" grep -q '^ExecStartPre=-/bin/rm -f .*/state/torn-down' "$(UNIT_DIR)/hermes-studio.service"
+    PATH="$STUBS:$PATH" systemctl --user start hermes-studio.service >/dev/null
     check "start consumed the marker"   [ ! -f "$(SVC_HOME)/state/torn-down" ]
-    PATH="$STUBS:$PATH" systemctl --user stop gnosia-learn.service >/dev/null
+    PATH="$STUBS:$PATH" systemctl --user stop hermes-studio.service >/dev/null
   else
-    check "agent clears marker on load" grep -qF 'rm -f "$1"; exec "$2" run start' "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
-    check "agent passes marker path"    grep -q '<string>.*/state/torn-down</string>' "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
-    PATH="$STUBS:$PATH" launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist" >/dev/null
+    check "agent clears marker on load" grep -qF 'rm -f "$1"; exec "$2" run start' "$HOME/Library/LaunchAgents/com.hermes-studio.web.plist"
+    check "agent passes marker path"    grep -q '<string>.*/state/torn-down</string>' "$HOME/Library/LaunchAgents/com.hermes-studio.web.plist"
+    PATH="$STUBS:$PATH" launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.hermes-studio.web.plist" >/dev/null
     check "load consumed the marker"    [ ! -f "$(SVC_HOME)/state/torn-down" ]
-    PATH="$STUBS:$PATH" launchctl bootout "gui/$(id -u)/com.gnosia-learn.web" >/dev/null
+    PATH="$STUBS:$PATH" launchctl bootout "gui/$(id -u)/com.hermes-studio.web" >/dev/null
   fi
   : > "$CALLS_LOG"
   run_deploy
@@ -1765,14 +2112,14 @@ test_teardown_purge() {
   echo "• teardown --purge: typed confirmation, then volume, state, units, .env and marker go"
   deployed
   mkdir -p "$(UNIT_DIR)"; echo keep > "$(UNIT_DIR)/neighbour.service"
-  run_teardown --purge "gnosia-lear"
+  run_teardown --purge "hermes-lear"
   check "wrong name: exits non-zero"    [ "$CODE" -ne 0 ]
   check "wrong name: nothing changed"   untouched
   check "wrong name: state kept"        [ -f "$(SVC_HOME)/state/built-sha" ]
   check "wrong name: no marker written" [ ! -f "$(SVC_HOME)/state/torn-down" ]
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "exits zero"                    [ "$CODE" -eq 0 ]
-  check "warns where the exports are"   out_has "$HOME/.gnosia/archive"
+  check "warns where the exports are"   out_has "$HOME/.hermes/archive"
   check "serve off for :8107"           calls_have "tailscale serve --https=8107 off"
   check "no docker touched"             no_call "^docker "
   check "clone gone"                    [ ! -e "$(REPO_DIR)" ]
@@ -1782,19 +2129,19 @@ test_teardown_purge() {
   check ".env gone"                     [ ! -f "$SVC/.env" ]
   check "marker dir gone"               [ ! -e "$(SVC_HOME)" ]
   check "services dir itself kept"      [ -d "$HOME/services" ]
-  check "exports kept"                  [ -f "$HOME/.gnosia/archive/latest/catalog.json" ]
-  check "blobs kept"                    [ -f "$HOME/.gnosia/blobs/b1" ]
-  check "vault kept"                    [ -d "$HOME/.gnosia/vault" ]
-  check "catalog.db kept"               [ -f "$HOME/.gnosia/catalog.db" ]
+  check "exports kept"                  [ -f "$HOME/.hermes/archive/latest/catalog.json" ]
+  check "blobs kept"                    [ -f "$HOME/.hermes/blobs/b1" ]
+  check "vault kept"                    [ -d "$HOME/.hermes/vault" ]
+  check "catalog.db kept"               [ -f "$HOME/.hermes/catalog.db" ]
   check "repo files kept"               [ -f "$SVC/setup.sh" ] && [ -f "$SVC/deploy.sh" ]
   if [ "$OS" = "Linux" ]; then
     local u
-    for u in gnosia-learn.service gnosia-learn-studio.service gnosia-learn-deploy.service \
-             gnosia-learn-deploy.timer gnosia-learn-export.service gnosia-learn-export.timer; do
+    for u in hermes-studio.service hermes-studio-runner.service hermes-studio-deploy.service \
+             hermes-studio-deploy.timer hermes-studio-export.service hermes-studio-export.timer; do
       check "unit $u gone"              [ ! -e "$(UNIT_DIR)/$u" ]
     done
     check "neighbour unit kept"         [ -f "$(UNIT_DIR)/neighbour.service" ]
-    check "daemon-reload after"         before "disable --now gnosia-learn.service" "systemctl --user daemon-reload"
+    check "daemon-reload after"         before "disable --now hermes-studio.service" "systemctl --user daemon-reload"
   fi
   teardown
 }
@@ -1803,7 +2150,7 @@ test_teardown_purge_missing_data_dir() {
   echo "• teardown --purge: state already gone is fine"
   deployed
   rm -rf "$(SVC_HOME)"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check ".env gone"                     [ ! -f "$SVC/.env" ]
   check "no docker touched"             no_call "^docker "
@@ -1811,24 +2158,24 @@ test_teardown_purge_missing_data_dir() {
 }
 
 test_teardown_purge_refuses_odd_paths() {
-  echo "• teardown --purge: refuses a SERVICE_HOME outside ~/services/gnosia-learn"
+  echo "• teardown --purge: refuses a SERVICE_HOME outside ~/services/hermes-studio"
   deployed
   set_service_home "$HOME"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "\$HOME: exits non-zero"        [ "$CODE" -ne 0 ]
-  check "  home untouched"              [ -d "$HOME/.gnosia" ]
+  check "  home untouched"              [ -d "$HOME/.hermes" ]
   check "  nothing changed"             untouched
   set_service_home "$HOME/services/../x"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "'..' refused"                  [ "$CODE" -ne 0 ]
   set_service_home "$HOME/services/"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "services dir itself refused"   [ "$CODE" -ne 0 ]
   mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
   local dotted
-  for dotted in "$HOME/services/." "$HOME/services/./gnosia-learn" "$HOME/services/gnosia-learn/.."; do
+  for dotted in "$HOME/services/." "$HOME/services/./hermes-studio" "$HOME/services/hermes-studio/.."; do
     set_service_home "$dotted"
-    run_teardown --purge "gnosia-learn"
+    run_teardown --purge "hermes-studio"
     check "'.' / '..' component refused: $dotted" [ "$CODE" -ne 0 ]
   done
   check "neighbour data never touched"  [ -f "$HOME/services/neighbour/keep" ]
@@ -1842,12 +2189,12 @@ test_teardown_purge_trailing_slashes() {
   deployed
   set_service_home "$HOME/services//"
   mkdir -p "$HOME/services/neighbour"; echo x > "$HOME/services/neighbour/keep"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "neighbour data kept"           [ -f "$HOME/services/neighbour/keep" ]
   ln -s "$HOME/services" "$HOME/services/alias"
   set_service_home "$HOME/services/alias"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "symlink to services refused"   [ "$CODE" -ne 0 ]
   check "neighbour still kept"          [ -f "$HOME/services/neighbour/keep" ]
   check "nothing changed"               untouched
@@ -1857,31 +2204,31 @@ test_teardown_purge_trailing_slashes() {
 test_teardown_home_variable_in_env() {
   echo "• teardown --purge: a \$HOME reference in .env is expanded like Compose does"
   deployed
-  sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/gnosia-learn"#' "$SVC/.env"
-  run_teardown --purge "gnosia-learn"
+  sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/hermes-studio"#' "$SVC/.env"
+  run_teardown --purge "hermes-studio"
   check "\${HOME} form: exits zero"     [ "$CODE" -eq 0 ]
   check "  state gone"                  [ ! -e "$(SVC_HOME)" ]
   teardown
   deployed
-  sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME='\$HOME/services/gnosia-learn'#" "$SVC/.env"
-  run_teardown --purge "gnosia-learn"
+  sed -i.bak "s#^SERVICE_HOME=.*#SERVICE_HOME='\$HOME/services/hermes-studio'#" "$SVC/.env"
+  run_teardown --purge "hermes-studio"
   check "single-quoted \$HOME stays literal and is refused" [ "$CODE" -ne 0 ]
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
   teardown
 }
 
 test_teardown_purge_own_dir_only() {
-  echo "• teardown --purge: only ~/services/gnosia-learn itself or inside it"
+  echo "• teardown --purge: only ~/services/hermes-studio itself or inside it"
   deployed
   mkdir -p "$HOME/services/neighbour/state"; echo x > "$HOME/services/neighbour/state/keep"
   set_service_home "$HOME/services/neighbour"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "another service's dir refused" [ "$CODE" -ne 0 ]
   check "  its data kept"               [ -f "$HOME/services/neighbour/state/keep" ]
   check "  nothing changed"             untouched
-  mkdir -p "$HOME/services/gnosia-learn/a:b"
-  set_service_home "$HOME/services/gnosia-learn/a:b"
-  run_teardown --purge "gnosia-learn"
+  mkdir -p "$HOME/services/hermes-studio/a:b"
+  set_service_home "$HOME/services/hermes-studio/a:b"
+  run_teardown --purge "hermes-studio"
   check "a colon in the path refused"   [ "$CODE" -ne 0 ]
   teardown
 }
@@ -1893,27 +2240,27 @@ test_teardown_purge_services_root_is_a_link() {
   mv "$HOME/services/"* "$HOME/real-services/" 2>/dev/null
   rmdir "$HOME/services"
   ln -s "$HOME" "$HOME/services"
-  mkdir -p "$HOME/gnosia-learn/state"; echo x > "$HOME/gnosia-learn/state/keep"
-  run_teardown --purge "gnosia-learn"
+  mkdir -p "$HOME/hermes-studio/state"; echo x > "$HOME/hermes-studio/state/keep"
+  run_teardown --purge "hermes-studio"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
-  check "nothing in \$HOME deleted"      [ -f "$HOME/gnosia-learn/state/keep" ]
+  check "nothing in \$HOME deleted"      [ -f "$HOME/hermes-studio/state/keep" ]
   check "nothing changed"               untouched
   rm -f "$HOME/services"
   teardown
 }
 
 test_teardown_purge_keeps_a_checkout_inside() {
-  echo "• teardown --purge: a checkout living inside ~/services/gnosia-learn survives"
+  echo "• teardown --purge: a checkout living inside ~/services/hermes-studio survives"
   deployed
-  local repo="$HOME/services/gnosia-learn/setup-server/services/gnosia-learn"
+  local repo="$HOME/services/hermes-studio/setup-server/services/hermes-studio"
   mkdir -p "$repo"
   cp -R "$SVC/." "$repo/"
   copy_lib "${repo%/services/*}"
-  echo secret > "$HOME/services/gnosia-learn/setup-server/other.env"
-  OUT="$(printf '%s\n' "gnosia-learn" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
+  echo secret > "$HOME/services/hermes-studio/setup-server/other.env"
+  OUT="$(printf '%s\n' "hermes-studio" | PATH="$STUBS:$PATH" bash "$repo/teardown.sh" --purge 2>&1)"; CODE=$?
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "checkout intact"               [ -f "$repo/teardown.sh" ]
-  check "other services' files kept"    [ -f "$HOME/services/gnosia-learn/setup-server/other.env" ]
+  check "other services' files kept"    [ -f "$HOME/services/hermes-studio/setup-server/other.env" ]
   check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
   teardown
 }
@@ -1921,11 +2268,11 @@ test_teardown_purge_keeps_a_checkout_inside() {
 test_teardown_purge_symlinked_clone() {
   echo "• teardown --purge: a repo/ symlinked to a working clone in ~/dev is refused"
   deployed
-  mkdir -p "$HOME/dev/gnosia-learn"; echo mine > "$HOME/dev/gnosia-learn/WORK"
-  rm -rf "$(REPO_DIR)"; ln -s "$HOME/dev/gnosia-learn" "$(REPO_DIR)"
-  run_teardown --purge "gnosia-learn"
+  mkdir -p "$HOME/dev/hermes-studio"; echo mine > "$HOME/dev/hermes-studio/WORK"
+  rm -rf "$(REPO_DIR)"; ln -s "$HOME/dev/hermes-studio" "$(REPO_DIR)"
+  run_teardown --purge "hermes-studio"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
-  check "working clone intact"          [ -f "$HOME/dev/gnosia-learn/WORK" ]
+  check "working clone intact"          [ -f "$HOME/dev/hermes-studio/WORK" ]
   check "nothing changed"               untouched
   check "state kept"                    [ -f "$(SVC_HOME)/state/built-sha" ]
   teardown
@@ -1935,18 +2282,18 @@ test_teardown_purge_keeps_data_root() {
   echo "• teardown --purge: a data root inside a purged dir is refused"
   deployed
   mkdir -p "$(SVC_HOME)/state/blobs"
-  sed -i.bak "s#^GNOSIA_HOME=.*#GNOSIA_HOME=$(SVC_HOME)/state/blobs#" "$SVC/.env"
-  run_teardown --purge "gnosia-learn"
+  sed -i.bak "s#^HERMES_HOME=.*#HERMES_HOME=$(SVC_HOME)/state/blobs#" "$SVC/.env"
+  run_teardown --purge "hermes-studio"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "says why"                      out_has "refusing to delete the blob store"
   check "nothing changed"               untouched
   teardown
-  # Same refusal when an old .env names the root only SELF_LEARN_HOME.
+  # Same refusal when a Gnosia-era .env names the root only GNOSIA_HOME.
   deployed
   mkdir -p "$(SVC_HOME)/state/blobs"
-  sed -i.bak '/^GNOSIA_HOME=/d' "$SVC/.env"
-  echo "SELF_LEARN_HOME=$(SVC_HOME)/state/blobs" >> "$SVC/.env"
-  run_teardown --purge "gnosia-learn"
+  sed -i.bak '/^HERMES_HOME=/d' "$SVC/.env"
+  echo "GNOSIA_HOME=$(SVC_HOME)/state/blobs" >> "$SVC/.env"
+  run_teardown --purge "hermes-studio"
   check "legacy var: exits non-zero"    [ "$CODE" -ne 0 ]
   check "  says why"                    out_has "refusing to delete the blob store"
   check "  nothing changed"             untouched
@@ -1954,23 +2301,23 @@ test_teardown_purge_keeps_data_root() {
 }
 
 test_teardown_foreign_sync_unit() {
-  echo "• teardown: sync.sh's gnosia-learn-seafile unit is never touched; purge refused while it exists"
+  echo "• teardown: sync.sh's hermes-studio-seafile unit is never touched; purge refused while it exists"
   deployed
   mkdir -p "$(UNIT_DIR)" "$(SVC_HOME)/seafile/ccnet"
-  echo unit > "$(UNIT_DIR)/gnosia-learn-seafile.service"
+  echo unit > "$(UNIT_DIR)/hermes-studio-seafile.service"
   if [ "$OS" != "Linux" ]; then
     mkdir -p "$HOME/Library/LaunchAgents"
-    echo agent > "$HOME/Library/LaunchAgents/com.gnosia-learn.seafile.plist"
+    echo agent > "$HOME/Library/LaunchAgents/com.hermes-studio.seafile.plist"
   fi
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "purge: exits non-zero"         [ "$CODE" -ne 0 ]
-  check "purge: names the unit"         out_has "gnosia-learn-seafile.service\|com.gnosia-learn.seafile"
+  check "purge: names the unit"         out_has "hermes-studio-seafile.service\|com.hermes-studio.seafile"
   check "purge: nothing changed"        untouched
   run_teardown
   check "default: exits zero"           [ "$CODE" -eq 0 ]
   check "default: warns, naming it"     out_has "Not touched (not created by setup.sh): .*seafile"
   check "unit never addressed"          no_call "seafile"
-  check "unit file kept"                [ -f "$(UNIT_DIR)/gnosia-learn-seafile.service" ]
+  check "unit file kept"                [ -f "$(UNIT_DIR)/hermes-studio-seafile.service" ]
   check "daemon state kept"             [ -d "$(SVC_HOME)/seafile/ccnet" ]
   teardown
 }
@@ -1979,7 +2326,7 @@ test_teardown_purge_sync_credentials() {
   echo "• teardown --purge: refused while .env holds sync.sh's Seafile account"
   deployed
   printf '\n# --- blob/db sync (written by sync.sh install) ---\nSEAFILE_SYNC_USER=sync@x.local\nSEAFILE_SYNC_PASSWORD=pw\n' >> "$SVC/.env"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "exits non-zero"                [ "$CODE" -ne 0 ]
   check "says why"                      out_has "SEAFILE_SYNC_USER"
   check "nothing changed"               untouched
@@ -1990,7 +2337,7 @@ test_teardown_purge_keeps_unknown_entries() {
   echo "• teardown --purge: entries setup.sh did not create stay, and so does the marker"
   deployed
   mkdir -p "$(SVC_HOME)/seafile"; echo x > "$(SVC_HOME)/seafile/left"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check "foreign entry kept"            [ -f "$(SVC_HOME)/seafile/left" ]
   check "state gone"                    [ ! -e "$(SVC_HOME)/state" ]
@@ -2013,7 +2360,7 @@ test_teardown_waits_for_lock() {
   check "  says it is starting"         out_has "just starting"
   check "  nothing changed"             untouched
   echo 999999 > "$(SVC_HOME)/.deploy.lock/pid"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "stale lock: exits zero"        [ "$CODE" -eq 0 ]
   check "  lock purged with the rest"   [ ! -e "$(SVC_HOME)/.deploy.lock" ]
   teardown
@@ -2039,11 +2386,11 @@ test_teardown_holds_lock() {
   run_teardown
   check "stale lock with started file: exits zero" [ "$CODE" -eq 0 ]
   check "  whole lock dir cleared"      [ ! -e "$(SVC_HOME)/.deploy.lock" ]
-  run_teardown --purge "gnosia-lear"
+  run_teardown --purge "hermes-lear"
   check "a run that dies (wrong name) exits non-zero" [ "$CODE" -ne 0 ]
   check "  still drops the lock"        [ ! -e "$(SVC_HOME)/.deploy.lock" ]
   rm -f "$STATE_DIR/lock_at_down"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "purge: exits zero"             [ "$CODE" -eq 0 ]
   check "  lock held during down -v"    grep -q "^live " "$STATE_DIR/lock_at_down"
   check "  lock gone"                   [ ! -e "$(SVC_HOME)/.deploy.lock" ]
@@ -2090,7 +2437,7 @@ test_teardown_marker_refusals() {
   mkdir -p "$HOME/outside/state"; echo precious > "$HOME/outside/state/torn-down"
   set_service_home "$HOME/outside"
   run_teardown
-  check "SERVICE_HOME outside ~/services/gnosia-learn: exits zero" [ "$CODE" -eq 0 ]
+  check "SERVICE_HOME outside ~/services/hermes-studio: exits zero" [ "$CODE" -eq 0 ]
   check "  warns, no marker"            out_has "not writing the torn-down marker"
   check "  file there not truncated"    [ "$(cat "$HOME/outside/state/torn-down")" = precious ]
   check "  no marker in the real state" [ ! -e "$(SVC_HOME)/state/torn-down" ]
@@ -2124,10 +2471,10 @@ test_teardown_unresolved_variable() {
   # setup.sh sources .env, so to it this is state/content, inside a dir the
   # purge deletes; left literal, the keep-data-root check tests nothing.
   mkdir -p "$(SVC_HOME)/state/content"; echo blob > "$(SVC_HOME)/state/content/b1"
-  sed -i.bak 's#^GNOSIA_HOME=.*#GNOSIA_HOME=$SERVICE_HOME/state/content#' "$SVC/.env"
-  run_teardown --purge "gnosia-learn"
-  check "GNOSIA_HOME=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  says why"                    out_has "GNOSIA_HOME .*still refers to another variable"
+  sed -i.bak 's#^HERMES_HOME=.*#HERMES_HOME=$SERVICE_HOME/state/content#' "$SVC/.env"
+  run_teardown --purge "hermes-studio"
+  check "HERMES_HOME=\$SERVICE_HOME/...: exits non-zero" [ "$CODE" -ne 0 ]
+  check "  says why"                    out_has "HERMES_HOME .*still refers to another variable"
   check "  refused before the prompt"   out_lacks "to confirm"
   check "  content kept"                [ -f "$(SVC_HOME)/state/content/b1" ]
   check "  nothing changed"             untouched
@@ -2138,7 +2485,7 @@ test_teardown_unresolved_variable() {
   teardown
   deployed
   sed -i.bak 's#^SERVICE_HOME=.*#SERVICE_HOME="${HOME}/services/${NAME}"#' "$SVC/.env"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "SERVICE_HOME=...\${NAME}: exits non-zero" [ "$CODE" -ne 0 ]
   check "  nothing changed"             untouched
   teardown
@@ -2150,14 +2497,14 @@ test_teardown_lock_after_prompt() {
   deployed
   lock="$(SVC_HOME)/.deploy.lock"
   printf '%s' "$lock" > "$STATE_DIR/lock_probe"
-  run_purge_at_prompt "gnosia-learn" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
+  run_purge_at_prompt "hermes-studio" "[ -e '$lock' ] && echo held > '$STATE_DIR/lock_at_prompt' || echo free > '$STATE_DIR/lock_at_prompt'"
   check "exits zero"                    [ "$CODE" -eq 0 ]
   check "  lock not held while the prompt waits" grep -qx free "$STATE_DIR/lock_at_prompt"
   check "  held by a live pid during down -v" grep -q "^live " "$STATE_DIR/lock_at_down"
   teardown
   deployed
   lock="$(SVC_HOME)/.deploy.lock"
-  run_purge_at_prompt "gnosia-learn" "mkdir '$lock' && echo \$\$ > '$lock/pid'"
+  run_purge_at_prompt "hermes-studio" "mkdir '$lock' && echo \$\$ > '$lock/pid'"
   check "a deploy/sync that starts during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
   check "  says who holds it"           out_has "holds .*deploy.lock"
   check "  nothing changed"             untouched
@@ -2166,7 +2513,7 @@ test_teardown_lock_after_prompt() {
   deployed
   lock="$(SVC_HOME)/.deploy.lock"
   mkdir -p "$lock"; echo 999999 > "$lock/pid"
-  run_purge_at_prompt "gnosia-learn" "[ -f '$lock/pid' ] && echo kept > '$STATE_DIR/lock_at_prompt' || echo cleared > '$STATE_DIR/lock_at_prompt'"
+  run_purge_at_prompt "hermes-studio" "[ -f '$lock/pid' ] && echo kept > '$STATE_DIR/lock_at_prompt' || echo cleared > '$STATE_DIR/lock_at_prompt'"
   check "stale lock: exits zero"        [ "$CODE" -eq 0 ]
   check "  not cleared before the answer" grep -qx kept "$STATE_DIR/lock_at_prompt"
   check "  cleared after it"            out_has "Cleared a stale deploy lock"
@@ -2174,14 +2521,14 @@ test_teardown_lock_after_prompt() {
   deployed
   lock="$(SVC_HOME)/.deploy.lock"
   mkdir -p "$lock"; echo 999999 > "$lock/pid"
-  run_teardown --purge "gnosia-lear"
+  run_teardown --purge "hermes-lear"
   check "wrong name with a stale lock: exits non-zero" [ "$CODE" -ne 0 ]
   check "  stale lock not touched (nothing changed)" [ "$(cat "$lock/pid")" = 999999 ]
   teardown
 }
 
 test_teardown_foreign_units_by_content() {
-  echo "• teardown: a unit/agent whose contents name ~/services/gnosia-learn is listed, never touched; purge refused"
+  echo "• teardown: a unit/agent whose contents name ~/services/hermes-studio is listed, never touched; purge refused"
   # teardown scans the unit dir on Linux and ~/Library/LaunchAgents on
   # macOS, so the fixture goes where this OS's branch looks.
   local dir job other ext=""
@@ -2192,10 +2539,10 @@ test_teardown_foreign_units_by_content() {
     dir="$HOME/Library/LaunchAgents"; job="com.me.nightly-backup"; other="com.me.unrelated"; ext=".plist"
   fi
   mkdir -p "$dir"
-  printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/gnosia-learn/studio/ /backup/\n' "$HOME" \
+  printf '[Service]\nExecStart=/usr/bin/rsync -a %s/services/hermes-studio/studio/ /backup/\n' "$HOME" \
     > "$dir/$job$ext"
   printf '[Service]\nExecStart=/bin/true\n' > "$dir/$other$ext"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "purge: exits non-zero"         [ "$CODE" -ne 0 ]
   check "  names it"                    out_has "$job"
   check "  nothing changed"             untouched
@@ -2213,7 +2560,7 @@ test_teardown_purge_rechecked_after_lock() {
   local dir job ext=""
   deployed
   rm -rf "$(REPO_DIR)"
-  run_purge_at_prompt "gnosia-learn" "mkdir -p '$(REPO_DIR)/.git'"
+  run_purge_at_prompt "hermes-studio" "mkdir -p '$(REPO_DIR)/.git'"
   check "repo/ recreated during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
   check "  says the list changed"       out_has "changed while the prompt waited"
   check "  nothing changed"             untouched
@@ -2222,7 +2569,7 @@ test_teardown_purge_rechecked_after_lock() {
   teardown
   deployed
   mkdir -p "$HOME/elsewhere"; echo precious > "$HOME/elsewhere/keep"
-  run_purge_at_prompt "gnosia-learn" "rm -rf '$(SVC_HOME)/studio' && ln -s '$HOME/elsewhere' '$(SVC_HOME)/studio'"
+  run_purge_at_prompt "hermes-studio" "rm -rf '$(SVC_HOME)/studio' && ln -s '$HOME/elsewhere' '$(SVC_HOME)/studio'"
   check "studio/ swapped for a symlink: exits non-zero" [ "$CODE" -ne 0 ]
   check "  refuses the link"            out_has "studio is a symlink"
   check "  nothing changed"             untouched
@@ -2230,11 +2577,11 @@ test_teardown_purge_rechecked_after_lock() {
   teardown
   deployed
   if [ "$OS" = "Linux" ]; then
-    dir="$(UNIT_DIR)"; job="gnosia-learn-seafile.service"
+    dir="$(UNIT_DIR)"; job="hermes-studio-seafile.service"
   else
-    dir="$HOME/Library/LaunchAgents"; job="com.gnosia-learn.seafile"; ext=".plist"
+    dir="$HOME/Library/LaunchAgents"; job="com.hermes-studio.seafile"; ext=".plist"
   fi
-  run_purge_at_prompt "gnosia-learn" "mkdir -p '$dir' && echo unit > '$dir/$job$ext'"
+  run_purge_at_prompt "hermes-studio" "mkdir -p '$dir' && echo unit > '$dir/$job$ext'"
   check "blob link installed during the prompt: exits non-zero" [ "$CODE" -ne 0 ]
   check "  names it"                    out_has "--purge refused: $job"
   check "  nothing changed"             untouched
@@ -2250,31 +2597,31 @@ test_teardown_macos_agents() {
   deployed
   export FAKE_UNAME=Darwin
   mkdir -p "$STATE_DIR/launchd"
-  for a in deploy export web; do touch "$STATE_DIR/launchd/com.gnosia-learn.$a"; done
+  for a in deploy export web; do touch "$STATE_DIR/launchd/com.hermes-studio.$a"; done
   mkdir -p "$HOME/Library/LaunchAgents"
-  printf '<string>%s/services/gnosia-learn/bin/deploy.sh</string>\n' "$HOME" \
+  printf '<string>%s/services/hermes-studio/bin/deploy.sh</string>\n' "$HOME" \
     > "$HOME/Library/LaunchAgents/com.me.backup.plist"
   run_teardown
   check "exits zero"                    [ "$CODE" -eq 0 ]
   for a in deploy export web; do
-    check "loaded $a agent booted out"  calls_have "launchctl bootout gui/.*/com.gnosia-learn.$a"
+    check "loaded $a agent booted out"  calls_have "launchctl bootout gui/.*/com.hermes-studio.$a"
   done
-  check "studio (not loaded) not booted out" no_call "launchctl bootout gui/.*/com.gnosia-learn.studio"
+  check "studio (not loaded) not booted out" no_call "launchctl bootout gui/.*/com.hermes-studio.studio"
   for a in deploy export studio web; do
-    check "$a agent disabled"           calls_have "launchctl disable gui/.*/com.gnosia-learn.$a"
+    check "$a agent disabled"           calls_have "launchctl disable gui/.*/com.hermes-studio.$a"
   done
-  check "deploy before web"             before "bootout gui/.*/com.gnosia-learn.deploy" "bootout gui/.*/com.gnosia-learn.web"
+  check "deploy before web"             before "bootout gui/.*/com.hermes-studio.deploy" "bootout gui/.*/com.hermes-studio.web"
   check "no systemctl"                  no_call "systemctl"
   check "agent named by contents"       out_has "Not touched (not created by setup.sh): com.me.backup"
   teardown
   deployed
   export FAKE_UNAME=Darwin
   mkdir -p "$STATE_DIR/launchd"
-  for a in deploy export web; do touch "$STATE_DIR/launchd/com.gnosia-learn.$a"; done
+  for a in deploy export web; do touch "$STATE_DIR/launchd/com.hermes-studio.$a"; done
   touch "$STATE_DIR/launchd_bootout_fails"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "bootout fails, agent still loaded: exits non-zero" [ "$CODE" -ne 0 ]
-  check "  says so"                     out_has "Could not unload LaunchAgent com.gnosia-learn.deploy"
+  check "  says so"                     out_has "Could not unload LaunchAgent com.hermes-studio.deploy"
   check "  deletion not reached"        [ -d "$(REPO_DIR)/.git" ]
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
   check "  .env kept"                   [ -f "$SVC/.env" ]
@@ -2282,7 +2629,7 @@ test_teardown_macos_agents() {
   teardown
   deployed
   export FAKE_UNAME=Darwin
-  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.gnosia-learn.web"
+  mkdir -p "$STATE_DIR/launchd"; touch "$STATE_DIR/launchd/com.hermes-studio.web"
   echo async > "$STATE_DIR/launchd_bootout_fails"
   run_teardown
   check "bootout errors but the agent unloads: exits zero" [ "$CODE" -eq 0 ]
@@ -2291,7 +2638,7 @@ test_teardown_macos_agents() {
   export FAKE_UNAME=Darwin
   mkdir -p "$STATE_DIR/launchd"
   touch "$STATE_DIR/launchd_disable_fails"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "disable fails: exits non-zero" [ "$CODE" -ne 0 ]
   check "  says it would reload"        out_has "would load again at the next login"
   check "  state kept"                  [ -f "$(SVC_HOME)/state/built-sha" ]
@@ -2300,7 +2647,7 @@ test_teardown_macos_agents() {
   deployed
   export FAKE_UNAME=Darwin
   mkdir -p "$STATE_DIR/launchd"
-  run_teardown --purge "gnosia-learn"
+  run_teardown --purge "hermes-studio"
   check "purge on macOS: exits zero"    [ "$CODE" -eq 0 ]
   check "  state gone"                  [ ! -e "$(SVC_HOME)/state" ]
   check "  no daemon-reload"            no_call "daemon-reload"
@@ -2314,6 +2661,14 @@ test_preflight_git_auth
 test_preflight_root
 test_fresh_deploy
 test_idempotent_rerun
+test_upgrade_imports_old_env
+test_upgrade_rewrites_quoted_service_home
+test_upgrade_lock_held_keeps_env
+test_upgrade_retries_move_after_rewrite
+test_upgrade_stops_old_units
+test_upgrade_keeps_a_stopped_old_app
+test_upgrade_carries_disabled_flag
+test_manual_setup_clears_disabled_flag
 test_migrate_removes_legacy_poller
 test_migrate_keeps_poller_without_deployd
 test_teardown_marks_disabled
@@ -2346,6 +2701,7 @@ test_sync_install
 test_sync_install_idempotent
 test_sync_install_old_layout
 test_sync_install_already_linked
+test_sync_keeps_explicit_mac_home
 test_sync_mac_setup_gui
 test_sync_mac_setup_legacy_lib_name
 test_sync_mac_setup_daemon_down
@@ -2369,6 +2725,7 @@ test_sync_pull_audit_fails
 test_sync_status
 test_sync_status_no_sqlite3
 test_sync_status_unreachable
+test_teardown_stops_legacy_units
 test_teardown_safe
 test_teardown_then_setup_restores
 test_teardown_then_start_and_stop

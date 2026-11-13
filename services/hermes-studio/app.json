@@ -1,0 +1,35 @@
+{
+  "key": "hermes-studio",
+  "name": "Hermes",
+  "tagline": "Study",
+  "group": "mine",
+  "icon": "book",
+  "author": "c-wenlong",
+  "url": "https://HOST:8107/",
+  "health": "http://127.0.0.1:8107/",
+  "marker": "~/services/hermes-studio",
+  "env": ".env",
+  "control": {
+    "parts": [
+      {
+        "unit": "hermes-studio-runner.service",
+        "optional": true
+      },
+      {
+        "unit": "hermes-studio.service"
+      }
+    ],
+    "primary": "hermes-studio.service",
+    "kuma": "hermes-studio",
+    "_comment": "`primary` is the web app: the studio runner is first in stop order but only exists while STUDIO_ENABLED=1, so it must not be the part whose state the phone reports. Stop order: the diagram studio runner first (a systemd user unit that only exists while STUDIO_ENABLED=1 in services/hermes-studio/.env, hence optional, and the one that talks to both the app's node_modules and the database), then the Next.js app (systemd user unit). Start is the reverse. A stopped app stays stopped across deploys — deployd's re-run rebuilds and migrates but only restarts the app, and the runner, if they were running."
+  },
+  "login": [
+    "Sign in at `/sign-in` with `OWNER_PASSWORD` from `.env`."
+  ],
+  "description": "Hermes study hub: the private promethevs-labs/hermes-studio repo's Next.js roadmap and Claude tutoring loop over a catalog that is one SQLite file under the data root — courses, concept notes, spaced-repetition reviews, indexed videos and diagrams. Native `next start` under a systemd user unit on 127.0.0.1:8107 behind Serve; no database server runs. deployd polls the remote every minute and re-runs setup.sh when main moves (stop app, npm ci, migrate, next build, start), and a nightly 03:00 timer exports the catalog to the data root's archive/ (~/.hermes by default, ~/.gnosia or ~/.self-learn on installs that predate a rename). Sign-in is the app's own OWNER_PASSWORD from .env — the tailnet is still the perimeter, the password just gates one owner from another tailnet device.",
+  "deploy": {
+    "repo": "https://github.com/promethevs-labs/hermes-studio",
+    "ref": "main",
+    "cmd": "services/hermes-studio/setup.sh"
+  }
+}

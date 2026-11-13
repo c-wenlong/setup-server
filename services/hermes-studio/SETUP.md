@@ -1,10 +1,10 @@
-# gnosia-learn — Gnosia study hub, auto-deployed from GitHub
+# hermes-studio — Hermes study hub, auto-deployed from GitHub
 
 A production build of the private
 [promethevs-labs/hermes-studio](https://github.com/promethevs-labs/hermes-studio) repo: a
 Next.js 16 app over a SQLite catalog, served natively and published
 tailnet-only. Push to `main` and deployd picks it up on its next tick —
-or immediately with `~/services/gnosia-learn/bin/deploy.sh --force`.
+or immediately with `~/services/hermes-studio/bin/deploy.sh --force`.
 
 The repo's own `docs/HOMESERVER.md` describes this exact deployment shape;
 this service wraps it in the repo's usual one-shot, idempotent form. Where
@@ -23,10 +23,10 @@ git push (laptop)
    GitHub (private repo)
         ▲  outbound git ls-remote, every minute (deployd)
         │
-deployd ──► setup.sh ──► bin/deploy.sh               gnosia-learn-export.timer
+deployd ──► setup.sh ──► bin/deploy.sh               hermes-studio-export.timer
   (services/deployd;      │                           (nightly 03:00:
    one timer for all      │ 1. stop app + studio if   catalog export ->
-   services)              │    running                ~/.gnosia/archive)
+   services)              │    running                ~/.hermes/archive)
                                 │ 2. git reset --hard
                                 │    origin/main
                                 │ 3. write checkout env files
@@ -37,21 +37,21 @@ deployd ──► setup.sh ──► bin/deploy.sh               gnosia-learn-ex
                                 │ 6. next build
                                 │ 7. start app + studio if they were running
                                 ▼
-              ~/services/gnosia-learn/repo  (machine-managed clone)
+              ~/services/hermes-studio/repo  (machine-managed clone)
                                 │  next start -p 8107 -H 127.0.0.1
                                 ▼
-              gnosia-learn.service (systemd user unit / launchd)
+              hermes-studio.service (systemd user unit / launchd)
                      │           127.0.0.1:8107 ──► Tailscale Serve HTTPS :8107
                      │  https://homeserver.tail-name.ts.net:8107
                      │                            (tailnet only)
-                     │  /studio/api/* proxied to ──► gnosia-learn-studio.service
+                     │  /studio/api/* proxied to ──► hermes-studio-runner.service
                      ▼          (npm run studio — diagram job runner, spawns
         the catalog: one SQLite  the claude CLI per job, loopback-only on
         file the app, catalog    127.0.0.1:7250 — never Serve-published.
         CLI and studio all open  Runs only while STUDIO_ENABLED=1 in .env;
-                     │           job state under ~/services/gnosia-learn/studio)
+                     │           job state under ~/services/hermes-studio/studio)
                      ▼
-   ~/.gnosia/  catalog.db  blobs/ vault/ archive/
+   ~/.hermes/  catalog.db  blobs/ vault/ archive/
         (upstream layout — rsync target; catalog.db is the whole database,
         no server to run)
 ```
@@ -62,7 +62,7 @@ deployd ──► setup.sh ──► bin/deploy.sh               gnosia-learn-ex
   Serve. Upstream's S6 notes Serve forwards `Host` and
   `X-Forwarded-Proto: https`, which is exactly what the app's session
   cookie and same-origin check read — no app-side setting needed.
-- The catalog is one SQLite file at `$CATALOG_DB` under `~/.gnosia`:
+- The catalog is one SQLite file at `$CATALOG_DB` under `~/.hermes`:
   no server, no port, no credentials — its only boundary is the
   filesystem, which already holds the blob store beside it.
 - Sign-in is the app's own `OWNER_PASSWORD` + signed cookie (one owner,
@@ -71,7 +71,7 @@ deployd ──► setup.sh ──► bin/deploy.sh               gnosia-learn-ex
 - `OWNER_PASSWORD` / `AUTH_SECRET` are generated into `.env` (mode 600)
   on first run and never overwritten. Every file that carries them — the
   checkout env files below — is written mode 600.
-- The deploy clone (`~/services/gnosia-learn/repo`) is machine-managed and
+- The deploy clone (`~/services/hermes-studio/repo`) is machine-managed and
   hard-reset on every deploy — **never edit it by hand**. The two env
   files inside it (`apps/web/.env.local`, `services/catalog/.env`) are
   rewritten from `.env` on every deploy; rotate secrets in `.env`, then
@@ -104,25 +104,25 @@ it whenever the recorded gitlink moves.
 ## What setup.sh does
 
 1. Preflight (above).
-2. Writes `.env` if absent (ports, paths, the `GNOSIA_HOME`/`CATALOG_DB`
+2. Writes `.env` if absent (ports, paths, the `HERMES_HOME`/`CATALOG_DB`
    catalog location, generated `OWNER_PASSWORD` and `AUTH_SECRET`). Re-runs
    read `.env` as the source of truth — `LOCAL_PORT=...` on the command
    line is ignored once `.env` exists. An `.env` written before the SQLite
    cut-over keeps working: its stale `postgres://` `DATABASE_URL` is
-   unused, and `GNOSIA_HOME`/`CATALOG_DB` derive to the data root it names
+   unused, and `HERMES_HOME`/`CATALOG_DB` derive to the data root it names
    through `SELF_LEARN_HOME`. An `.env` from before the rename keeps its
    root at `~/.self-learn` the same way — the paths below assume the
-   fresh default `~/.gnosia`.
-3. Installs `deploy.sh` -> `~/services/gnosia-learn/bin/` (refreshed every
-   run) and creates `$GNOSIA_HOME/blobs`.
-4. Writes the units — `gnosia-learn.service` (the app),
-   `gnosia-learn-studio.service` (the diagram job runner), and the
+   fresh default `~/.hermes`.
+3. Installs `deploy.sh` -> `~/services/hermes-studio/bin/` (refreshed every
+   run) and creates `$HERMES_HOME/blobs`.
+4. Writes the units — `hermes-studio.service` (the app),
+   `hermes-studio-runner.service` (the diagram job runner), and the
    nightly export `.timer` — or the matching LaunchAgents — and removes
-   a leftover `self-learn-deploy`/`gnosia-learn-deploy` timer or
+   a leftover `self-learn-deploy`/`hermes-studio-deploy` timer or
    LaunchAgent from before the deployd migration (kept, with a warning,
    when deployd itself is not installed). The studio unit gets the
    resolved `claude` path baked in as
-   `STUDIO_CLAUDE_BIN` and `STUDIO_HOME=~/services/gnosia-learn/studio`,
+   `STUDIO_CLAUDE_BIN` and `STUDIO_HOME=~/services/hermes-studio/studio`,
    so job workspaces survive a checkout re-clone.
 5. Runs the initial deploy: clone, env files, `npm ci`, `catalog
    migrate` (creates the SQLite file on first connect), `next build`.
@@ -143,7 +143,7 @@ it whenever the recorded gitlink moves.
 ## Deploy
 
 ```sh
-cd services/gnosia-learn && ./setup.sh
+cd services/hermes-studio && ./setup.sh
 ```
 
 Overrides (first run only — after that, edit `.env`): `LOCAL_PORT` /
@@ -171,27 +171,27 @@ SQLite file now, so the old pg_dump/restore dance is a file copy.
 ```sh
 # on the laptop — .backup makes a consistent single file even while a
 # dev checkout has the database open
-sqlite3 ~/.gnosia/catalog.db ".backup '$HOME/laptop-catalog.db'"
+sqlite3 ~/.hermes/catalog.db ".backup '$HOME/laptop-catalog.db'"
 scp ~/laptop-catalog.db homeserver:~/catalog.db
-rsync -a --exclude .owner ~/.gnosia/blobs/ homeserver:~/.gnosia/blobs/
+rsync -a --exclude .owner ~/.hermes/blobs/ homeserver:~/.hermes/blobs/
 
 # first deploy here — leave the catalog file empty
-cd services/gnosia-learn && SKIP_SEED=1 AUTH_SECRET=<laptop's> ./setup.sh
+cd services/hermes-studio && SKIP_SEED=1 AUTH_SECRET=<laptop's> ./setup.sh
 
 # swap the laptop's file in for the migrated-but-empty one the deploy
 # left — every writer goes down first: the studio runner also holds the
 # db open when STUDIO_ENABLED=1 (ignore its "not loaded" error when off)
-systemctl --user stop gnosia-learn-studio gnosia-learn
-rm -f ~/.gnosia/catalog.db-wal ~/.gnosia/catalog.db-shm
-mv ~/catalog.db ~/.gnosia/catalog.db
-cd ~/services/gnosia-learn/repo && npm run catalog -- doctor && npm run catalog -- blob audit --fix
-systemctl --user start gnosia-learn
-systemctl --user start gnosia-learn-studio   # only if it was running
+systemctl --user stop hermes-studio-runner hermes-studio
+rm -f ~/.hermes/catalog.db-wal ~/.hermes/catalog.db-shm
+mv ~/catalog.db ~/.hermes/catalog.db
+cd ~/services/hermes-studio/repo && npm run catalog -- doctor && npm run catalog -- blob audit --fix
+systemctl --user start hermes-studio
+systemctl --user start hermes-studio-runner   # only if it was running
 ```
 
 (The same swap covers a catalog that *was* seeded — `mv` replaces the
 file wholesale. On macOS the stop/start is `launchctl bootout` /
-`bootstrap` on `com.gnosia-learn.web`.) The `--exclude .owner` matters:
+`bootstrap` on `com.hermes-studio.web`.) The `--exclude .owner` matters:
 the blob store's marker names its database by resolved path, so a copied
 marker names the laptop's file — a path that is not here — and uploads
 and `audit --fix` would refuse the root (upstream S3).
@@ -206,12 +206,12 @@ them. The container still answers on its old loopback port even though
 
 ```sh
 docker start self-learn-db   # no-op if it is already running
-set -a; . services/gnosia-learn/.env; set +a   # POSTGRES_USER, _PASSWORD, _DB, PG_PORT
+set -a; . services/hermes-studio/.env; set +a   # POSTGRES_USER, _PASSWORD, _DB, PG_PORT
 # a pre-rename .env names only SELF_LEARN_HOME — derive the catalog path
 # the way setup.sh does so the port lands where the app actually reads it
-GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
-CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
-cd ~/services/gnosia-learn/repo
+HERMES_HOME="${HERMES_HOME:-${GNOSIA_HOME:-${SELF_LEARN_HOME:-}}}"
+CATALOG_DB="${CATALOG_DB:-$HERMES_HOME/catalog.db}"
+cd ~/services/hermes-studio/repo
 node services/catalog/scripts/pg-to-sqlite.mjs \
   --from "postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@127.0.0.1:$PG_PORT/$POSTGRES_DB" \
   --to "$CATALOG_DB"
@@ -223,7 +223,7 @@ The port migrates the fresh file to head, copies every table and runs
 delete the empty one a fresh deploy created first. Afterwards:
 `npm run catalog -- doctor && npm run catalog -- blob audit --fix`, then
 `docker rm -f self-learn-db && docker volume rm self-learn-postgres`.
-Blobs need no move — `GNOSIA_HOME` derives to the same root the old
+Blobs need no move — `HERMES_HOME` derives to the same root the old
 `.env`'s `SELF_LEARN_HOME` already named.
 
 ## Syncing with the MacBook (`sync.sh`)
@@ -236,9 +236,9 @@ file, swapped in while the receiving app is stopped), never a merge.
 
 ```
 server                          Seafile                          MacBook
-~/.gnosia/blobs/local ◄── gnosia-learn-blobs library ──► ~/.gnosia/blobs/local
+~/.hermes/blobs/local ◄── hermes-studio-blobs library ──► ~/.hermes/blobs/local
   seaf-cli daemon      dedicated non-admin sync account          Seafile Client.app
-  (gnosia-learn-         (.owner + .tmp sit beside local/,          (GUI pairing —
+  (hermes-studio-         (.owner + .tmp sit beside local/,          (GUI pairing —
    seafile.service)     outside the synced tree)                   no seaf-cli on macOS)
 
 ./sync.sh push ──► copy catalog.db here ──► scp ──► swap it in on the Mac
@@ -253,9 +253,9 @@ server                          Seafile                          MacBook
 ```
 
 - `install` creates a **non-admin** Seafile account
-  (`gnosia-learn-sync@<host>.local`) and a private `gnosia-learn-blobs` library,
+  (`hermes-studio-sync@<host>.local`) and a private `hermes-studio-blobs` library,
   then runs `seaf-daemon` in the foreground under
-  `gnosia-learn-seafile.service` (systemd user unit, `Restart=always` — a
+  `hermes-studio-seafile.service` (systemd user unit, `Restart=always` — a
   dead daemon is revived, and `active (running)` actually means syncing).
   Credentials persist into `.env` (mode 600) —
   `SEAFILE_SYNC_USER`/`_PASSWORD`/`_REPO`. Admin credentials are only
@@ -263,7 +263,7 @@ server                          Seafile                          MacBook
   and no password ever lands on a process list (`curl -K -` reads the
   request from stdin; `seaf-cli` takes it via its getpass stdin
   fallback).
-- `mac-setup` writes `~/.gnosia/blobs/local/seafile-ignore.txt` on the
+- `mac-setup` writes `~/.hermes/blobs/local/seafile-ignore.txt` on the
   Mac **before** any pairing. Only `blobs/local` is the library worktree —
   `.owner` and `.tmp` sit at `blobs/` root, outside the synced tree, so a
   foreign `.owner` can never be delivered onto either machine (the ignore
@@ -275,7 +275,7 @@ server                          Seafile                          MacBook
   is snapshotted consistently (`sqlite3 .backup`, or a stopped-writer copy
   of the db/`-wal`/`-shm` set when no sqlite3), staged beside the file it
   replaces so the final `mv` is a rename, and the receiver's writers go
-  down first — `pull` stops `gnosia-learn.service` and the studio runner
+  down first — `pull` stops `hermes-studio.service` and the studio runner
   (restarting only what was running); `push` stops the checkout's `next`
   processes on the Mac (scoped to `$MAC_REPO`, waited on) and tells you to
   restart them yourself. `.owner` is **not** restamped — it names the
@@ -293,43 +293,43 @@ server                          Seafile                          MacBook
 ## Ops
 
 ```sh
-~/services/gnosia-learn/bin/deploy.sh --force          # pull + rebuild + migrate + restart now
-~/services/gnosia-learn/bin/deploy.sh --sha <commit>   # pin to a commit (rollback — TROUBLESHOOT.md)
-journalctl --user -u gnosia-learn -f                   # app logs
-journalctl --user -u gnosia-learn-studio -f            # studio runner logs
+~/services/hermes-studio/bin/deploy.sh --force          # pull + rebuild + migrate + restart now
+~/services/hermes-studio/bin/deploy.sh --sha <commit>   # pin to a commit (rollback — TROUBLESHOOT.md)
+journalctl --user -u hermes-studio -f                   # app logs
+journalctl --user -u hermes-studio-runner -f            # studio runner logs
 curl -s http://127.0.0.1:7250/api/health             # runner health (loopback)
 journalctl --user -u deployd -n 50                     # deploy history
 ~/services/deployd/bin/deployd --status                # watched repos + last results
-journalctl --user -u gnosia-learn-export               # nightly export runs
-systemctl --user list-timers gnosia-learn-export.timer deployd.timer
-ls -l ~/.gnosia/catalog.db                       # the whole catalog, one file
-ls ~/.gnosia/archive/latest                      # newest readable export
+journalctl --user -u hermes-studio-export               # nightly export runs
+systemctl --user list-timers hermes-studio-export.timer deployd.timer
+ls -l ~/.hermes/catalog.db                       # the whole catalog, one file
+ls ~/.hermes/archive/latest                      # newest readable export
 tailscale serve status
 ./sync.sh status                                     # both catalogs + blob stores
-systemctl --user status gnosia-learn-seafile           # blob-sync daemon
+systemctl --user status hermes-studio-seafile           # blob-sync daemon
 ```
 
 Remove: `./teardown.sh` (or Remove in the launcher) unpublishes every Serve
 port that proxies to the app, disables the export timer (and any leftover
 deploy timer), stops the studio runner and the app, marks the service
 disabled in deployd's state so the next push does not resurrect it, and
-keeps `~/services/gnosia-learn`
+keeps `~/services/hermes-studio`
 and `.env`, so `./setup.sh` brings it back running. `./teardown.sh
 --purge` (type the name) also deletes the deploy clone, state, studio
-and bin dirs, the unit files and `.env`. Neither touches `~/.gnosia`
+and bin dirs, the unit files and `.env`. Neither touches `~/.hermes`
 — `catalog.db`, `blobs`, `vault` and the nightly exports in `archive/`
-all survive a purge — or `sync.sh`'s `gnosia-learn-seafile.service`;
+all survive a purge — or `sync.sh`'s `hermes-studio-seafile.service`;
 purge refuses while that blob link is installed. See TROUBLESHOOT.md,
 "Nuke and pave".
 
-The catalog CLI works in the checkout (`cd ~/services/gnosia-learn/repo &&
+The catalog CLI works in the checkout (`cd ~/services/hermes-studio/repo &&
 npm run catalog -- status`) — `services/catalog/.env` there points it at
 this `catalog.db`.
 
 ## The studio runner
 
 `STUDIO_ENABLED=1` (the server's `.env` has it on) runs a third service:
-`gnosia-learn-studio` (`npm run studio` — `tsx services/studio/src/index.ts`),
+`hermes-studio-runner` (`npm run studio` — `tsx services/studio/src/index.ts`),
 the diagram job runner behind the app's `/studio/api/*` proxy. It binds
 `127.0.0.1:7250`, is never published through Serve (the app proxies to it
 and stamps the signed-in owner itself), and reaches the catalog the way
@@ -339,7 +339,7 @@ resolved at setup time (`STUDIO_CLAUDE_BIN` in the unit), authenticating
 with the login credentials in `~/.claude` — the runner's default
 `STUDIO_AGENT_AUTH=login` strips `ANTHROPIC_API_KEY` from the job env.
 Job workspaces and the write-ahead log live in
-`~/services/gnosia-learn/studio` (`STUDIO_HOME`), outside the
+`~/services/hermes-studio/studio` (`STUDIO_HOME`), outside the
 machine-managed checkout. Its lifecycle follows the app: setup and the
 deploy script stop/start them together, and a deliberately stopped stack
 stays stopped. Optional spend cap: set `STUDIO_DAILY_USD` in `.env` and
@@ -352,7 +352,7 @@ it refuses to queue a job while that submodule is unbuilt (health says
 `STUDIO_ENABLED=1` every deploy runs `git submodule update --init
 tools/tldrawkc` and rebuilds (`npm ci && npm run build`) only when the
 recorded gitlink moved — the last-built sha is stamped at
-`~/services/gnosia-learn/state/tldrawkc-sha`.
+`~/services/hermes-studio/state/tldrawkc-sha`.
 
 ## Not deployed (upstream leftovers)
 
@@ -366,5 +366,5 @@ recorded gitlink moved — the last-built sha is stamped at
 
 Nothing to install. Open `https://homeserver.tail-name.ts.net:8107`,
 sign in at `/sign-in` with `OWNER_PASSWORD` from `.env`. Editing the
-curriculum happens wherever the gnosia repo is a working clone —
+curriculum happens wherever the hermes repo is a working clone —
 push to `main`, the box deploys it on the next poll.

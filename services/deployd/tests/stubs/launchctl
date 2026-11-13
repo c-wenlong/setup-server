@@ -11,7 +11,16 @@ case "${1:-}" in
   bootstrap) l="$(basename "${3:-}" .plist)"; [ -z "$l" ] || touch "$STATE_DIR/loaded.$l" ;;
   bootout)   rm -f "$STATE_DIR/loaded.${2##*/}" ;;
   print)     [ -f "$STATE_DIR/loaded.${2##*/}" ] || { echo "Could not find service" >&2; exit 113; } ;;
-  kickstart) [ ! -f "$STATE_DIR/restart_fails" ] || exit 1 ;;
+  kickstart)
+    # A file landing while the unit cycles must stay newer than the
+    # baseline captured before kickstart. Same contract as systemctl.
+    if [ -f "$STATE_DIR/restart_fails" ]; then
+      exit 1
+    fi
+    if [ -f "$STATE_DIR/restart_edits" ]; then
+      touch -t 203101010000 "$(cat "$STATE_DIR/restart_edits")"
+    fi
+    ;;
   print-disabled) [ ! -f "$STATE_DIR/show_fails" ] || exit 1 ;;
 esac
 exit 0

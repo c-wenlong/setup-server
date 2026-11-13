@@ -643,7 +643,7 @@ PYEOF
   OUT="$(PYTHONPATH="$SANDBOX/fakelib" FAKE_KUMA_LOG="$SANDBOX/kuma.log" \
     KUMA_PORT=3001 KUMA_ADMIN_USER=u KUMA_ADMIN_PASSWORD=p NTFY_PORT=8080 \
     ADGUARD_DNS_IP=100.77.77.77 \
-    GNOSIA_ENV="$1" python3 "$SERVICE_DIR/seed_kuma.py" 2>&1)"
+    HERMES_ENV="$1" python3 "$SERVICE_DIR/seed_kuma.py" 2>&1)"
   CODE=$?
 }
 
@@ -652,20 +652,20 @@ not_seeded() { ! seeded "$1"; }
 no_edit()    { ! grep -q -- "edit:$1:" "$SANDBOX/kuma.log"; }
 
 test_seed_studio_monitor() {
-  echo "• seed: the studio monitor exists only while STUDIO_ENABLED=1 in services/gnosia-learn/.env"
+  echo "• seed: the studio monitor exists only while STUDIO_ENABLED=1 in services/hermes-studio/.env"
   setup
   printf 'STUDIO_ENABLED=0\n' > "$SANDBOX/sl.env"
   run_seed "$SANDBOX/sl.env"
   check "flag off: seed exits zero"        [ "$CODE" -eq 0 ]
-  check "flag off: app monitor still added" seeded gnosia-learn
+  check "flag off: app monitor still added" seeded hermes-studio
   check "flag off: dns monitor still added" seeded adguard-dns
-  check "flag off: no studio monitor"      not_seeded gnosia-learn-studio
+  check "flag off: no studio monitor"      not_seeded hermes-studio-runner
   run_seed "$SANDBOX/absent.env"
-  check "no env file: no studio monitor"   not_seeded gnosia-learn-studio
+  check "no env file: no studio monitor"   not_seeded hermes-studio-runner
   printf 'STUDIO_ENABLED=0\nSTUDIO_ENABLED=1\n' > "$SANDBOX/sl.env"
   run_seed "$SANDBOX/sl.env"
   check "flag on: seed exits zero"         [ "$CODE" -eq 0 ]
-  check "flag on: studio monitor added"    seeded gnosia-learn-studio
+  check "flag on: studio monitor added"    seeded hermes-studio-runner
   teardown
 }
 
@@ -710,14 +710,21 @@ test_seed_renamed_monitors() {
   printf '7 self-learn https://old-host:8107/\n' > "$SANDBOX/have"
   FAKE_KUMA_HAVE="$SANDBOX/have" run_seed "$SANDBOX/absent.env"
   check "exits zero"                     [ "$CODE" -eq 0 ]
-  check "old monitor re-keyed"           grep -qx 'edit:7:gnosia-learn' "$SANDBOX/kuma.log"
+  check "old monitor re-keyed"           grep -qx 'edit:7:hermes-studio' "$SANDBOX/kuma.log"
   check "url repointed too"              grep -qx 'edit:7:https://homeserver.tail-name.ts.net:8107/' "$SANDBOX/kuma.log"
-  check "not duplicated"                 not_seeded gnosia-learn
+  check "not duplicated"                 not_seeded hermes-studio
   # both names already present: the operator split them, leave both alone
-  printf '7 self-learn https://a/\n8 gnosia-learn https://b/\n' > "$SANDBOX/have"
+  printf '7 self-learn https://a/\n8 hermes-studio https://b/\n' > "$SANDBOX/have"
   FAKE_KUMA_HAVE="$SANDBOX/have" run_seed "$SANDBOX/absent.env"
   check "both kept: monitor 7 untouched" no_edit 7
   check "both kept: new one repointed"   grep -q 'edit:8:' "$SANDBOX/kuma.log"
+  # the Gnosia-era monitor name re-keys the same way
+  printf '9 gnosia-learn https://old-host:8107/\n' > "$SANDBOX/have"
+  FAKE_KUMA_HAVE="$SANDBOX/have" run_seed "$SANDBOX/absent.env"
+  check "gnosia-learn re-keyed"          grep -qx 'edit:9:hermes-studio' "$SANDBOX/kuma.log"
+  printf '9 gnosia-learn-studio https://old-host:7250/\n' > "$SANDBOX/have"
+  FAKE_KUMA_HAVE="$SANDBOX/have" run_seed "$SANDBOX/absent.env"
+  check "gnosia-learn-studio re-keyed"   grep -qx 'edit:9:hermes-studio-runner' "$SANDBOX/kuma.log"
   teardown
 }
 

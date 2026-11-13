@@ -1226,6 +1226,22 @@ def marker_exists(marker):
             and os.path.exists(os.path.expanduser(marker)))
 
 
+# Service directories a rename left behind. setup.sh imports the old .env
+# and keeps SERVICE_HOME there, so a stopped install still occupies the old
+# path. The registry marker stays one string (the current home); this only
+# answers "is it installed".
+LEGACY_MARKERS = {
+    "hermes-studio": ("~/services/gnosia-learn", "~/services/self-learn"),
+}
+
+
+def installed_marker(svc):
+    if marker_exists(svc.get("marker")):
+        return True
+    key = svc.get("key")
+    return any(marker_exists(path) for path in LEGACY_MARKERS.get(key, ()))
+
+
 def derive_state(setup, installed, active):
     """Map (setup, installed, active) onto the four tile states.
 
@@ -2197,7 +2213,7 @@ def services_payload():
             active = control_running(svc, resources) is True
             degraded = False
         receipt = load_receipt(svc.get("key"))
-        installed = ((active or marker_exists(svc.get("marker")))
+        installed = ((active or installed_marker(svc))
                      and not is_removed(receipt, active))
         if restore_pending(svc):
             active = degraded = installed = False
@@ -2318,7 +2334,7 @@ def service_detail(key):
         active = control_running(svc, resources) is True
         degraded = False
     receipt = load_receipt(key)
-    installed = ((active or marker_exists(svc.get("marker")))
+    installed = ((active or installed_marker(svc))
                  and not is_removed(receipt, active))
     if restore_pending(svc):
         active = degraded = installed = False
@@ -5688,7 +5704,10 @@ def start_action(key, action):
                                    "TROUBLESHOOT.md)")
         health = resolve_health(svc)
         active = bool(health) and probe_all([health]).get(health, False)
-        if not ((active or marker_exists(svc.get("marker")))
+        # Same check the tile uses. A rename leaves the install at the
+        # old home, and installed_marker counts that. Checking only the
+        # new marker rejects Remove on a tile that already reads installed.
+        if not ((active or installed_marker(svc))
                 and not is_removed(load_receipt(key), active)):
             raise DeployError(409, "this service is not installed")
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # launchctl stub (used when the mocked suite runs on macOS, or fakes it with
 # FAKE_UNAME=Darwin): logs and tracks agent loaded state in $STATE_DIR —
-# web_active for com.gnosia-learn.web (and anything else, matching the
+# web_active for com.hermes-studio.web (and anything else, matching the
 # historical single-marker behaviour), studio_active for
-# com.gnosia-learn.studio. When $STATE_DIR/launchd/ exists (teardown tests),
+# com.hermes-studio.studio. When $STATE_DIR/launchd/ exists (teardown tests),
 # each label has its own marker there instead: launchd/<label>.
 # Failure switches:
 #   launchd_bootout_fails  — exists => `bootout` fails and the agent stays
@@ -12,7 +12,11 @@
 echo "launchctl $*" >> "$CALLS_LOG"
 
 marker=web_active
-case " ${*: -1} " in *studio*) marker=studio_active ;; esac
+# The web label is com.hermes-studio.web, so "studio" alone is not the runner.
+# The word is space-padded, so each pattern needs that leading space too.
+case " ${*: -1} " in
+  *hermes-studio.studio*|*gnosia-learn.studio*|*self-learn.studio*) marker=studio_active ;;
+esac
 if [ -d "$STATE_DIR/launchd" ]; then
   last="${*: -1}"; last="${last##*/}"
   marker="launchd/${last%.plist}"
@@ -34,7 +38,7 @@ case "${1:-}" in
     [ ! -f "$STATE_DIR/launchd_disable_fails" ] || exit 1
     ;;
   bootstrap|kickstart)
-    # launchd runs the agent's ProgramArguments on load; com.gnosia-learn.web's
+    # launchd runs the agent's ProgramArguments on load; com.hermes-studio.web's
     # is an `sh -c` wrapper that clears teardown's torn-down marker first —
     # running it here keeps a stubbed bootstrap faithful.
     plist="${*: -1}"
