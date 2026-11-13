@@ -148,10 +148,14 @@ either `no control registry found — nothing is controllable` or
 ## Nuke and pave
 
 ```sh
+cd ~/dev/setup-server/services/ntfy-control && ./teardown.sh --purge
+./setup.sh
+```
+Stateless — nothing is lost by re-deploying. By hand, the equivalent is:
+
+```sh
 systemctl --user disable --now ntfy-control
 rm -f ~/.config/systemd/user/ntfy-control.service
 systemctl --user daemon-reload
 rm -rf ~/services/ntfy-control ~/dev/setup-server/services/ntfy-control/.env
-cd ~/dev/setup-server/services/ntfy-control && ./setup.sh
 ```
-Stateless — nothing is lost by re-deploying.
