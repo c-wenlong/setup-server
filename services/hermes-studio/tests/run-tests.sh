@@ -1843,6 +1843,44 @@ EOF
   : > "$CALLS_LOG"
 }
 
+test_teardown_stops_legacy_units() {
+  echo "• teardown: a pre-rename app, runner and export timer are stopped; blob sync is not"
+  deployed
+  if [ "$OS" = "Linux" ]; then
+    echo x > "$(UNIT_DIR)/gnosia-learn.service"
+    echo x > "$(UNIT_DIR)/gnosia-learn-studio.service"
+    echo x > "$(UNIT_DIR)/gnosia-learn-export.timer"
+    echo x > "$(UNIT_DIR)/gnosia-learn-export.service"
+    echo x > "$(UNIT_DIR)/gnosia-learn-seafile.service"
+    touch "$STATE_DIR/gnosia_web_active" "$STATE_DIR/gnosia_studio_active"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents" "$STATE_DIR/launchd"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.web.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.studio.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.export.plist"
+    echo x > "$HOME/Library/LaunchAgents/com.gnosia-learn.seafile.plist"
+    touch "$STATE_DIR/launchd/com.gnosia-learn.web" \
+          "$STATE_DIR/launchd/com.gnosia-learn.studio" \
+          "$STATE_DIR/launchd/com.gnosia-learn.export"
+  fi
+  run_teardown
+  check "exits zero"                 [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "old app stopped"          calls_have "systemctl --user disable --now gnosia-learn.service"
+    check "old runner stopped"       calls_have "systemctl --user disable --now gnosia-learn-studio.service"
+    check "old export stopped"       calls_have "systemctl --user disable --now gnosia-learn-export.timer"
+    check "old blob sync untouched"  no_call "gnosia-learn-seafile"
+    check "old seafile kept"         [ -f "$(UNIT_DIR)/gnosia-learn-seafile.service" ]
+  else
+    check "old web booted out"       calls_have "launchctl bootout gui/.*/com.gnosia-learn.web"
+    check "old studio booted out"    calls_have "launchctl bootout gui/.*/com.gnosia-learn.studio"
+    check "old export booted out"    calls_have "launchctl bootout gui/.*/com.gnosia-learn.export"
+    check "old blob sync untouched"  no_call "com.gnosia-learn.seafile"
+    check "old seafile plist kept"   [ -f "$HOME/Library/LaunchAgents/com.gnosia-learn.seafile.plist" ]
+  fi
+  teardown
+}
+
 test_teardown_safe() {
   echo "• teardown: safe remove stops timers, studio, app (no Postgres anymore); keeps data"
   deployed
@@ -2687,6 +2725,7 @@ test_sync_pull_audit_fails
 test_sync_status
 test_sync_status_no_sqlite3
 test_sync_status_unreachable
+test_teardown_stops_legacy_units
 test_teardown_safe
 test_teardown_then_setup_restores
 test_teardown_then_start_and_stop

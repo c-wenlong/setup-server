@@ -35,7 +35,8 @@ first, dated by merge.
   name. `sync.sh mac-setup` unloads the old Mac blob-sync agent before
   loading the new one. The launcher's Remove accepts an install that
   still lives at the old home, and teardown reads that home's `.env`
-  when the new file does not exist yet. deployd carries a
+  when the new file does not exist yet. It also stops the old app,
+  runner and export timer, and leaves the blob-sync unit alone. deployd carries a
   pre-rename skip flag and poller tombstone onto the new key before it
   decides to deploy, so an app the owner removed stays removed. A carried
   override whose command is the old `setup.sh` is rewritten to the new

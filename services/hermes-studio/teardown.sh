@@ -194,13 +194,15 @@ ok "$NAME: local :$LOCAL_PORT, state $SERVICE_HOME, blobs/exports ${HERMES_HOME:
 
 # Exactly the units / LaunchAgents setup.sh writes, timers first: a timer
 # left enabled could start a deploy that brings the app back while it is
-# being stopped.
+# being stopped. The pre-rename names are on the same list. Remove can
+# run before the first renamed setup, and those units still hold the port.
+# The blob-sync units stay off this list. sync.sh install replaces them.
 UNIT_DIR="$HOME/.config/systemd/user"
 AGENT_DIR="$HOME/Library/LaunchAgents"
-TIMERS="hermes-studio-deploy.timer hermes-studio-export.timer"
-ONESHOTS="hermes-studio-deploy.service hermes-studio-export.service"
-UNIT_FILES="$TIMERS $ONESHOTS hermes-studio-runner.service hermes-studio.service"
-AGENTS="com.hermes-studio.deploy com.hermes-studio.export com.hermes-studio.studio com.hermes-studio.web"
+TIMERS="hermes-studio-deploy.timer hermes-studio-export.timer gnosia-learn-deploy.timer gnosia-learn-export.timer self-learn-deploy.timer self-learn-export.timer"
+ONESHOTS="hermes-studio-deploy.service hermes-studio-export.service gnosia-learn-deploy.service gnosia-learn-export.service self-learn-deploy.service self-learn-export.service"
+UNIT_FILES="$TIMERS $ONESHOTS hermes-studio-runner.service hermes-studio.service gnosia-learn-studio.service gnosia-learn.service self-learn-studio.service self-learn.service"
+AGENTS="com.hermes-studio.deploy com.hermes-studio.export com.hermes-studio.studio com.hermes-studio.web com.gnosia-learn.deploy com.gnosia-learn.export com.gnosia-learn.studio com.gnosia-learn.web com.self-learn.deploy com.self-learn.export com.self-learn.studio com.self-learn.web"
 
 # Units that mention this service but that setup.sh does not create — on
 # this box, sync.sh's hermes-studio-seafile.service (the blob-sync daemon, which
@@ -209,10 +211,21 @@ AGENTS="com.hermes-studio.deploy com.hermes-studio.export com.hermes-studio.stud
 # listing; they are never stopped, disabled or deleted here.
 # Run again by purge_targets after the --purge prompt.
 if [ "$OS" = "Linux" ]; then
-  SCAN_DIR="$UNIT_DIR"; SCAN_NAME='hermes-studio*'; SCAN_MINE=" $UNIT_FILES "
+  SCAN_DIR="$UNIT_DIR"; SCAN_MINE=" $UNIT_FILES "
 else
-  SCAN_DIR="$AGENT_DIR"; SCAN_NAME='com.hermes-studio.*'; SCAN_MINE=" $AGENTS "
+  SCAN_DIR="$AGENT_DIR"; SCAN_MINE=" $AGENTS "
 fi
+# A name this service owns, including the pre-rename units. The blob-sync
+# unit matches here and is not in SCAN_MINE, so it stays foreign. The
+# alternation lives in the case, not in a variable: an expanded `|` is a
+# literal character and would miss hermes-studio-seafile.
+ours_or_legacy() {
+  case "$1" in
+    hermes-studio*|gnosia-learn*|self-learn*) return 0 ;;
+    com.hermes-studio.*|com.gnosia-learn.*|com.self-learn.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 scan_foreign() {
   FOREIGN=""
   if [ -d "$SCAN_DIR" ]; then
@@ -221,11 +234,9 @@ scan_foreign() {
       b="$(basename "$f")"
       [ "$OS" = "Linux" ] || b="${b%.plist}"
       case "$SCAN_MINE" in *" $b "*) continue ;; esac
-      # shellcheck disable=SC2254  # SCAN_NAME is a glob on purpose
-      case "$(basename "$f")" in
-        $SCAN_NAME) ;;
-        *) grep -qF -e "$HOME/services/$NAME" -e "$SERVICE_HOME" "$f" 2>/dev/null || continue ;;
-      esac
+      if ! ours_or_legacy "$b"; then
+        grep -qF -e "$HOME/services/$NAME" -e "$SERVICE_HOME" "$f" 2>/dev/null || continue
+      fi
       FOREIGN="$FOREIGN $b"
     done < <(find "$SCAN_DIR" -maxdepth 1 ! -type d 2>/dev/null | sort)
   fi
@@ -500,8 +511,12 @@ if [ "$OS" = "Linux" ]; then
     [ -f "$UNIT_DIR/$u" ] || continue
     systemctl --user stop "$u" >/dev/null 2>&1 || die "Could not stop $u: systemctl --user status $u"
   done
-  info "Stopping and disabling hermes-studio-runner, then hermes-studio"
-  for u in hermes-studio-runner.service hermes-studio.service; do
+  info "Stopping and disabling the studio runner, then the app"
+  # Old name first. It binds the same port as the new unit, and a
+  # Remove that only stops hermes-studio leaves gnosia-learn running.
+  for u in gnosia-learn-studio.service self-learn-studio.service \
+           hermes-studio-runner.service \
+           gnosia-learn.service self-learn.service hermes-studio.service; do
     [ -f "$UNIT_DIR/$u" ] || continue
     systemctl --user disable --now "$u" >/dev/null 2>&1 || die "Could not stop $u: systemctl --user status $u"
   done
