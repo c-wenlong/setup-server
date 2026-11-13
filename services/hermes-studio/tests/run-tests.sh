@@ -450,6 +450,70 @@ EOF
   teardown
 }
 
+test_upgrade_lock_held_keeps_env() {
+  echo "• upgrade: a live old lock refuses before SERVICE_HOME is rewritten"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SANDBOX/repo/services/gnosia-learn"
+  cat > "$SANDBOX/repo/services/gnosia-learn/.env" <<EOF
+SERVICE_HOME=$HOME/services/gnosia-learn
+GNOSIA_HOME=$HOME/.gnosia
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+EOF
+  chmod 600 "$SANDBOX/repo/services/gnosia-learn/.env"
+  mkdir -p "$HOME/services/gnosia-learn/.deploy.lock" \
+    "$HOME/services/gnosia-learn/studio"
+  echo '{"id":"job-1"}' > "$HOME/services/gnosia-learn/studio/job.json"
+  echo $$ > "$HOME/services/gnosia-learn/.deploy.lock/pid"
+  run_deploy
+  check "exits non-zero"           [ "$CODE" -ne 0 ]
+  check "says why"                 out_has "still running under"
+  check "env not imported yet"     [ ! -f "$SVC/.env" ]
+  check "old env still there"     [ -f "$SANDBOX/repo/services/gnosia-learn/.env" ]
+  check "jobs stay put"           [ -f "$HOME/services/gnosia-learn/studio/job.json" ]
+  check "lock left to its owner"  [ "$(cat "$HOME/services/gnosia-learn/.deploy.lock/pid")" = "$$" ]
+  teardown
+}
+
+test_upgrade_retries_move_after_rewrite() {
+  echo "• upgrade: a retry moves jobs after SERVICE_HOME already names the new home"
+  setup
+  touch "$STATE_DIR/operator"
+  mkdir -p "$SVC"
+  cat > "$SVC/.env" <<EOF
+SERVICE_HOME=$HOME/services/hermes-studio
+GNOSIA_HOME=$HOME/.gnosia
+CATALOG_DB=$HOME/.gnosia/catalog.db
+OWNER_PASSWORD=kept-password
+AUTH_SECRET=kept-secret-kept-secret-kept-secret
+NODE_BIN=$STUBS
+LOCAL_PORT=8107
+PUBLIC_URL=https://test-host.tailfake.ts.net:8107
+REPO_URL=https://github.com/promethevs-labs/hermes-studio.git
+BRANCH=main
+STUDIO_ENABLED=0
+ASSET_FILES_ENABLED=1
+EOF
+  chmod 600 "$SVC/.env"
+  mkdir -p "$HOME/services/gnosia-learn/state" "$HOME/services/gnosia-learn/repo/.git" \
+    "$HOME/services/gnosia-learn/repo/apps/web/.next" \
+    "$HOME/services/gnosia-learn/studio" "$HOME/.gnosia"
+  echo '{"id":"job-1"}' > "$HOME/services/gnosia-learn/studio/job.json"
+  echo seeded > "$HOME/services/gnosia-learn/state/db-bootstrapped"
+  echo aaa1111 > "$HOME/services/gnosia-learn/state/built-sha"
+  printf 'STUDIO_ENABLED=0 ASSET_FILES_ENABLED=1 HERMES_HOME=%s CATALOG_DB=%s\n' \
+    "$HOME/.gnosia" "$HOME/.gnosia/catalog.db" \
+    > "$HOME/services/gnosia-learn/state/env-sig"
+  run_deploy
+  check "studio jobs moved"       [ -f "$HOME/services/hermes-studio/studio/job.json" ]
+  check "bootstrap moved"         [ -f "$HOME/services/hermes-studio/state/db-bootstrapped" ]
+  check "old studio left behind"  [ ! -e "$HOME/services/gnosia-learn/studio" ]
+  check "password kept"           env_has "OWNER_PASSWORD=kept-password"
+  check "no re-seed"              no_call "npm run catalog -- import seed"
+  teardown
+}
+
 test_upgrade_stops_old_units() {
   echo "• upgrade: old app, runner and export units are stopped before the new ones start"
   setup
@@ -2472,6 +2536,8 @@ test_preflight_root
 test_fresh_deploy
 test_idempotent_rerun
 test_upgrade_imports_old_env
+test_upgrade_lock_held_keeps_env
+test_upgrade_retries_move_after_rewrite
 test_upgrade_stops_old_units
 test_upgrade_carries_disabled_flag
 test_manual_setup_clears_disabled_flag

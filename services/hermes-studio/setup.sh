@@ -145,10 +145,36 @@ host="$(tailnet_host)"
 [ -n "$host" ] || die "Could not determine tailnet DNS name (is MagicDNS enabled?)"
 
 # ---------------------------------------------------------------- .env
+# Hold the old deploy lock before importing or rewriting .env. deploy.sh
+# and sync.sh take $SERVICE_HOME/.deploy.lock, and an old process still
+# holds the one under the directory this run is about to leave. A refusal
+# after the import leaves a half-written config, and the next run then
+# skips the move.
+new_home="$HOME/services/hermes-studio"
+for old_home in "$HOME/services/gnosia-learn" "$HOME/services/self-learn"; do
+  [ -d "$old_home" ] || continue
+  old_lock="$old_home/.deploy.lock"
+  if [ -d "$old_lock" ]; then
+    old_owner="$(cat "$old_lock/pid" 2>/dev/null || true)"
+    if [ -n "$old_owner" ] && kill -0 "$old_owner" 2>/dev/null; then
+      die "A deploy is still running under $old_home (pid $old_owner). Wait for it, then re-run setup.sh."
+    fi
+    # A leftover dir with no live pid is a crash, not a holder.
+    # deploy.sh reclaims the same case. Leaving it would make mkdir fail.
+    rm -rf "$old_lock"
+  fi
+  if ! mkdir "$old_lock" 2>/dev/null; then
+    die "Could not take the deploy lock under $old_home. Wait, then re-run setup.sh."
+  fi
+  echo $$ > "$old_lock/pid"
+done
+
 # Git does not move an ignored .env when the service directory is renamed,
 # so an ordinary upgrade still has the old file beside this checkout.
 # Import it before the fresh-install branch, or this run would mint a new
 # password and a new catalog under ~/.hermes and never see the live one.
+# After the lock check: a refusal must leave the old file unimported, or
+# the retry finds a half-written config and skips the copy.
 for old_env in "$SERVICE_DIR/../gnosia-learn/.env" \
                "$SERVICE_DIR/../self-learn/.env"; do
   if [ ! -f "$ENV_FILE" ] && [ -f "$old_env" ]; then
@@ -157,11 +183,14 @@ for old_env in "$SERVICE_DIR/../gnosia-learn/.env" \
     ok "Imported the existing config from $old_env"
   fi
 done
+
 # The imported file still names the old service directory. setup.sh now
 # lives in services/hermes-studio, so SERVICE_HOME has to follow or the
 # deploy looks for build state under the directory git left behind.
 # Python, not sed: $HOME in the test harness contains a newline, and a
 # sed replacement that includes it dies under pipefail.
+# The move is not inside this if. A retry whose .env already names the
+# new home still has to pick up jobs and build state the first run left.
 if [ -f "$ENV_FILE" ] && python3 - "$ENV_FILE" "$HOME" <<'PY'
 import pathlib, sys
 path, home = sys.argv[1], sys.argv[2]
@@ -185,45 +214,50 @@ PY
 then
   chmod 600 "$ENV_FILE"
   ok "Pointed SERVICE_HOME at $HOME/services/hermes-studio"
-  # The imported file's old directory still holds the bootstrap marker and
-  # the built checkout. Leave them behind and the new home looks like a
-  # first install: setup reseeds the catalog and rebuilds from scratch.
-  for old_home in "$HOME/services/gnosia-learn" "$HOME/services/self-learn"; do
-    [ -d "$old_home" ] || continue
-    mkdir -p "$HOME/services/hermes-studio"
-    # Hold the old deploy lock for the move. deploy.sh and sync.sh take
-    # $SERVICE_HOME/.deploy.lock, and an old process still holds the one
-    # under this directory. Moving the checkout out from under it lets
-    # both commands write the same catalog.
-    old_lock="$old_home/.deploy.lock"
+fi
+# The imported file's old directory still holds the bootstrap marker and
+# the built checkout. Leave them behind and the new home looks like a
+# first install: setup reseeds the catalog and rebuilds from scratch.
+# This runs even when .env already names the new home. A retry after a
+# refused lock, or a crash between the rewrite and the mv, still picks
+# the saved files up.
+for old_home in "$HOME/services/gnosia-learn" "$HOME/services/self-learn"; do
+  [ -d "$old_home" ] || continue
+  mkdir -p "$new_home"
+  old_lock="$old_home/.deploy.lock"
+  # The check above already holds this lock when it found the directory.
+  # A retry that skipped that check (the rewrite already happened, or
+  # the old directory appeared after it) takes it here.
+  if [ ! -d "$old_lock" ] || [ "$(cat "$old_lock/pid" 2>/dev/null || true)" != "$$" ]; then
     if [ -d "$old_lock" ]; then
       old_owner="$(cat "$old_lock/pid" 2>/dev/null || true)"
       if [ -n "$old_owner" ] && kill -0 "$old_owner" 2>/dev/null; then
         die "A deploy is still running under $old_home (pid $old_owner). Wait for it, then re-run setup.sh."
       fi
-      # A leftover dir with no live pid is a crash, not a holder.
-      # deploy.sh reclaims the same case. Leaving it would make mkdir
-      # fail and the move would never start.
       rm -rf "$old_lock"
     fi
     if ! mkdir "$old_lock" 2>/dev/null; then
       die "Could not take the deploy lock under $old_home. Wait, then re-run setup.sh."
     fi
     echo $$ > "$old_lock/pid"
-    # studio/ holds saved job workspaces. The new runner reads
-    # $SERVICE_HOME/studio, so leaving it behind hides those jobs.
-    # seafile/ is the blob-sync daemon's ccnet dir. setup.sh stops the
-    # old unit and does not start the new one (sync.sh install does),
-    # so the directory moves with the rest and the next install finds it.
-    for part in state repo studio seafile; do
-      if [ -d "$old_home/$part" ] && [ ! -e "$HOME/services/hermes-studio/$part" ]; then
-        mv "$old_home/$part" "$HOME/services/hermes-studio/$part"
-      fi
-    done
-    rm -rf "$old_lock"
-    ok "Moved deploy state from $old_home"
+  fi
+  # studio/ holds saved job workspaces. The new runner reads
+  # $SERVICE_HOME/studio, so leaving it behind hides those jobs.
+  # seafile/ is the blob-sync daemon's ccnet dir. setup.sh stops the
+  # old unit and does not start the new one (sync.sh install does),
+  # so the directory moves with the rest and the next install finds it.
+  moved_any=0
+  for part in state repo studio seafile; do
+    if [ -d "$old_home/$part" ] && [ ! -e "$new_home/$part" ]; then
+      mv "$old_home/$part" "$new_home/$part"
+      moved_any=1
+    fi
   done
-fi
+  rm -rf "$old_lock"
+  if [ "$moved_any" = 1 ]; then
+    ok "Moved deploy state from $old_home"
+  fi
+done
 if [ -f "$ENV_FILE" ]; then
   ok "Config already exists, leaving untouched: $ENV_FILE"
 else

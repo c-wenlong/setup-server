@@ -27,8 +27,10 @@ first, dated by merge.
   An upgrade also imports the ignored `.env` from the old service
   directory and points `SERVICE_HOME` at `~/services/hermes-studio`,
   leaving the data root where that file already named it. The move takes
-  `state/`, `repo/`, `studio/` and `seafile/`, and it refuses to start
-  while an old deploy still holds the old lock. deployd carries a
+  `state/`, `repo/`, `studio/` and `seafile/`. It takes the old deploy
+  lock before it rewrites `SERVICE_HOME`, and a later run still moves
+  those directories when `.env` already names the new home. A live pid
+  in the old lock refuses the run. deployd carries a
   pre-rename skip flag and poller tombstone onto the new key before it
   decides to deploy, so an app the owner removed stays removed. A carried
   override whose command is the old `setup.sh` is rewritten to the new
