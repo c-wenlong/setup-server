@@ -94,6 +94,9 @@
     'metabase':      { file: 'metabase' },                    /* #509ee3    */
     'plane':         { file: 'plane' },                       /* #5275fc    */
     'umami':         { file: 'umami', dark: true },           /* black ink  */
+    /* Upstream brand mark: black mark on the yellow Infisical plate, reads
+       on both tile themes, so no -dark pair. */
+    'infisical':     { file: 'infisical' },                   /* #E8D822    */
     /* Red-gradient lobster, reads on both tile themes. */
     'openclaw':      { file: 'openclaw' },
     /* App-icon plate: white bg for the light tile, #0d1117 for dark. */
