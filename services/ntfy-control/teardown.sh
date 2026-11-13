@@ -145,12 +145,12 @@ env_lint
 SERVICE_HOME="$(env_get SERVICE_HOME)"
 SERVICE_HOME="${SERVICE_HOME:-$HOME/services/$NAME}"
 
-# A unit file on disk but no reachable user manager (a bare SSH shell with
-# no user bus) must not proceed: stop/disable would fail silently and the
-# listener would keep running while teardown claims removal.
-if [ "$OS" = "Linux" ] && { [ -f "$UNIT" ] || [ -L "$UNIT" ]; } \
-   && ! systemctl --user list-units >/dev/null 2>&1; then
-  die "The unit file $UNIT exists but the user systemd manager is unreachable (over SSH: export DBUS_SESSION_BUS_ADDRESS=/run/user/$(id -u)/bus). Nothing was changed."
+# No reachable user manager (a bare SSH shell with no user bus) means
+# nothing can be verified: stop/disable would fail silently, and a unit
+# whose file was deleted could still be loaded with the listener running
+# while teardown reports removal.
+if [ "$OS" = "Linux" ] && ! systemctl --user list-units >/dev/null 2>&1; then
+  die "The user systemd manager is unreachable (over SSH: export DBUS_SESSION_BUS_ADDRESS=/run/user/$(id -u)/bus). Nothing was changed."
 fi
 
 # --purge confirmation comes before anything changes, so a mistyped name
@@ -166,7 +166,14 @@ fi
 
 # ------------------------------------------------- disable (and purge)
 if [ "$OS" = "Linux" ]; then
-  if [ -f "$UNIT" ] || [ -L "$UNIT" ]; then
+  unit_file=0
+  { [ -f "$UNIT" ] || [ -L "$UNIT" ]; } && unit_file=1
+  # A deleted unit file does not unload the service systemd already
+  # loaded — check the manager too, or a fileless listener would survive
+  # teardown (and a purge) still answering phone commands.
+  unit_loaded=0
+  systemctl --user cat "$UNIT_NAME" >/dev/null 2>&1 && unit_loaded=1
+  if [ "$unit_file" -eq 1 ] || [ "$unit_loaded" -eq 1 ]; then
     info "Stopping and disabling $UNIT_NAME"
     systemctl --user stop "$UNIT_NAME" 2>/dev/null || true
     # A failed stop must not read as removed: verify the unit is actually
@@ -174,12 +181,19 @@ if [ "$OS" = "Linux" ]; then
     if [ "$(systemctl --user is-active "$UNIT_NAME" 2>/dev/null || true)" = "active" ]; then
       die "$UNIT_NAME did not stop — check 'systemctl --user status $UNIT_NAME' and re-run."
     fi
-    systemctl --user disable "$UNIT_NAME" >/dev/null 2>&1 \
-      || die "systemctl --user disable $UNIT_NAME failed. Try it by hand and re-run."
-    ok "$UNIT_NAME stopped and disabled"
+    if [ "$unit_file" -eq 1 ]; then
+      systemctl --user disable "$UNIT_NAME" >/dev/null 2>&1 \
+        || die "systemctl --user disable $UNIT_NAME failed. Try it by hand and re-run."
+      ok "$UNIT_NAME stopped and disabled"
+    else
+      # No file means it cannot be enabled — stopping it is enough.
+      ok "$UNIT_NAME stopped (the unit file was already gone)"
+    fi
     if [ "$PURGE" -eq 1 ]; then
-      rm -f -- "$UNIT"
-      ok "Deleted $UNIT"
+      if [ -f "$UNIT" ] || [ -L "$UNIT" ]; then
+        rm -f -- "$UNIT"
+        ok "Deleted $UNIT"
+      fi
       systemctl --user daemon-reload \
         || die "systemctl --user daemon-reload failed. Run it by hand."
       systemctl --user reset-failed "$UNIT_NAME" 2>/dev/null || true

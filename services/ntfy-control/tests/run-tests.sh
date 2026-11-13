@@ -932,11 +932,28 @@ test_teardown_purge_bad_state_dir() {
   run_deploy
   # A path outside ~/services/<name>: outside the only tree teardown owns.
   mkdir -p "$HOME/other-state"
-  sed -i "s|SERVICE_HOME=.*|SERVICE_HOME=$HOME/other-state|" "$SVC/.env"
+  # Portable in-place edit: BSD sed wants a backup suffix after -i.
+  sed -i.bak "s|SERVICE_HOME=.*|SERVICE_HOME=$HOME/other-state|" "$SVC/.env" 2>/dev/null \
+    || sed -i '' "s|SERVICE_HOME=.*|SERVICE_HOME=$HOME/other-state|" "$SVC/.env"
+  rm -f "$SVC/.env.bak"
   run_teardown "ntfy-control" --purge
   check "outside path refused"     [ "$CODE" -ne 0 ]
   check "outside dir survives"     [ -d "$HOME/other-state" ]
   check "state dir untouched"      [ -d "$HOME/services/ntfy-control" ]
+  teardown
+}
+
+test_teardown_fileless_unit() {
+  echo "• teardown: a deleted unit file does not leave a loaded listener running"
+  setup
+  run_deploy
+  [ "$OS" = "Linux" ] || { teardown; return 0; }
+  rm -f "$HOME/.config/systemd/user/ntfy-control.service"
+  run_teardown
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check "still stops the unit"     calls_have "systemctl --user stop ntfy-control"
+  check "reports the missing file" out_has "unit file was already gone"
+  check ".env kept"                [ -f "$SVC/.env" ]
   teardown
 }
 
@@ -980,6 +997,7 @@ test_teardown_no_env
 test_teardown_purge
 test_teardown_purge_wrong_name
 test_teardown_purge_bad_state_dir
+test_teardown_fileless_unit
 
 if [ "${1:-}" = "--live" ]; then
   echo
