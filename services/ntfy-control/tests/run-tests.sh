@@ -37,7 +37,8 @@ setup() {
   mkdir -p "$HOME" "$STATE_DIR" "$SVC" "$SANDBOX/repo/services/monitoring"
   copy_lib "$SANDBOX/repo"
   : > "$CALLS_LOG"
-  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/control_listener.py" "$SERVICE_DIR/kuma_toggle.py" "$SVC/"
+  cp "$SERVICE_DIR/setup.sh" "$SERVICE_DIR/teardown.sh" \
+     "$SERVICE_DIR/control_listener.py" "$SERVICE_DIR/kuma_toggle.py" "$SVC/"
   # The listener's credentials come out of monitoring/.env (its setup.sh
   # creates the `control` account there); this fixture stands in for it.
   cat > "$SANDBOX/repo/services/monitoring/.env" <<'EOF'
@@ -55,6 +56,16 @@ teardown() {
 
 run_deploy() {
   OUT="$(printf '%s' "${1:-}" | PATH="$STUBS:$PATH" bash "$SVC/setup.sh" 2>&1)"
+  CODE=$?
+}
+
+# $1 is the typed --purge confirmation (empty for the plain remove).
+run_teardown() {
+  if [ "${2:-}" = "--purge" ]; then
+    OUT="$(printf '%s\n' "$1" | PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" --purge 2>&1)"
+  else
+    OUT="$(PATH="$STUBS:$PATH" bash "$SVC/teardown.sh" 2>&1)"
+  fi
   CODE=$?
 }
 
@@ -822,6 +833,113 @@ sys.exit(0 if g == ["services/adguard/teardown.sh", "--check-dns"]
          and os.path.isfile(os.path.join(repo, g[0])) else 1)' "$REGISTRY"
 }
 
+# ------------------------------------------------------------ teardown
+test_teardown_default() {
+  echo "• teardown: stops + disables the listener, keeps .env and state"
+  setup
+  run_deploy
+  check "deploy ok"                [ "$CODE" -eq 0 ]
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  if [ "$OS" = "Linux" ]; then
+    check "unit stopped"           calls_in_order "systemctl --user stop ntfy-control" \
+                                                  "systemctl --user disable ntfy-control"
+    check "unit file kept"         [ -f "$HOME/.config/systemd/user/ntfy-control.service" ]
+    check "no daemon-reload"       no_call "daemon-reload"
+  else
+    check "agent booted out"       calls_have "launchctl bootout"
+    check "plist deleted"          [ ! -f "$HOME/Library/LaunchAgents/com.ntfy-control.listener.plist" ]
+  fi
+  check ".env kept"                [ -f "$SVC/.env" ]
+  check "state dir kept"           [ -d "$HOME/services/ntfy-control" ]
+  check "offers re-deploy"         out_has "brings it back"
+  check "offers purge"             out_has "teardown.sh --purge"
+  teardown
+}
+
+test_teardown_idempotent() {
+  echo "• teardown: a second run on a removed service changes nothing"
+  setup
+  run_deploy
+  run_teardown
+  : > "$CALLS_LOG"
+  run_teardown
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  # The unit file survives a plain remove, so the second run stops +
+  # disables again — a no-op on an already-inactive unit, not a repair.
+  check ".env kept"                [ -f "$SVC/.env" ]
+  check "state dir kept"           [ -d "$HOME/services/ntfy-control" ]
+  if [ "$OS" = "Linux" ]; then
+    check "unit file still kept"   [ -f "$HOME/.config/systemd/user/ntfy-control.service" ]
+  else
+    check "plist stays gone"       [ ! -f "$HOME/Library/LaunchAgents/com.ntfy-control.listener.plist" ]
+  fi
+  teardown
+}
+
+test_teardown_no_env() {
+  echo "• teardown: refuses when .env is missing rather than guessing paths"
+  setup
+  run_teardown
+  check "exits non-zero"           [ "$CODE" -ne 0 ]
+  check "explains"                 out_has "nothing here was deployed\|no paths to trust"
+  teardown
+}
+
+test_teardown_purge() {
+  echo "• teardown --purge: deletes state, .env, and the unit file"
+  setup
+  run_deploy
+  run_teardown "ntfy-control" --purge
+  check "exits zero"               [ "$CODE" -eq 0 ]
+  check ".env gone"                [ ! -f "$SVC/.env" ]
+  check "state dir gone"           [ ! -d "$HOME/services/ntfy-control" ]
+  if [ "$OS" = "Linux" ]; then
+    check "unit file gone"         [ ! -f "$HOME/.config/systemd/user/ntfy-control.service" ]
+    check "daemon reloaded"        calls_have "systemctl --user daemon-reload"
+  fi
+  teardown
+}
+
+test_teardown_purge_wrong_name() {
+  echo "• teardown --purge: a wrong confirmation changes nothing"
+  setup
+  run_deploy
+  run_teardown "wrong" --purge
+  check "exits non-zero"           [ "$CODE" -ne 0 ]
+  check "confirmation refused"     out_has "did not match"
+  check ".env kept"                [ -f "$SVC/.env" ]
+  check "state dir kept"           [ -d "$HOME/services/ntfy-control" ]
+  check "no stop attempted"        no_call "systemctl --user stop\|launchctl bootout"
+  teardown
+}
+
+test_teardown_purge_bad_state_dir() {
+  echo "• teardown --purge: odd SERVICE_HOME values are refused"
+  setup
+  run_deploy
+  # A symlinked leaf: never rm -rf through a symlink.
+  mv "$HOME/services/ntfy-control" "$HOME/services/ntfy-control-real"
+  ln -s "$HOME/services/ntfy-control-real" "$HOME/services/ntfy-control"
+  run_teardown "ntfy-control" --purge
+  check "symlink refused"          [ "$CODE" -ne 0 ]
+  check "target survives"          [ -d "$HOME/services/ntfy-control-real" ]
+  check ".env kept on refusal"     [ -f "$SVC/.env" ]
+  teardown
+
+  setup
+  run_deploy
+  # A path outside ~/services/<name>: outside the only tree teardown owns.
+  mkdir -p "$HOME/other-state"
+  sed -i "s|SERVICE_HOME=.*|SERVICE_HOME=$HOME/other-state|" "$SVC/.env"
+  run_teardown "ntfy-control" --purge
+  check "outside path refused"     [ "$CODE" -ne 0 ]
+  check "outside dir survives"     [ -d "$HOME/other-state" ]
+  check "state dir untouched"      [ -d "$HOME/services/ntfy-control" ]
+  teardown
+}
+
 # ------------------------------------------------------------------ main
 echo "Mocked suite (sandboxed, no system changes):"
 test_preflight_ntfy_down
@@ -856,6 +974,12 @@ test_handle_stop_guard_timeout
 test_handle_launcher_apps
 test_apps_dir_live_reload
 test_shipped_adguard_guard
+test_teardown_default
+test_teardown_idempotent
+test_teardown_no_env
+test_teardown_purge
+test_teardown_purge_wrong_name
+test_teardown_purge_bad_state_dir
 
 if [ "${1:-}" = "--live" ]; then
   echo
