@@ -90,10 +90,10 @@ PUBLISHED = [
     # /api/heartbeat, not / — the UI is a SPA. Official healthcheck.
     ("umami", 8106, "/api/heartbeat"),
     # "/" is the public landing page and the only unauthenticated 200 —
-    # Gnosia has no health route. It proves the Next server answers, not
+    # Hermes has no health route. It proves the Next server answers, not
     # that the catalog reads: content pages read catalog.db per request, and
     # the landing page reads none, so a DB fault won't be caught here.
-    ("gnosia-learn", 8107, "/"),
+    ("hermes-studio", 8107, "/"),
     # /api/health ({"ok":true}) — the documented always-open probe; it also
     # answers on the phone-link path, so it stays up under both.
     ("kopifund", 8300, "/api/health"),
@@ -143,16 +143,16 @@ MONITORS.append(
 )
 
 
-def gnosia_learn_studio_enabled():
-    """STUDIO_ENABLED=1 in services/gnosia-learn/.env, the flag that turns the runner on.
+def hermes_learn_studio_enabled():
+    """STUDIO_ENABLED=1 in services/hermes-studio/.env, the flag that turns the runner on.
 
-    That file is gnosia-learn's own switch, so it is read from there rather than
+    That file is hermes-studio's own switch, so it is read from there rather than
     from this service's environment. A missing file or flag means off, which
     is setup.sh's default; the last assignment wins, as when the file is
-    sourced. GNOSIA_ENV overrides the path (the tests use it).
+    sourced. HERMES_ENV overrides the path (the tests use it).
     """
-    path = os.environ.get("GNOSIA_ENV") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "gnosia-learn", ".env")
+    path = os.environ.get("HERMES_ENV") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "hermes-studio", ".env")
     enabled = False
     try:
         with open(path, encoding="utf-8") as fh:
@@ -165,15 +165,15 @@ def gnosia_learn_studio_enabled():
     return enabled
 
 
-# The gnosia-learn studio runner is loopback-only too — the app proxies
+# The hermes-studio studio runner is loopback-only too — the app proxies
 # /studio/api/* to it, so the published :8107 monitor can never see it down.
 # Seeded only while the runner is switched on: with STUDIO_ENABLED=0 (the
 # default) nothing listens on :7250, and a monitor there would alert for an
 # intentionally absent service. Turning Studio on later needs this seed run
 # again (re-run services/monitoring/setup.sh) to add it. A monitor seeded earlier is
 # left as it is; if the flag goes back to 0, pause it in the Kuma UI.
-if gnosia_learn_studio_enabled():
-    MONITORS.append(("gnosia-learn-studio", "http://127.0.0.1:7250/api/health"))
+if hermes_learn_studio_enabled():
+    MONITORS.append(("hermes-studio-runner", "http://127.0.0.1:7250/api/health"))
 
 api = UptimeKumaApi(f"http://127.0.0.1:{os.environ['KUMA_PORT']}", timeout=30)
 user = os.environ["KUMA_ADMIN_USER"]
@@ -243,12 +243,14 @@ if not ADGUARD_DNS_IP:
 have = {m["name"]: m for m in api.get_monitors()}
 
 # Rename-era monitors: a seeded `self-learn*` monitor still points at :8107
-# but control.kuma now pauses `gnosia-learn*` only, so a launcher/phone stop
+# but control.kuma now pauses `hermes-studio*` only, so a launcher/phone stop
 # would leave the old monitor alerting. Re-key it in place — same monitor
 # id, so its settings and paused state survive. When both names exist the
 # operator already split them deliberately; leave both.
-for old, new in {"self-learn": "gnosia-learn",
-                 "self-learn-studio": "gnosia-learn-studio"}.items():
+for old, new in {"self-learn": "hermes-studio",
+                 "self-learn-studio": "hermes-studio-runner",
+                 "gnosia-learn": "hermes-studio",
+                 "gnosia-learn-studio": "hermes-studio-runner"}.items():
     monitor = have.pop(old, None)
     if monitor is not None and new not in have:
         api.edit_monitor(monitor["id"], name=new)

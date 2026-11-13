@@ -1,4 +1,4 @@
-# gnosia-learn — troubleshooting
+# hermes-studio — troubleshooting
 
 Layered triage: deploy pipeline → catalog → app → publish → client. Work
 top-down; each layer assumes the one above it is healthy.
@@ -7,24 +7,24 @@ top-down; each layer assumes the one above it is healthy.
 migrates but only restarts the app if it was running (this is how the
 launcher's stop button survives deployd's re-runs). So a
 red tile with fresh deploy logs means stopped-on-purpose, not broken —
-`systemctl --user start gnosia-learn` or the launcher's start button.
+`systemctl --user start hermes-studio` or the launcher's start button.
 
 ## Quick status
 
-The commands below show the fresh-install data root `~/.gnosia`; a
-pre-rename install keeps `~/.self-learn` — substitute your `GNOSIA_HOME`
-from `services/gnosia-learn/.env` throughout.
+The commands below show the fresh-install data root `~/.hermes`; a
+pre-rename install keeps `~/.self-learn` — substitute your `HERMES_HOME`
+from `services/hermes-studio/.env` throughout.
 
 ```sh
-systemctl --user is-active gnosia-learn                  # app up?
-systemctl --user list-timers gnosia-learn-export.timer deployd.timer   # schedulers
+systemctl --user is-active hermes-studio                  # app up?
+systemctl --user list-timers hermes-studio-export.timer deployd.timer   # schedulers
 ~/services/deployd/bin/deployd --status                # watched repos + last results
 journalctl --user -u deployd -n 30                     # last deploy runs
-cat ~/services/gnosia-learn/state/built-sha              # what was last built
-ls -l ~/.gnosia/catalog.db                       # the catalog file
+cat ~/services/hermes-studio/state/built-sha              # what was last built
+ls -l ~/.hermes/catalog.db                       # the catalog file
 curl -sI http://127.0.0.1:8107/ | head -1              # app answering locally?
 tailscale serve status                               # :8107 published?
-ls ~/.gnosia/archive/latest                      # nightly export landing?
+ls ~/.hermes/archive/latest                      # nightly export landing?
 ```
 
 ## Layer 1 — deploys not happening
@@ -34,7 +34,7 @@ ls ~/.gnosia/archive/latest                      # nightly export landing?
 - deployd polls every minute — check what it saw and did:
   `~/services/deployd/bin/deployd --status`, then
   `journalctl --user -u deployd -n 30`. Deploy now by hand:
-  `~/services/gnosia-learn/bin/deploy.sh`.
+  `~/services/hermes-studio/bin/deploy.sh`.
 - `up to date at <sha>` with an old sha → the fetch isn't seeing your
   push: wrong branch? `.env` `BRANCH` must match what you push to —
   and the `deploy` block in `app.json` must match it too (deployd polls
@@ -51,17 +51,17 @@ ls ~/.gnosia/archive/latest                      # nightly export landing?
   killed build; self-clears when the recorded owner is gone (dead pid, a
   pid now owned by a different process, or a lock whose pid was never
   written past a couple of minutes), or:
-  `rm -rf ~/services/gnosia-learn/.deploy.lock`. (A skip exits non-zero so
+  `rm -rf ~/services/hermes-studio/.deploy.lock`. (A skip exits non-zero so
   deployd retries it after its failure backoff — RETRY_SECONDS, 15 min by
   default — not on the next one-minute tick. Not a stuck state.)
 
 **Deploy fails.** Run it by hand for the full error:
-`~/services/gnosia-learn/bin/deploy.sh --force`
+`~/services/hermes-studio/bin/deploy.sh --force`
 
 - `npm ci` / network errors → transient; the next deployd tick retries.
 - `catalog migrate` fails → the catalog path is wrong or the file
-  unwritable. Compare `GNOSIA_HOME`/`CATALOG_DB` in
-  `services/gnosia-learn/.env` against `services/catalog/.env` inside the
+  unwritable. Compare `HERMES_HOME`/`CATALOG_DB` in
+  `services/hermes-studio/.env` against `services/catalog/.env` inside the
   checkout — deploy.sh rewrites the checkout copy from `.env` on every
   run, so an edited-here value is the fix, not a symptom. If the error
   says `DATABASE_URL is a Postgres URL`, the checkout's `.env` is a stale
@@ -78,46 +78,46 @@ ls ~/.gnosia/archive/latest                      # nightly export landing?
 
 ## Layer 2 — catalog broken
 
-**`cd ~/services/gnosia-learn/repo && npm run catalog -- status` fails.**
+**`cd ~/services/hermes-studio/repo && npm run catalog -- status` fails.**
 
-- `CATALOG_DB`/`GNOSIA_HOME` wrong → `services/catalog/.env` in the
-  checkout is rewritten from `services/gnosia-learn/.env` on every deploy;
+- `CATALOG_DB`/`HERMES_HOME` wrong → `services/catalog/.env` in the
+  checkout is rewritten from `services/hermes-studio/.env` on every deploy;
   fix `.env`, then `deploy.sh --force`.
 - `catalog.db` itself damaged or replaced with a partial copy →
   `npm run catalog -- migrate` first (a copy carries its own migration
   journal, so this is a hash check and shows whether the file opens at
   all). Rebuild content from the newest export in
-  `~/.gnosia/archive/latest` (`catalog import`), or swap a known-good
+  `~/.hermes/archive/latest` (`catalog import`), or swap a known-good
   `catalog.db` in while the app is stopped — `sync.sh pull` does the
   whole replace from the Mac.
 - `blob audit` refuses the root ("belongs to database ...") → a
   `.owner` marker was rsynced over from the laptop; it names the
   database by its resolved path, so a copied marker always names a file
-  that is not here. Delete `~/.gnosia/blobs/.owner`, then
+  that is not here. Delete `~/.hermes/blobs/.owner`, then
   `npm run catalog -- blob audit --fix` in the checkout.
 
 ## Layer 3 — app broken
 
 **`curl http://127.0.0.1:8107/` fails or the unit won't stay up.**
 
-- `journalctl --user -u gnosia-learn -n 100` — port taken? `-p` arg wrong?
+- `journalctl --user -u hermes-studio -n 100` — port taken? `-p` arg wrong?
   `next` binary missing (an interrupted `npm ci` — re-run
   `deploy.sh --force`)?
 - Landing page loads but every content page says "could not read its
   content" → the app reaches the catalog but a type isn't flipped (fresh
   seed path runs six flips; a swapped-in catalog.db carries its own).
-  Check: `cd ~/services/gnosia-learn/repo && npm run catalog -- status`,
+  Check: `cd ~/services/hermes-studio/repo && npm run catalog -- status`,
   and flip what it names.
 - Pages load but say the catalog is unreachable / writes 503 → the app
   cannot open `catalog.db`: the path comes from `services/catalog/.env`
-  in the checkout (rewritten from `services/gnosia-learn/.env` each
+  in the checkout (rewritten from `services/hermes-studio/.env` each
   deploy), so fix `.env`, then `deploy.sh --force`.
 - Sign-in refuses the correct password → you edited
   `apps/web/.env.local` in the checkout and a deploy reverted it; the
-  source of truth is `services/gnosia-learn/.env`. An `.env.local` at the repo ROOT
+  source of truth is `services/hermes-studio/.env`. An `.env.local` at the repo ROOT
   is never read — the app reads it from `apps/web/` only.
 - "was not running — left stopped" in deploy logs → expected after a
-  manual stop; `systemctl --user start gnosia-learn`.
+  manual stop; `systemctl --user start hermes-studio`.
 
 ## Layer 4 — publish broken
 
@@ -143,22 +143,22 @@ ls ~/.gnosia/archive/latest                      # nightly export landing?
   or a first-run without the laptop's value). Sign in again; provider
   keys saved in Settings must be re-entered.
 
-## Studio runner broken (`gnosia-learn-studio`)
+## Studio runner broken (`hermes-studio-runner`)
 
 **The Studio page loads but jobs never start / the panel says the runner is down.**
 
 - `curl -s http://127.0.0.1:7250/api/health` — the runner's own surface
   (loopback only; the app proxies `/studio/api/*` to it). If it fails:
-  `journalctl --user -u gnosia-learn-studio -n 100`. Unit missing entirely →
+  `journalctl --user -u hermes-studio-runner -n 100`. Unit missing entirely →
   re-run `setup.sh`.
 - Health answers but `"tldrawkc": false` / queue refuses every job → the
   submodule isn't built. Under `STUDIO_ENABLED=1` the next
   `deploy.sh --force` rebuilds it; by hand:
-  `cd ~/services/gnosia-learn/repo && git submodule update --init tools/tldrawkc
+  `cd ~/services/hermes-studio/repo && git submodule update --init tools/tldrawkc
   && (cd tools/tldrawkc && npm ci && npm run build)`, then restart
-  `gnosia-learn-studio` so its cached probe re-runs.
+  `hermes-studio-runner` so its cached probe re-runs.
 - Studio missing from the UI at all → `STUDIO_ENABLED` isn't 1 in
-  `services/gnosia-learn/.env`. Set it and re-run `setup.sh` — that flag gates both
+  `services/hermes-studio/.env`. Set it and re-run `setup.sh` — that flag gates both
   the web UI and the runner's enable. Flipping it back to 0 and
   re-running stops and disables the unit.
 - Jobs start and immediately fail with a claude/auth error → the runner
@@ -170,7 +170,7 @@ ls ~/.gnosia/archive/latest                      # nightly export landing?
   `services/catalog/.env` — same diagnosis as Layer 2.
 - A deploy appeared to kill a job mid-run → expected: the deploy stops
   and restarts the runner with the app (it shares the checkout's
-  `node_modules`). Job state under `~/services/gnosia-learn/studio` is the
+  `node_modules`). Job state under `~/services/hermes-studio/studio` is the
   write-ahead log — interrupted jobs resume or can be re-enqueued.
 
 ## Layer 6 — sync broken (`sync.sh`)
@@ -180,27 +180,27 @@ reports whether each side's sync client is alive.
 
 **`seaf : not installed` / daemon not answering.**
 
-- `systemctl --user status gnosia-learn-seafile` — the unit runs
+- `systemctl --user status hermes-studio-seafile` — the unit runs
   `seaf-daemon` in the foreground, so `active (running)` is healthy and a
   crashed daemon restarts itself (`Restart=always`). `journalctl --user -u
-  gnosia-learn-seafile` has the daemon's own errors. Re-run
+  hermes-studio-seafile` has the daemon's own errors. Re-run
   `./sync.sh install` to repair — it is idempotent (existing
   account/library are reused).
-- `seaf-cli list -c ~/services/gnosia-learn/seafile/ccnet` — the
-  `gnosia-learn-blobs` row should say `synchronized`. If the library is
+- `seaf-cli list -c ~/services/hermes-studio/seafile/ccnet` — the
+  `hermes-studio-blobs` row should say `synchronized`. If the library is
   missing, the daemon dropped it: `./sync.sh install` re-links.
 - Nothing syncs after a reboot → lingering off? `loginctl show-user
   $USER -p Linger`. Also check `seaf-daemon`/`ccnet` actually run:
   `pgrep -fl 'seaf-daemon|ccnet'`.
 
 **On the Mac.** No seaf-cli on macOS — the Seafile Client app owns the
-sync. Check the client's library list: `gnosia-learn-blobs` should show a
+sync. Check the client's library list: `hermes-studio-blobs` should show a
 green state. A red/error state → right-click → resync, or delete the
 local sync entry and repeat the `mac-setup` pairing steps — into
-`~/.gnosia/blobs/local`, not `~/.gnosia/blobs` (the whole `blobs`
+`~/.hermes/blobs/local`, not `~/.hermes/blobs` (the whole `blobs`
 dir as library root is the retired layout; `.owner` lived inside it and
 syncs clobbered it across machines). Confirm
-`~/.gnosia/blobs/local/seafile-ignore.txt` still lists `/.owner` and
+`~/.hermes/blobs/local/seafile-ignore.txt` still lists `/.owner` and
 `/.tmp`.
 
 **`blob audit` reports rows "outstanding" / findings.**
@@ -229,21 +229,21 @@ the local checkout if nothing is mid-transfer.
 - `a deploy or sync is running` → the shared `.deploy.lock` is held.
   Same rules as deploy: it self-clears once the recorded owner is gone
   (dead pid, a pid now owned by a different process, or a lock whose pid
-  was never written), or `rm -rf ~/services/gnosia-learn/.deploy.lock`.
+  was never written), or `rm -rf ~/services/hermes-studio/.deploy.lock`.
 - The copy or swap failed on either side → the receiving `catalog.db`
   may be left empty/partial — re-run the same command; a transfer always
   replaces the whole file, so retrying is safe.
-- `pull` stops `gnosia-learn.service` for the swap; if it dies between
+- `pull` stops `hermes-studio.service` for the swap; if it dies between
   stop and start the app stays stopped —
-  `systemctl --user start gnosia-learn` once the file is in place.
+  `systemctl --user start hermes-studio` once the file is in place.
 - A `pgrep` warning about a Next dev server on the Mac means `push`'s
   swap replaces the file under a live reader — expected; restart
   the dev server after.
 
 **Undoing the sync.** Mac: right-click the library in Seafile Client →
 unsync (folder stays). Server: `systemctl --user disable --now
-gnosia-learn-seafile.service`, remove the `SEAFILE_SYNC_*`/`MAC_*` lines
-from `.env`, `rm -rf ~/services/gnosia-learn/seafile`. The blob folders
+hermes-studio-seafile.service`, remove the `SEAFILE_SYNC_*`/`MAC_*` lines
+from `.env`, `rm -rf ~/services/hermes-studio/seafile`. The blob folders
 and catalogs on both ends are untouched — they just stop converging.
 
 ## Rollback
@@ -255,7 +255,7 @@ earlier (a failed deploy is retried after RETRY_SECONDS and deploys the
 tip, undoing the pin):
 
 ```sh
-~/services/gnosia-learn/bin/deploy.sh --sha <previous-sha>
+~/services/hermes-studio/bin/deploy.sh --sha <previous-sha>
 # ...fixed upstream? the next push redeploys the branch tip on its own.
 ```
 
@@ -273,7 +273,7 @@ the deploy cannot restart anything mid-teardown), then stops the studio
 runner and the app, and refuses to start while a deploy or
 `sync.sh` push/pull holds the deploy lock, then holds that lock itself until
 it finishes. It never touches
-the data root (catalog.db, blobs, vault, nightly exports — `~/.gnosia` on a
+the data root (catalog.db, blobs, vault, nightly exports — `~/.hermes` on a
 fresh install, `~/.self-learn` on a pre-rename one) or anything
 `sync.sh` installed.
 
@@ -282,15 +282,15 @@ root's `archive/` is a full backup — derive the path from `.env` the way
 setup.sh does so this works on either layout:
 
 ```sh
-set -a; . ~/dev/setup-server/services/gnosia-learn/.env; set +a
-GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
-CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
-systemctl --user start gnosia-learn-export.service       # fresh export into $GNOSIA_HOME/archive
-sqlite3 "$CATALOG_DB" ".backup '$HOME/catalog-$(date +%F).db'"  # consistent while the app runs — never a bare cp of a live WAL-mode db (no sqlite3? stop gnosia-learn + gnosia-learn-studio first, then cp)
-cp ~/dev/setup-server/services/gnosia-learn/.env ~/gnosia-learn.env.bak  # AUTH_SECRET unseals those keys
+set -a; . ~/dev/setup-server/services/hermes-studio/.env; set +a
+HERMES_HOME="${HERMES_HOME:-$SELF_LEARN_HOME}"
+CATALOG_DB="${CATALOG_DB:-$HERMES_HOME/catalog.db}"
+systemctl --user start hermes-studio-export.service       # fresh export into $HERMES_HOME/archive
+sqlite3 "$CATALOG_DB" ".backup '$HOME/catalog-$(date +%F).db'"  # consistent while the app runs — never a bare cp of a live WAL-mode db (no sqlite3? stop hermes-studio + hermes-studio-runner first, then cp)
+cp ~/dev/setup-server/services/hermes-studio/.env ~/hermes-studio.env.bak  # AUTH_SECRET unseals those keys
 ```
 
-Then, from `~/dev/setup-server/services/gnosia-learn`:
+Then, from `~/dev/setup-server/services/hermes-studio`:
 
 ```sh
 ./teardown.sh            # remove, keep state + .env (the launcher's Remove)
@@ -301,30 +301,30 @@ Then, from `~/dev/setup-server/services/gnosia-learn`:
 
 A `./setup.sh` re-run after a plain teardown restarts the app. Starting it
 in between — launcher, phone or `systemctl --user start` — clears
-`~/services/gnosia-learn/state/torn-down` (the unit's `ExecStartPre` and the
+`~/services/hermes-studio/state/torn-down` (the unit's `ExecStartPre` and the
 LaunchAgent's wrapper do it), so a later stop reads as yours and stays
 stopped across the re-run. To keep it stopped without ever starting it,
-delete `~/services/gnosia-learn/state/torn-down` before re-running.
+delete `~/services/hermes-studio/state/torn-down` before re-running.
 
 `--purge` refuses while `sync.sh`'s blob link is installed
-(`gnosia-learn-seafile.service`, or `SEAFILE_SYNC_USER` in `.env`): that
+(`hermes-studio-seafile.service`, or `SEAFILE_SYNC_USER` in `.env`): that
 unit is not `setup.sh`'s, and `.env` holds the sync account's password.
 Plain `teardown.sh` leaves it running and says so. To remove the link by
 hand first:
 
 ```sh
-systemctl --user disable --now gnosia-learn-seafile
-rm -f ~/.config/systemd/user/gnosia-learn-seafile.service && systemctl --user daemon-reload
-rm -rf ~/services/gnosia-learn/seafile
+systemctl --user disable --now hermes-studio-seafile
+rm -f ~/.config/systemd/user/hermes-studio-seafile.service && systemctl --user daemon-reload
+rm -rf ~/services/hermes-studio/seafile
 # then delete the "blob/db sync (written by sync.sh install)" block from .env;
-# the gnosia-learn-sync account and its library stay in Seafile until you delete them there
+# the hermes-studio-sync account and its library stay in Seafile until you delete them there
 ```
 
-`rm -rf ~/.gnosia` (catalog.db, blobs, vault, exports) is never
+`rm -rf ~/.hermes` (catalog.db, blobs, vault, exports) is never
 scripted; do it by hand only if you really want the data root gone.
 
-The only irreplaceable state is `~/.gnosia/catalog.db` (learner
-history, sealed provider keys) and `~/.gnosia/blobs` (videos,
-diagrams). A copy of `catalog.db` plus the latest `~/.gnosia/archive/`
+The only irreplaceable state is `~/.hermes/catalog.db` (learner
+history, sealed provider keys) and `~/.hermes/blobs` (videos,
+diagrams). A copy of `catalog.db` plus the latest `~/.hermes/archive/`
 export is a full backup — and the copied file only restores sealed keys
 under the same `AUTH_SECRET`.

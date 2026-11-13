@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# sync.sh — keep the homeserver's gnosia-learn data in step with the MacBook.
+# sync.sh — keep the homeserver's hermes-studio data in step with the MacBook.
 #
-# Two halves, following docs/HOMESERVER.md in the gnosia repo (S1–S3):
+# Two halves, following docs/HOMESERVER.md in the hermes repo (S1–S3):
 #
-#   blobs — $GNOSIA_HOME/blobs/local rides a dedicated Seafile library
-#           ("gnosia-learn-blobs") continuously. The store is content-addressed,
+#   blobs — $HERMES_HOME/blobs/local rides a dedicated Seafile library
+#           ("hermes-studio-blobs") continuously. The store is content-addressed,
 #           so both sides union without conflicts. `.owner` and `.tmp` sit
 #           beside local/, outside the synced tree: the marker names one
 #           database, and a foreign one makes uploads and `blob audit`
@@ -17,7 +17,7 @@
 #
 #   db    — the catalog is ONE SQLite file per side (upstream
 #           docs/SQLITE-MIGRATION.md): $CATALOG_DB under this machine's
-#           $GNOSIA_HOME, $MAC_DB_FILE under the Mac's. `push`/`pull` copy
+#           $HERMES_HOME, $MAC_DB_FILE under the Mac's. `push`/`pull` copy
 #           that file — never a merge: the receiving side's catalog.db is
 #           replaced wholesale.
 #
@@ -44,15 +44,15 @@
 #   sync.sh push        copy THIS server's catalog.db over the Mac's
 #   sync.sh pull        copy the Mac's catalog.db over this server's
 #
-# Reads this service's .env (ports, paths, SERVICE_HOME, GNOSIA_HOME,
+# Reads this service's .env (ports, paths, SERVICE_HOME, HERMES_HOME,
 # CATALOG_DB); Seafile admin credentials come from the sibling seafile
 # service's .env. Sync settings written by install (SEAFILE_SYNC_*, MAC_*)
 # live in .env too. An .env written before the SQLite cut-over lacks
-# GNOSIA_HOME/CATALOG_DB — both are derived below, and its DATABASE_URL /
+# HERMES_HOME/CATALOG_DB — both are derived below, and its DATABASE_URL /
 # POSTGRES_* leftovers are simply unused now.
 #
-# Mac overrides (defaults match the MacBook): MAC_SSH, MAC_GNOSIA_HOME
-# (the Mac's data root, ~/.gnosia), MAC_DB_FILE, MAC_REPO, MAC_SEAFILE_URL,
+# Mac overrides (defaults match the MacBook): MAC_SSH, MAC_HERMES_HOME
+# (the Mac's data root, ~/.hermes), MAC_DB_FILE, MAC_REPO, MAC_SEAFILE_URL,
 # MAC_PATH_PREFIX. SQLITE3 may name a sqlite3 binary for the snapshot step;
 # an explicitly empty value forces the stop-and-copy fallback.
 
@@ -78,28 +78,29 @@ randhex() {
   fi
 }
 
-[ -f "$ENV_FILE" ] || die "no $ENV_FILE — deploy gnosia-learn first (./setup.sh)"
+[ -f "$ENV_FILE" ] || die "no $ENV_FILE — deploy hermes-studio first (./setup.sh)"
 set -a; . "$ENV_FILE"; set +a
 SERVICE_HOME="${SERVICE_HOME:?SERVICE_HOME missing from $ENV_FILE}"
 NODE_BIN="${NODE_BIN:-/usr/bin}"
-# Upstream resolves the data root as GNOSIA_HOME and the catalog as one
+# Upstream resolves the data root as HERMES_HOME and the catalog as one
 # SQLite file under it (docs/SQLITE-MIGRATION.md). An .env from the Postgres
-# era lacks both, and one from before the rename names the root only
-# SELF_LEARN_HOME — derive the way setup.sh/deploy.sh do, either name wins.
+# era lacks both, and one from before a rename names the root only
+# GNOSIA_HOME or SELF_LEARN_HOME — derive the way setup.sh/deploy.sh do.
 SELF_LEARN_HOME="${SELF_LEARN_HOME:-}"
-GNOSIA_HOME="${GNOSIA_HOME:-$SELF_LEARN_HOME}"
-[ -n "$GNOSIA_HOME" ] || die "GNOSIA_HOME missing from $ENV_FILE (an older .env names the data root SELF_LEARN_HOME)"
-CATALOG_DB="${CATALOG_DB:-$GNOSIA_HOME/catalog.db}"
+GNOSIA_HOME="${GNOSIA_HOME:-}"
+HERMES_HOME="${HERMES_HOME:-${GNOSIA_HOME:-$SELF_LEARN_HOME}}"
+[ -n "$HERMES_HOME" ] || die "HERMES_HOME missing from $ENV_FILE (an older .env names the data root GNOSIA_HOME or SELF_LEARN_HOME)"
+CATALOG_DB="${CATALOG_DB:-$HERMES_HOME/catalog.db}"
 REPO_DIR="$SERVICE_HOME/repo"
 BUILD_STATE="$SERVICE_HOME/state"
 LOCK="$SERVICE_HOME/.deploy.lock"   # shared with deploy.sh: a live sync blocks the poller
-WEB_UNIT="gnosia-learn.service"
-WEB_LABEL="com.gnosia-learn.web"
-STUDIO_UNIT="gnosia-learn-studio.service"
-STUDIO_LABEL="com.gnosia-learn.studio"
-SEAF_UNIT="gnosia-learn-seafile.service"
+WEB_UNIT="hermes-studio.service"
+WEB_LABEL="com.hermes-studio.web"
+STUDIO_UNIT="hermes-studio-runner.service"
+STUDIO_LABEL="com.hermes-studio.studio"
+SEAF_UNIT="hermes-studio-seafile.service"
 SEAF_DIR="$SERVICE_HOME/seafile"    # ccnet config root for the sync daemon
-BLOBS_DIR="$GNOSIA_HOME/blobs"
+BLOBS_DIR="$HERMES_HOME/blobs"
 # Only blobs/local is the library worktree. .owner and .tmp sit beside it at
 # blobs/ root — outside the tree entirely, so a seafile-ignore miss or a
 # merge conflict can never carry a foreign .owner onto this machine (the
@@ -121,11 +122,11 @@ MAC_SSH="${MAC_SSH:-user@100.77.77.78}"
 # The account ssh logs in as owns the home and the nix profile.
 MAC_USER="${MAC_SSH%%@*}"
 # The Mac's data root: catalog.db, blobs/ and the checkout all live under
-# it. `~/.gnosia` expands on the Mac side, resolved over ssh (see
+# it. `~/.hermes` expands on the Mac side, resolved over ssh (see
 # resolve_mac_paths) so scp and remote commands always see absolute paths.
-MAC_GNOSIA_HOME="${MAC_GNOSIA_HOME:-~/.gnosia}"
-MAC_REPO="${MAC_REPO:-}"                  # default: $MAC_GNOSIA_HOME/checkout
-MAC_DB_FILE="${MAC_DB_FILE:-}"            # default: $MAC_GNOSIA_HOME/catalog.db
+MAC_HERMES_HOME="${MAC_HERMES_HOME:-~/.hermes}"
+MAC_REPO="${MAC_REPO:-}"                  # default: $MAC_HERMES_HOME/checkout
+MAC_DB_FILE="${MAC_DB_FILE:-}"            # default: $MAC_HERMES_HOME/catalog.db
 # nix-installed node/npm are not on a bare ssh PATH
 MAC_PATH_PREFIX="${MAC_PATH_PREFIX:-/etc/profiles/per-user/$MAC_USER/bin}"
 # The Mac's app is a manually run `npm run dev`, not a launchd job — there
@@ -155,12 +156,12 @@ resolve_mac_paths() {
   MAC_HOME_RESOLVED="$($SSH "$MAC_SSH" 'printf %s "$HOME"')" \
     || die "could not resolve the Mac's home directory"
   [ -n "$MAC_HOME_RESOLVED" ] || die "could not resolve the Mac's home directory"
-  case "$MAC_GNOSIA_HOME" in
-    \~)   MAC_GNOSIA_HOME="$MAC_HOME_RESOLVED" ;;
-    \~/*) MAC_GNOSIA_HOME="$MAC_HOME_RESOLVED/${MAC_GNOSIA_HOME#\~/}" ;;
+  case "$MAC_HERMES_HOME" in
+    \~)   MAC_HERMES_HOME="$MAC_HOME_RESOLVED" ;;
+    \~/*) MAC_HERMES_HOME="$MAC_HOME_RESOLVED/${MAC_HERMES_HOME#\~/}" ;;
   esac
-  MAC_REPO="${MAC_REPO:-$MAC_GNOSIA_HOME/checkout}"
-  MAC_DB_FILE="${MAC_DB_FILE:-$MAC_GNOSIA_HOME/catalog.db}"
+  MAC_REPO="${MAC_REPO:-$MAC_HERMES_HOME/checkout}"
+  MAC_DB_FILE="${MAC_DB_FILE:-$MAC_HERMES_HOME/catalog.db}"
   # Same rule as the local side: stage beside the file being replaced so the
   # mv is a rename, not a copy that can die halfway.
   MAC_STAGE="$(dirname "$MAC_DB_FILE")/.sync-stage"
@@ -406,14 +407,14 @@ snapshot_mac() {  # fills the remote staging dir $MAC_STAGE
 
 # -------------------------------------------------------------- blob audit
 # Informational: reports rows whose object Seafile has not delivered yet.
-# Run with CATALOG_DB + GNOSIA_HOME (never DATABASE_URL, whose postgres-era
+# Run with CATALOG_DB + HERMES_HOME (never DATABASE_URL, whose postgres-era
 # value would now be refused) so the incoming database validates the store
 # it just inherited. Never --fix: it deletes day-old orphans, and a delete
 # on a shared store propagates to the other machine.
 audit_local() {
   [ -d "$REPO_DIR" ] || { warn "no checkout at $REPO_DIR — skipping audit"; return 0; }
   info "blob audit on this server (informational)"
-  if ( cd "$REPO_DIR" && PATH="$NODE_BIN:$PATH" CATALOG_DB="$CATALOG_DB" GNOSIA_HOME="$GNOSIA_HOME" \
+  if ( cd "$REPO_DIR" && PATH="$NODE_BIN:$PATH" CATALOG_DB="$CATALOG_DB" HERMES_HOME="$HERMES_HOME" \
          npm run catalog -- blob audit ); then
     ok "blob audit clean"
   else
@@ -423,7 +424,7 @@ audit_local() {
 
 audit_mac() {
   info "blob audit on the Mac (informational)"
-  if $SSH "$MAC_SSH" "export PATH='$MAC_PATH_PREFIX':\$PATH; cd '$MAC_REPO' && CATALOG_DB='$MAC_DB_FILE' GNOSIA_HOME='$MAC_GNOSIA_HOME' npm run catalog -- blob audit"; then
+  if $SSH "$MAC_SSH" "export PATH='$MAC_PATH_PREFIX':\$PATH; cd '$MAC_REPO' && CATALOG_DB='$MAC_DB_FILE' HERMES_HOME='$MAC_HERMES_HOME' npm run catalog -- blob audit"; then
     ok "Mac blob audit clean"
   else
     warn "Mac audit reported gaps — Seafile may still be delivering"
@@ -434,7 +435,7 @@ audit_mac() {
 write_ignore_local() {
   mkdir -p "$LINK_DIR"
   cat > "$IGNORE_FILE" <<'EOF'
-# Written by services/gnosia-learn/sync.sh — machine-local entries that must not sync.
+# Written by services/hermes-studio/sync.sh — machine-local entries that must not sync.
 # .owner names this machine's database for this blob root; a foreign marker
 # makes uploads and `blob audit` refuse it (docs/HOMESERVER.md S3).
 # .tmp is the catalog's scratch space.
@@ -478,10 +479,10 @@ cmd_install() {
   if [ -z "${SEAFILE_SYNC_USER:-}" ]; then
     # .local suffix: Seafile rejects emails whose domain has no dot (400
     # "email invalid"), and a bare hostname has none.
-    SEAFILE_SYNC_USER="gnosia-learn-sync@$(hostname -s 2>/dev/null || hostname).local"
+    SEAFILE_SYNC_USER="hermes-studio-sync@$(hostname -s 2>/dev/null || hostname).local"
     SEAFILE_SYNC_PASSWORD="$(randhex 24)"
     info "Creating Seafile account $SEAFILE_SYNC_USER"
-    printf 'data-urlencode "email=%s"\ndata-urlencode "name=gnosia-learn blob sync"\ndata-urlencode "password=%s"\n' \
+    printf 'data-urlencode "email=%s"\ndata-urlencode "name=hermes-studio blob sync"\ndata-urlencode "password=%s"\n' \
         "$SEAFILE_SYNC_USER" "$SEAFILE_SYNC_PASSWORD" \
       | seafile_api POST /api/v2.1/admin/users/ "$admin_token" >/dev/null \
       || die "could not create the sync account"
@@ -496,8 +497,8 @@ cmd_install() {
       | seafile_api POST /api2/auth-token/ \
       | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p')"
     [ -n "$user_token" ] || die "could not log in as $SEAFILE_SYNC_USER"
-    info "Creating library gnosia-learn-blobs"
-    SEAFILE_SYNC_REPO="$(printf 'data-urlencode "name=gnosia-learn-blobs"\n' \
+    info "Creating library hermes-studio-blobs"
+    SEAFILE_SYNC_REPO="$(printf 'data-urlencode "name=hermes-studio-blobs"\n' \
       | seafile_api POST /api2/repos/ "$user_token" \
       | sed -n 's/.*"repo_id": *"\([^"]*\)".*/\1/p')"
     [ -n "$SEAFILE_SYNC_REPO" ] || die "library creation returned no repo_id"
@@ -542,9 +543,9 @@ EOF
   info "Writing + starting $SEAF_UNIT"
   mkdir -p "$HOME/.config/systemd/user"
   cat > "$HOME/.config/systemd/user/$SEAF_UNIT" <<EOF
-# Generated by services/gnosia-learn/sync.sh — regenerated on every install.
+# Generated by services/hermes-studio/sync.sh — regenerated on every install.
 [Unit]
-Description=gnosia-learn blob sync (Seafile daemon for $BLOBS_DIR)
+Description=hermes-studio blob sync (Seafile daemon for $BLOBS_DIR)
 After=network-online.target
 
 [Service]
@@ -612,7 +613,7 @@ cmd_mac_setup() {
   # The instructions name the library to pair; a pre-rename install kept
   # its self-learn-blobs library, so ask the daemon for the real name
   # behind SEAFILE_SYNC_REPO rather than printing the fresh-install one.
-  SYNC_LIB_NAME="gnosia-learn-blobs"
+  SYNC_LIB_NAME="hermes-studio-blobs"
   if seaf_bin="$(command -v seaf-cli 2>/dev/null)"; then
     listed="$("$seaf_bin" list -c "$SEAF_DIR/ccnet" 2>/dev/null \
       | awk -v r="$SEAFILE_SYNC_REPO" '$2 == r {print $1}' || true)"
@@ -621,9 +622,9 @@ cmd_mac_setup() {
 
   # Written before any pairing — a synced .owner/.tmp on either side would
   # poison the other machine's blob root.
-  info "Writing $MAC_GNOSIA_HOME/blobs/local/seafile-ignore.txt"
-  $SSH "$MAC_SSH" "mkdir -p '$MAC_GNOSIA_HOME/blobs/local' && cat > '$MAC_GNOSIA_HOME/blobs/local/seafile-ignore.txt'" <<'EOF'
-# Written by services/gnosia-learn/sync.sh — machine-local entries that must not sync.
+  info "Writing $MAC_HERMES_HOME/blobs/local/seafile-ignore.txt"
+  $SSH "$MAC_SSH" "mkdir -p '$MAC_HERMES_HOME/blobs/local' && cat > '$MAC_HERMES_HOME/blobs/local/seafile-ignore.txt'" <<'EOF'
+# Written by services/hermes-studio/sync.sh — machine-local entries that must not sync.
 # .owner names this machine's database for this blob root; a foreign marker
 # makes uploads and `blob audit` refuse it (docs/HOMESERVER.md S3).
 # .tmp is the catalog's scratch space.
@@ -635,38 +636,38 @@ EOF
   SEAF_MAC="$($SSH "$MAC_SSH" 'export PATH="'"$MAC_PATH_PREFIX"':$PATH"; command -v seaf-cli' 2>/dev/null || true)"
   if [ -n "$SEAF_MAC" ]; then
     info "seaf-cli found on the Mac ($SEAF_MAC) — pairing headless"
-    $SSH "$MAC_SSH" "mkdir -p '$MAC_GNOSIA_HOME/.seafile' && { [ -d '$MAC_GNOSIA_HOME/.seafile/ccnet' ] || '$SEAF_MAC' init -c '$MAC_GNOSIA_HOME/.seafile/ccnet' -d '$MAC_GNOSIA_HOME/.seafile'; }" \
+    $SSH "$MAC_SSH" "mkdir -p '$MAC_HERMES_HOME/.seafile' && { [ -d '$MAC_HERMES_HOME/.seafile/ccnet' ] || '$SEAF_MAC' init -c '$MAC_HERMES_HOME/.seafile/ccnet' -d '$MAC_HERMES_HOME/.seafile'; }" \
       || die "seaf-cli init on the Mac failed"
     # The agent runs seaf-daemon itself (next to seaf-cli) in the foreground
     # with KeepAlive — a oneshot `seaf-cli start` wrapper would leave a dead
     # daemon looking alive, same failure the systemd unit avoids.
     SEAF_DAEMON_MAC="${SEAF_MAC%/*}/seaf-daemon"
-    $SSH "$MAC_SSH" "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.gnosia-learn.seafile.plist" <<EOF
+    $SSH "$MAC_SSH" "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.hermes-studio.seafile.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated by services/gnosia-learn/sync.sh mac-setup. -->
+<!-- Generated by services/hermes-studio/sync.sh mac-setup. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.gnosia-learn.seafile</string>
+  <key>Label</key><string>com.hermes-studio.seafile</string>
   <key>ProgramArguments</key>
-  <array><string>$SEAF_DAEMON_MAC</string><string>-c</string><string>$MAC_GNOSIA_HOME/.seafile/ccnet</string><string>-d</string><string>$MAC_GNOSIA_HOME/.seafile/seafile-data</string><string>-w</string><string>$MAC_GNOSIA_HOME/.seafile/seafile</string></array>
+  <array><string>$SEAF_DAEMON_MAC</string><string>-c</string><string>$MAC_HERMES_HOME/.seafile/ccnet</string><string>-d</string><string>$MAC_HERMES_HOME/.seafile/seafile-data</string><string>-w</string><string>$MAC_HERMES_HOME/.seafile/seafile</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/gnosia-learn-seafile.log</string>
-  <key>StandardErrorPath</key><string>/tmp/gnosia-learn-seafile.log</string>
+  <key>StandardOutPath</key><string>/tmp/hermes-studio-seafile.log</string>
+  <key>StandardErrorPath</key><string>/tmp/hermes-studio-seafile.log</string>
 </dict>
 </plist>
 EOF
-    $SSH "$MAC_SSH" "launchctl bootout gui/\$(id -u)/com.gnosia-learn.seafile 2>/dev/null; launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.gnosia-learn.seafile.plist" \
-      || warn "LaunchAgent load failed — start the daemon by hand: $SEAF_DAEMON_MAC -c $MAC_GNOSIA_HOME/.seafile/ccnet -d $MAC_GNOSIA_HOME/.seafile/seafile-data -w $MAC_GNOSIA_HOME/.seafile/seafile"
+    $SSH "$MAC_SSH" "launchctl bootout gui/\$(id -u)/com.hermes-studio.seafile 2>/dev/null; launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.hermes-studio.seafile.plist" \
+      || warn "LaunchAgent load failed — start the daemon by hand: $SEAF_DAEMON_MAC -c $MAC_HERMES_HOME/.seafile/ccnet -d $MAC_HERMES_HOME/.seafile/seafile-data -w $MAC_HERMES_HOME/.seafile/seafile"
     # The agent owns the daemon — no `seaf-cli start` here, or two daemons
     # fight over the same ccnet dir and KeepAlive retries forever. Pairing
     # waits for the agent's daemon to answer rpc first.
-    printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | $SSH "$MAC_SSH" "for _ in \$(seq 1 20); do '$SEAF_MAC' list -c '$MAC_GNOSIA_HOME/.seafile/ccnet' >/dev/null 2>&1 && break; sleep 0.5; done
-      '$SEAF_MAC' list -c '$MAC_GNOSIA_HOME/.seafile/ccnet' 2>/dev/null | grep -q '$SEAFILE_SYNC_REPO' || \
+    printf '%s\n' "$SEAFILE_SYNC_PASSWORD" | $SSH "$MAC_SSH" "for _ in \$(seq 1 20); do '$SEAF_MAC' list -c '$MAC_HERMES_HOME/.seafile/ccnet' >/dev/null 2>&1 && break; sleep 0.5; done
+      '$SEAF_MAC' list -c '$MAC_HERMES_HOME/.seafile/ccnet' 2>/dev/null | grep -q '$SEAFILE_SYNC_REPO' || \
         '$SEAF_MAC' sync -l '$SEAFILE_SYNC_REPO' -s '$MAC_SEAFILE_URL' \
-          -d '$MAC_GNOSIA_HOME/blobs/local' -u '$SEAFILE_SYNC_USER' \
-          -c '$MAC_GNOSIA_HOME/.seafile/ccnet'" || die "seaf-cli pairing on the Mac failed"
+          -d '$MAC_HERMES_HOME/blobs/local' -u '$SEAFILE_SYNC_USER' \
+          -c '$MAC_HERMES_HOME/.seafile/ccnet'" || die "seaf-cli pairing on the Mac failed"
     ok "seaf-cli paired on the Mac; daemon returns at login"
   else
     cat <<EOF
@@ -680,7 +681,7 @@ there is no seaf-cli for macOS). On the MacBook, once:
        user     $SEAFILE_SYNC_USER
        password $SEAFILE_SYNC_PASSWORD   (also in .env)
   3. Right-click the "$SYNC_LIB_NAME" library -> "Sync this library" ->
-     "sync with an existing folder" -> pick $MAC_GNOSIA_HOME/blobs/local.
+     "sync with an existing folder" -> pick $MAC_HERMES_HOME/blobs/local.
   4. Enable auto-start on login in the client's settings if it is off.
 
 seafile-ignore.txt is already in place, so the Mac's own .owner never
@@ -751,8 +752,8 @@ if [ -f \"\$db\" ]; then
 else
   printf 'db    : %s missing\n' \"\$db\"
 fi
-printf 'owner : %s\n' \"\$(tr -d '\n ' < '$MAC_GNOSIA_HOME/blobs/.owner' 2>/dev/null || echo missing)\"
-printf 'blobs : %s files, %s\n' \"\$(find '$MAC_GNOSIA_HOME/blobs/local' -type f 2>/dev/null | wc -l | tr -d ' ')\" \"\$(du -sh '$MAC_GNOSIA_HOME/blobs' 2>/dev/null | cut -f1)\"
+printf 'owner : %s\n' \"\$(tr -d '\n ' < '$MAC_HERMES_HOME/blobs/.owner' 2>/dev/null || echo missing)\"
+printf 'blobs : %s files, %s\n' \"\$(find '$MAC_HERMES_HOME/blobs/local' -type f 2>/dev/null | wc -l | tr -d ' ')\" \"\$(du -sh '$MAC_HERMES_HOME/blobs' 2>/dev/null | cut -f1)\"
 if pgrep -fl 'Seafile Client|seafile-applet|seaf-daemon' >/dev/null 2>&1; then echo 'seaf  : client running'; else echo 'seaf  : NO client running'; fi"
 }
 

@@ -8,6 +8,23 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Changed
+
+- **gnosia-learn renamed to hermes-studio**, matching upstream's rename of
+  the app to Hermes: the service dir, launcher key and icon, systemd units
+  and LaunchAgents (`gnosia-learn*` → `hermes-studio*`, the studio unit
+  `hermes-studio-runner` so it does not collide with the web unit,
+  `com.gnosia-learn.*` → `com.hermes-studio.*`), Kuma monitors, the Seafile
+  sync account and library defaults (`hermes-studio-sync@`,
+  `hermes-studio-blobs`) and the `--purge` confirmation name all follow,
+  and the launcher tile now reads "Hermes". `HERMES_HOME` becomes the
+  canonical data root (default `~/.hermes` on a fresh install). An existing
+  `.env` is still the source of truth: `GNOSIA_HOME` and `SELF_LEARN_HOME`
+  are still read, and a re-run does not move `~/.gnosia` or `~/.self-learn`.
+  Old deploy pollers (`self-learn`, `gnosia-learn`, `hermes-studio`) are
+  removed once deployd is installed. Kuma re-keys `self-learn*`,
+  `gnosia-learn` and `gnosia-learn-studio` onto the new monitor names.
+
 ### Added
 
 - **App tiles regain Kuma pausing and phone control.** A launcher app
