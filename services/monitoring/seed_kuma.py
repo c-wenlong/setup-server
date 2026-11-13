@@ -94,6 +94,9 @@ PUBLISHED = [
     # that the catalog reads: content pages read catalog.db per request, and
     # the landing page reads none, so a DB fault won't be caught here.
     ("gnosia-learn", 8107, "/"),
+    # /api/status, not / — the UI is a SPA and a 200 shell would stay
+    # green against a down API. Official healthcheck.
+    ("infisical", 8110, "/api/status"),
     # /api/health ({"ok":true}) — the documented always-open probe; it also
     # answers on the phone-link path, so it stays up under both.
     ("kopifund", 8300, "/api/health"),

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# curl stub — fakes Infisical's HTTP surface. State in $STATE_DIR:
+#   health_fails_left    — countdown of 503s from /api/status (slow boot)
+#   bootstrap_fail       — POST /api/v1/admin/bootstrap returns 500
+#   already_bootstrapped — POST ... returns 400 "already bootstrapped",
+#                          the real API's answer on a second call
+#   bootstrap_conn_fail  — POST acts like a refused connection: prints 000
+#                          for -w and exits 7, the way real curl does
+#                          (this is what `|| echo 000` turned into 000000)
+echo "curl $*" >> "$CALLS_LOG"
+
+method="GET"; out=""; url=""; want_code=0; failonerr=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -u) shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && want_code=1; shift 2 ;;
+    -H|--max-time|--connect-timeout|-d|--data-binary) shift 2 ;;
+    -L) shift ;;
+    -[a-zA-Z]*) case "$1" in *f*) failonerr=1 ;; esac; shift ;;
+    --*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+
+emit() {
+  if [ -n "$out" ]; then
+    printf '%s' "$2" > "$out"
+  elif [ "$want_code" != "1" ]; then
+    printf '%s' "$2"
+  fi
+  [ "$want_code" = "1" ] && printf '%s' "$1"
+  if [ "$failonerr" = "1" ] && [ "$1" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: $1" >&2
+    exit 22
+  fi
+  exit 0
+}
+
+case "$url" in
+  */api/status|*/api/status/)
+    if [ -f "$STATE_DIR/health_fails_left" ]; then
+      left="$(cat "$STATE_DIR/health_fails_left")"
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$STATE_DIR/health_fails_left"
+        emit 503 '{"message":"Service Unavailable"}'
+      fi
+    fi
+    emit 200 '{"message":"Infisical is up and running","emailConfigured":false}'
+    ;;
+  */api/v1/admin/bootstrap|*/api/v1/admin/bootstrap/)
+    if [ "$method" = "POST" ]; then
+      if [ -f "$STATE_DIR/bootstrap_conn_fail" ]; then
+        [ "$want_code" = "1" ] && printf '000'
+        exit 7                        # CURLE_COULDNT_CONNECT
+      fi
+      if [ -f "$STATE_DIR/bootstrap_fail" ]; then
+        emit 500 '{"message":"something went wrong"}'
+      fi
+      if [ -f "$STATE_DIR/already_bootstrapped" ]; then
+        emit 400 '{"message":"Instance has already been bootstrapped"}'
+      fi
+      # Real response shape: user + organization + machine-identity token.
+      emit 200 '{"message":"Successfully bootstrapped instance","user":{"email":"admin@example.com","superAdmin":true},"organization":{"name":"homeserver","slug":"homeserver-x1"},"identity":{"id":"id-1","name":"Instance Admin Identity","credentials":{"token":"eyJhbGciOi.stub-token"}}}'
+    fi
+    emit 200 '{}'
+    ;;
+  *)
+    emit 200 '{}'
+    ;;
+esac

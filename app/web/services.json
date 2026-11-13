@@ -926,6 +926,39 @@
       }
     },
     {
+      "key": "infisical",
+      "name": "Infisical",
+      "tagline": "Secrets",
+      "group": "dev",
+      "icon": "infisical",
+      "author": "infisical",
+      "url": "https://HOST:{HTTPS_PORT|LOCAL_PORT:8110}/",
+      "health": "http://127.0.0.1:{LOCAL_PORT:8110}/api/status",
+      "marker": "~/services/infisical",
+      "setup": "services/infisical/setup.sh",
+      "env": "services/infisical/.env",
+      "control": {
+        "parts": [
+          {
+            "container": "infisical"
+          },
+          {
+            "container": "infisical-redis"
+          },
+          {
+            "container": "infisical-db"
+          }
+        ],
+        "kuma": "infisical",
+        "_comment": "Stop order: the app first, then the cache, then the database it talks to. Start is the reverse."
+      },
+      "login": [
+        "Sign in with `INFISICAL_ADMIN_EMAIL` / `INFISICAL_ADMIN_PASSWORD` from `.env`.",
+        "`INFISICAL_ADMIN_TOKEN` in `.env` is an instance-admin machine identity for the API/CLI — it is returned exactly once by bootstrap."
+      ],
+      "description": "Self-hosted secrets manager (env vars, API keys, certs) — the machine-side counterpart to vaultwarden. Pinned v0.167.6 + Postgres 16 + Redis 7, loopback-only behind Serve on :8110. First super-admin and org seeded via POST /api/v1/admin/bootstrap, which also returns the instance-admin machine-identity token (saved to .env) and, since v0.162.8, closes public signup. Named volumes infisical-postgres / infisical-redis; marker dir ~/services/infisical. ⚠️ Nothing backs this box up: losing infisical-postgres or ENCRYPTION_KEY loses every stored secret — a dump without the key restores nothing readable. Keep both."
+    },
+    {
       "key": "n8n",
       "name": "n8n",
       "tagline": "Automation",
