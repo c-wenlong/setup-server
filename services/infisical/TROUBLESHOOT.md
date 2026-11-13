@@ -29,8 +29,13 @@ docker compose --project-directory . logs --tail=100 db
 
 - **`ENCRYPTION_KEY missing from .env`** (or `AUTH_SECRET`,
   `POSTGRES_PASSWORD`, `SITE_URL`) — `.env` is incomplete. These use
-  `${VAR:?}` so Compose refuses rather than boot half-configured. Move
-  the file aside and re-run `./setup.sh`.
+  `${VAR:?}` so Compose refuses rather than boot half-configured. Fix by
+  **restoring the missing line**, not by moving `.env` aside: a fresh
+  `.env` would generate a *new* `POSTGRES_PASSWORD` (app can no longer
+  reach the existing volume) and a *new* `ENCRYPTION_KEY` (every stored
+  secret becomes unreadable). Recover the original values from your
+  backup of `.env`; only move `.env` aside when the database is still
+  empty anyway.
 - **`ENCRYPTION_KEY must be 16 bytes`** on app boot — it must be exactly
   32 hex chars. Regenerate: `openssl rand -hex 16`. ⚠️ If the database
   already has secrets, a new key makes them unreadable — restore the old

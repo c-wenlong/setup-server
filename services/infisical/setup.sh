@@ -155,6 +155,13 @@ INFISICAL_ADMIN_EMAIL=$ADMIN_EMAIL
 INFISICAL_ADMIN_PASSWORD=$admin_pass
 INFISICAL_ORG=homeserver
 EOF
+  if [ -n "$HTTPS_PORT_EXPLICIT" ]; then
+    # An explicit publish port stops following LOCAL_PORT, so it must be
+    # recorded — the launcher tile and teardown read this file for the
+    # real publish port.
+    printf '\n# Explicitly set at install: the tailnet publish port, which no longer\n# follows LOCAL_PORT. Delete this line to resume following it.\nHTTPS_PORT=%s\n' \
+      "$HTTPS_PORT" >> "$ENV_FILE"
+  fi
   chmod 600 "$ENV_FILE"
   ok "Wrote $ENV_FILE"
 fi
@@ -162,6 +169,7 @@ fi
 # Read back: an existing .env is the source of truth for ports, paths and
 # credentials, so a re-run can never silently move a live deployment.
 REQUESTED_PORT="$LOCAL_PORT"
+REQUESTED_HTTPS_PORT="${HTTPS_PORT_EXPLICIT:+$HTTPS_PORT}"
 env_lint "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 DATA_DIR="${INFISICAL_DATA:?INFISICAL_DATA missing from $ENV_FILE}"
@@ -172,10 +180,28 @@ ORG="${INFISICAL_ORG:-homeserver}"
 if [ "$LOCAL_PORT" != "$REQUESTED_PORT" ]; then
   warn "LOCAL_PORT=$REQUESTED_PORT ignored — the existing $ENV_FILE says $LOCAL_PORT. Edit .env and re-run to move the port."
 fi
-# .env holds no HTTPS_PORT (only the derived SITE_URL), so a default HTTPS
-# port keeps following the local port .env settled on; an explicit
-# HTTPS_PORT is honoured as given.
-[ -n "$HTTPS_PORT_EXPLICIT" ] || HTTPS_PORT="$LOCAL_PORT"
+# Whether .env records a publish port is a presence question, separate
+# from the value the source just loaded: `HTTPS_PORT=` at column 0, after
+# `export`, or indented all count as recorded.
+env_https_recorded="$(grep -cE '^[[:space:]]*(export[[:space:]]+)?HTTPS_PORT=' "$ENV_FILE" || true)"
+if [ "$env_https_recorded" -gt 0 ]; then
+  # .env already decided the publish port (an earlier explicit override);
+  # an explicit value on this re-run is as ignored as LOCAL_PORT is.
+  if [ -n "$HTTPS_PORT_EXPLICIT" ] && [ "$HTTPS_PORT" != "$REQUESTED_HTTPS_PORT" ]; then
+    warn "HTTPS_PORT=$REQUESTED_HTTPS_PORT ignored — the existing $ENV_FILE says $HTTPS_PORT. Edit .env and re-run to move the publish port."
+  fi
+elif [ -n "$HTTPS_PORT_EXPLICIT" ]; then
+  # First explicit override on a re-run: apply it and record it so the
+  # launcher tile and teardown see the real publish port. The leading
+  # newline keeps a .env with no trailing newline parseable.
+  printf '\n# Explicitly set on re-run: the tailnet publish port, which no longer\n# follows LOCAL_PORT. Delete this line to resume following it.\nHTTPS_PORT=%s\n' \
+    "$HTTPS_PORT" >> "$ENV_FILE"
+  ok "Recorded HTTPS_PORT=$HTTPS_PORT in $ENV_FILE"
+else
+  # No recorded publish port: HTTPS keeps following the local port .env
+  # settled on.
+  HTTPS_PORT="$LOCAL_PORT"
+fi
 
 # Drift check, not a rewrite: .env is the user's file. But a SITE_URL that
 # no longer matches this machine breaks login redirects and CORS silently,
@@ -229,9 +255,12 @@ print(json.dumps({
   "organization": os.environ["INF_ORG"],
 }))')"
     # curl already prints 000 on a refused connection AND exits non-zero;
-    # a `|| echo 000` fallback would concatenate that into "000000".
-    code="$(curl -sS -o "$WORK/bootstrap.json" -w '%{http_code}' --max-time 60 \
-      -X POST -H 'Content-Type: application/json' --data-binary "$payload" \
+    # a `|| echo 000` fallback would concatenate that into "000000". The
+    # body goes on stdin (@-): with -d it would sit in curl's argv, visible
+    # in /proc to every other local account, and it carries the generated
+    # admin password.
+    code="$(printf '%s' "$payload" | curl -sS -o "$WORK/bootstrap.json" -w '%{http_code}' --max-time 60 \
+      -X POST -H 'Content-Type: application/json' --data-binary @- \
       "http://127.0.0.1:$LOCAL_PORT/api/v1/admin/bootstrap" 2>/dev/null)" || true
     case "$code" in
       [0-9][0-9][0-9]) ;;

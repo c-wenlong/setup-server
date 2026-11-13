@@ -264,6 +264,15 @@ test_https_port_follows_local_port() {
   check "exits zero"                     [ "$CODE" -eq 0 ]
   check "served :8443 -> 127.0.0.1:8120" calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8120"
   check "prints the :8443 URL"           out_has "https://test-host.tailfake.ts.net:8443"
+  check ".env records HTTPS_PORT"        grep -qx 'HTTPS_PORT=8443' "$SVC/.env"
+  : > "$CALLS_LOG"
+  export HTTPS_PORT=9555
+  run_deploy
+  check "re-run exits zero"              [ "$CODE" -eq 0 ]
+  check "re-run says it ignored :9555"   out_has "HTTPS_PORT=9555 ignored"
+  check "re-run still serves :8443"      calls_have "tailscale serve --bg --https=8443 http://127.0.0.1:8120"
+  check "re-run never served :9555"      no_call "https=9555"
+  check ".env still records :8443"       grep -qx 'HTTPS_PORT=8443' "$SVC/.env"
   teardown
 }
 
@@ -404,7 +413,7 @@ test_live() {
   live_check "infisical-redis container running" sh -c "docker inspect -f '{{.State.Status}}' infisical-redis | grep -qx running"
   # Container ports list as `5432/tcp` even unpublished — only a `->`
   # mapping is a real host publish, and only on THIS service's pair.
-  live_check "postgres and redis publish nothing on the host" sh -c "! docker ps --filter name=infisical-db --filter name=infisical-redis --format '{{.Ports}}' | grep -F '->'"
+  live_check "postgres and redis publish nothing on the host" sh -c "! docker ps --filter name=infisical-db --filter name=infisical-redis --format '{{.Ports}}' | grep -F -- '->'"
   live_check "local /api/status is 200"         sh -c "curl -fsS -o /dev/null 'http://127.0.0.1:$port/api/status'"
   live_check "not listening on non-local ifaces" no_external_listener "$port"
   live_check "tailscale serve maps :$https_port" sh -c "'$ts' serve status | grep -A2 ':$https_port' | grep -q 'proxy http://127.0.0.1:$port'"
@@ -682,6 +691,29 @@ test_teardown_purge_trailing_slashes() {
   teardown
 }
 
+test_teardown_purge_moved_data_dir() {
+  echo "• teardown --purge: data moved to a child still takes the bootstrap marker + parent"
+  deployed
+  # INFISICAL_DATA moved to a child of ~/services/infisical. The
+  # .bootstrapped marker lives at the parent — outside the purge target —
+  # so without the explicit rm it would outlive the purge, and the next
+  # setup.sh would skip seeding an admin on an empty database.
+  local child="$HOME/services/infisical/storage"
+  mkdir -p "$child"
+  echo keep > "$child/marker"
+  # deployed() left its own marker in the parent; remove it so the parent
+  # is empty once .bootstrapped is gone (the rmdir case this test checks).
+  rm -f "$HOME/services/infisical/marker"
+  sed -i.bak "s#^INFISICAL_DATA=.*#INFISICAL_DATA=$child#" "$SVC/.env"
+  run_teardown --purge "infisical"
+  check "exits zero"                       [ "$CODE" -eq 0 ]
+  check "child data gone"                  [ ! -e "$child" ]
+  check "bootstrap marker gone"            [ ! -e "$HOME/services/infisical/.bootstrapped" ]
+  check "parent dir rmdir'd (empty)"       [ ! -e "$HOME/services/infisical" ]
+  check ".env gone"                        [ ! -f "$SVC/.env" ]
+  teardown
+}
+
 test_teardown_purge_missing_data_dir() {
   echo "• teardown --purge: a data dir already gone is fine"
   deployed
@@ -725,6 +757,7 @@ test_teardown_only_shared_ports
 test_teardown_serve_status_fails
 test_teardown_quoted_env
 test_teardown_purge_trailing_slashes
+test_teardown_purge_moved_data_dir
 test_teardown_purge_missing_data_dir
 
 if [ "${1:-}" = "--live" ]; then

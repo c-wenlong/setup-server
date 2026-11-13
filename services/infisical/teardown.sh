@@ -277,6 +277,11 @@ fi
 if [ "$PURGE" -eq 1 ]; then
   info "Purging state"
   [ -z "$PURGE_DIR" ] || rm -rf -- "$PURGE_DIR"
+  # The .bootstrapped marker lives at ~/services/<name> itself, which is
+  # OUTSIDE INFISICAL_DATA whenever the data dir was moved to a child —
+  # leave it and the next ./setup.sh would skip seeding an admin on an
+  # empty database (and the rmdir below would fail on the non-empty dir).
+  [ -L "$HOME/services/$NAME" ] || rm -f -- "$HOME/services/$NAME/.bootstrapped"
   rm -f -- "$ENV_FILE"
   # ~/services/<name> is the launcher's install marker. Try it even when the
   # data dir was already gone, so a purged app never reads as installed;
