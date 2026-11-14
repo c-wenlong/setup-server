@@ -1028,6 +1028,16 @@ method (server.py adds no rules):
 | `cache_control` | `^[A-Za-z0-9 ,=-]{1,100}$`, not blank | `add_header Cache-Control "<value>"` on the files `location /` |
 | `frame_ancestors` | the string `none`, nothing else | `add_header Content-Security-Policy "frame-ancestors 'none'" always;` and `add_header X-Frame-Options DENY always;` on the files `location /` and the 50x page's location |
 
+**Compression.** Whenever a server block is generated (any of the three
+fields is set), its files `location /` also turns gzip on for text files:
+`gzip on`, `gzip_comp_level 5`, `gzip_min_length 1024`, `gzip_proxied any`
+(requests arrive through Tailscale Serve, which nginx treats as proxied),
+`gzip_vary on`, and `gzip_types` for CSS, plain text, JavaScript, JSON, web
+manifests and SVG (HTML is always included). The image's default config has
+gzip off. Images, fonts and `application/octet-stream` files are left alone,
+and so are the proxy locations, so a streamed reply is never buffered for
+compression. It is not a field: there is nothing to configure.
+
 A proxy path matches `^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?$`, so it is
 never `/` itself (that would shadow the site) and holds no quote, brace,
 `;` or space that could reshape the config. A `.` or `..` segment is also
