@@ -107,6 +107,9 @@ one-shot deploy.
 | <a href="https://guacamole.apache.org/"><img src="app/web/static/icons/guacamole.svg" width="20" alt="Apache Guacamole"></a> [remote-desktop](services/remote-desktop/) | This box's GNOME desktop in a browser tab — Guacamole + gnome-remote-desktop; **needs sudo** (configures a system daemon) | `cd services/remote-desktop && ./setup.sh` |
 
 Future service ideas live in [EXPLORATION.md](EXPLORATION.md).
+Every user-facing feature (deploy, upgrade, remove, monitoring, the launcher,
+deployd and each service, with its route, status and tests) is listed in
+[FEATURES.md](FEATURES.md).
 The live deployment (every running service, port map, credentials pointers) is
 documented in [DIRECTORY.md](DIRECTORY.md); keep it updated when adding
 services.

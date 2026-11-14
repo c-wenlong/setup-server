@@ -54,6 +54,11 @@ first, dated by merge.
 
 ### Added
 
+- **FEATURES.md**, the single feature inventory QA checks map to: one
+  line per user-facing feature (pipeline capabilities, the launcher,
+  deployd, monitoring, repo checks and every service or launcher app)
+  with its status, surface, entry point and tests. Linked from README.md.
+
 - **App tiles regain Kuma pausing and phone control.** A launcher app
   definition may carry `kuma` — one monitor name or a list of up to five —
   which the launcher pauses on Stop/Remove and resumes on Start, the same
