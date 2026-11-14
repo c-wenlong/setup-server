@@ -83,8 +83,9 @@ Methods, and the fields each adds to the definition:
                     "frame-ancestors 'none'" and X-Frame-Options DENY, so
                     no other site can frame the app (clickjacking). A meta
                     CSP cannot set frame-ancestors, so it has to be here.
-                With any of these set, the generated server block (files exactly
-                as the image's default config serves them, plus these) is
+                With any of these set, the generated server block (files
+                as the image's default config serves them, gzipped when
+                they are text: JS, CSS, JSON, SVG; plus these) is
                 written beside the release as <release>.nginx.conf and
                 mounted read-only over the default; a rollback mounts the
                 previous release's own file, so it serves identically.
@@ -1077,13 +1078,32 @@ def prune_releases(key, keep_names):
                 pass
 
 
+# Compression for the files a static app serves. The image's default config
+# has gzip off, so a Vite bundle went out at full size (Argus Index: 550 KB
+# and 283 KB of JS). Text types only (text/html is always on the list):
+# images, fonts and already-packed blobs (application/octet-stream) gain
+# nothing. `gzip_proxied any` because the request arrives through Tailscale
+# Serve, and nginx skips proxied requests by default. Only on the files
+# location: a proxied API reply (NDJSON streams) is left as it comes.
+STATIC_GZIP = [
+    "        gzip on;",
+    "        gzip_comp_level 5;",
+    "        gzip_min_length 1024;",
+    "        gzip_proxied any;",
+    "        gzip_vary on;",
+    "        gzip_types text/css text/plain application/javascript"
+    " text/javascript application/json application/manifest+json"
+    " image/svg+xml;",
+]
+
+
 def static_conf(d):
     """The nginx server block for a static definition, or None when it has
     none of proxies, cache_control and frame_ancestors (the image's own
     default config then serves it, exactly as before these fields
     existed). The files side mirrors that default config (root, index,
-    the 50x page); the only additions there are the Cache-Control and
-    anti-framing headers. Every word written here passed validate():
+    the 50x page); the only additions there are gzip for text files
+    (STATIC_GZIP) and the Cache-Control and anti-framing headers. Every word written here passed validate():
     paths and the header value hold no quote, brace, `;` or whitespace
     that could reshape the config, and the frame-ancestors source comes
     from FRAME_ANCESTORS, never from the definition."""
@@ -1117,6 +1137,7 @@ def static_conf(d):
     lines += ["    location / {",
               "        root   %s;" % STATIC_DOCROOT,
               "        index  index.html index.htm;"]
+    lines += STATIC_GZIP
     if cache:
         lines.append('        add_header Cache-Control "%s";' % cache)
     # `always`: an error reply can be framed and clicked through too. The

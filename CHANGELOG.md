@@ -10,6 +10,14 @@ first, dated by merge.
 
 ### Changed
 
+- **Launcher static apps gzip their text files.** The nginx server block
+  `ghapp.py` generates for a static app (one with `proxies`, `cache_control`
+  or `frame_ancestors`) now turns gzip on in its files `location /` for
+  HTML, CSS, JavaScript, JSON, web manifests and SVG. The image's default
+  config has it off, so Argus Index's 550 KB and 283 KB JS bundles went out
+  uncompressed (177 KB and 95 KB gzipped). Proxy locations and
+  `application/octet-stream` files are unchanged. A release keeps the config
+  it was started with, so an app picks this up on its next deploy.
 - **gnosia-learn renamed to hermes-studio**, matching upstream's rename of
   the app to Hermes: the service dir, launcher key and icon, systemd units
   and LaunchAgents (`gnosia-learn*` → `hermes-studio*`, the studio unit

@@ -1848,10 +1848,40 @@ class StaticProxyTest(Sandbox):
         self.assertEqual(files, "    location / {\n"
                                 "        root   /usr/share/nginx/html;\n"
                                 "        index  index.html index.htm;\n"
+                                + self.GZIP +
                                 '        add_header Cache-Control "no-cache";\n'
                                 "    }")
         self.assertIn("error_page   500 502 503 504  /50x.html;", text)
         self.assertEqual(text.count("{"), text.count("}"))
+
+    GZIP = ("        gzip on;\n"
+            "        gzip_comp_level 5;\n"
+            "        gzip_min_length 1024;\n"
+            "        gzip_proxied any;\n"
+            "        gzip_vary on;\n"
+            "        gzip_types text/css text/plain application/javascript"
+            " text/javascript application/json application/manifest+json"
+            " image/svg+xml;\n")
+
+    def test_files_are_gzipped_but_proxied_replies_and_packed_blobs_are_not(self):
+        text = ghapp.static_conf(method_def("static", proxies=self.API,
+                                            cache_control="no-cache"))
+        # Once, inside the files location: a streamed API reply passes
+        # through a proxy location as it comes.
+        self.assertEqual(text.count("gzip on;"), 1)
+        files = text[text.index("    location / {"):]
+        self.assertIn(self.GZIP, files[:files.index("    }")])
+        api = text[text.index("    location /api/ {"):text.index("    location / {")]
+        self.assertNotIn("gzip", api)
+        # Requests come through Tailscale Serve, which nginx counts as proxied.
+        self.assertIn("gzip_proxied any;", text)
+        types = [ln for ln in text.splitlines() if "gzip_types" in ln][0]
+        self.assertIn("application/javascript", types)
+        self.assertIn("text/css", types)
+        # A site's own gzip blobs and its images are not compressed again.
+        self.assertNotIn("octet-stream", types)
+        self.assertNotIn("image/png", types)
+        self.assertNotIn("*", types)
 
     def test_cache_control_alone_adds_only_the_header(self):
         text = ghapp.static_conf(method_def("static", cache_control="no-cache"))
@@ -1875,6 +1905,7 @@ class StaticProxyTest(Sandbox):
         self.assertEqual(files, "    location / {\n"
                                 "        root   /usr/share/nginx/html;\n"
                                 "        index  index.html index.htm;\n"
+                                + self.GZIP +
                                 '        add_header Cache-Control "no-cache";\n'
                                 "        add_header Content-Security-Policy "
                                 "\"frame-ancestors 'none'\" always;\n"
