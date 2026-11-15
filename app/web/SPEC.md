@@ -130,6 +130,7 @@ Deployed today — immich (Photos, 2283), seafile (Files, 8443, health
 :3001 on 2026-09-13 so the published and local ports match),
 kaichenpedia (Wiki, 8091), n8n (Automation, 5678), beszel (Metrics, 8092),
 uptime-kuma (Status, 3002), ntfy (Alerts, 3003), manimkc (Video, 8090),
+constellations (Design research, external, 8108 via 8845),
 ollama (Models, no URL, health :11434/api/version).
 
 Planned, from EXPLORATION.md, `setup: null` — adguard (DNS), jellyfin
