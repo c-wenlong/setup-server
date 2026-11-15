@@ -8,6 +8,16 @@ first, dated by merge.
 
 ## [Unreleased]
 
+### Added
+
+- **Launcher tile for Constellations.** An external entry in
+  `app/web/registry.json` (opens `https://HOST:8108/library`, health
+  `http://127.0.0.1:8845/`, controls `design-research.service`, no sign-in)
+  brings back the design-research tile dropped with the retired
+  design-systems service in #193. It has no `setup`, so neither the
+  launcher nor deployd installs or deploys it; the constellations repo
+  still owns the app.
+
 ### Changed
 
 - **Launcher static apps gzip their text files.** The nginx server block

@@ -131,6 +131,7 @@
     "hermes-studio",
     "kopifund",
     "manimkc",
+    "constellations",
     "deployd",
     "immich",
     "seafile",
@@ -192,6 +193,28 @@
         "No sign-in \u2014 the tile opens its `/docs` API page."
       ],
       "description": "Video-gen job server: POST a JSON brief and it renders a narrated ManimGL video, then uploads it to the Seafile `manimkc` library. A systemd user unit on 127.0.0.1:8090; the tile opens its /docs API page, since that is the whole UI. Code lives in its own repo at ~/dev/manimkc, not in this one, and narration runs through ElevenLabs, Sarvam or local Kokoro TTS."
+    },
+    {
+      "key": "constellations",
+      "name": "Constellations",
+      "tagline": "Design research",
+      "group": "mine",
+      "icon": "palette",
+      "author": "starship-terminal",
+      "url": "https://HOST:8108/library",
+      "health": "http://127.0.0.1:8845/",
+      "marker": "~/services/design-research",
+      "control": {
+        "parts": [
+          {
+            "unit": "design-research.service"
+          }
+        ]
+      },
+      "login": [
+        "No sign-in \u2014 the tailnet is the only boundary."
+      ],
+      "description": "The design-research studio app from the starship-terminal/constellations repo: a Next.js app (`next start`) on 127.0.0.1:8845, published tailnet-only on :8108 by `tailscale serve`; the tile opens its /library page. This tile only displays and starts/stops it. The app lives in its own repo and deploys and updates itself (scripts/studio-deploy.sh plus design-research-update.timer), so neither the launcher nor deployd builds or owns it. Not monitored in Uptime Kuma."
     },
     {
       "key": "karakeep",
