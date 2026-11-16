@@ -64,12 +64,17 @@ calls_have() { grep -qF -- "$1" "$CALLS_LOG"; }
 no_call()    { ! grep -qF -- "$1" "$CALLS_LOG"; }
 env_has()    { grep -qxF -- "$1" "$SVC/.env"; }
 
-echo "1. fresh install publishes 8108 to 8845"
+echo "1. fresh install publishes 8108 to 8845 ($OS)"
 setup
 run_deploy
 check "exits 0" [ "$CODE" -eq 0 ]
 check "writes LOCAL_PORT" env_has "LOCAL_PORT=8845"
 check "writes HTTPS_PORT" env_has "HTTPS_PORT=8108"
+if [ "$OS" = "Linux" ]; then
+  check "starts the unit" calls_have "systemctl --user enable --now design-research.service"
+else
+  check "starts the unit" calls_have "launchctl bootstrap"
+fi
 check "publishes serve" calls_have "tailscale serve --bg --https=8108 http://127.0.0.1:8845"
 check "probes the app" calls_have "curl -fsS -o /dev/null http://127.0.0.1:8845/"
 teardown
@@ -107,7 +112,11 @@ run_teardown ""
 check "exits 0" [ "$CODE" -eq 0 ]
 check "turns 8108 off" calls_have "tailscale serve --https=8108 off"
 check "leaves 8109" no_call "tailscale serve --https=8109 off"
-check "stops the unit" calls_have "systemctl --user disable --now design-research.service"
+if [ "$OS" = "Linux" ]; then
+  check "stops the unit" calls_have "systemctl --user disable --now design-research.service"
+else
+  check "stops the unit" calls_have "launchctl bootout"
+fi
 check "keeps .env" [ -f "$SVC/.env" ]
 teardown
 

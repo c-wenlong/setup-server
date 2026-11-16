@@ -119,9 +119,13 @@ EOF
 [ "$unpublished" -gt 0 ] || ok "Nothing on Tailscale Serve points at $TARGET (already off)"
 
 if [ "$OS" = "Linux" ]; then
-  systemctl --user disable --now "$UNIT_NAME" || true
+  systemctl --user disable --now "$UNIT_NAME"
+  systemctl --user is-active --quiet "$UNIT_NAME" \
+    && die "$UNIT_NAME is still active after stop."
 else
   launchctl bootout "gui/$(id -u)/$PLIST_LABEL" || true
+  launchctl print "gui/$(id -u)/$PLIST_LABEL" >/dev/null 2>&1 \
+    && die "$UNIT_NAME is still loaded after bootout."
 fi
 ok "Stopped $UNIT_NAME"
 

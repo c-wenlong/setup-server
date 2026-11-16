@@ -25,6 +25,11 @@ for u in ${units[@]+"${units[@]}"}; do
     start|restart) touch "$STATE_DIR/active.$u" ;;
     stop) [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
     disable) [ "$now" -eq 0 ] || [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
+    is-active)
+      if [ -f "$STATE_DIR/active.$u" ]; then echo active; exit 0; fi
+      echo inactive
+      exit 3
+      ;;
     show)
       [ ! -f "$STATE_DIR/show_fails" ] || { echo "Failed to connect to bus" >&2; exit 1; }
       file="$HOME/.config/systemd/user/$u.service"

@@ -22,7 +22,7 @@
 # LOCAL_PORT. Sudo is needed at most once on Linux (tailscale operator).
 #
 # Idempotent. An existing .env is never rewritten. Re-running repairs the
-# Serve mapping and does not restart the app.
+# Serve mapping and starts the app if Remove had stopped it.
 
 set -euo pipefail
 
@@ -79,16 +79,44 @@ if [ -n "$HTTPS_PORT_EXPLICIT" ] && [ "$HTTPS_PORT" != "$REQUESTED_HTTPS" ]; the
   warn "HTTPS_PORT=$REQUESTED_HTTPS ignored: $ENV_FILE says $HTTPS_PORT. Edit .env and re-run to move it."
 fi
 require_numeric LOCAL_PORT HTTPS_PORT
+TARGET="http://127.0.0.1:$LOCAL_PORT"
+
+# ---------------------------------------------------------------- start
+# Remove disables the unit. Install has to bring it back, or the tile stays
+# on Install after a failed health check.
+if [ "$OS" = "Linux" ]; then
+  systemctl --user enable --now design-research.service
+else
+  launchctl enable "gui/$(id -u)/com.setup-server.constellations" || true
+  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.setup-server.constellations.plist" || true
+fi
+ok "Started design-research.service"
 
 # ---------------------------------------------------------------- publish
-info "Publishing https://$TS_HOST:$HTTPS_PORT -> http://127.0.0.1:$LOCAL_PORT"
-ts_serve_publish "$HTTPS_PORT" "http://127.0.0.1:$LOCAL_PORT"
+info "Publishing https://$TS_HOST:$HTTPS_PORT -> $TARGET"
+if ts_serve_foreign "$HTTPS_PORT" "$TARGET"; then
+  die "HTTPS :$HTTPS_PORT already proxies to a different target. To hand the port to this service: $TAILSCALE serve --https=$HTTPS_PORT off, then re-run."
+fi
+ts_serve_publish "$HTTPS_PORT" "$TARGET"
+# ts_serve_publish returns success when it leaves a foreign mapping alone.
+# Confirm the port actually points here before calling it published.
+"$TAILSCALE" serve status | awk -v want=":$HTTPS_PORT" -v t="$TARGET" '
+  /^https:\/\// {
+    inport = 0
+    u = $1; sub(/\/$/, "", u)
+    p = match(u, /:[0-9]+$/) ? substr(u, RSTART) : ":443"
+    inport = (p == want)
+    next
+  }
+  inport && /\|-- / && / proxy / && $NF == t { found = 1 }
+  END { exit !found }' \
+  || die "HTTPS :$HTTPS_PORT does not proxy to $TARGET. Open would reach something else."
 ok "Published"
 
 # ---------------------------------------------------------------- verify
-info "Checking http://127.0.0.1:$LOCAL_PORT/"
-wait_http "http://127.0.0.1:$LOCAL_PORT/" 10 1 \
-  || die "The app did not answer on 127.0.0.1:$LOCAL_PORT. Start design-research.service, then re-run."
+info "Checking $TARGET/"
+wait_http "$TARGET/" 10 1 \
+  || die "The app did not answer on $TARGET. Check design-research.service, then re-run."
 ok "App answers"
 
 echo
