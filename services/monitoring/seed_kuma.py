@@ -121,6 +121,8 @@ PUBLISHED = [
     # (its /api/* sits behind pairing), so this proves the server answers,
     # nothing more.
     ("t3code", 8109, "/"),
+    # "/" is the app shell (200). The app has no separate health route.
+    ("constellations", 8108, "/"),
     # /healthz ({"ok":true,"status":"live"}), not / — the gateway's own
     # unauthenticated health route. / would 403 whenever trustedProxies
     # changes, and everything deeper sits behind the gateway token.

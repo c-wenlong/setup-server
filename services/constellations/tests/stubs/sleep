@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# sleep stub: no-op, so the health-check retry loop runs instantly.
+exit 0

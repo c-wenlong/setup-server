@@ -57,6 +57,8 @@
     /* The Hermes mark from the hermes repo's own brand set
        (apps/web/public/brand/mark.png). Raster, no vector original. */
     'hermes-studio':  { file: 'hermes-studio',  ext: 'png' },
+    /* Flat mark from the constellations repo (app/public/brand/flat). */
+    'constellations': { file: 'constellations', ext: 'png' },
     /* Vendored copy of the site's own favicon (site/favicon.svg in the
        sources repo), the fallback behind the tile's live-favicon rung.
        The cream plate reads on both tile themes, so no -dark pair. */

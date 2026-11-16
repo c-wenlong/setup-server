@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# systemctl stub: logs every call and succeeds. Unit state for teardown's
+# checks lives in $STATE_DIR (a unit is named without its .service suffix):
+#   active.<unit>   exists => running; `start`/`restart` create it, `stop` and
+#                   `disable --now` remove it
+#   fragment.<unit> the FragmentPath `show` prints (default: the user unit
+#                   file when it is on disk, else empty)
+#   show_fails      exists => `show` fails, like a session with no user bus
+#   stop_ignored    exists => `stop` / `disable --now` leave the unit running
+echo "systemctl $*" >> "$CALLS_LOG"
+[ -n "${STATE_DIR:-}" ] && [ -d "$STATE_DIR" ] || exit 0
+verb=""; now=0; units=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user|--quiet|-q|--no-pager|--) ;;
+    --now) now=1 ;;
+    -p|--property) shift ;;
+    -*) ;;
+    *) if [ -z "$verb" ]; then verb="$1"; else units+=("${1%.service}"); fi ;;
+  esac
+  shift
+done
+for u in ${units[@]+"${units[@]}"}; do
+  case "$verb" in
+    start|restart) touch "$STATE_DIR/active.$u" ;;
+    stop) [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
+    disable) [ "$now" -eq 0 ] || [ -f "$STATE_DIR/stop_ignored" ] || rm -f "$STATE_DIR/active.$u" ;;
+    show)
+      [ ! -f "$STATE_DIR/show_fails" ] || { echo "Failed to connect to bus" >&2; exit 1; }
+      file="$HOME/.config/systemd/user/$u.service"
+      if [ -f "$STATE_DIR/fragment.$u" ]; then frag="$(cat "$STATE_DIR/fragment.$u")"
+      elif [ -e "$file" ]; then frag="$file"
+      else frag=""; fi
+      if [ -n "$frag" ]; then echo "LoadState=loaded"; else echo "LoadState=not-found"; fi
+      if [ -f "$STATE_DIR/active.$u" ]; then echo "ActiveState=active"; else echo "ActiveState=inactive"; fi
+      echo "FragmentPath=$frag"
+      ;;
+  esac
+done
+exit 0
