@@ -66,7 +66,10 @@ directory are bespoke raster icons (not from the vendored collection above,
 so the licence table does not cover them):
 `kaichenpedia.png` is cropped from the kaichenpedia repo's own artwork,
 `manimkc.png` is that service's own logo, `hermes-studio.png` is the Hermes
-mark (`apps/web/public/brand/mark.png`) from the hermes repo, and
+mark (`apps/web/public/brand/mark.png`) from the hermes repo,
+`constellations.png` is `app/public/brand/flat/icon-192.png` from the
+private constellations repo (the owner's own mark, used only to identify
+that service), and
 `sources.svg` is the sources repo's own `site/favicon.svg` copied unchanged —
 each service's own artwork, the repo owner's in each case.
 `launcher.svg` is the launcher's own mark (three fused white tiles sliding

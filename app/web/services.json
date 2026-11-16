@@ -199,6 +199,31 @@
       }
     },
     {
+      "key": "constellations",
+      "name": "Constellations",
+      "tagline": "Design research",
+      "group": "mine",
+      "icon": "spark",
+      "author": "starship-terminal",
+      "url": "https://HOST:{HTTPS_PORT:8108}/",
+      "health": "http://127.0.0.1:{LOCAL_PORT:8845}/",
+      "marker": "~/services/design-research",
+      "setup": "services/constellations/setup.sh",
+      "env": "services/constellations/.env",
+      "control": {
+        "parts": [
+          {
+            "unit": "design-research.service"
+          }
+        ],
+        "kuma": "constellations"
+      },
+      "login": [
+        "No account sign-in. The tailnet is the boundary. Open the URL in a browser on the tailnet."
+      ],
+      "description": "Constellations: the private design-research app from starship-terminal/constellations. next start on 127.0.0.1:8845, published tailnet-only on :8108. The app's own studio-deploy.sh owns the checkout and the build; this service only publishes it and lets the launcher start and stop design-research.service."
+    },
+    {
       "key": "kopifund",
       "name": "Kopifund",
       "tagline": "Money",
